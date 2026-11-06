@@ -63,6 +63,16 @@ import com.indagium.generated.BuildInfo
 import com.indagium.model.*
 import com.indagium.security.SecretStore
 import com.indagium.security.defaultSecretStore
+import com.indagium.storage.EntryId
+import com.indagium.storage.SelectionBase
+import com.indagium.storage.SelectionGeneration
+import com.indagium.storage.SelectionOverride
+import com.indagium.storage.SourceId
+import com.indagium.storage.StackFileSession
+import com.indagium.storage.StorageExportCommitFence
+import com.indagium.storage.StorageExportSpec
+import com.indagium.storage.StorageFailure
+import com.indagium.storage.StorageSelection
 import com.indagium.source.FileMeta
 import com.indagium.source.LogCallSite
 import com.indagium.source.LogSourceResolver
@@ -317,7 +327,7 @@ private const val CANONICAL_PATH_CACHE_MAX = 200_000
 private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
 
 /**
- * How long after a tab closes its [AppendOnlyLogList] rows are released (see [AppState.closeTabsById]).
+ * How long after a tab closes its releasable rows are released (see [AppState.closeTabsById]).
  * The tab's own jobs are cancelled at close; this grace only lets a reader that was already past its
  * last cancellation check finish, or hit [com.indagium.utils.ReleasedLogListException] and end quietly.
  */
@@ -349,7 +359,7 @@ internal class RowsPin internal constructor(private val onClose: (() -> Unit)?) 
 }
 
 /** A closed tab's store that could not be released at the delay because a reader still pinned it. */
-private class PendingRowRelease(val releaseRows: () -> Unit, var trimAfterwards: Boolean)
+private class PendingRowRelease(val target: RowReleaseTarget, var forceTrim: Boolean)
 
 /** Shared backing held by lightweight List/Map facades, so a delayed release also clears stale
  * Compose snapshots that still reference an old LogTab after its current shell was updated. */
@@ -382,14 +392,14 @@ private class ReleasableLogRmap(val content: ReleasableLogContent) : AbstractMap
     override val size: Int get() = content.rmap.size
 }
 
-private data class RowReleaseTarget(val store: Any, val release: () -> Unit)
+private data class RowReleaseTarget(val store: Any, val rowCount: () -> Int, val release: () -> Unit)
 
 private fun releasableLogRows(
     rows: List<LogEntry>,
     rmap: Map<Int, LogEntry>,
 ): Pair<List<LogEntry>, Map<Int, LogEntry>> = when (rows) {
     is AppendOnlyLogList -> rows to rmap
-    is ReleasableLogRows -> rows to rmap
+    is ReleasableLogRows -> rows to ReleasableLogRmap(rows.content)
     else -> {
         val content = ReleasableLogContent(rows, rmap)
         ReleasableLogRows(content) to ReleasableLogRmap(content)
@@ -397,14 +407,10 @@ private fun releasableLogRows(
 }
 
 private fun rowReleaseTarget(tab: LogTab): RowReleaseTarget? = when (val rows = tab.logData) {
-    is AppendOnlyLogList -> RowReleaseTarget(rows.storeIdentity) { rows.release() }
-    is ReleasableLogRows -> RowReleaseTarget(rows.content) { rows.content.release() }
+    is AppendOnlyLogList -> RowReleaseTarget(rows.storeIdentity, { if (rows.isReleased) 0 else rows.size }) { rows.release() }
+    is ReleasableLogRows -> RowReleaseTarget(rows.content, { rows.size }) { rows.content.release() }
     else -> null
 }
-
-/** Closing historically delays release only for append-only capture/tail stores. */
-private fun closedTabRowReleaseTarget(tab: LogTab): RowReleaseTarget? =
-    rowReleaseTarget(tab)?.takeIf { tab.logData is AppendOnlyLogList }
 
 private const val RELEASED_ROWS_TRIM_REASON = "released closed capture rows"
 private const val CLOSED_TAB_TRIM_REASON = "closed large or capture tab"
@@ -4201,14 +4207,16 @@ class AppState(
      * counts as live while its controller is registered; stop/close paths unregister it first.
      */
     internal fun requestHeapTrim(reason: String) {
-        val recording = synchronized(stateLock) {
-            val live = captureControllersByTab.isNotEmpty() || tablessLaneControllers.isNotEmpty()
-            // A trim that is actually forwarded clears the closed-row tally, whatever asked for it;
-            // one skipped for a live capture frees nothing, so the tally keeps counting.
-            if (!live) closedRowsSinceTrim = 0L
-            live
-        }
-        if (!recording) heapTrimRequester(reason)
+        val forward = synchronized(stateLock) { reserveHeapTrimLocked(force = true) }
+        if (forward) heapTrimRequester(reason)
+    }
+
+    /** Atomically decide and reset accounting, so concurrent releases cannot lose or duplicate it. */
+    private fun reserveHeapTrimLocked(force: Boolean): Boolean {
+        if ((!force && closedRowsSinceTrim < HEAP_TRIM_CLOSED_ROWS) ||
+            captureControllersByTab.isNotEmpty() || tablessLaneControllers.isNotEmpty()) return false
+        closedRowsSinceTrim = 0L
+        return true
     }
 
     /** Rows of closed tabs since the last forwarded heap trim; see [HEAP_TRIM_CLOSED_ROWS]. Guarded by [stateLock]. */
@@ -6226,6 +6234,265 @@ class AppState(
 
     // ── Tabs ────────────────────────────────────────────────────────
     var tabs by mutableStateOf(emptyList<LogTab>())
+
+    // Test-only route used to exercise an actual tab without promoting the incomplete backend.
+    private val experimentalStorageFiles = mutableStateMapOf<String, java.nio.file.Path>()
+    private val experimentalStorageSessions = mutableMapOf<String, StackFileSession>()
+    private val experimentalStorageReady = mutableSetOf<String>()
+    private val experimentalStorageSelections = mutableStateMapOf<String, StorageSelection>()
+    private val experimentalStorageAnchors = mutableMapOf<String, Pair<Long, Int>>()
+    private val experimentalStorageSelectionRevisions = mutableMapOf<String, Long>()
+    internal var experimentalStorageCopyPublisher: (String) -> Unit = ::copyToClipboard
+
+    internal fun experimentalStorageFile(tabId: String): java.nio.file.Path? = experimentalStorageFiles[tabId]
+
+    internal fun experimentalStorageSelection(tabId: String): StorageSelection? = experimentalStorageSelections[tabId]
+
+    internal fun experimentalStoragePageReady(tabId: String): Boolean = synchronized(stateLock) { tabId in experimentalStorageReady }
+
+    internal fun markExperimentalStoragePageReady(tabId: String, session: StackFileSession) = synchronized(stateLock) {
+        if (experimentalStorageSessions[tabId] === session) experimentalStorageReady.add(tabId)
+    }
+
+    private fun storageSelectionGeneration(tabId: String, session: StackFileSession): SelectionGeneration {
+        val generation = session.generation
+        return SelectionGeneration(SourceId(tabId), generation.sourceVersion, generation.queryId, generation.projectionId, 0, 0)
+    }
+
+    private fun storageSessionMatches(tab: LogTab, session: StackFileSession): Boolean =
+        tab.filter == session.filter && tab.expanded == session.expanded &&
+            tab.logFormat == LogFormat.LOGCAT && tab.manualBlocks.none { it.enabled }
+
+    internal fun attachExperimentalStorageSession(tabId: String, session: StackFileSession): Boolean {
+        val attached = synchronized(stateLock) {
+            val tab = tabs.firstOrNull { it.id == tabId }
+            if (closed.get() || tabId !in experimentalStorageFiles || tab == null || !storageSessionMatches(tab, session)) {
+                return@synchronized false
+            }
+            experimentalStorageSessions[tabId] = session
+            experimentalStorageReady.remove(tabId)
+            upTab(tabId) { current ->
+                current.copy(analysis = current.analysis.copy(
+                    tagCounts = session.analysis.tagCounts,
+                    processNames = session.analysis.processNames,
+                    tagPids = session.analysis.tagPids,
+                ))
+            }
+            if (experimentalStorageSelections[tabId]?.generation != storageSelectionGeneration(tabId, session)) {
+                experimentalStorageSelections.remove(tabId)
+            }
+            experimentalStorageAnchors.remove(tabId)
+            bumpStorageSelectionRevision(tabId)
+            true
+        }
+        if (attached) SearchScope.entries.filter { tab(tabId)?.searchFor(it)?.active == true }.forEach { scheduleSearchRecompute(tabId, it) }
+        return attached
+    }
+
+    internal fun detachExperimentalStorageSession(tabId: String, session: StackFileSession) = synchronized(stateLock) {
+        if (experimentalStorageSessions[tabId] === session) {
+            experimentalStorageReady.remove(tabId)
+            experimentalStorageSessions.remove(tabId)
+        }
+    }
+
+    internal fun selectAllExperimentalStorageRows(tabId: String) = synchronized(stateLock) {
+        val session = experimentalStorageSessions[tabId] ?: return@synchronized
+        val tab = tabs.firstOrNull { it.id == tabId } ?: return@synchronized
+        if (!storageSessionMatches(tab, session)) return@synchronized
+        experimentalStorageAnchors.remove(tabId)
+        bumpStorageSelectionRevision(tabId)
+        experimentalStorageSelections[tabId] = StorageSelection(storageSelectionGeneration(tabId, session), SelectionBase.AllDisplayedRows)
+        upTab(tabId) { it.copy(selected = emptySet()) }
+    }
+
+    internal fun clearExperimentalStorageSelection(tabId: String) {
+        synchronized(stateLock) {
+            experimentalStorageSelections.remove(tabId)
+            experimentalStorageAnchors.remove(tabId)
+            bumpStorageSelectionRevision(tabId)
+        }
+        clearSelection(tabId)
+    }
+
+    private fun bumpStorageSelectionRevision(tabId: String): Long =
+        ((experimentalStorageSelectionRevisions[tabId] ?: 0L) + 1).also { experimentalStorageSelectionRevisions[tabId] = it }
+
+    internal fun selectExperimentalStorageRow(tabId: String, position: Long, id: Int, multi: Boolean, range: Boolean, header: Boolean) {
+        var rangeRequest: StorageRangeRequest? = null
+        val handled = synchronized(stateLock) {
+            val session = experimentalStorageSessions[tabId] ?: return@synchronized false
+            val current = tabs.firstOrNull { it.id == tabId } ?: return@synchronized true
+            if (!storageSessionMatches(current, session)) return@synchronized true
+            val revision = bumpStorageSelectionRevision(tabId)
+            if (range && !multi) {
+                val anchor = experimentalStorageAnchors[tabId] ?: (position to id).also { experimentalStorageAnchors[tabId] = it }
+                rangeRequest = StorageRangeRequest(session, current, anchor, position to id, revision)
+                return@synchronized true
+            }
+            experimentalStorageAnchors[tabId] = position to id
+            val selection = experimentalStorageSelections[tabId] ?: return@synchronized false
+            if (selection.generation != storageSelectionGeneration(tabId, session) || !multi) {
+                experimentalStorageSelections.remove(tabId)
+                return@synchronized false
+            }
+            val entryId = EntryId(id)
+            val selected = when (selection.overrideFor(entryId)) {
+                SelectionOverride.INCLUDED -> true
+                SelectionOverride.EXCLUDED -> false
+                SelectionOverride.NONE -> when (val base = selection.base) {
+                    SelectionBase.AllDisplayedRows -> !header
+                    SelectionBase.AllDisplayedItems -> true
+                    is SelectionBase.DisplayRange -> position in base.firstPosition..base.lastPosition
+                    SelectionBase.Explicit -> false
+                }
+            }
+            val included = selection.inclusions.toMutableSet()
+            val excluded = selection.exclusions.toMutableSet()
+            if (selected) {
+                included.remove(entryId)
+                excluded.add(entryId)
+            } else {
+                excluded.remove(entryId)
+                included.add(entryId)
+            }
+            experimentalStorageSelections[tabId] = StorageSelection(
+                selection.generation, selection.base, selection.anchor, included, excluded,
+            )
+            true
+        }
+        rangeRequest?.let { request -> resolveExperimentalStorageRange(tabId, request) }
+        if (!handled) selRow(tabId, id, multi, false)
+    }
+
+    private data class StorageRangeRequest(
+        val session: StackFileSession,
+        val snapshot: LogTab,
+        val anchor: Pair<Long, Int>,
+        val endpoint: Pair<Long, Int>,
+        val revision: Long,
+    )
+
+    private fun resolveExperimentalStorageRange(tabId: String, request: StorageRangeRequest) {
+        ioScope.launch {
+            try {
+                val anchor = request.session.selectionOccurrence(request.anchor.first, EntryId(request.anchor.second))
+                val endpoint = request.session.selectionOccurrence(request.endpoint.first, EntryId(request.endpoint.second))
+                synchronized(stateLock) {
+                    val current = tabs.firstOrNull { it.id == tabId }
+                    if (experimentalStorageSessions[tabId] === request.session &&
+                        experimentalStorageSelectionRevisions[tabId] == request.revision && current != null &&
+                        current.filter == request.snapshot.filter && current.expanded == request.snapshot.expanded) {
+                        val generation = storageSelectionGeneration(tabId, request.session)
+                        experimentalStorageSelections[tabId] = StorageSelection(generation, SelectionBase.DisplayRange(anchor, endpoint))
+                        upTab(tabId) { it.copy(selected = emptySet()) }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                AppLogger.warn("storage", "Could not select log range", error)
+            }
+        }
+    }
+
+    internal fun copyExperimentalStorageSelection(tabId: String, session: StackFileSession, snapshot: LogTab): Job? {
+        if (!storageSessionMatches(snapshot, session)) return null
+        val (activeSelection, selectionRevision) = synchronized(stateLock) {
+            experimentalStorageSelections[tabId] to (experimentalStorageSelectionRevisions[tabId] ?: 0L)
+        }
+        if (activeSelection == null && snapshot.selected.isEmpty()) return null
+        val settingsSnapshot = settings
+        val selectionGeneration = storageSelectionGeneration(tabId, session)
+        val selection = activeSelection ?: StorageSelection(
+            selectionGeneration, SelectionBase.Explicit, inclusions = snapshot.selected.mapTo(LinkedHashSet(), ::EntryId),
+        )
+        return ioScope.launch {
+            try {
+                val text = session.selectedTextForCopy(selection, selectionGeneration, settingsSnapshot, snapshot.showTimeDelta, 20_000_000)
+                synchronized(stateLock) {
+                    val current = tabs.firstOrNull { it.id == tabId }
+                    if (experimentalStorageSessions[tabId] === session && current != null && current.filter == snapshot.filter &&
+                        current.expanded == snapshot.expanded && current.selected == snapshot.selected &&
+                        experimentalStorageSelections[tabId] === activeSelection &&
+                        (experimentalStorageSelectionRevisions[tabId] ?: 0L) == selectionRevision &&
+                        current.showTimeDelta == snapshot.showTimeDelta && settings == settingsSnapshot) {
+                        experimentalStorageCopyPublisher(text)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                AppLogger.warn("storage", "Could not copy selected log rows", error)
+                synchronized(stateLock) {
+                    if (experimentalStorageSessions[tabId] === session) {
+                        showOpenError("Could not copy log lines", snapshot.sourcePath, error.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    internal fun exportExperimentalStorageTo(tabId: String, session: StackFileSession, destination: File, csv: Boolean): Job? {
+        val captured = synchronized(stateLock) {
+            val snapshot = tabs.firstOrNull { it.id == tabId } ?: return@synchronized null
+            if (experimentalStorageSessions[tabId] !== session || !storageSessionMatches(snapshot, session)) return@synchronized null
+            Triple(snapshot, experimentalStorageSelections[tabId], experimentalStorageSelectionRevisions[tabId] ?: 0L)
+        } ?: return null
+        val (snapshot, selection, selectionRevision) = captured
+        val settingsSnapshot = settings
+        val generation = storageSelectionGeneration(tabId, session)
+        return ioScope.launch {
+            try {
+                val anchor = if (settingsSnapshot.copyTimeDelta && snapshot.showTimeDelta) {
+                    if (selection == null) snapshot.selected.minOrNull()
+                    else session.selectedIdsForCopy(selection, generation).firstOrNull()
+                } else {
+                    null
+                }
+                val spec = StorageExportSpec(
+                    snapshot.logFormat, settingsSnapshot, snapshot.showTimeDelta, anchor, session.analysis.processNames, csv,
+                )
+                val fence = StorageExportCommitFence { action ->
+                    synchronized(stateLock) {
+                        val current = tabs.firstOrNull { it.id == tabId }
+                        if (experimentalStorageSessions[tabId] !== session || current == null || current.filter != snapshot.filter ||
+                            current.expanded != snapshot.expanded || current.selected != snapshot.selected ||
+                            current.showTimeDelta != snapshot.showTimeDelta || experimentalStorageSelections[tabId] !== selection ||
+                            (experimentalStorageSelectionRevisions[tabId] ?: 0L) != selectionRevision || settings != settingsSnapshot) {
+                            throw StorageFailure.InvalidRequest("Export view changed")
+                        }
+                        action()
+                    }
+                }
+                session.export(destination, spec, callerFence = fence)
+                AppLogger.info("export", "Exported filtered log to ${destination.absolutePath}")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                AppLogger.warn("export", "Could not export filtered log", error)
+                synchronized(stateLock) {
+                    val current = tabs.firstOrNull { it.id == tabId }
+                    if (experimentalStorageSessions[tabId] === session && current?.filter == snapshot.filter &&
+                        current.expanded == snapshot.expanded) {
+                        showOpenError("Could not export log", destination.absolutePath, error.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    internal fun openStorageFileForTesting(file: File): String {
+        require(file.isFile)
+        val tabId = "t${tabCounter.getAndIncrement()}"
+        val tab = mkTab(tabId, file.name, emptyList(), analysis = LogAnalysis()).copy(sourcePath = file.absolutePath)
+        synchronized(stateLock) {
+            experimentalStorageFiles[tabId] = file.toPath()
+            publishOpenedTab(tab)
+        }
+        return tabId
+    }
+
     private var activeTabIdState by mutableStateOf("")
     var activeTabId: String
         get() = activeTabIdState
@@ -6564,6 +6831,15 @@ class AppState(
 
     fun close(forAppDataReset: Boolean = false) {
         if (!closed.compareAndSet(false, true)) return
+        val storageSessions = synchronized(stateLock) {
+            experimentalStorageFiles.clear()
+            experimentalStorageReady.clear()
+            experimentalStorageSelections.clear()
+            experimentalStorageAnchors.clear()
+            experimentalStorageSelectionRevisions.clear()
+            experimentalStorageSessions.values.toList().also { experimentalStorageSessions.clear() }
+        }
+        storageSessions.forEach { it.close() }
         clearTestStepRecording(force = true)
         if (!forAppDataReset) AppLogger.info("app", "Indagium shutting down")
         heapPressureMonitor.stop()
@@ -6587,8 +6863,10 @@ class AppState(
         com.indagium.capture.CaptureExtractionCache.releaseLeases()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
         // every decoder/audio line explicitly rather than relying on daemon-thread teardown.
-        videoControllers.values.forEach { controller -> controller.close() }
-        videoControllers.clear()
+        val closingVideoControllers = synchronized(stateLock) {
+            videoControllers.values.toList().also { videoControllers.clear() }
+        }
+        closingVideoControllers.forEach { it.close() }
         activeLoads.clear()
         synchronized(stateLock) {
             pendingRestoredLoads.clear()
@@ -6938,7 +7216,7 @@ class AppState(
             if (tab == null || target == null || !canUnloadTabContentLocked(tab, displayedLogTabIdsLocked())) {
                 false
             } else {
-                trimAfterRelease = shouldTrimHeapAfterClosing(listOf(tab))
+                trimAfterRelease = tabForcesHeapTrim(tab)
                 // Invalidate and detach ownership under the same lock as shell publication. A
                 // rapid reactivation can then only create new readers/resources after this cleanup.
                 releaseSearchState(tabId)
@@ -9598,19 +9876,22 @@ class AppState(
     }
 
     private fun attachVideo(tabId: String, source: VideoSource, sourceLabel: String): String? {
-        if (tab(tabId) == null) return null
         // Temporary diagnostic breadcrumb — see the matching openGrabber breadcrumbs in
         // VideoPlayerController.kt for why: there is no other log line marking a video attach at
         // all today, so this pins down exactly when (relative to everything else happening at
         // archive-open time) a stuck-forever video's attach actually occurred.
         AppLogger.info("video", "attachVideo: tabId=$tabId source=${source::class.simpleName} label=$sourceLabel")
-        // A controller owns a grabber/audio line for precisely one source. Dispose it BEFORE
-        // publishing replacement metadata so a recomposition cannot keep using the old decoder.
-        videoControllers.remove(tabId)?.close()
-        bumpVideoAnchorRequest(tabId)
-        // A fresh VideoAttachment defaults rotationDegrees to 0, so replacing the attachment
-        // resets rotation implicitly — no separate clear needed now that rotation lives on it.
-        upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
+        // Detach the old controller and publish the new source atomically; release its resources
+        // outside the lock so decoder shutdown does not block unrelated state updates.
+        val previous = synchronized(stateLock) {
+            if (closed.get() || tab(tabId) == null) return null
+            val controller = videoControllers.remove(tabId)
+            bumpVideoAnchorRequest(tabId)
+            // Publish the replacement under the same lock as controller publication.
+            upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
+            controller
+        }
+        previous?.close()
         // A successful attachment should be immediately discoverable; otherwise a user who had
         // collapsed the video panel sees no sign that a standalone dropped recording was accepted.
         videoPanelVisible = true
@@ -9622,12 +9903,16 @@ class AppState(
      * resources. The log tab and all of its annotations stay intact.
      */
     fun removeVideo(tabId: String) {
-        videoControllers.remove(tabId)?.close()
-        videoFollowSuppressionByTab.remove(tabId)
-        bumpVideoAnchorRequest(tabId)
-        upTab(tabId) { tab ->
-            if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
+        val previous = synchronized(stateLock) {
+            val controller = videoControllers.remove(tabId)
+            videoFollowSuppressionByTab.remove(tabId)
+            bumpVideoAnchorRequest(tabId)
+            upTab(tabId) { tab ->
+                if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
+            }
+            controller
         }
+        previous?.close()
         // There can be no embedded player after removing the active tab's only attachment.
         if (tabId == activeTabId) videoPanelVisible = false
         // Detached archive-video attachment may have been the cache's last referencer.
@@ -9665,8 +9950,8 @@ class AppState(
      *  broken local file already gets. [FailedVideoPlayerController] fills that one gap so this
      *  function's contract — non-null whenever [LogTab.attachedVideo] is non-null — actually holds. */
     fun videoController(tabId: String): VideoPlayerController? {
-        // Checked before resolveVideoPlaybackPath, not just via getOrPut's own lazy factory,
-        // because resolveVideoPlaybackPath itself is not free for a VideoSource.ArchiveEntry: it
+        // Check the cached controller before resolving a path because resolveVideoPlaybackPath
+        // itself is not free for a VideoSource.ArchiveEntry: it
         // touches the filesystem (recomputing the cache-key fingerprint from the archive's own
         // canonicalPath/length/lastModified, then stat-ing and touching the cache destination)
         // every time it runs. This function is called unmemoized from BoundVideoPanel's composable
@@ -9679,18 +9964,24 @@ class AppState(
         // sit on a slow mount (reported against a VM shared folder), since the UI thread stayed
         // perpetually busy re-deriving a path it already had instead of ever getting to render the
         // controller's (already correct) published duration.
-        videoControllers[tabId]?.let { return it }
-        val attachment = tab(tabId)?.attachedVideo ?: return null
-        val path = resolveVideoPlaybackPath(attachment.source)
-        // Temporary diagnostic breadcrumb, paired with the identity-hash logs in
-        // VideoPlayerController.openGrabber and VideoTransportBar's SideEffect — see those for
-        // why: this is the one place a NEW controller gets constructed for a tab, so logging here
-        // (rather than on every videoController call, which would be call-per-recomposition noise)
-        // pins down exactly which controller instance this tab's map entry ends up holding.
-        AppLogger.info("video", "videoController: constructing new controller for tabId=$tabId path=$path")
-        return videoControllers.getOrPut(tabId) {
-            if (path != null) videoControllerFactory(path) else FailedVideoPlayerController(videoUnavailableMessage(attachment))
+        val attachment = synchronized(stateLock) {
+            if (closed.get()) return null
+            videoControllers[tabId]?.let { return it }
+            tab(tabId)?.attachedVideo ?: return null
         }
+        val path = resolveVideoPlaybackPath(attachment.source)
+        AppLogger.info("video", "videoController: constructing new controller for tabId=$tabId path=$path")
+        val candidate = if (path != null) {
+            videoControllerFactory(path)
+        } else {
+            FailedVideoPlayerController(videoUnavailableMessage(attachment))
+        }
+        val published = synchronized(stateLock) {
+            if (closed.get() || tab(tabId)?.attachedVideo !== attachment) null
+            else videoControllers[tabId] ?: candidate.also { videoControllers[tabId] = it }
+        }
+        if (published !== candidate) candidate.close()
+        return published
     }
 
     /** Current playhead when a video controller is already open; does not instantiate a decoder. */
@@ -11553,7 +11844,16 @@ class AppState(
     // auto-expands the owning group and scrolls only as much as needed — see
     // SearchNavigationRequest's doc comment.
     private fun requestSearchScrollAnchor(tabId: String, scope: SearchScope, entryId: Int, inputRevision: Long) {
-        if (scope == SearchScope.FILTERED) setSelectedRows(tabId, listOf(entryId))
+        if (scope == SearchScope.FILTERED) {
+            synchronized(stateLock) {
+                if (tabId in experimentalStorageFiles) {
+                    experimentalStorageSelections.remove(tabId)
+                    experimentalStorageAnchors.remove(tabId)
+                    bumpStorageSelectionRevision(tabId)
+                }
+            }
+            setSelectedRows(tabId, listOf(entryId))
+        }
         searchNavigationCounter += 1
         val request = SearchNavigationRequest(
             id = searchNavigationCounter,
@@ -11596,6 +11896,10 @@ class AppState(
      *  Searches a *fully expanded* copy of the tab so a match inside a collapsed group is still
      *  found; the real tab.expanded and stored filter are never mutated here. */
     private fun scheduleSearchRecompute(tabId: String, scope: SearchScope) {
+        if (synchronized(stateLock) { tabId in experimentalStorageFiles }) {
+            scheduleExperimentalStorageSearch(tabId, scope)
+            return
+        }
         val key = SearchJobKey(tabId, scope)
         val initial = tab(tabId) ?: return
         if (initial.contentState != TabContentState.LOADED) return
@@ -11639,6 +11943,43 @@ class AppState(
             }
             ensureActive()
             applySearchResult(tabId, scope, request.inputRevision, generation, result)
+        }
+    }
+
+    private fun scheduleExperimentalStorageSearch(tabId: String, scope: SearchScope) {
+        val key = SearchJobKey(tabId, scope)
+        val initial = tab(tabId) ?: return
+        val revision = initial.searchFor(scope).inputRevision
+        val generation = searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L } ?: 1L
+        searchJobs.remove(key)?.cancel()
+        val session = synchronized(stateLock) { experimentalStorageSessions[tabId] } ?: return
+        searchJobs[key] = ioScope.launch {
+            try {
+                delay(SEARCH_RECOMPUTE_DEBOUNCE_MS)
+                val stored = tab(tabId) ?: return@launch
+                val request = stored.searchFor(scope)
+                if (!request.active || request.inputRevision != revision || !storageSessionMatches(stored, session)) return@launch
+                val result = session.search(request.query, request.caseSensitive, scope == SearchScope.FILTERED)
+                ensureActive()
+                synchronized(stateLock) {
+                    val current = tabs.firstOrNull { it.id == tabId }
+                    if (experimentalStorageSessions[tabId] === session && current != null && storageSessionMatches(current, session)) {
+                        applySearchResult(tabId, scope, revision, generation, result)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                AppLogger.warn("storage", "Could not search log", error)
+                synchronized(stateLock) {
+                    if (experimentalStorageSessions[tabId] === session && searchJobRevisions[key] == generation) {
+                        upTab(tabId) { current ->
+                            current.withSearch(scope, current.searchFor(scope).copy(isSearching = false))
+                        }
+                        showOpenError("Could not search log", initial.sourcePath, error.message ?: "Unknown error")
+                    }
+                }
+            }
         }
     }
 
@@ -12084,17 +12425,8 @@ class AppState(
         cancelAllLoads()
     }
 
-    /**
-     * Capture/video tabs, or closed rows since the last trim ([closedRowsSinceTrim], cumulative
-     * including [closing]) reaching [HEAP_TRIM_CLOSED_ROWS], free enough to be worth a trim.
-     * A lone small tab does not, but several in a row add up (they leave memory unreturned on Linux).
-     * Call under [stateLock]; it adds [closing]'s rows to the tally.
-     */
-    private fun shouldTrimHeapAfterClosing(closing: List<LogTab>): Boolean {
-        closedRowsSinceTrim += closing.sumOf { it.logData.size.toLong() }
-        return closedRowsSinceTrim >= HEAP_TRIM_CLOSED_ROWS ||
-            closing.any { it.captureSessionId != null || it.captureSourceSessionId != null || it.attachedVideo != null }
-    }
+    private fun tabForcesHeapTrim(tab: LogTab): Boolean =
+        tab.captureSessionId != null || tab.captureSourceSessionId != null || tab.attachedVideo != null
 
     // Resource cleanup and the tabs-list removal used to be two separate phases — cleanup
     // unguarded, then a synchronized(stateLock) block removing the tab — leaving a window where a
@@ -12162,20 +12494,27 @@ class AppState(
         // join or a standalone connection's synchronous adb cleanup, and stateLock is taken by ~80
         // other call sites across this class, so blocking IO/joins must never run while holding it.
         val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
+        val closedStorageSessions = mutableListOf<StackFileSession>()
         var trimHeapAfterClose = false
         var rowsToRelease: List<RowReleaseTarget> = emptyList()
         var exitCompare = false
         // Closing a snapshot ends its extraction claim (file IO), so it happens after stateLock is released.
         val closedSnapshots = mutableListOf<ImportedCaptureSnapshot>()
         synchronized(stateLock) {
-            // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
-            // counting only; the GC request itself is issued after the lock is released.
             val closing = tabs.filter { it.id in tabIds }
-            trimHeapAfterClose = shouldTrimHeapAfterClosing(closing)
+            trimHeapAfterClose = closing.any(::tabForcesHeapTrim)
             // Taken in the same critical section as cancelTailingFor below, and appendTailedLines
             // also needs stateLock, so no tail batch can extend these lists once we are past here.
-            rowsToRelease = closing.mapNotNull(::closedTabRowReleaseTarget).distinctBy { it.store }
+            rowsToRelease = closing.mapNotNull(::rowReleaseTarget).distinctBy { it.store }
+            // Plain lists have no explicit release; account for them when their tabs close.
+            closedRowsSinceTrim += closing.filter { rowReleaseTarget(it) == null }.sumOf { it.logData.size.toLong() }
             tabIds.forEach { tabId ->
+                experimentalStorageFiles.remove(tabId)
+                experimentalStorageReady.remove(tabId)
+                experimentalStorageSelections.remove(tabId)
+                experimentalStorageAnchors.remove(tabId)
+                experimentalStorageSelectionRevisions.remove(tabId)
+                experimentalStorageSessions.remove(tabId)?.let(closedStorageSessions::add)
                 contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
                 contentLoadJobs.remove(tabId)?.cancel()
                 reloadSourcesByTab.remove(tabId)
@@ -12223,6 +12562,7 @@ class AppState(
             tabs = next
             stripTabsClosed(tabIds)
         }
+        closedStorageSessions.forEach { it.close() }
         // Outside stateLock: updateCompareMode takes it again through upTab and autosaves.
         if (exitCompare) updateCompareMode(false)
         closeSnapshotsOffThread(closedSnapshots)
@@ -12239,8 +12579,9 @@ class AppState(
             // The release job issues the trim itself, AFTER dropping the rows: a trim requested here
             // would run first, and HeapTrim's coalescing would then absorb the later request.
             releaseRowsLater(rowsToRelease, trimAfterwards = trimHeapAfterClose)
-        } else if (trimHeapAfterClose) {
-            requestHeapTrim(CLOSED_TAB_TRIM_REASON)
+        } else {
+            val forward = synchronized(stateLock) { reserveHeapTrimLocked(trimHeapAfterClose) }
+            if (forward) heapTrimRequester(CLOSED_TAB_TRIM_REASON)
         }
     }
 
@@ -12254,15 +12595,15 @@ class AppState(
      * A store is skipped when a remaining tab or a not-yet-loaded restored tab still uses it; that
      * list is read under [stateLock] together with the release itself so a reader cannot register in
      * between. A store a background job still pins ([pinRows]) is not dropped either but parked in
-     * [rowsPendingRelease]: the last unpin releases it ([unpinRows]). [trimAfterwards] carries the
-     * close-time trim decision: the GC has to run after the release to free anything.
+     * [rowsPendingRelease]: the last unpin releases it ([unpinRows]). A force-trim flag follows
+     * capture/video stores to their release; row counts are tallied at release.
      */
     private fun releaseRowsLater(rows: List<RowReleaseTarget>, trimAfterwards: Boolean) {
         ioScope.launch {
             delay(closedTabRowsReleaseDelayMs)
             var released = false
             var deferred = false
-            synchronized(stateLock) {
+            val forward = synchronized(stateLock) {
                 val inUse = storesInUseLocked()
                 for (target in rows) {
                     val store = target.store
@@ -12270,21 +12611,19 @@ class AppState(
                         store in inUse -> Unit
                         rowsPinCounts.containsKey(store) -> {
                             deferred = true
-                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(target.release, false) }
-                            pending.trimAfterwards = pending.trimAfterwards || trimAfterwards
+                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(target, false) }
+                            pending.forceTrim = pending.forceTrim || trimAfterwards
                         }
                         else -> {
+                            closedRowsSinceTrim += target.rowCount().toLong()
                             target.release()
                             released = true
                         }
                     }
                 }
+                reserveHeapTrimLocked(trimAfterwards && (released || !deferred))
             }
-            // Nothing released and something deferred: this trim would free nothing yet, and the
-            // deferred store's own release issues it (with the same decision) once its readers finish.
-            if (trimAfterwards && (released || !deferred)) {
-                requestHeapTrim(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
-            }
+            if (forward) heapTrimRequester(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
         }
     }
 
@@ -12327,9 +12666,8 @@ class AppState(
         ioScope.launch(block = block).also { job -> job.invokeOnCompletion { pin.close() } }
 
     private fun unpinRows(tabId: String, store: Any) {
-        var pending: PendingRowRelease? = null
         var released = false
-        synchronized(stateLock) {
+        val forward = synchronized(stateLock) {
             val readerCount = (readerPinsByTab[tabId] ?: 0) - 1
             if (readerCount > 0) readerPinsByTab[tabId] = readerCount else readerPinsByTab.remove(tabId)
             val remaining = (rowsPinCounts[store] ?: 0) - 1
@@ -12338,18 +12676,15 @@ class AppState(
                 return
             }
             rowsPinCounts.remove(store)
-            pending = rowsPendingRelease.remove(store)
-            // Re-checked: the store could have become a tab's rows while the closed one waited. Same
-            // critical section as the release, so a reader cannot register in between.
+            val pending = rowsPendingRelease.remove(store)
             pending?.takeIf { store !in storesInUseLocked() }?.let {
-                it.releaseRows()
+                closedRowsSinceTrim += it.target.rowCount().toLong()
+                it.target.release()
                 released = true
             }
+            reserveHeapTrimLocked(pending?.forceTrim == true)
         }
-        // Outside stateLock, and after the release: the GC only frees the rows once they are dropped.
-        if (pending?.trimAfterwards == true) {
-            requestHeapTrim(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
-        }
+        if (forward) heapTrimRequester(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -14546,6 +14881,14 @@ class AppState(
     }
 
     private fun exportFilteredAfterLoad(tabId: String, saved: File, csv: Boolean) {
+        val (isExperimental, session) = synchronized(stateLock) {
+            (tabId in experimentalStorageFiles) to experimentalStorageSessions[tabId]
+        }
+        if (isExperimental) {
+            if (session != null) exportExperimentalStorageTo(tabId, session, saved, csv)
+            else showOpenError("Could not export log", saved.absolutePath, "The log view is not ready")
+            return
+        }
         ioScope.launch {
             val t = awaitTabLoaded(tabId) ?: return@launch
             launchPinned(pinRows(t)) {

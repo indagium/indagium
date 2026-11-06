@@ -1,0 +1,19 @@
+import groovy.json.JsonOutput
+allprojects { afterEvaluate { p ->
+ if (p.extensions.findByName('kotlin') != null) {
+ p.tasks.register('ramPocExportClasspath') {
+ doLast {
+ def target = p.extensions.getByName('kotlin').targets.getByName('desktop')
+ def result = [:]
+ ['main','test'].each { n ->
+ def c = target.compilations.getByName(n)
+ result[n] = (c.output.allOutputs.files + c.runtimeDependencyFiles.files).collect { it.absolutePath }
+ }
+ def out = new File(p.buildDir, 'ram-poc/classpath.json')
+ out.parentFile.mkdirs()
+ out.text = JsonOutput.toJson(result)
+ println(out.absolutePath)
+ }
+ }
+ }
+} }

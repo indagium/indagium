@@ -22,12 +22,14 @@ import com.indagium.ui.spliceSummarize
 import com.indagium.ui.summarizeItems
 import com.indagium.utils.AppendOnlyList
 import com.indagium.utils.AppendOnlyLogList
+import com.indagium.utils.FlatRows
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.appendFastPathHits
 import com.indagium.utils.appendLogEntries
 import com.indagium.utils.computeItems
 import com.indagium.utils.computeProcessNames
 import com.indagium.utils.invalidateComputeCache
+import com.indagium.utils.isAppendOnlyExtensionOf
 import com.indagium.utils.mergeTagPids
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -356,7 +358,7 @@ class ComputeItemsAppendTest {
     }
 
     @Test
-    fun priorRowObjectsKeepTheirIdentityAndTheSpliceSummaryMatches() {
+    fun flatSnapshotsPreserveTheirRowsAndTheSpliceSummaryMatches() {
         val tab = mkTab("ap-identity", "a.log", mixed(1, 5000))
         invalidateComputeCache(tab.id)
         val before = computeItems(tab, true)
@@ -366,7 +368,8 @@ class ComputeItemsAppendTest {
         val after = computeItems(grown, true)
         assertEquals(hitsBefore + 1, appendFastPathHits.get())
         assertEquals(5050, after.size)
-        for (i in before.indices) assertSame(before[i], after[i], "row $i lost its identity")
+        assertTrue(after.isAppendOnlyExtensionOf(before))
+        for (i in before.indices) assertEquals(before[i], after[i], "row $i changed")
         val spliced = spliceSummarize(before, beforeSummary, after)
         assertNotNull(spliced)
         val full = summarizeItems(after)
@@ -433,11 +436,11 @@ class ComputeItemsAppendTest {
     private fun storeOf(items: List<LogItem>): Any = (items as AppendOnlyList<*>).storeIdentity
 
     @Test
-    fun theFullComputeReturnsAnAppendOnlyListForEveryRenderPath() {
+    fun theFullComputeUsesCompactFlatRowsAndAppendOnlyGroupedRows() {
         // Plain rows (no stack groups / sequences / manual blocks) ...
         val plain = mixedTab("ap-store-plain")
         invalidateComputeCache(plain.id)
-        assertTrue(computeItems(plain, true) is AppendOnlyList<*>)
+        assertTrue(computeItems(plain, true) is FlatRows)
         // ... and the renderRange path (a stack-trace group is present).
         val stacks = crashTab("ap-store-stack")
         invalidateComputeCache(stacks.id)
@@ -445,7 +448,7 @@ class ComputeItemsAppendTest {
         // An empty log too (nothing to share yet, but the contract is uniform).
         val empty = mkTab("ap-store-empty", "a.log", emptyList())
         invalidateComputeCache(empty.id)
-        assertTrue(computeItems(empty, true) is AppendOnlyList<*>)
+        assertTrue(computeItems(empty, true) is FlatRows)
     }
 
     private fun stackGroup() = StackTraceGroup(gid = "st_2", rid = 2, memberIds = listOf(3, 4))
@@ -459,13 +462,13 @@ class ComputeItemsAppendTest {
 
     @Test
     fun consecutiveFastBatchesShareOneBackingStoreAndNeverCopy() {
-        val start = mixedTab("ap-share")
+        val start = crashTab("ap-share")
         invalidateComputeCache(start.id)
         val initial = computeItems(start, true)
         val store = storeOf(initial)
         var tab = start
         var previous = initial
-        var next = 13
+        var next = 9
         repeat(6) {
             val batch = mixed(next, 7).also { next += 7 }
             tab = append(tab, batch)

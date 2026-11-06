@@ -10,7 +10,7 @@ import java.util.BitSet
 // implementation recomputed "next start match" by rescanning forward per candidate and compared
 // every candidate pair to find parents, which was O(candidates²): a pattern matching ~5% of a
 // 10M-line file produced ~500k candidates and never finished.
-private class SeqCandidate(val idx: Int, val def: SequenceDef) {
+internal class SeqCandidate(val idx: Int, val def: SequenceDef) {
     var endExclusive: Int = 0
     var parent: Int = -1
 }
@@ -58,7 +58,7 @@ private class SeqScan(
 // thread's coincidental text match from opening a new group; for the END pattern (same def,
 // second call site below) it stops a different thread's end line from closing a group that isn't
 // "its" run. null (the common, unscoped case) leaves matching exactly as it always was.
-private fun matchesSeqText(
+internal fun matchesSeqText(
     entry: LogEntry,
     hay: String,
     text: String,
@@ -149,7 +149,7 @@ internal fun computeSeqGroups(
         c.endExclusive = if (endIdx != null) endIdx + 1 else fallback
     }
 
-    assignParents(candidates)
+    assignParents(candidates, cancellationCheck)
 
     val childrenByParent = HashMap<Int, MutableList<Int>>()
     candidates.forEachIndexed { ci, c ->
@@ -217,9 +217,17 @@ private fun nextSameDefStartIdxs(candidates: List<SeqCandidate>): IntArray {
 // all-pairs definition exactly. A sweep in idx order keeps every still-possible parent on a
 // stack: a candidate popped (or buried) once its endExclusive falls at/before the current idx can
 // never contain a later candidate, because a later candidate's range starts after it ends.
-private fun assignParents(candidates: List<SeqCandidate>) {
+internal fun assignParents(
+    candidates: List<SeqCandidate>,
+    cancellationCheck: CancellationCheck = CancellationCheck {},
+) {
     val stack = ArrayList<Int>()
+    var comparisons = 0
     for (ci in candidates.indices) {
+        if (++comparisons >= CANCELLATION_CHECK_INTERVAL) {
+            comparisons = 0
+            cancellationCheck()
+        }
         val c = candidates[ci]
         while (stack.isNotEmpty() && candidates[stack.last()].endExclusive <= c.idx) {
             stack.removeAt(stack.lastIndex)
@@ -228,6 +236,10 @@ private fun assignParents(candidates: List<SeqCandidate>) {
         // fail the containment test below since c.endExclusive > c.idx >= their endExclusive.
         var bestLen = Int.MAX_VALUE
         for (si in stack) {
+            if (++comparisons >= CANCELLATION_CHECK_INTERVAL) {
+                comparisons = 0
+                cancellationCheck()
+            }
             val p = candidates[si]
             if (c.endExclusive <= p.endExclusive) {
                 val len = p.endExclusive - p.idx

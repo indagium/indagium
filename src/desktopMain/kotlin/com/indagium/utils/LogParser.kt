@@ -71,31 +71,31 @@ fun parseLogcat(file: File): List<LogEntry> =
 // optionally continuing a tab's existing id counter rather than restarting at 1.
 fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> {
     var id = startId
-    // A multi-GB logcat has millions of lines but only a handful of distinct tags — interning
-    // them collapses millions of duplicate Strings into shared references (hundreds of MB saved).
-    val tagCache = HashMap<String, String>()
-    val internTag: (String) -> String = { tag -> tagCache.getOrPut(tag) { tag } }
-
+    val parser = LogcatLineParser()
     return lines.mapNotNull { raw ->
-        val line = raw.trim()
-        if (line.isEmpty() || line.startsWith("-----")) return@mapNotNull null
+        parser.parse(raw, id)?.also { id++ }
+    }.toList()
+}
 
-        parseStructuredLogcatLine(line, id, internTag)?.let { parsed ->
-            id++
-            return@mapNotNull parsed
-        }
+/** A reusable parser with a caller-scoped tag cache; skipped lines do not consume an ID. */
+internal class LogcatLineParser {
+    // The caller controls this cache's lifetime; file pages use one cache per page.
+    private val tagCache = HashMap<String, String>()
+    private val internTag: (String) -> String = { tag -> tagCache.getOrPut(tag) { tag } }
+
+    fun parse(raw: String, id: Int): LogEntry? {
+        val line = raw.trim()
+        if (line.isEmpty() || line.startsWith("-----")) return null
+
+        parseStructuredLogcatLine(line, id, internTag)?.let { return it }
         val wrappedPayload = RE_RAW_WRAPPER.matchEntire(line)?.let { m ->
             m.groupValues.drop(1).firstOrNull(String::isNotEmpty)
         }
         wrappedPayload?.let { payload ->
-            parseStructuredLogcatLine(payload, id, internTag)?.let { parsed ->
-                id++
-                return@mapNotNull parsed
-            }
+            parseStructuredLogcatLine(payload, id, internTag)?.let { return it }
         }
-
-        LogEntry(id++, "", LogLevel.I, "RAW", raw.trimEnd())
-    }.toList()
+        return LogEntry(id, "", LogLevel.I, "RAW", raw.trimEnd())
+    }
 }
 
 // Each match* helper below owns exactly one regex alternative's LogEntry construction, so

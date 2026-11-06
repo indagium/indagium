@@ -187,14 +187,14 @@ private fun isExceptionPrelude(scan: MsgScanner, msg: String): Boolean {
 // Pulled out of computeStackTraceGroups (rather than a local class there) purely to keep that
 // function's own cyclomatic complexity under detekt's threshold — it doesn't capture anything
 // from the enclosing scan, so nothing else about it depends on being local.
-private class OpenTrace(val triggerIdx: Int, val isFatal: Boolean) {
-    val memberIds = mutableListOf<Int>()
+private class OpenTrace(val triggerId: Int, triggerOrdinal: Long, val isFatal: Boolean) {
+    val memberIds = IntMembers()
     var sawFrame = false
 
     // Rule B bookkeeping: the logData index of the most recently claimed line (trigger line
     // itself until a member is added). computeStackTraceGroups checks the gap from this to the
     // current index before letting a continuation extend the trace — see MAX_TRACE_INTERLEAVE.
-    var lastClaimedIdx = triggerIdx
+    var lastClaimedIdx = triggerOrdinal
 
     // Rule C bookkeeping: true once any member was accepted via isUnconditionalContinuation (a
     // real "at" frame, "Caused by:", "... N more", or "Process:" line) rather than only via
@@ -247,13 +247,13 @@ private fun traceKey(pid: Int, tid: Int): Long = (pid.toLong() shl INT_BITS) or 
 
 // Rule B gate: whether a continuation at logData index `i` is still close enough to `open`'s last
 // claimed line to extend it. See MAX_TRACE_INTERLEAVE's doc for the measured justification.
-private fun withinTraceReach(open: OpenTrace, i: Int): Boolean = i - open.lastClaimedIdx <= MAX_TRACE_INTERLEAVE
+private fun withinTraceReach(open: OpenTrace, i: Long): Boolean = i - open.lastClaimedIdx <= MAX_TRACE_INTERLEAVE
 
 // Decides whether `entry` extends `open` as a continuation member and, if so, mutates `open`'s
 // member list / frame / signature state and returns true. Pulled out of computeStackTraceGroups
 // for the same reason OpenTrace itself was (see that class's doc comment) — keeping the caller's
 // branch count under detekt's CyclomaticComplexMethod threshold.
-private fun tryExtendTrace(open: OpenTrace, entry: LogEntry, trigger: Boolean): Boolean {
+private fun tryExtendTrace(open: OpenTrace, entry: LogEntry, trigger: Boolean, beforeMember: () -> Unit): Boolean {
     // Real crash dumps put metadata lines — "Process: <pkg>, PID: <n>", the exception class-name
     // line ("java.lang.NullPointerException: ...") — between the "FATAL EXCEPTION" header and the
     // first "at" frame. Tolerate a trigger-like line here too (fold it in) as long as no frame has
@@ -262,7 +262,8 @@ private fun tryExtendTrace(open: OpenTrace, entry: LogEntry, trigger: Boolean): 
     val isHeaderFollowUp = !open.sawFrame && trigger
     val isUnconditional = isUnconditionalContinuation(entry.msg)
     if (!isUnconditional && !isHeaderFollowUp) return false
-    open.memberIds += entry.id
+    beforeMember()
+    open.memberIds.add(entry.id)
     // Rule C: only an unconditional continuation (never a bare isHeaderFollowUp repeat of the
     // trigger shape) proves this is a real stack dump rather than the same one-line message
     // logged repeatedly — see flush()'s doc.
@@ -279,70 +280,133 @@ private fun tryExtendTrace(open: OpenTrace, entry: LogEntry, trigger: Boolean): 
     return true
 }
 
-fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
-    val openByKey = HashMap<Long, OpenTrace>()
-    val pendingPreludeByKey = HashMap<Long, Int>()
-    val groups = mutableListOf<StackTraceGroup>()
+/** Primitive member storage avoids a boxed integer for every retained trace line. */
+private class IntMembers {
+    private var values = IntArray(8)
+    var size = 0
+        private set
 
-    fun flush(key: Long) {
+    fun add(value: Int) {
+        if (size == values.size) {
+            check(size < Int.MAX_VALUE) { "Stack trace exceeds supported member count" }
+            val capacity = minOf(Int.MAX_VALUE.toLong(), size.toLong() * 2).toInt()
+            values = values.copyOf(capacity)
+        }
+        values[size++] = value
+    }
+
+    fun snapshot(): IntArray = values.copyOf(size)
+}
+
+/** Immutable primitive representation for a completed stack group. */
+internal class CompactStackGroup(
+    val rid: Int,
+    val isFatal: Boolean,
+    val signature: String,
+    private val members: IntArray,
+) {
+    val gid: String get() = "st_$rid"
+    val memberCount: Int get() = members.size
+
+    fun memberId(index: Int): Int = members[index]
+
+    fun memberIds(): IntArray = members.copyOf()
+
+    fun toLegacy(): StackTraceGroup = StackTraceGroup(
+        gid = gid, rid = rid, memberIds = members.toList(), isFatal = isFatal, signature = signature,
+    )
+}
+
+/**
+ * A single-owner scanner over rows in source order. Open traces, their primitive member IDs and
+ * pending preludes can grow with input; the interleave limit bounds gaps, not group length.
+ * Callers must discard the scanner on cancellation or source changes; only [finish] publishes.
+ */
+internal class StackTraceScanner(
+    private val beforeMember: () -> Unit = {},
+    private val beforeStateAdd: (Long) -> Unit = {},
+) {
+    private data class Prelude(val ordinal: Long, val id: Int, val tag: String)
+
+    private val openByKey = HashMap<Long, OpenTrace>()
+    private val pendingPreludeByKey = HashMap<Long, Prelude>()
+    private val groups = mutableListOf<CompactStackGroup>()
+    private val scanner = MsgScanner()
+    private var ordinal = 0L
+    private var finished = false
+
+    private fun flush(key: Long) {
         val open = openByKey.remove(key) ?: return
-        // Rule C: a trace whose members are exclusively isHeaderFollowUp repeats of the trigger
-        // line — never a real "at" frame / "Caused by:" / "... N more" / "Process:" line — is not
-        // a stack dump, it's the same one-line exception message logged repeatedly (the worst
-        // observed case: 7 members, 1172 interleaved foreign lines, zero "at" frames).
-        // Do not weaken this to "must contain an at frame": a truncated dump whose only member is
-        // a "Process: <pkg>, PID: <n>" line (isUnconditionalContinuation accepts it) must still
-        // produce a group — see aHeaderWithNoClassNameOrFrameGetsAUniquePerRidSignature... test.
-        if (open.memberIds.isNotEmpty() && open.hasUnconditionalMember) {
-            val rid = logData[open.triggerIdx].id
-            groups += StackTraceGroup(
-                gid = "st_$rid", rid = rid, memberIds = open.memberIds.toList(), isFatal = open.isFatal,
-                signature = open.computeSignature(rid),
+        if (open.memberIds.size > 0 && open.hasUnconditionalMember) {
+            groups += CompactStackGroup(
+                rid = open.triggerId,
+                isFatal = open.isFatal,
+                signature = open.computeSignature(open.triggerId),
+                members = open.memberIds.snapshot(),
             )
         }
     }
 
-    val scanner = MsgScanner()
-    for (i in logData.indices) {
-        val entry = logData[i]
+    fun feed(entry: LogEntry) {
+        check(!finished) { "Scanner is finished" }
+        check(ordinal < Long.MAX_VALUE) { "Too many source rows" }
+        val i = ordinal++
         scanner.scan(entry.msg)
         val trigger = isTrigger(scanner, entry.msg)
         val key = traceKey(entry.pid, entry.tid)
         val open = openByKey[key]
         if (open != null) {
-            if (withinTraceReach(open, i) && tryExtendTrace(open, entry, trigger)) {
+            if (withinTraceReach(open, i) && tryExtendTrace(open, entry, trigger, beforeMember)) {
                 open.lastClaimedIdx = i
-                continue
+                return
             }
-            // Either too far past the trace's last claimed line (Rule B) or not a continuation
-            // shape at all — either way, flush and fall through to re-evaluate this line fresh.
             flush(key)
         }
         if (trigger) {
-            val preludeIdx = pendingPreludeByKey[key]
-                ?.takeIf { it == i - 1 && logData[it].tag == entry.tag }
-            openByKey[key] = OpenTrace(preludeIdx ?: i, isFatal = scanner.fatalException).also { trace ->
-                if (preludeIdx != null) {
-                    trace.memberIds += entry.id
-                    trace.lastClaimedIdx = i
+            val prelude = pendingPreludeByKey.remove(key)
+                ?.takeIf { it.ordinal == i - 1 && it.tag == entry.tag }
+            beforeStateAdd(openByKey.size.toLong() + pendingPreludeByKey.size)
+            openByKey[key] = OpenTrace(prelude?.id ?: entry.id, prelude?.ordinal ?: i, isFatal = scanner.fatalException)
+                .also { trace ->
+                    if (prelude != null) {
+                        beforeMember()
+                        trace.memberIds.add(entry.id)
+                        trace.lastClaimedIdx = i
+                    }
+                    trace.noteIfClassNameLine(entry.msg)
                 }
-                // Covers both shapes: a bare "<Class>Exception: msg" trigger opening its own
-                // trace, and a prelude-promoted trigger (this line IS the exception header even
-                // though the trace's rid points at the prelude line before it).
-                trace.noteIfClassNameLine(entry.msg)
-            }
-            pendingPreludeByKey.remove(key)
         } else if (isExceptionPrelude(scanner, entry.msg)) {
-            pendingPreludeByKey[key] = i
+            if (key !in pendingPreludeByKey) beforeStateAdd(openByKey.size.toLong() + pendingPreludeByKey.size)
+            pendingPreludeByKey[key] = Prelude(i, entry.id, entry.tag)
         } else {
             pendingPreludeByKey.remove(key)
         }
     }
-    openByKey.keys.toList().forEach { flush(it) }
 
-    // Flush order follows whichever key's trace closed first, not document order once multiple
-    // pid/tid keys interleave — restore document order (entry id increases monotonically per tab).
-    return groups.sortedBy { it.rid }
+    fun finish(cancellationCheck: () -> Unit = {}): List<CompactStackGroup> {
+        check(!finished) { "Scanner is finished" }
+        finished = true
+        val keys = ArrayList<Long>(openByKey.size)
+        for (key in openByKey.keys) {
+            cancellationCheck()
+            keys.add(key)
+        }
+        for (key in keys) {
+            cancellationCheck()
+            flush(key)
+        }
+        // sortedWith is stable; equal root IDs retain the original flush order.
+        return groups.sortedWith { left, right ->
+            cancellationCheck()
+            left.rid.compareTo(right.rid)
+        }
+    }
+}
+
+fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
+    val scanner = StackTraceScanner()
+    logData.forEach(scanner::feed)
+    return scanner.finish().map(CompactStackGroup::toLegacy)
 }
 
 // EXCEPTION sites are derived 1:1 from computeStackTraceGroups()'s output — the header line an

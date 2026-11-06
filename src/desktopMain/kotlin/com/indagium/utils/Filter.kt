@@ -6,8 +6,18 @@ import com.indagium.diagram3.ParsedSeq3
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.*
+import com.indagium.storage.EntryId
+import com.indagium.storage.StorageFailure
+import com.indagium.storage.projection.DisplayProjection
+import com.indagium.storage.projection.HeaderDescriptor
+import com.indagium.storage.projection.ProjectionGeneration
+import com.indagium.storage.projection.RowStyle
 import com.indagium.ui.DANGER_RED
 import com.indagium.ui.SEQ_COLORS
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 // Tags-mode message/PID rules and the kwInTag live-search add matches on top of the base tag
 // filter rather than replacing it — an entry passes if it satisfies a positive selector OR the
@@ -234,16 +244,43 @@ private fun rulePatternMatches(entry: LogEntry, rule: MessageRule, regexContext:
 fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
     visibleEntries(tab, applyFilter, RegexEvaluationContext())
 
+private const val INITIAL_MATCH_POSITIONS = 1024
+
 internal fun visibleEntries(
     tab: LogTab,
     applyFilter: Boolean,
     regexContext: RegexEvaluationContext,
-): List<LogEntry> =
-    if (applyFilter) {
-        tab.logData.filter { passesFilter(it, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids) }
-    } else {
-        tab.logData
+    cancellationCheck: CancellationCheck = NoCancellationCheck,
+): List<LogEntry> {
+    val source = tab.logData
+    if (!applyFilter) return source
+    var positions: IntArray? = null
+    var count = 0
+    for (i in source.indices) {
+        if ((i + 1) % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+        if (passesFilter(source[i], tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) {
+            var indices = positions
+            if (indices != null) {
+                if (count == indices.size) {
+                    val capacity = minOf(source.size.toLong(), maxOf(count.toLong() + 1, count.toLong() + count / 2))
+                    indices = indices.copyOf(capacity.toInt())
+                    positions = indices
+                }
+                indices[count] = i
+            }
+            count++
+        } else if (positions == null) {
+            positions = IntArray(minOf(source.size, maxOf(count, INITIAL_MATCH_POSITIONS)))
+            for (j in 0 until count) {
+                if ((j + 1) % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+                positions[j] = j
+            }
+        }
     }
+    return positions?.let { indices ->
+        MatchingEntries.create(source, if (indices.size == count) indices else indices.copyOf(count), count)
+    } ?: source
+}
 
 // Ids are strictly increasing within a tab (parser, merge, and tailing all guarantee it) and
 // dense enough that a BitSet id-set is ~1 bit/entry — the boxed HashSet<Int> equivalents these
@@ -306,9 +343,39 @@ data class CrossingThreadHint(val hostDefId: String, val hostTid: Int, val guest
 
 private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, TabComputeCache>()
 
+// A slot survives only while a cache entry or an in-flight computation needs it. Removing a slot
+// invalidates all computations that acquired it, without retaining tombstones for closed tabs.
+private class ComputeCacheSlot(var active: Int = 0)
+
+private val computeCacheLock = Any()
+private val computeCacheSlots = HashMap<String, ComputeCacheSlot>()
+
+private fun acquireComputeCacheSlot(key: String): ComputeCacheSlot = synchronized(computeCacheLock) {
+    computeCacheSlots.getOrPut(key) { ComputeCacheSlot() }.also { it.active++ }
+}
+
+private fun releaseComputeCacheSlot(key: String, slot: ComputeCacheSlot) = synchronized(computeCacheLock) {
+    slot.active--
+    if (slot.active == 0 && computeCacheSlots[key] === slot && !computeCacheByTab.containsKey(key)) {
+        computeCacheSlots.remove(key)
+    }
+}
+
+private fun publishComputeCache(key: String, slot: ComputeCacheSlot, value: TabComputeCache?, observed: TabComputeCache?) {
+    synchronized(computeCacheLock) {
+        if (computeCacheSlots[key] !== slot) return
+        if (value != null) computeCacheByTab[key] = value
+        else if (computeCacheByTab[key] === observed) computeCacheByTab.remove(key)
+    }
+}
+
 fun invalidateComputeCache(tabId: String) {
-    computeCacheByTab.remove("$tabId#true")
-    computeCacheByTab.remove("$tabId#false")
+    synchronized(computeCacheLock) {
+        for (key in listOf("$tabId#true", "$tabId#false")) {
+            computeCacheSlots.remove(key)
+            computeCacheByTab.remove(key)
+        }
+    }
 }
 
 // Read-only peek at the memoized sequence groups from this tab's last computeItems(tab,
@@ -363,7 +430,7 @@ fun cachedCrossingThreadHintsFor(tab: LogTab, applyFilter: Boolean): List<Crossi
 // list and splice. Any condition this can't prove — different toggle kind, multi-gid change,
 // header not currently visible, unexpected neighborhood — returns null and the caller does the
 // full rebuild, so the fallback is exactly the previous behavior.
-@Suppress("ReturnCount")
+@Suppress("ReturnCount", "CyclomaticComplexMethod")
 private fun spliceStackToggle(tab: LogTab, prior: TabComputeCache): List<LogItem>? {
     val priorItems = prior.items ?: return null
     if (prior.manualBlocks != tab.manualBlocks) return null
@@ -379,21 +446,25 @@ private fun spliceStackToggle(tab: LogTab, prior: TabComputeCache): List<LogItem
     val header = priorItems[idx] as LogItem.StackTraceHeader
     if (header.expanded == expanding) return null
 
-    val result = ArrayList<LogItem>(priorItems.size + if (expanding) group.memberIds.size else 0)
-    result.addAll(priorItems.subList(0, idx))
-    result.add(header.copy(expanded = expanding))
+    val capacity = priorItems.size + if (expanding) group.memberIds.size else 0
+    val compact = if (priorItems is GroupedRows) GroupedRows.Builder(capacity) else null
+    val result = ArrayList<LogItem>(if (compact == null) capacity else 0)
+
+    fun add(item: LogItem) { if (compact != null) compact.add(item) else result.add(item) }
+    for (i in 0 until idx) add(priorItems[i])
+    add(header.copy(expanded = expanding))
     if (expanding) {
         group.memberIds.forEach { id ->
-            tab.rmap[id]?.let { result.add(LogItem.Row(it, header.indent + 1, DANGER_RED)) }
+            tab.rmap[id]?.let { add(LogItem.Row(it, header.indent + 1, DANGER_RED)) }
         }
-        result.addAll(priorItems.subList(idx + 1, priorItems.size))
+        for (i in idx + 1 until priorItems.size) add(priorItems[i])
     } else {
         val end = idx + 1 + group.memberIds.size
         if (end > priorItems.size) return null
         for (k in idx + 1 until end) if (priorItems[k] !is LogItem.Row) return null
-        result.addAll(priorItems.subList(end, priorItems.size))
+        for (i in end until priorItems.size) add(priorItems[i])
     }
-    return result
+    return compact?.finish() ?: result
 }
 
 /** Test hook: number of computeItems calls that were answered by [appendComputeFast]. */
@@ -487,29 +558,35 @@ private fun appendComputeFast(
         if (reachesTail) return null
     }
 
-    val tailPassing: List<LogEntry> = if (applyFilter) {
-        val passing = ArrayList<LogEntry>()
-        var sinceCheck = 0
-        for (entry in tail) {
-            if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
-                sinceCheck = 0
-                cancellationCheck()
-            }
-            if (passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) passing += entry
+    val passingPositions = IntArray(tail.size)
+    var passingCount = 0
+    for (i in tail.indices) {
+        if ((i + 1) % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+        if (!applyFilter || passesFilter(tail[i], tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) {
+            passingPositions[passingCount++] = oldSize + i
         }
-        passing
-    } else {
-        tail
     }
-    val visible = if (applyFilter) appendLogEntries(cached.visible, tailPassing) else logData
-    // O(batch): the new rows are written straight into the shared backing store of the previous
-    // item list (see appendMapped), which is what also keeps Compose key equality between
-    // consecutive lists O(1). A plain-list base (a splice result) is converted once. Nothing passing
-    // the filter returns the previous list untouched.
-    val items: List<LogItem> = if (tailPassing.isEmpty()) {
-        cachedItems
-    } else {
-        appendMapped(cachedItems, tailPassing) { LogItem.Row(it, 0) }
+    val visible: List<LogEntry> = when {
+        !applyFilter -> logData
+        passingCount == 0 -> cached.visible
+        cached.visible === cached.logData && passingCount == tail.size -> logData
+        cached.visible is MatchingEntries -> cached.visible.append(logData, passingPositions, passingCount)
+        else -> {
+            // A previously all-visible prefix becomes sparse on this batch.
+            val prefixSize = cached.visible.size
+            val positions = IntArray(prefixSize + passingCount)
+            for (i in 0 until prefixSize) {
+                if ((i + 1) % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+                positions[i] = i
+            }
+            passingPositions.copyInto(positions, prefixSize, 0, passingCount)
+            MatchingEntries.create(logData, positions, positions.size)
+        }
+    }
+    val items: List<LogItem> = when {
+        passingCount == 0 -> cachedItems
+        cachedItems is FlatRows -> cachedItems.extend(visible)
+        else -> appendMapped(cachedItems, (0 until passingCount).map { logData[passingPositions[it]] }) { LogItem.Row(it, 0) }
     }
     return TabComputeCache(
         logData = logData,
@@ -808,14 +885,86 @@ internal fun computeItems(
     regexContext: RegexEvaluationContext,
     storeInCache: Boolean = true,
 ): List<LogItem> {
+    val cacheKey = "${tab.id}#$applyFilter"
+    val slot = acquireComputeCacheSlot(cacheKey)
+    try {
+        return computeItemsWithSlot(tab, applyFilter, cancellationCheck, regexContext, storeInCache, cacheKey, slot)
+    } finally {
+        releaseComputeCacheSlot(cacheKey, slot)
+    }
+}
+
+private fun sourceOrdinal(rows: List<LogEntry>, id: Int): Long {
+    var lo = 0
+    var hi = rows.size - 1
+    while (lo <= hi) {
+        val mid = lo + (hi - lo) / 2
+        val found = rows[mid].id
+        when {
+            found < id -> lo = mid + 1
+            found > id -> hi = mid - 1
+            else -> return mid.toLong()
+        }
+    }
+    throw StorageFailure.InvalidRequest("Displayed entry ID is absent from source: $id")
+}
+
+/**
+ * Experimental eager-preparation renderer; never publishes to the viewer or compute cache.
+ * The caller transfers a pin covering all rows in [tab]; it is closed even if dispatch is cancelled.
+ */
+internal suspend fun computeDisplayProjection(
+    tab: LogTab,
+    applyFilter: Boolean,
+    generation: ProjectionGeneration,
+    maxPageRows: Int,
+    rowLease: AutoCloseable,
+): DisplayProjection = rowLease.use {
+    withContext(Dispatchers.Default) {
+        val context = currentCoroutineContext()
+        var previousId: Int? = null
+        tab.logData.forEachIndexed { index, entry ->
+            if (index % CANCELLATION_CHECK_INTERVAL == 0) context.ensureActive()
+            val previous = previousId
+            if (entry.id < 0 || (previous != null && entry.id <= previous)) {
+                throw StorageFailure.InvalidRequest("Experimental projection requires unique, ascending, nonnegative IDs")
+            }
+            previousId = entry.id
+        }
+        val builder = DisplayProjection.Builder(generation, maxPageRows)
+        val cacheKey = "${tab.id}#$applyFilter"
+        val slot = acquireComputeCacheSlot(cacheKey)
+        try {
+            val regexContext = RegexEvaluationContext()
+            computeItemsWithSlot(tab, applyFilter, { context.ensureActive() }, regexContext, false, cacheKey, slot, builder)
+            context.ensureActive()
+            if (regexContext.hasTimedOut) throw StorageFailure.InvalidRequest("Projection filter timed out")
+            builder.finish()
+        } finally {
+            releaseComputeCacheSlot(cacheKey, slot)
+        }
+    }
+}
+
+@Suppress("CyclomaticComplexMethod", "LongMethod", "LoopWithTooManyJumpStatements", "LongParameterList")
+private fun computeItemsWithSlot(
+    tab: LogTab,
+    applyFilter: Boolean,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
+    storeInCache: Boolean,
+    cacheKey: String,
+    slot: ComputeCacheSlot,
+    projection: DisplayProjection.Builder? = null,
+): List<LogItem> {
     val sequences = tab.filter.sequences
     // Deliberately NOT keyed on tab.expanded — see spliceStackToggle just above, whose entire
     // point is finding THIS SAME cache entry across an expanded-set change so a single group
     // toggle can splice member rows in/out instead of re-running the whole computation. That
     // sharing is also exactly why storeInCache exists: a probing caller must not overwrite this
     // entry with a result built from a hypothetical expanded set (see the doc above).
-    val cacheKey = "${tab.id}#$applyFilter"
-    val prior = computeCacheByTab[cacheKey]?.takeIf {
+    val observed = if (projection == null) computeCacheByTab[cacheKey] else null
+    val prior = observed?.takeIf {
         it.logData === tab.logData &&
             it.stackGroupsRef === tab.analysis.stackTraceGroups &&
             it.filter == tab.filter
@@ -824,18 +973,18 @@ internal fun computeItems(
     // `prior` lookup above. When only rows were appended (and nothing else changed in a way that can
     // alter old rows' output) extend the previous result in O(batch) instead of re-filtering and
     // re-rendering the whole log. Must run BEFORE `data` below, which would start a full filter pass.
-    if (prior == null) {
-        computeCacheByTab[cacheKey]?.let { cached ->
+    if (prior == null && projection == null) {
+        observed?.let { cached ->
             appendComputeFast(tab, applyFilter, cached, cancellationCheck, regexContext)
         }?.let { extended ->
             if (storeInCache) {
-                if (regexContext.hasTimedOut) computeCacheByTab.remove(cacheKey) else computeCacheByTab[cacheKey] = extended
+                publishComputeCache(cacheKey, slot, extended.takeUnless { regexContext.hasTimedOut }, observed)
             }
             appendFastPathHits.incrementAndGet()
             return extended.items.orEmpty()
         }
     }
-    val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext)
+    val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext, cancellationCheck)
     var fullSeqGroups: List<SeqGroup>? = prior?.seqGroups
     var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
     var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
@@ -850,10 +999,10 @@ internal fun computeItems(
     fun storeCache(items: List<LogItem>) {
         if (!storeInCache) return
         if (regexContext.hasTimedOut) {
-            computeCacheByTab.remove(cacheKey)
+            publishComputeCache(cacheKey, slot, null, observed)
             return
         }
-        computeCacheByTab[cacheKey] = TabComputeCache(
+        val entry = TabComputeCache(
             logData = tab.logData,
             stackGroupsRef = tab.analysis.stackTraceGroups,
             filter = tab.filter,
@@ -870,6 +1019,7 @@ internal fun computeItems(
             tagPids = tab.analysis.tagPids,
             analysisPending = tab.analysis.pending,
         )
+        publishComputeCache(cacheKey, slot, entry, observed)
     }
 
     if (prior != null) {
@@ -921,7 +1071,14 @@ internal fun computeItems(
 
     val manualBlocksEnabled = tab.manualBlocks.filter { it.enabled }
     if (seqGroups.isEmpty() && allStackGroups.isEmpty() && manualBlocksEnabled.isEmpty()) {
-        return appendMapped<LogItem, LogEntry>(emptyList(), data) { LogItem.Row(it, 0) }.also { storeCache(it) }
+        if (projection == null) return FlatRows(data).also { storeCache(it) }
+        val flatStyle = RowStyle()
+        for (i in data.indices) {
+            if (i % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+            val entry = data[i]
+            projection.appendRowUnchecked(sourceOrdinal(tab.logData, entry.id), EntryId(entry.id), flatStyle)
+        }
+        return emptyList()
     }
 
     val defMap = sequences.associateBy { it.id }
@@ -1172,6 +1329,54 @@ internal fun computeItems(
     // recursing) keeps the single index-walk loop below as the one place that decides where each
     // row lands, so it stays trivially compatible with the crossing-chain/manual-hosting resolution
     // already layered on top of it.
+    val compact = if (projection == null && tab.sourcePath != null && !tab.tailing) GroupedRows.Builder(data.size) else null
+    val rendered = ArrayList<LogItem>(if (projection == null && compact == null) data.size else 0)
+    val suppressedAnchors = ArrayList<Int>()
+    var lastStyle = RowStyle()
+
+    fun row(entry: LogEntry, indent: Int, color: Color?, scopedColor: Color? = null) {
+        if (suppressedAnchors.contains(entry.id)) return
+        if (projection == null) {
+            if (compact != null) compact.row(entry, indent, color, scopedColor)
+            else rendered.add(LogItem.Row(entry, indent, color, scopedColor))
+        } else {
+            if (lastStyle.indent != indent || lastStyle.groupColor != color || lastStyle.scopedSeqColor != scopedColor) {
+                lastStyle = RowStyle(indent, color, scopedColor)
+            }
+            projection.appendRowUnchecked(sourceOrdinal(tab.logData, entry.id), EntryId(entry.id), lastStyle)
+        }
+    }
+
+    fun header(item: LogItem, declaredEnd: Int, hostedEnd: Int, members: () -> List<Int>) {
+        if (projection == null) {
+            if (compact != null) compact.header(item) else rendered.add(item)
+            return
+        }
+        val entry = item.entry
+        val ordinal = sourceOrdinal(tab.logData, entry.id)
+        val memberIds = members()
+        val memberOrdinals = LongArray(memberIds.size) {
+            if (it % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+            sourceOrdinal(tab.logData, memberIds[it])
+        }
+        val descriptor = when (item) {
+            is LogItem.SeqHeader -> HeaderDescriptor(
+                item.gid, "sequence", ordinal, declaredEnd.toLong(), hostedEnd.toLong(), item.indent,
+                item.expanded, memberOrdinals, EntryId(entry.id), item.count, item.color, item.scopeTid,
+            )
+            is LogItem.ManualHeader -> HeaderDescriptor(
+                item.gid, "manual", ordinal, declaredEnd.toLong(), hostedEnd.toLong(), 0,
+                item.expanded, memberOrdinals, EntryId(entry.id), item.count, item.color, direction = item.direction,
+            )
+            is LogItem.StackTraceHeader -> HeaderDescriptor(
+                item.gid, "stack", ordinal, declaredEnd.toLong(), hostedEnd.toLong(), item.indent,
+                item.expanded, memberOrdinals, EntryId(entry.id), item.count,
+            )
+            is LogItem.Row -> error("Expected header")
+        }
+        projection.appendHeaderUnchecked(descriptor)
+    }
+
     fun renderRange(
         lo: Int,
         hi: Int,
@@ -1181,8 +1386,7 @@ internal fun computeItems(
         scopeTid: Int? = null,
         foreignIndent: Int = indent,
         foreignColor: Color? = ambientColor,
-    ): List<LogItem> {
-        val items = ArrayList<LogItem>(hi - lo)
+    ) {
         var childPtr = 0
         var idx = lo
         var sinceCancellationCheck = 0
@@ -1204,7 +1408,10 @@ internal fun computeItems(
                     val exp = sg.gid in tab.expanded
                     val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
                     val color = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
-                    items += LogItem.SeqHeader(entry, sg.gid, indent, exp, totalCh, color, defMap[sg.defId]?.scopeTid)
+                    header(
+                        LogItem.SeqHeader(entry, sg.gid, indent, exp, totalCh, color, defMap[sg.defId]?.scopeTid),
+                        sg.endExclusive, seqEffectiveEnd(sg),
+                    ) { sg.plain + sg.nested.flatMap { listOf(it.rid) + it.ch } }
                     if (exp) {
                         val kids = (
                             sg.nested.map { ng -> ChildRef.NestedC(ng, rootIdxOf(ng.rid)) } +
@@ -1228,7 +1435,7 @@ internal fun computeItems(
                         // EXPANDED sg still jumps `idx` straight past hi on its own (see just
                         // below), so widening hi here is a no-op for that case and only matters for
                         // the collapsed one.
-                        items += renderRange(
+                        renderRange(
                             idx + 1, seqEffectiveEnd(sg), indent + 1, color, kids,
                             scopeTid = defMap[sg.defId]?.scopeTid, foreignIndent = indent, foreignColor = ambientColor,
                         )
@@ -1242,12 +1449,15 @@ internal fun computeItems(
                     val ng = child.ng
                     val exp = ng.gid in tab.expanded
                     val color = defMap[ng.defId]?.color ?: ambientColor ?: SEQ_COLORS.first()
-                    items += LogItem.SeqHeader(entry, ng.gid, indent, exp, ng.ch.size, color, defMap[ng.defId]?.scopeTid)
+                    header(
+                        LogItem.SeqHeader(entry, ng.gid, indent, exp, ng.ch.size, color, defMap[ng.defId]?.scopeTid),
+                        ng.endExclusive, ng.endExclusive,
+                    ) { ng.ch }
                     if (exp) {
                         val kids = nestedHostsManual[ng.gid].orEmpty()
                             .map { m -> ChildRef.ManualC(m, m.range.last + 1, m.range.last + 1) }
                             .sortedBy { it.start }
-                        items += renderRange(
+                        renderRange(
                             idx + 1, ng.endExclusive, indent + 1, color, kids,
                             scopeTid = defMap[ng.defId]?.scopeTid, foreignIndent = indent, foreignColor = ambientColor,
                         )
@@ -1264,7 +1474,10 @@ internal fun computeItems(
                     // The anchor entry (what the header displays) isn't necessarily at
                     // range.first — TO_END and some RANGE blocks anchor at the other end.
                     val headerEntry = indexOfId(block.anchorId)?.let { data[it] } ?: entry
-                    items += LogItem.ManualHeader(headerEntry, block.id, block.direction, exp, mr.range.count(), block.color)
+                    header(
+                        LogItem.ManualHeader(headerEntry, block.id, block.direction, exp, mr.range.count(), block.color),
+                        child.declaredEnd, child.end,
+                    ) { emptyList() }
                     if (exp) {
                         val kids = manualHostsSeq[block.id].orEmpty()
                             .map { sg -> ChildRef.SeqC(sg, rootIdxOf(sg.rid)) }
@@ -1273,8 +1486,12 @@ internal fun computeItems(
                         // either end of it — TO_START/TO_END/RANGE all place it differently) and
                         // filter the anchor's own row out afterward, matching the header, which
                         // already displays that entry.
-                        val inner = renderRange(mr.range.first, mr.range.last + 1, indent + 1, block.color, kids)
-                        items += inner.filterNot { it is LogItem.Row && it.entry.id == block.anchorId }
+                        suppressedAnchors.add(block.anchorId)
+                        try {
+                            renderRange(mr.range.first, mr.range.last + 1, indent + 1, block.color, kids)
+                        } finally {
+                            suppressedAnchors.removeAt(suppressedAnchors.lastIndex)
+                        }
                         // Jump past the FULL effective extent, including a hosted crossing
                         // sequence's tail beyond this block's own declared end — the soft-bound
                         // recursion just above already rendered every row in it (renderRange's own
@@ -1297,13 +1514,13 @@ internal fun computeItems(
                 stackGroupByRid[entry.id] != null -> {
                     val stg = stackGroupByRid.getValue(entry.id)
                     val exp = stg.gid in tab.expanded
-                    items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    header(LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size), -1, -1) { stg.memberIds }
                     // Mark members as owned by an emitted header regardless of `exp` — a collapsed
                     // header's count already accounts for them, and expanding it later must be able
                     // to reveal them via this same bitset.
                     stg.memberIds.forEach(membersUnderEmittedStackHeader::set)
                     if (exp) {
-                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { row(it, indent + 1, DANGER_RED) } }
                     }
                     idx += 1
                 }
@@ -1311,12 +1528,12 @@ internal fun computeItems(
                 nestedStackGroupByRid[entry.id] != null -> {
                     val stg = nestedStackGroupByRid.getValue(entry.id)
                     val exp = stg.gid in tab.expanded
-                    items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    header(LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size), -1, -1) { stg.memberIds }
                     // See the sibling stackGroupByRid branch above: mark unconditionally, not only
                     // when exp.
                     stg.memberIds.forEach(membersUnderEmittedStackHeader::set)
                     if (exp) {
-                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { row(it, indent + 1, DANGER_RED) } }
                     }
                     idx += 1
                 }
@@ -1337,7 +1554,7 @@ internal fun computeItems(
                         is ChildRef.ManualC -> null // manual blocks are never thread-scoped
                     }
                     if (cScopeTid != null && entry.tid != cScopeTid) {
-                        items += LogItem.Row(entry, indent, ambientColor)
+                        row(entry, indent, ambientColor)
                     }
                     idx += 1
                 }
@@ -1357,7 +1574,7 @@ internal fun computeItems(
                     // on renderRange's parameters) route a foreign-tid entry to the ENCLOSING level
                     // instead of nesting/tinting it as part of the run it doesn't belong to.
                     if (scopeTid != null && entry.tid != scopeTid) {
-                        items += LogItem.Row(entry, foreignIndent, foreignColor)
+                        row(entry, foreignIndent, foreignColor)
                     } else {
                         // scopeTid != null here means entry.tid == scopeTid (the branch above
                         // already peeled off the mismatch case) — a genuine member of the
@@ -1367,13 +1584,12 @@ internal fun computeItems(
                         // without confusing it for an ordinary/unscoped sequence's member (see
                         // LogItem.Row.scopedSeqColor's own doc).
                         val scopedColor = if (scopeTid != null) ambientColor else null
-                        items += LogItem.Row(entry, indent, ambientColor, scopedColor)
+                        row(entry, indent, ambientColor, scopedColor)
                     }
                     idx += 1
                 }
             }
         }
-        return items
     }
 
     val topChildren = (
@@ -1381,10 +1597,9 @@ internal fun computeItems(
             topLevelManual.map { m -> ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m)) }
     ).sortedBy { it.start }
 
-    // Wrapped in an append-only list (one O(n) copy next to the O(n) render above) so the first
-    // append fast path batch after this full compute extends it in place instead of copying it.
-    val rendered = renderRange(0, data.size, indent = 0, ambientColor = null, children = topChildren)
-    val result: List<LogItem> = appendMapped<LogItem, LogItem>(emptyList(), rendered) { it }
+    renderRange(0, data.size, indent = 0, ambientColor = null, children = topChildren)
+    if (projection != null) return emptyList()
+    val result: List<LogItem> = compact?.finish() ?: appendMapped<LogItem, LogItem>(emptyList(), rendered) { it }
     storeCache(result)
     return result
 }

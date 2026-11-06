@@ -66,7 +66,7 @@ fun computeProcessNames(logData: List<LogEntry>): Map<Int, String> {
 // than one per failed parse step (detekt LoopWithTooManyJumpStatements). Tag equality is checked
 // first here, exactly as before — the `when` is what keeps every non-proc-start line away from a
 // regex, and the vast majority of a real log never gets past it.
-private fun LogEntry.procStartPidAndName(): Pair<Int, String>? = when (tag) {
+internal fun LogEntry.procStartPidAndName(): Pair<Int, String>? = when (tag) {
     PROC_START_TAG ->
         // startsWith gate before the regex: "Start proc " is a cheap prefix check, and
         // ActivityManager logs plenty of other things.

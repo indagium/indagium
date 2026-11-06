@@ -238,7 +238,7 @@ fun <S : Any, T : Any> appendMapped(base: List<S>, src: List<T>, map: (T) -> S):
 
 /** See [AppendOnlyList.isSameStoreExtensionOf]; false unless the receiver is an [AppendOnlyList]. */
 internal fun List<*>.isAppendOnlyExtensionOf(older: List<*>): Boolean =
-    this is AppendOnlyList<*> && isSameStoreExtensionOf(older)
+    (this is AppendOnlyList<*> && isSameStoreExtensionOf(older)) || (this is FlatRows && isExtensionOf(older))
 
 /**
  * Thrown when an element of an [AppendOnlyList] whose store was [released][AppendOnlyList.release]

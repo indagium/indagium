@@ -69,6 +69,16 @@ import javax.imageio.ImageIO
 import javax.imageio.ImageWriteParam
 import kotlin.math.roundToInt
 
+// Bound traversal before mapping: flat projections create row wrappers on access, so drop(offset)
+// would otherwise materialize every remaining row even when the requested page is tiny.
+internal fun <T> visiblePage(items: List<T>, offset: Int, limit: Int): List<T> {
+    require(offset >= 0) { "Requested element count $offset is less than zero." }
+    require(limit >= 0) { "Requested element count $limit is less than zero." }
+    val start = offset.coerceAtMost(items.size)
+    val end = start + limit.coerceAtMost(items.size - start)
+    return items.subList(start, end)
+}
+
 // Hex-color parsing constants for set_highlighters (parseHexColor / colorToHex).
 private const val OPAQUE_ALPHA_MASK = 0xFF000000L
 private const val COLOR_CHANNEL_MAX = 255
@@ -1730,7 +1740,7 @@ internal class IndagiumToolOperations(
         return mapOf(
             "tabId" to tabId,
             "totalCount" to items.size,
-            "items" to items.drop(offset).take(limit).map {
+            "items" to visiblePage(items, offset, limit).map {
                 projectItem(logItemToMap(it, tab.logFormat == LogFormat.DLT), fields, compact)
             },
         )

@@ -14,6 +14,7 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.spliceSummarize
 import com.indagium.ui.summarizeItems
 import com.indagium.utils.EntryIdMap
+import com.indagium.utils.GroupedRows
 import com.indagium.utils.computeItems
 import com.indagium.utils.invalidateComputeCache
 import kotlin.test.Test
@@ -44,6 +45,20 @@ class ComputeItemsSpliceTest {
         val fresh = computeItems(tab.copy(expanded = toggledExpanded), applyFilter = true)
         assertEquals(fresh, spliced)
         assertTrue(fresh.isNotEmpty())
+    }
+
+    @Test
+    fun fileBackedGroupedRowsMatchLegacyBeforeAndAfterToggle() {
+        val legacy = mkTab("grouped-legacy", "a.log", crashEntries())
+        val fileTab = legacy.copy(id = "grouped-file", sourcePath = "/generated/a.log")
+        val gid = legacy.analysis.stackTraceGroups.first().gid
+        invalidateComputeCache(legacy.id)
+        invalidateComputeCache(fileTab.id)
+        assertEquals(computeItems(legacy, true), computeItems(fileTab, true))
+        val compact = computeItems(fileTab.copy(expanded = setOf(gid)), true)
+        assertTrue(compact is GroupedRows)
+        assertEquals(computeItems(legacy.copy(expanded = setOf(gid)), true), compact)
+        assertEquals(computeItems(legacy, true), computeItems(fileTab, true))
     }
 
     @Test

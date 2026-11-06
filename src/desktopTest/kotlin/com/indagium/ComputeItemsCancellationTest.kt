@@ -1,6 +1,8 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.SequenceDef
@@ -67,5 +69,22 @@ class ComputeItemsCancellationTest {
         }
 
         assertEquals(2, calls, "renderRange must stop at the second checkpoint, not keep rendering past it")
+    }
+
+    @Test
+    fun buildingSparsePositionPrefixChecksCancellation() {
+        val n = CANCELLATION_CHECK_INTERVAL * 4
+        val rows = (1..n).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "T", if (id == n) "drop" else "keep")
+        }
+        val tab = mkTab("cancel-position-prefix", "synthetic.log", rows)
+            .copy(filter = Filter(mode = FilterMode.KEYWORD, kwText = "keep"))
+        var checks = 0
+        assertFailsWith<CancellationException> {
+            computeItems(tab, true, cancellationCheck = {
+                if (++checks == 5) throw CancellationException("cancel while copying prefix")
+            })
+        }
+        assertEquals(5, checks)
     }
 }

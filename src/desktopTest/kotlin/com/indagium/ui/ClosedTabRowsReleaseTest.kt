@@ -2,24 +2,26 @@
 
 package com.indagium.ui
 
+import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.LogTab
 import com.indagium.utils.AppendOnlyLogList
 import com.indagium.utils.appendLogEntries
+import com.indagium.utils.listArchiveLogCandidates
+import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
-/**
- * Closing a tab whose rows live in an [AppendOnlyLogList] (a tailed or captured tab) explicitly
- * releases that store after a grace delay, then requests the heap trim, so a stale Compose snapshot
- * record of the old `tabs` list cannot keep the whole capture alive (see
- * [AppState.releaseClosedTabRowsLater]).
- */
+/** Closing a tab releases its row store after a grace period, including stale Compose snapshots. */
 class ClosedTabRowsReleaseTest {
     private fun entries(range: IntRange) = range.map { LogEntry(it, "10:00:00.000", LogLevel.I, "Tag", "msg $it") }
 
@@ -29,6 +31,12 @@ class ClosedTabRowsReleaseTest {
         val app = AppState(autosaveFile = Files.createTempFile("closed-rows-release-autosave", "").toFile(), autoExportNotes = false)
         app.closedTabRowsReleaseDelayMs = 150
         return app
+    }
+
+    private fun waitUntil(message: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(condition(), message)
     }
 
     // captureSessionId marks the tab as a capture so closing it asks for a trim whatever its size.
@@ -84,7 +92,8 @@ class ClosedTabRowsReleaseTest {
         val rows = entries(1..5)
         val trimReasons = mutableListOf<String>()
         app.heapTrimRequester = { reason -> trimReasons += reason }
-        app.tabs = listOf(captureTab("t1", rows), mkTab("t2", "t2.log", entries(1..3)))
+        val plainTab = captureTab("t1", rows).copy(logData = rows, rmap = mkRmap(rows))
+        app.tabs = listOf(plainTab, mkTab("t2", "t2.log", entries(1..3)))
 
         app.closeTab("t1")
 
@@ -107,5 +116,109 @@ class ClosedTabRowsReleaseTest {
         while (!rows.isReleased && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(rows.isReleased)
         assertTrue(synchronized(trimReasons) { trimReasons.isEmpty() }, "close semantics for small tabs stay trim-free")
+    }
+
+    @Test
+    fun ordinaryAndZipTabsReleaseStaleRowsAndIndexesAfterClose() {
+        val dir = Files.createTempDirectory("closed-source-rows").toFile()
+        val contents = "10:00:00.000 I/Tag: synthetic row one\n10:00:00.100 I/Tag: synthetic row two\n"
+        val file = File(dir, "sample.log").also { it.writeText(contents) }
+        val zip = File(dir, "sample.zip").also { archive ->
+            ZipOutputStream(archive.outputStream()).use { output ->
+                output.putNextEntry(ZipEntry("logs/sample.log"))
+                output.write(contents.toByteArray())
+                output.closeEntry()
+            }
+        }
+        val app = newState()
+        try {
+            val candidate = listArchiveLogCandidates(zip).single()
+            val opens = listOf<() -> String?>(
+                { app.openFile(file) },
+                { app.openZipEntryAsIs(zip, candidate) },
+                { app.openZipEntryAsIs(zip, candidate) },
+                { app.openZipEntryAsIs(zip, candidate) },
+            )
+            val closedSnapshots = mutableListOf<LogTab>()
+            for (open in opens) {
+                val id = assertNotNull(open())
+                waitUntil("synthetic file should load") { app.tab(id)?.logData?.size == 2 }
+                val stale = assertNotNull(app.tab(id))
+                assertEquals(2, stale.rmap.size)
+                app.closeTab(id)
+                assertEquals(2, stale.logData.size, "the grace period protects outgoing readers")
+                closedSnapshots += stale
+                waitUntil("closed source rows and index should be released") {
+                    closedSnapshots.all { it.logData.isEmpty() && it.rmap.isEmpty() }
+                }
+            }
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun duplicateTabKeepsSharedRowsAndIndexUntilLastOwnerCloses() {
+        val app = newState()
+        try {
+            val original = captureTab("original", entries(1..10))
+            val duplicate = mkTab("duplicate", "duplicate.log", original.logData)
+            val delayCompleted = CountDownLatch(1)
+            app.heapTrimRequester = { delayCompleted.countDown() }
+            app.tabs = listOf(original, duplicate)
+            app.closeTab(original.id)
+            assertTrue(delayCompleted.await(10, TimeUnit.SECONDS))
+            assertEquals(10, duplicate.logData.size)
+            assertEquals(10, duplicate.rmap.size)
+            assertEquals(1, duplicate.rmap[1]?.id)
+            app.closeTab(duplicate.id)
+            waitUntil("last owner releases shared rows and both index facades") {
+                original.logData.isEmpty() && original.rmap.isEmpty() &&
+                    duplicate.logData.isEmpty() && duplicate.rmap.isEmpty()
+            }
+        } finally {
+            app.close()
+        }
+    }
+
+    @Test
+    fun closingOrdinaryTabDefersReleaseUntilTheLastReaderUnpins() {
+        val app = newState()
+        try {
+            val tab = captureTab("pinned-ordinary", entries(1..10))
+            app.tabs = listOf(tab)
+            val first = app.pinRows(tab)
+            val second = app.pinRows(tab)
+            app.closeTab(tab.id)
+            Thread.sleep(600)
+            assertEquals(10, tab.logData.size)
+            first.close()
+            assertEquals(10, tab.rmap.size)
+            second.close()
+            waitUntil("last reader releases ordinary rows") { tab.logData.isEmpty() && tab.rmap.isEmpty() }
+        } finally {
+            app.close()
+        }
+    }
+
+    @Test
+    fun largeOrdinaryTabRequestsTrimOnlyAfterItsRowsAreReleased() {
+        val app = newState()
+        try {
+            val tab = mkTab("large", "synthetic.log", entries(1..50_000), analysis = LogAnalysis())
+            val trimmed = CountDownLatch(1)
+            val events = mutableListOf<Pair<String, Boolean>>()
+            app.heapTrimRequester = { reason ->
+                synchronized(events) { events += reason to tab.logData.isEmpty() }
+                trimmed.countDown()
+            }
+            app.tabs = listOf(tab)
+            app.closeTab(tab.id)
+            assertTrue(trimmed.await(10, TimeUnit.SECONDS))
+            assertEquals(listOf("released closed capture rows" to true), synchronized(events) { events.toList() })
+        } finally {
+            app.close()
+        }
     }
 }

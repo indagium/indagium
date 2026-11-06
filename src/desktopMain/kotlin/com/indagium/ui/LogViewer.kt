@@ -56,6 +56,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.debug.AppLogger
 import com.indagium.model.*
+import com.indagium.storage.ProjectionViewportController
+import com.indagium.storage.ProjectionViewportState
+import com.indagium.storage.SelectionBase
+import com.indagium.storage.SelectionOverride
+import com.indagium.storage.StackFileSession
+import com.indagium.storage.StorageNavigationTarget
+import com.indagium.storage.StorageSelection
+import com.indagium.storage.projection.DecodedDisplayEvent
+import com.indagium.utils.FlatRows
 import com.indagium.utils.HlSpan
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.asLogEntryView
@@ -80,6 +89,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +103,137 @@ private const val CTX_MENU_KEYBOARD_X_DP = 60f
 private const val LOADING_GRACE_MS = 250L
 private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 private const val DOUBLE_CLICK_WINDOW_MS = 500L
+
+/** Experimental page-backed rendering using the same row components as the regular viewer. */
+@Composable
+internal fun StorageLogRows(
+    controller: ProjectionViewportController,
+    tab: LogTab,
+    pageRows: Int,
+    modifier: Modifier = Modifier,
+    onSelect: (Long, Int, Boolean, Boolean, Boolean) -> Unit = { _, _, _, _, _ -> },
+    onToggleGroup: (String) -> Unit = {},
+    selection: StorageSelection? = null,
+    onSelectAll: (() -> Unit)? = null,
+    onClearSelection: (() -> Unit)? = null,
+    onCopySelection: (() -> Unit)? = null,
+    onCopyText: (String) -> Unit = {},
+    session: StackFileSession? = null,
+    navigation: SearchNavigationRequest? = null,
+    onConsumeNavigation: (Long) -> Unit = {},
+    onOpenSearch: () -> Unit = {},
+) {
+    require(pageRows in 2..controller.maxPageRows && controller.size <= Int.MAX_VALUE)
+    val viewport by controller.state.collectAsState()
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val bounds = remember { HashMap<Int, Pair<Float, Float>>() }
+    val search = tab.searchFor(SearchScope.FILTERED)
+    val regexContext = remember(tab.filter, search.query, search.caseSensitive) { RegexEvaluationContext() }
+    var selectedText by remember(tab.id) { mutableStateOf("") }
+    val theme = tc()
+    val font = monoFont()
+    LaunchedEffect(controller, listState, pageRows) {
+        snapshotFlow { listState.firstVisibleItemIndex / (pageRows / 2) }
+            .distinctUntilChanged()
+            .collect { block -> controller.request(block.toLong() * (pageRows / 2), pageRows) }
+    }
+    LaunchedEffect(controller, session, navigation?.id) {
+        val request = navigation ?: return@LaunchedEffect
+        val currentSession = session ?: return@LaunchedEffect
+        if (request.tabId != tab.id || request.scope != SearchScope.FILTERED || request.inputRevision != search.inputRevision) {
+            return@LaunchedEffect
+        }
+        when (val target = currentSession.navigationTarget(com.indagium.storage.EntryId(request.entryId))) {
+            is StorageNavigationTarget.Visible -> {
+                listState.scrollToItem(target.position.toInt())
+                onConsumeNavigation(request.id)
+            }
+            is StorageNavigationTarget.Expand -> onToggleGroup(target.groupId)
+            StorageNavigationTarget.Missing -> onConsumeNavigation(request.id)
+        }
+    }
+    val error = (viewport as? ProjectionViewportState.Failed)?.error
+    if (error != null) {
+        AppText("Could not read log: ${error.message.orEmpty()}", color = theme.tx)
+        return
+    }
+    val page = (viewport as? ProjectionViewportState.Ready)?.page
+    val copyModifier = Modifier.onPreviewKeyEvent { event ->
+        val actionPressed = if (isMacOs) event.isMetaPressed else event.isCtrlPressed
+        when {
+            event.type == KeyEventType.KeyDown && actionPressed && event.key == Key.C -> {
+                if (selectedText.isNotBlank()) onCopyText(selectedText) else onCopySelection?.invoke()
+                selectedText.isNotBlank() || onCopySelection != null
+            }
+            event.type == KeyEventType.KeyDown && actionPressed && event.key == Key.A && onSelectAll != null -> {
+                onSelectAll(); true
+            }
+            event.type == KeyEventType.KeyDown && actionPressed && event.key == Key.F -> {
+                onOpenSearch(); true
+            }
+            event.type == KeyEventType.KeyDown && event.key == Key.Escape && onClearSelection != null -> {
+                onClearSelection(); true
+            }
+            else -> false
+        }
+    }.focusable()
+    LazyColumn(state = listState, modifier = modifier.then(copyModifier).testTag("storage-log-rows")) {
+        items(controller.size.toInt()) { index ->
+            val offset = index.toLong() - (page?.start ?: -1)
+            val event = if (page != null && offset >= 0 && offset < page.items.size) page.items[offset.toInt()] else null
+            Box(Modifier.fillMaxWidth().testTag("storage-row-$index")) {
+                when (event) {
+                    is DecodedDisplayEvent.Row -> {
+                        val style = event.event.style
+                        val selected = storageSelectionContains(selection, index.toLong(), event.row.entry.id, false)
+                        val matchIndex = if (search.active) search.matchIds.indexOfId(event.row.entry.id) else -1
+                        LogRow(
+                            item = LogItem.Row(event.row.entry, style.indent, style.groupColor, style.scopedSeqColor),
+                            tab = tab, panelKey = tab.id, mono = font, tc = theme,
+                            wrapLimitChars = MIN_WRAP_LIMIT_CHARS,
+                            onSelRow = { id, multi, range -> onSelect(index.toLong(), id, multi, range, false) },
+                            onCtxMenu = { _, _, _, _ -> }, onSelectedTextChange = { selectedText = it },
+                            rowBoundsAbs = bounds, regexContext = regexContext, selectedOverride = selected,
+                            searchHighlight = if (matchIndex >= 0) SearchHighlight(
+                                search.query, search.caseSensitive, matchIndex == search.currentIdx,
+                                theme.searchMatchBg, theme.searchCurrentBg,
+                            ) else null,
+                        )
+                    }
+                    is DecodedDisplayEvent.Header -> {
+                        val header = event.descriptor
+                        check(header.kind == "stack")
+                        val selected = storageSelectionContains(selection, index.toLong(), event.anchor.entry.id, true)
+                        val matchIndex = if (search.active) search.matchIds.indexOfId(event.anchor.entry.id) else -1
+                        StackTraceHeaderRow(
+                            item = LogItem.StackTraceHeader(event.anchor.entry, header.groupId, header.depth, header.expanded, header.count),
+                            tab = tab, mono = font, tc = theme,
+                            onSelRow = { id, multi, range -> onSelect(index.toLong(), id, multi, range, true) },
+                            onCtxMenu = { _, _, _, _ -> }, onToggleGroup = onToggleGroup, rowBoundsAbs = bounds,
+                            selectedOverride = selected, isSearchMatch = matchIndex >= 0,
+                            isCurrentSearchMatch = matchIndex >= 0 && matchIndex == search.currentIdx,
+                        )
+                    }
+                    null -> Spacer(Modifier.fillMaxWidth().height(22.dp))
+                }
+            }
+        }
+    }
+}
+
+private fun storageSelectionContains(selection: StorageSelection?, position: Long, id: Int, header: Boolean): Boolean? {
+    if (selection == null) return null
+    return when (selection.overrideFor(com.indagium.storage.EntryId(id))) {
+        SelectionOverride.INCLUDED -> true
+        SelectionOverride.EXCLUDED -> false
+        SelectionOverride.NONE -> when (selection.base) {
+            SelectionBase.AllDisplayedRows -> !header
+            SelectionBase.AllDisplayedItems -> true
+            is SelectionBase.DisplayRange -> position in selection.base.firstPosition..selection.base.lastPosition
+            else -> false
+        }
+    }
+}
 
 // Upper bound for awaitExpandedAt below — the recompute it waits on has no fixed budget of its own
 // (LOADING_GRACE_MS only governs when the LOADING line starts showing, not how long the compute is
@@ -178,6 +319,16 @@ internal fun IntArray.indexOfId(id: Int): Int {
 }
 
 internal fun summarizeItems(items: List<LogItem>): ItemsSummary {
+    if (items is FlatRows) {
+        val ids = IntArray(items.size)
+        val bits = java.util.BitSet()
+        for (i in ids.indices) {
+            val id = items.entries[i].id
+            ids[i] = id
+            bits.set(id)
+        }
+        return ItemsSummary(ids, ids.copyOf(), bits, 0, 0)
+    }
     val allIds = IntArray(items.size)
     val idBits = java.util.BitSet()
     var rows = 0
@@ -219,6 +370,19 @@ internal fun spliceSummarize(
     if (newItems === oldItems && oldSummary.allIds.size == oldItems.size) return oldSummary
     val oldN = oldItems.size
     val newN = newItems.size
+    val validFlatSummary = oldSummary.allIds.size == oldN && oldSummary.rowIds.size == oldN
+    if (oldItems is FlatRows && newItems is FlatRows && newItems.isExtensionOf(oldItems) && validFlatSummary) {
+        val allIds = oldSummary.allIds.copyOf(newN)
+        val rowIds = oldSummary.rowIds.copyOf(newN)
+        val bits = oldSummary.idBits.clone() as java.util.BitSet
+        for (i in oldN until newN) {
+            val id = newItems.entries[i].id
+            allIds[i] = id
+            rowIds[i] = id
+            bits.set(id)
+        }
+        return ItemsSummary(allIds, rowIds, bits, 0, 0)
+    }
     if (oldN == 0 || newN == 0 || oldSummary.allIds.size != oldN) return null
     var head = 0
     var headRows = 0
@@ -314,7 +478,11 @@ private val EMPTY_SUMMARY = summarizeItems(emptyList())
 // this file can `snapshotFlow { computedItems.expandedAt }` and wait on the REAL recompute landing
 // instead of guessing a fixed delay — see centerOnItem's callers and CHANGE 4/1.3(b)'s doc.
 @Composable
-private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): State<ComputedLogItems> {
+private fun rememberComputedLogItems(
+    tab: LogTab,
+    applyFilter: Boolean,
+    pinViewerRows: ((LogTab) -> RowsPin)?,
+): State<ComputedLogItems> {
     val dataSize = tab.logData.size
     val lastId = tab.logData.lastOrNull()?.id
     val filter = tab.filter
@@ -336,6 +504,13 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): State<C
     // behavior this now applies to every tab, unchanged in shape.
     val computedState = remember(tab.id, applyFilter) {
         mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true, expandedAt = null))
+    }
+    // The previous computed view remains on screen while a new snapshot is computed. Its source
+    // may be an older store than tab.logData, including after an entirely filtered-out append.
+    val sourceRows = (computedState.value.items as? FlatRows)?.sourceRows
+    DisposableEffect(ViewerRowIdentity(sourceRows), pinViewerRows) {
+        val pin = sourceRows?.let { pinViewerRows?.invoke(tab.copy(logData = it)) }
+        onDispose { pin?.close() }
     }
     LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
@@ -1272,6 +1447,7 @@ internal fun FilterBarToolbarButton(
 internal fun LogViewer(
     tab: LogTab,
     modifier: Modifier = Modifier,
+    pinViewerRows: ((LogTab) -> RowsPin)? = null,
     settings: AppSettings = AppSettings(),
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onSelRowRange: (List<Int>) -> Unit = { _ -> },
@@ -1372,8 +1548,48 @@ internal fun LogViewer(
     // Tiled mode (log-view tiling, ui/LogViewerTiles.kt): instead of one Column with banners and a draggable split, LogViewer emits
     // the Original and Log tiles into the enclosing TilingSurface. null (every other caller) keeps the single Column below.
     tiles: LogViewerTiles? = null,
+    // Test-only integration seam; normal tabs remain on the full-featured eager route.
+    storageViewport: ProjectionViewportController? = null,
+    storageSession: StackFileSession? = null,
+    storageSelection: StorageSelection? = null,
+    storageOnSelect: ((Long, Int, Boolean, Boolean, Boolean) -> Unit)? = null,
 ) {
     val tc        = tc()
+    if (storageViewport != null) {
+        @Composable
+        fun StoragePane(paneModifier: Modifier) {
+            Column(paneModifier.fillMaxSize().background(tc.bg)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppText("${tab.filename} — ${storageViewport.size} displayed items", color = tc.tx)
+                    AppButton("Find", onClick = onOpenSearch)
+                    AppButton("Export TXT", onClick = onExportTxt)
+                    AppButton("Export CSV", onClick = onExportCsv)
+                }
+                val search = tab.searchFor(SearchScope.FILTERED)
+                if (search.active) {
+                    SearchBar(
+                        tabId = tab.id, search = search, onQueryChange = onSearchQueryChange,
+                        onToggleCase = onSearchToggleCase, onNext = onSearchNext, onPrev = onSearchPrev,
+                        onClose = onSearchClose, onFocused = onSearchFocused, autoFocus = true,
+                    )
+                }
+                StorageLogRows(
+                    storageViewport, tab, storageViewport.maxPageRows, Modifier.weight(1f).fillMaxWidth(),
+                    onSelect = storageOnSelect ?: { _, id, multi, range, _ -> onSelRow(id, multi, range) }, onToggleGroup = onToggleGroup,
+                    selection = storageSelection, onSelectAll = onSelectAll, onClearSelection = onClearSelection,
+                    onCopySelection = onCopySelection?.let { callback -> { callback(null) } }, onCopyText = onCopyText,
+                    session = storageSession, navigation = searchNavigationRequests[SearchScope.FILTERED] ?: searchNavigationRequest,
+                    onConsumeNavigation = onConsumeSearchNavigation, onOpenSearch = onOpenSearch,
+                )
+            }
+        }
+        if (tiles == null) {
+            StoragePane(modifier)
+        } else {
+            tiles.scope.Tile(tiles.logId, tiles.logSlot { StoragePane(Modifier) })
+        }
+        return
+    }
     val mono      = monoFont()
     val toolbarDensity = LocalDensity.current
     val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
@@ -1397,7 +1613,7 @@ internal fun LogViewer(
     // `by`, not `=`: keeps this a live-readable delegated property so the LaunchedEffects further
     // down can snapshotFlow { computedItems.expandedAt } and wait on the real recompute landing —
     // see rememberComputedLogItems's doc.
-    val computedItems by rememberComputedLogItems(tab, true)
+    val computedItems by rememberComputedLogItems(tab, true, pinViewerRows)
     val items = computedItems.items
     val itemsVersion = items.size to items.lastOrNull()?.let(::logItemEntryId)
     val visCnt = computedItems.summary.visibleEntryCount
@@ -2147,7 +2363,7 @@ internal fun LogViewer(
 
         if (tab.showUnfiltered) {
             // `by`, not `=` — same reason as computedItems above.
-            val computedAllItems by rememberComputedLogItems(tab, false)
+            val computedAllItems by rememberComputedLogItems(tab, false, pinViewerRows)
             val allItems = computedAllItems.items
             val allItemsVersion = allItems.size to allItems.lastOrNull()?.let(::logItemEntryId)
             // Each panel needs its own bounds map so row IDs from "Original" and "Filtered"
@@ -3532,10 +3748,11 @@ private fun LogRow(
     // false (a narrow tiled pane, whose column header drops PID/TID — pidTidColumnsVisible) renders
     // the row without its pid/tid text; copying rows (entry-based) is unaffected.
     showPidTid: Boolean = true,
+    selectedOverride: Boolean? = null,
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
-    val isSel    = entry.id in tab.selected
+    val isSel    = selectedOverride ?: (entry.id in tab.selected)
     var hov      by remember { mutableStateOf(false) }
     var rowRoot  by remember { mutableStateOf(Offset.Zero) }
     var sel      by remember(tab.id, entry.id) { mutableStateOf(TextRange.Zero) }
@@ -4574,12 +4791,13 @@ private fun StackTraceHeaderRow(
     wrapLimitChars: Int = MIN_WRAP_LIMIT_CHARS,
     pidFieldChars: Int = 5,
     showPidTid: Boolean = true,
+    selectedOverride: Boolean? = null,
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
     val latestOnCtxMenu by rememberUpdatedState(onCtxMenu)
     val sc = DANGER_RED
-    val isSel = item.entry.id in tab.selected
+    val isSel = selectedOverride ?: (item.entry.id in tab.selected)
     var hov by remember { mutableStateOf(false) }
     var rowRoot by remember { mutableStateOf(Offset.Zero) }
     var lastClickMs by remember { mutableStateOf(0L) }

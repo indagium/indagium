@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -8,6 +9,12 @@ import com.indagium.model.CtxMenuState
 import com.indagium.model.LogTab
 import com.indagium.model.SearchScope
 import com.indagium.model.searchFor
+
+internal class ViewerRowIdentity(private val rows: Any?) {
+    override fun equals(other: Any?): Boolean = other is ViewerRowIdentity && rows === other.rows
+
+    override fun hashCode(): Int = System.identityHashCode(rows)
+}
 
 /**
  * The log viewer wired to [state] for [tab]: the horizontal filter bar's model and actions, and every LogViewer callback. Pulled out of
@@ -29,6 +36,43 @@ internal fun BoundLogViewer(
     tiles: LogViewerTiles? = null,
     compare: Boolean = false,
 ) {
+    val storagePath = if (compare) null else state.experimentalStorageFile(tab.id)
+    if (storagePath != null) {
+        StorageFileLogViewer(
+            tab = tab, path = storagePath, modifier = modifier,
+            onSelect = { position, id, multi, range, header ->
+                state.selectExperimentalStorageRow(tab.id, position, id, multi, range, header)
+            },
+            onToggleGroup = { state.toggleGroup(tab.id, it) },
+            selection = state.experimentalStorageSelection(tab.id),
+            onSelectAll = { state.selectAllExperimentalStorageRows(tab.id) },
+            onClearSelection = { state.clearExperimentalStorageSelection(tab.id) },
+            onSessionOpened = { state.attachExperimentalStorageSession(tab.id, it) },
+            onSessionClosed = { state.detachExperimentalStorageSession(tab.id, it) },
+            onFirstPageReady = { state.markExperimentalStoragePageReady(tab.id, it) },
+            onCopySelection = { session, _ ->
+                state.tab(tab.id)?.let { state.copyExperimentalStorageSelection(tab.id, session, it) }
+            },
+            onCopyText = state::copyToClipboard,
+            onExportTxt = { state.exportFilteredTxt(tab.id) }, onExportCsv = { state.exportFilteredCsv(tab.id) },
+            onOpenSearch = {
+                if (state.isSearchOpen(tab.id)) state.closeSearch(tab.id) else state.openSearch(tab.id, SearchScope.FILTERED)
+            },
+            onSearchQueryChange = { scope, query -> state.setSearchQuery(tab.id, query, scope) },
+            onSearchToggleCase = { state.toggleSearchCase(tab.id, it) },
+            onSearchNext = { state.searchNext(tab.id, it) }, onSearchPrev = { state.searchPrev(tab.id, it) },
+            onSearchClose = { state.closeSearch(tab.id, it) }, onSearchFocused = { state.focusSearch(tab.id, it) },
+            searchNavigation = state.searchNavigationFor(tab.id, SearchScope.FILTERED),
+            onConsumeSearchNavigation = { state.consumeSearchNavigation(it) }, tiles = tiles,
+        )
+        return
+    }
+    // Flat item projections read the source store lazily. Keep it alive through the mounted
+    // viewer's lifetime; disposing the viewer relinquishes the pin and permits inactive unload.
+    DisposableEffect(state, ViewerRowIdentity(tab.logData)) {
+        val pin = state.pinRows(tab)
+        onDispose { pin.close() }
+    }
     val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
         tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
     }
@@ -66,8 +110,9 @@ internal fun BoundLogViewer(
             onOpenFilterPanel = { state.openFilterPanelRevealing(tab.id) },
         )
     }
+    val pinViewerRows = remember(state) { state::pinRows }
     LogViewer(
-        tab = tab, modifier = modifier,
+        tab = tab, modifier = modifier, pinViewerRows = pinViewerRows,
         settings = state.settings,
         onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
         onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },

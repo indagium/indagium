@@ -3,11 +3,16 @@
 package com.indagium.ui
 
 import com.indagium.model.AnnBlock
+import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
+import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.utils.AppendOnlyLogList
+import com.indagium.utils.FlatRows
 import com.indagium.utils.ReleasedLogListException
 import com.indagium.utils.appendLogEntries
+import com.indagium.utils.computeItems
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -83,6 +88,48 @@ class ClosedTabRowsPinTest {
         assertTrue(rows.isReleased, "the last unpin releases the store right away")
         assertEquals(listOf("released closed capture rows" to true), sink.snapshot(), "one trim, after the release")
         assertFailsWith<ReleasedLogListException> { rows[0] }
+    }
+
+    @Test
+    fun pinnedFlatProjectionRemainsReadableUntilViewerDisposes() {
+        val app = newState()
+        val rows = appendOnly(10)
+        val capture = captureTab("flat-pin", rows)
+        app.tabs = listOf(capture, mkTab("other", "other.log", entries(1..3)))
+        val pin = app.pinRows(capture)
+        val items = computeItems(capture, true)
+        app.closeTab(capture.id)
+        pastReleaseDelay()
+
+        assertEquals(1, (items.first() as LogItem.Row).entry.id)
+        assertEquals(10, (items.last() as LogItem.Row).entry.id)
+        pin.close()
+        assertTrue(rows.isReleased, "disposing the last viewer must allow row release")
+    }
+
+    @Test
+    fun projectionPinProtectsOldStoreWhenFilteredAppendMovesTheViewerToANewStore() {
+        val app = newState()
+        val rows = appendLogEntries(emptyList(), entries(1..1024)) as AppendOnlyLogList
+        val owner = captureTab("old-owner", rows)
+        val filter = Filter(mode = FilterMode.KEYWORD, kwText = "msg")
+        val viewer = captureTab("viewer", rows).copy(filter = filter)
+        app.tabs = listOf(owner, viewer)
+        val projection = computeItems(viewer, true) as FlatRows
+        val projectionPin = app.pinRows(viewer.copy(logData = projection.sourceRows))
+        val tail = (1025..1537).map { LogEntry(it, "10:00:00.000", LogLevel.I, "Tag", "excluded") }
+        val nextRows = appendLogEntries(rows, tail)
+        val nextViewer = viewer.copy(logData = nextRows)
+        app.tabs = listOf(owner, nextViewer)
+        assertTrue(computeItems(nextViewer, true) === projection)
+        val currentPin = app.pinRows(nextViewer)
+        app.closeTab(owner.id)
+        pastReleaseDelay()
+        assertEquals(1, (projection.first() as LogItem.Row).entry.id)
+        assertFalse(rows.isReleased)
+        projectionPin.close()
+        assertTrue(rows.isReleased)
+        currentPin.close()
     }
 
     @Test
