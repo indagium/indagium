@@ -18,7 +18,6 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.nio.ShortBuffer
 import java.util.Locale
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
@@ -856,6 +855,7 @@ internal data class DurationRecoveryResult(
  */
 internal fun scanPackets(path: String, isCancelled: () -> Boolean = { false }): PacketScanResult {
     if (isCancelled()) return PacketScanResult(0L, 0L, 0.0)
+    awaitFfmpegNatives()
     FFmpegFrameGrabber(path).use { grabber ->
         grabber.boundDecoderThreads(PACKET_SCAN_DECODE_THREADS)
         grabber.start()
@@ -936,6 +936,7 @@ internal fun scanDurationMs(path: String, isCancelled: () -> Boolean = { false }
  */
 internal fun scanDecodedTimestampDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long {
     if (isCancelled()) return 0L
+    awaitFfmpegNatives()
     FFmpegFrameGrabber(path).use { grabber ->
         configureCaptureMkvOpusDecoder(grabber, path)
         grabber.boundDecoderThreads(ONE_SHOT_DECODE_THREADS)
@@ -1136,30 +1137,6 @@ internal fun videoPlayerControllerWithGrabberFactory(
     grabberFactory: (String) -> FFmpegFrameGrabber,
 ): VideoPlayerController = FfmpegVideoPlayerController(path, grabberFactory = grabberFactory)
 
-/** Runs [load] once, on its own daemon thread that nothing interrupts, the first time [await] is
- *  called. [await] ignores interrupts while it waits and leaves the caller's interrupt flag set. */
-internal class UninterruptedOneTimeLoad(private val threadName: String, private val load: () -> Unit) {
-    private val finished by lazy {
-        CompletableFuture<Unit>().also { done ->
-            Thread({
-                runCatching(load).onFailure { AppLogger.error("video", "$threadName failed", it) }
-                done.complete(Unit)
-            }, threadName).apply { isDaemon = true }.start()
-        }
-    }
-
-    /** Returns once the load has ended, however it ended: a failed load surfaces at first use. */
-    fun await() {
-        finished.join()
-    }
-}
-
-// wakeDecoder interrupts the decode thread on every play/seek/rate change, and with an empty
-// JavaCPP cache an interrupted load fails FFmpeg's class init for the rest of the process.
-private val ffmpegNativeLoad = UninterruptedOneTimeLoad("indagium-ffmpeg-load") {
-    Class.forName(FFmpegFrameGrabber::class.java.name)
-}
-
 /** Internal capability implemented by production controllers without widening the established
  * public player interface. Older test doubles continue to work and are treated as discovering
  * until they report a positive duration. */
@@ -1214,7 +1191,7 @@ private class FfmpegVideoPlayerController(
     private val path: String,
     private val beforeGrab: (() -> Unit)? = null,
     private val grabberFactory: (String) -> FFmpegFrameGrabber = {
-        ffmpegNativeLoad.await()
+        awaitFfmpegNatives()
         FFmpegFrameGrabber(it)
     },
 ) : VideoPlayerController,
@@ -1491,6 +1468,7 @@ private class FfmpegVideoPlayerController(
     override fun grabCurrentFrame(): ByteArray? = lastImage?.let(::encodePng)
 
     override fun grabFrameAt(ms: Long): ByteArray? = runCatching {
+        awaitFfmpegNatives()
         FFmpegFrameGrabber(path).use { g ->
             configureCaptureMkvOpusDecoder(g, path)
             g.boundDecoderThreads(ONE_SHOT_DECODE_THREADS)

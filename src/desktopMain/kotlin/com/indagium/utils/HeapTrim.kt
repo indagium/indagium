@@ -2,6 +2,7 @@ package com.indagium.utils
 
 import com.indagium.capture.mirror.MacVideoToolboxMirrorNative
 import com.indagium.debug.AppLogger
+import com.indagium.video.ffmpegNativesLoaded
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
@@ -108,13 +109,7 @@ internal class HeapTrimScheduler(
             return when {
                 os.contains("mac", ignoreCase = true) -> MacVideoToolboxMirrorNative.releaseFreedMemory()
                 os.contains("linux", ignoreCase = true) -> {
-                    // Throwable, not Exception: a missing JavaCPP native lib is an UnsatisfiedLinkError,
-                    // and a best-effort trim must never break the caller.
-                    try {
-                        org.bytedeco.javacpp.Pointer.trimMemory()
-                    } catch (ignored: Throwable) {
-                        // Best effort only.
-                    }
+                    trimJavaCppMemory()
                     0L
                 }
                 else -> 0L
@@ -124,5 +119,23 @@ internal class HeapTrimScheduler(
         fun defaultExecutor(): ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "indagium-heap-trim").apply { isDaemon = true }
         }
+    }
+}
+
+/**
+ * `malloc_trim(0)` through JavaCPP. Skipped until the shared FFmpeg/JavaCPP load has finished:
+ * this runs on the trim timer's thread, which must never be the first to initialize `Pointer` (its
+ * static initializer waits for the `Loader` lock the load holds, see video/FfmpegNatives.kt). If
+ * nothing has used FFmpeg yet there is no FFmpeg native memory to give back either.
+ */
+@Suppress("TooGenericExceptionCaught", "SwallowedException")
+internal fun trimJavaCppMemory() {
+    if (!ffmpegNativesLoaded()) return
+    // Throwable, not Exception: a missing JavaCPP native lib is an UnsatisfiedLinkError, and a
+    // best-effort trim must never break the caller.
+    try {
+        org.bytedeco.javacpp.Pointer.trimMemory()
+    } catch (ignored: Throwable) {
+        // Best effort only.
     }
 }

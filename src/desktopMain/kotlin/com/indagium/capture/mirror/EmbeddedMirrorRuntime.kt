@@ -5,6 +5,7 @@ package com.indagium.capture.mirror
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.CaptureVideoCodec
+import com.indagium.video.awaitFfmpegNatives
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGRA
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
@@ -665,6 +666,7 @@ internal class JavaCvH264Decoder : H264Decoder {
         decode(input, CaptureVideoCodec.H264.scrcpyId, onFrame)
 
     override fun decode(input: InputStream, codecId: Int, onFrame: (MirrorFrame) -> Unit) {
+        awaitFfmpegNatives()
         // A live socket is never seekable or EOF-terminated. The default InputStream constructor
         // allocates a near-Integer.MAX_VALUE seek buffer; FFmpeg then tries to fill/seek it before
         // probing, so start() waits forever and the UI reports transport LIVE with no frame. A

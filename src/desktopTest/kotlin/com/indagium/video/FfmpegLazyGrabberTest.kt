@@ -134,6 +134,21 @@ class FfmpegLazyGrabberTest {
         assertTrue(returned.await(WAIT_SECONDS, TimeUnit.SECONDS), "a failed load must not strand its waiters")
     }
 
+    @Test
+    fun isLoadedNeverStartsTheLoadAndOnlyReportsSuccess() {
+        val runs = AtomicInteger()
+        val load = UninterruptedOneTimeLoad("test-load-state") { runs.incrementAndGet() }
+        assertEquals(false, load.isLoaded)
+        Thread.sleep(SETTLE_MS)
+        assertEquals(0, runs.get(), "asking whether it is loaded must not start the load")
+        load.await()
+        assertEquals(true, load.isLoaded)
+
+        val failing = UninterruptedOneTimeLoad("test-load-state-failure") { throw UnsatisfiedLinkError("simulated") }
+        failing.await()
+        assertEquals(false, failing.isLoaded)
+    }
+
     private companion object {
         const val WAIT_SECONDS = 10L
         const val POLL_MS = 10L

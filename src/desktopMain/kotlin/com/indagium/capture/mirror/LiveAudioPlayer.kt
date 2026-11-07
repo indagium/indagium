@@ -2,6 +2,7 @@
 
 package com.indagium.capture.mirror
 
+import com.indagium.video.awaitFfmpegNatives
 import org.bytedeco.ffmpeg.avcodec.AVCodec
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
 import org.bytedeco.ffmpeg.avutil.AVChannelLayout
@@ -72,10 +73,12 @@ internal interface LiveAudioSink : Closeable {
  *  dependency and is the guaranteed fallback, found by ID rather than name as a last resort. */
 private val OPUS_DECODER_CANDIDATES = listOf("libopus", "opus")
 
-internal fun findOpusDecoder(): AVCodec? =
-    OPUS_DECODER_CANDIDATES.firstNotNullOfOrNull { name ->
+internal fun findOpusDecoder(): AVCodec? {
+    awaitFfmpegNatives()
+    return OPUS_DECODER_CANDIDATES.firstNotNullOfOrNull { name ->
         avcodec_find_decoder_by_name(name)?.takeUnless { it.isNull }
     } ?: avcodec_find_decoder(AV_CODEC_ID_OPUS)?.takeUnless { it.isNull }
+}
 
 /**
  * Bounded ring buffer of interleaved 16-bit stereo PCM "frames" (one L+R sample pair). [write] never

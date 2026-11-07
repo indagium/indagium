@@ -4,6 +4,7 @@ package com.indagium.capture
 
 import com.indagium.capture.mirror.LIVE_AUDIO_CHANNELS
 import com.indagium.capture.mirror.LIVE_AUDIO_SAMPLE_RATE_HZ
+import com.indagium.video.awaitFfmpegNatives
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
 import org.bytedeco.ffmpeg.avutil.AVFrame
 import org.bytedeco.ffmpeg.avutil.AVRational
@@ -361,6 +362,11 @@ internal fun audioFramesReady(elapsedMs: Long, anchorMs: Long, playoutDelayMs: L
 internal class OpusPcmEncoder(
     private val targetBitRateBps: Long = MIXED_AUDIO_OPUS_BITRATE_BPS,
 ) : Closeable {
+    // First, so av_packet_alloc below (the first JavaCPP use) runs after the shared native load.
+    init {
+        awaitFfmpegNatives()
+    }
+
     // Nullable only so a constructor that throws part-way can free whatever it already allocated
     // ([freeNative]); after construction succeeds both are non-null for the object's life.
     private var codecContextOrNull: AVCodecContext? = null

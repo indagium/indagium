@@ -6,6 +6,7 @@ import com.indagium.capture.StreamingMkvWriter
 import com.indagium.capture.mirror.MirrorVideoPacket
 import com.indagium.capture.mirror.ScrcpyCodecIds
 import com.indagium.capture.mirror.muxedVideoPacketPayload
+import com.indagium.video.awaitFfmpegNatives
 import com.indagium.video.seekToTimestampUs
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AV1
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
@@ -136,6 +137,7 @@ internal class RecordedVideoTimeline private constructor(
         private val open = HashMap<File, FFmpegFrameGrabber>()
 
         fun forSegment(segment: Segment): FFmpegFrameGrabber = open[segment.file] ?: run {
+            awaitFfmpegNatives()
             val grabber = FFmpegFrameGrabber(segment.file).apply { setVideoOption("threads", "2") }
             try {
                 grabber.start(false)

@@ -66,11 +66,12 @@ When a full run goes in the background, check on it rather than just waiting for
   lines for a deadlock. Then stop the task and kill the test JVM.
 - **Report** the stuck test and the cycle to the user. Don't silently rerun and hope.
 
-Known hang: JavaCPP class-init deadlock. The `indagium-ffmpeg-load` thread holds the `Loader` lock
-and waits for `Pointer`'s class init. Meanwhile a capture preview coroutine left over from a capture
-UI test (`FfmpegCaptureVideoExporter.coverageEndMs`) is initializing `Pointer` and waiting for the
-`Loader` lock. `CaptureSnapshotExportLifecycleTest` can also hang. A temporary Gradle init script
-that calls `filter.excludeTestsMatching(...)` on `desktopTest` skips it locally.
+Past hang: a JavaCPP class-init deadlock. The FFmpeg load thread held the `Loader` lock while
+another thread was inside `Pointer.<clinit>` waiting for that lock. It is fixed by
+`video/FfmpegNatives.kt`: every production `org.bytedeco` entry point calls `awaitFfmpegNatives()`
+first, and `NativeLoadGuardTest` fails on a new one that doesn't. `CaptureSnapshotExportLifecycleTest`
+can still hang. A temporary Gradle init script that calls `filter.excludeTestsMatching(...)` on
+`desktopTest` skips it locally.
 
 ## Architecture
 

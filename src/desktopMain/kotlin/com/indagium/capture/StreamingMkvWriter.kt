@@ -2,6 +2,7 @@
 
 package com.indagium.capture
 
+import com.indagium.video.awaitFfmpegNatives
 import org.bytedeco.ffmpeg.avformat.AVFormatContext
 import org.bytedeco.ffmpeg.avformat.AVIOContext
 import org.bytedeco.ffmpeg.avutil.AVDictionary
@@ -100,6 +101,7 @@ internal class StreamingMkvWriter(
     fun start(width: Int, height: Int, extradata: ByteArray, videoCodecId: Int = AV_CODEC_ID_H264) {
         check(output == null) { "StreamingMkvWriter.start() already called" }
         require(width > 0 && height > 0) { "video dimensions must be positive" }
+        awaitFfmpegNatives()
         destination.absoluteFile.parentFile?.mkdirs()
         val context = AVFormatContext(null)
         ffmpegCheck(

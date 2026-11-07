@@ -1,5 +1,6 @@
 package com.indagium.capture
 
+import com.indagium.video.awaitFfmpegNatives
 import com.indagium.video.configureCaptureMkvOpusDecoder
 import com.indagium.video.seekToTimestampUs
 import org.bytedeco.ffmpeg.avcodec.AVPacket
@@ -169,6 +170,7 @@ class FfmpegCaptureVideoExporter(
         require(gaps.zipWithNext().all { (left, right) -> left.endElapsedMs <= right.startElapsedMs }) {
             "Capture availability intervals overlap"
         }
+        awaitFfmpegNatives()
 
         val parent = destination.absoluteFile.parentFile
             ?: throw IOException("Video destination has no parent: ${destination.absolutePath}")
@@ -224,6 +226,7 @@ class FfmpegCaptureVideoExporter(
         require(requestedEndMs > requestedStartMs) { "Video export end must be after its start" }
         require(source.isFile) { "Capture video does not exist: ${source.absolutePath}" }
         require(source.canonicalFile != destination.canonicalFile) { "Video destination must differ from its capture source" }
+        awaitFfmpegNatives()
 
         // MP4 export (archive v3): the container is chosen by the DESTINATION's own extension —
         // CaptureArchive.kt's export() picks "screen.mp4" or "screen.mkv" per the session's
@@ -307,6 +310,7 @@ class FfmpegCaptureVideoExporter(
         require(source.isFile) { "Capture video does not exist: ${source.absolutePath}" }
         val inputLength = source.length()
         require(inputLength > 0L) { "Capture video has no readable bytes: ${source.absolutePath}" }
+        awaitFfmpegNatives()
         val window = withInput(source) { input -> scanWindow(input, inputLength, requestedStartMs, requestedEndMs) }
         return window.coveredEndUs / MILLIS_PER_SECOND
     }

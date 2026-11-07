@@ -1,6 +1,7 @@
 package com.indagium.capture
 
 import com.indagium.utils.moveReplacingAtomically
+import com.indagium.video.awaitFfmpegNatives
 import org.bytedeco.ffmpeg.avcodec.AVCodec
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
 import org.bytedeco.ffmpeg.avcodec.AVPacket
@@ -146,6 +147,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
     )
 
     override fun ensureAvailable() {
+        awaitFfmpegNatives()
         try {
             val encoder = avcodec_find_encoder_by_name(COMPACT_AV1_ENCODER)
             if (encoder == null || encoder.isNull) {
@@ -165,6 +167,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
 
     override fun isAlreadyAv1(source: File): Boolean {
         if (!source.isFile || source.length() <= 0L) return false
+        awaitFfmpegNatives()
         val grabber = FFmpegFrameGrabber(source)
         return try {
             grabber.start(false)
@@ -180,6 +183,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
 
     override fun copyAlreadyAv1(source: File, destination: File) {
         require(source.isFile && source.length() > 0L) { "Compact export has no readable staged video" }
+        awaitFfmpegNatives()
         if (source.extension.equals("mkv", ignoreCase = true)) {
             copyWithCancellation(source, destination)
         } else {

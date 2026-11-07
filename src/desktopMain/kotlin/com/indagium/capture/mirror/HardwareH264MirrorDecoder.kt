@@ -2,6 +2,7 @@
 
 package com.indagium.capture.mirror
 
+import com.indagium.video.awaitFfmpegNatives
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
 import org.bytedeco.ffmpeg.avutil.AVBufferRef
 import org.bytedeco.ffmpeg.avutil.AVFrame
@@ -55,6 +56,7 @@ internal class HardwareH264MirrorDecoder(
 
     @Suppress("CyclomaticComplexMethod") // The single decode/cleanup scope keeps native resources paired.
     override fun decode(input: BoundedScrcpyPacketFeed, onFrame: (MirrorFrameInfo) -> Unit) {
+        awaitFfmpegNatives()
         val codec = avcodec_find_decoder(AV_CODEC_ID_H264)
             ?: throw IOException("Bundled FFmpeg has no H.264 decoder")
         val codecContext = avcodec_alloc_context3(codec)
