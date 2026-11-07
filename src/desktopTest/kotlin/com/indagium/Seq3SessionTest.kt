@@ -2015,6 +2015,45 @@ class Seq3SessionTest {
     }
 
     @Test
+    fun aCanvasEditKeepsTheHalfTypedWordOfATrimmedPreview() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        val preview = liveSource("first")
+        // A suggestion list is open on the half-typed `/pa`: the draft has it, the import does not.
+        val draft = preview.replace("@enduml", "/pa\n@enduml")
+        state.seq3Sessions.updateSourceDraftText(id, draft)
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, draft, Seq3Dialect.PLANTUML, preview))
+        assertEquals(preview, view.sourceLiveLastAppliedText, "what was imported, not the whole draft")
+        val revision = view.sourceExternalRevision
+        val ids = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.map { it.id }
+
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec(ids[0], ids[1], "Canvas"))))
+
+        assertEquals(draft, view.sourceDraft, "the half-typed word is not replaced by the canonical text")
+        assertTrue(view.sourceDraftStale, "the draft is pending, so the canvas edit marks it stale")
+        assertEquals(revision, view.sourceExternalRevision, "the editor is not told to adopt anything")
+    }
+
+    @Test
+    fun theNextLiveApplyAfterTheListClosesRecordsTheFullDraft() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        val preview = liveSource("first")
+        val draft = preview.replace("@enduml", "/pa\n@enduml")
+        state.seq3Sessions.updateSourceDraftText(id, draft)
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, draft, Seq3Dialect.PLANTUML, preview))
+        assertEquals(preview, view.sourceLiveLastAppliedText)
+
+        val closed = liveSource("second")
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, closed, Seq3Dialect.PLANTUML))
+        assertEquals(closed, view.sourceLiveLastAppliedText, "an untrimmed apply records the full draft again")
+    }
+
+    @Test
     fun aCanvasEditStillLocksTheSourceWhileTypedTextIsPending() {
         val state = state()
         val id = state.seq3Sessions.beginEmpty("log")!!

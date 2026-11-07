@@ -846,8 +846,16 @@ class Seq3Session(
      *  revision becomes one ordinary document undo step; an invalid partial edit only updates its
      *  diagnostic, and a revision that removes evidence waits for the existing explicit
      *  confirmation flow. The import baseline stays fixed until reload/dialect change so source
-     *  markers keep referring to the same generated rows while the user types. */
-    fun applyLiveSourceDraft(id: String, source: String, dialect: Seq3Dialect): Seq3SourceImportResult {
+     *  markers keep referring to the same generated rows while the user types. [previewSource] is
+     *  the text that is imported when it differs from the draft [source]: the editor leaves out the
+     *  half-typed word an open suggestion list belongs to, so the preview keeps following the
+     *  rest of the draft without flagging that word. */
+    fun applyLiveSourceDraft(
+        id: String,
+        source: String,
+        dialect: Seq3Dialect,
+        previewSource: String = source,
+    ): Seq3SourceImportResult {
         val current = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
         val view = viewState(id) ?: return Seq3SourceImportResult.Failure(emptyList())
         if (view.sourceEditorDialect != dialect) {
@@ -882,8 +890,8 @@ class Seq3Session(
         val baseline = requireNotNull(view.sourceLiveImportBaseline)
         // A blank editor clears structure while keeping current session metadata, including a
         // title entered since the source baseline was established.
-        val importBase = if (source.isBlank()) latest.document else baseline
-        val imported = importSourceText(source, dialect, importBase, sourceOwnsVisibleLifelines = true)
+        val importBase = if (previewSource.isBlank()) latest.document else baseline
+        val imported = importSourceText(previewSource, dialect, importBase, sourceOwnsVisibleLifelines = true)
         val success = imported as? Seq3SourceImportResult.Success
         if (success == null) {
             view.sourceDiagnostics = (imported as Seq3SourceImportResult.Failure).diagnostics
@@ -911,7 +919,8 @@ class Seq3Session(
         }
         val appliedDocument = session(id)?.document ?: stableDocument
         view.sourceLiveLastAppliedDocument = appliedDocument
-        view.sourceLiveLastAppliedText = source
+        // What was imported: a trimmed preview leaves the draft with a pending, unapplied word.
+        view.sourceLiveLastAppliedText = previewSource
         // Keep the text as typed. This baseline is only the current diagram's canonical form for
         // stale protection; advancing it must not increment the editor generation or move focus.
         view.sourceDraftCanonical = appliedDocument.toEditorSource(dialect)

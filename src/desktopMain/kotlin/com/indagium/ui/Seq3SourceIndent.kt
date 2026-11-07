@@ -34,6 +34,9 @@ internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
     /** The level a plain statement would get on the next line. */
     val currentLevel: Int get() = base + blocks.size
 
+    /** The block (`loop`, `alt`, ...) the next line would sit in, or null outside every block. */
+    val innermostBlock: String? get() = blocks.lastOrNull()
+
     fun copy(): Seq3SourceIndentState = Seq3SourceIndentState(dialect).also {
         it.blocks.addAll(blocks)
         it.bodyStarted = bodyStarted

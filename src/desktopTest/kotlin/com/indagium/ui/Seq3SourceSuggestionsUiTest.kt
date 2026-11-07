@@ -15,9 +15,11 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.withKeyDown
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 import com.indagium.diagram3.Seq3Dialect
 import org.junit.After
@@ -100,7 +102,7 @@ class Seq3SourceSuggestionsUiTest {
     }
 
     @Test
-    fun slashSuggestionListIsCompactScrollableAndAnchoredToTheEditor() {
+    fun slashSuggestionListIsCompactScrollableAndAnchoredToTheCaretLine() {
         val sessionId = startWorkspace("source-suggestions-scroll")
         showWorkspace(sessionId)
         rule.onNodeWithTag("seq3-source-edit").performClick()
@@ -115,8 +117,119 @@ class Seq3SourceSuggestionsUiTest {
         assertTrue(suggestionsBounds.bottom.value - suggestionsBounds.top.value <= 215f, "suggestions should show a short scrollable list: $suggestionsBounds")
         assertTrue(suggestionsBounds.left.value >= editorBounds.left.value &&
             suggestionsBounds.left.value - editorBounds.left.value <= 20f,
-            "suggestions should remain anchored at the editor start: editor=$editorBounds suggestions=$suggestionsBounds")
+            "suggestions should line up with the typed slash: editor=$editorBounds suggestions=$suggestionsBounds")
+        // The slash is on line 2: the list starts right under that line (the layout trims the first
+        // line's leading, so it ends at 31dp, not 36dp), never at the editor's top.
+        val belowFirstLine = editorBounds.top.value + 18f
+        assertTrue(suggestionsBounds.top.value >= belowFirstLine && suggestionsBounds.top.value <= editorBounds.top.value + 40f,
+            "suggestions should open just below the caret line: editor=$editorBounds suggestions=$suggestionsBounds")
         rule.onNodeWithText("/group", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun suggestionListOpensAboveTheCaretLineWhenTheViewportEndsBelowIt() {
+        val sessionId = startWorkspace("source-suggestions-above")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        val lines = (1..80).joinToString("\n") { "participant P$it" }
+        editor.performTextReplacement("@startuml\n$lines\n/")
+        rule.waitForIdle()
+
+        val editorBounds = editor.getBoundsInRoot()
+        val suggestionsBounds = rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed().getBoundsInRoot()
+        // The caret is on the last line, scrolled to the bottom of the viewport: the list ends above that line.
+        assertTrue(suggestionsBounds.top.value >= editorBounds.top.value - 0.5f && suggestionsBounds.bottom.value <= editorBounds.bottom.value - 18f + 1f,
+            "suggestions should open above the caret line near the bottom: editor=$editorBounds suggestions=$suggestionsBounds")
+    }
+
+    @Test
+    fun enterAfterAKeywordTypedInFullWithNothingToExpandIsANewline() {
+        val sessionId = startWorkspace("source-suggestions-end-enter")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement("@startuml\nalt ok\n    A -> B: x\nend")
+        rule.waitForIdle()
+        rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertDoesNotExist()
+
+        editor.performKeyInput { pressKey(Key.Enter) }
+        rule.waitForIdle()
+
+        assertEquals("@startuml\nalt ok\n    A -> B: x\nend\n", view.sourceDraft)
+    }
+
+    @Test
+    fun enterAfterASingleLetterIsANewline() {
+        val sessionId = startWorkspace("source-suggestions-a-enter")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement("@startuml\na")
+        rule.waitForIdle()
+        rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertDoesNotExist()
+
+        editor.performKeyInput { pressKey(Key.Enter) }
+        rule.waitForIdle()
+
+        assertEquals("@startuml\na\n", view.sourceDraft)
+    }
+
+    @Test
+    fun dividerIsSuggestedOnlyInsideTheBlockThatOwnsIt() {
+        val sessionId = startWorkspace("source-suggestions-divider")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+
+        editor.performTextReplacement("@startuml\nalt ok\n    /el")
+        rule.waitForIdle()
+        rule.onNodeWithText("/else", useUnmergedTree = true).assertIsDisplayed()
+
+        editor.performTextReplacement("@startuml\nloop x\n    /el")
+        rule.waitForIdle()
+        rule.onNodeWithText("/else", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun everyRowHasAPictogram() {
+        val sessionId = startWorkspace("source-suggestions-glyphs")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement("@startuml\n/")
+        rule.waitForIdle()
+
+        listOf("participant", "actor", "title", "note", "activate", "call", "return", "async", "loop").forEach { keyword ->
+            rule.onNodeWithTag("seq3-source-suggestion-glyph-$keyword", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
+        }
+    }
+
+    @Test
+    fun livePreviewKeepsFollowingTheDraftWhileTheSuggestionListIsOpen() {
+        val sessionId = startWorkspace("source-suggestions-live")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+
+        // The slash word is typed above `@enduml`, so the draft is valid apart from that word.
+        val first = "@startuml\nparticipant \"Alpha\" as A\n/pa"
+        editor.performTextReplacement("$first\n@enduml")
+        editor.performTextInputSelection(TextRange(first.length))
+        rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
+        rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.any { it.name == "Alpha" } }
+        rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(view.sourceDiagnostics.isEmpty(), "the half-typed word is not part of the preview: ${view.sourceDiagnostics}")
+
+        val second = "@startuml\nparticipant \"Alpha\" as A\nparticipant \"Beta\" as B\n/pa"
+        editor.performTextReplacement("$second\n@enduml")
+        editor.performTextInputSelection(TextRange(second.length))
+        rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.any { it.name == "Beta" } }
+        rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(view.sourceDiagnostics.isEmpty(), "${view.sourceDiagnostics}")
     }
 
     @Test

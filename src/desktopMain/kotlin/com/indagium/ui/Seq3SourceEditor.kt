@@ -6,6 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -45,9 +48,11 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
@@ -64,10 +69,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextRange
@@ -184,6 +187,8 @@ internal fun Seq3SourceEditorPane(
     // The in-tile issues list under the editor, opened from the status strip.
     var showSourceIssues by remember(session.id) { mutableStateOf(false) }
     var viewportPx by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(0) }
+    // The editor's last text layout (of the visible text), which places the suggestion list at the caret.
+    var textLayout by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<TextLayoutResult?>(null) }
     val scope = rememberCoroutineScope()
     var pendingNewDiagramEvidenceRemoval by remember(session.id) { mutableStateOf<Pair<String, Seq3Dialect>?>(null) }
     LaunchedEffect(session.id) {
@@ -244,8 +249,13 @@ internal fun Seq3SourceEditorPane(
         seq3SourceLineNumberMap(sourceText, view.sourceEditorDialect, showSourceMarkers)
     }
     val lineCount = visibleLines.lineCount
-    val lineHeightDp = with(LocalDensity.current) { 18.sp.toDp() }
-    val lineHeightPx = with(LocalDensity.current) { 18.sp.toPx() }
+    val density = LocalDensity.current
+    val lineHeightDp = with(density) { 18.sp.toDp() }
+    val lineHeightPx = with(density) { 18.sp.toPx() }
+    // The raw ranges the editor hides (marker lines): the layout holds the text without them.
+    val hiddenRanges = remember(sourceText, view.sourceEditorDialect, showSourceMarkers) {
+        if (showSourceMarkers) emptyList() else seq3SourceMarkerDeletionRanges(sourceText, view.sourceEditorDialect)
+    }
     LaunchedEffect(scroll.value, lineCount, lineHeightPx) {
         val firstLine = (scroll.value / lineHeightPx).toInt().coerceIn(0, lineCount - 1)
         val offset = (scroll.value - firstLine * lineHeightPx).roundToInt()
@@ -367,7 +377,7 @@ internal fun Seq3SourceEditorPane(
         dismissedSuggestionStart = null
     }
     val sourceSuggestions = suggestionTrigger?.let {
-        seq3SourceSuggestions(view.sourceEditorDialect, it.query, participantChoices.map { choice -> choice.alias })
+        seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias })
     }.orEmpty()
     LaunchedEffect(suggestionTrigger?.query, view.sourceEditorDialect) {
         selectedSuggestionIndex = 0
@@ -376,22 +386,25 @@ internal fun Seq3SourceEditorPane(
         suggestionTrigger.start != dismissedSuggestionStart
     if (selectedSuggestionIndex !in sourceSuggestions.indices) selectedSuggestionIndex = 0
 
+    // The preview keeps following the draft while the suggestion list is open; the half-typed word
+    // the list belongs to is left out of what is imported, so it is not flagged while it is typed.
+    val previewText = if (suggestionsVisible && suggestionTrigger != null) {
+        sourceText.removeRange(suggestionTrigger.start.coerceIn(0, sourceText.length), suggestionTrigger.end.coerceIn(0, sourceText.length))
+    } else sourceText
     LaunchedEffect(
         session.id,
         sourceText,
+        previewText,
         view.sourceEditorDialect,
         view.sourceLiveEnabled,
         view.sourceDraftInitialized,
-        suggestionsVisible,
     ) {
-        if (!view.sourceLiveEnabled || !view.sourceDraftInitialized || suggestionsVisible) return@LaunchedEffect
+        if (!view.sourceLiveEnabled || !view.sourceDraftInitialized) return@LaunchedEffect
         delay(400)
         // sourceDraft moves on first when New diagram or a reload replaces the source, before this
         // effect is cancelled; applying sourceText then would bring the replaced text back.
-        if (editorState.text.toString() == sourceText && view.sourceDraft == sourceText &&
-            view.sourceLiveEnabled && !suggestionsVisible
-        ) {
-            state.seq3Sessions.applyLiveSourceDraft(session.id, sourceText, view.sourceEditorDialect)
+        if (editorState.text.toString() == sourceText && view.sourceDraft == sourceText && view.sourceLiveEnabled) {
+            state.seq3Sessions.applyLiveSourceDraft(session.id, sourceText, view.sourceEditorDialect, previewText)
         }
     }
 
@@ -459,19 +472,13 @@ internal fun Seq3SourceEditorPane(
                 textStyle = TextStyle(color = tc.tx, fontSize = 11.sp, lineHeight = 18.sp, fontFamily = MONO),
                 cursorBrush = SolidColor(tc.ac),
                 lineLimits = TextFieldLineLimits.MultiLine(),
-                outputTransformation = remember(view.sourceEditorDialect, showSourceMarkers, tc.tx, tc.ac, tc.ts, tc.td) {
+                outputTransformation = remember(view.sourceEditorDialect, showSourceMarkers, tc) {
+                    val palette = seq3SourcePalette(tc)
                     OutputTransformation {
-                        transformSeq3SourceOutput(
-                            this,
-                            view.sourceEditorDialect,
-                            tc.tx,
-                            tc.ac,
-                            tc.ts,
-                            tc.td,
-                            showSourceMarkers,
-                        )
+                        transformSeq3SourceOutput(this, view.sourceEditorDialect, palette, showSourceMarkers)
                     }
                 },
+                onTextLayout = { getResult -> getResult()?.let { textLayout = it } },
                 scrollState = scroll,
                 modifier = Modifier.weight(1f).fillMaxHeight().padding(top = 8.dp, bottom = 8.dp)
                     .onSizeChanged { viewportPx = it.height }
@@ -592,7 +599,8 @@ internal fun Seq3SourceEditorPane(
                         }
                     },
                 decorator = TextFieldDecorator { inner ->
-                    Box {
+                    // At least the viewport wide, so the suggestion list never sits outside the box.
+                    Box(Modifier.widthIn(min = with(density) { horizontalScroll.viewportSize.toDp() })) {
                         if (editorState.text.isEmpty()) {
                             AppText(sourceStartHint(view.sourceEditorDialect), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
                         }
@@ -613,21 +621,41 @@ internal fun Seq3SourceEditorPane(
                                 }
                             }
                         } else if (suggestionsVisible) {
-                            Column(
-                                Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 6.dp)
-                                    .widthIn(min = 210.dp, max = 320.dp).width(IntrinsicSize.Max).heightIn(max = 208.dp)
-                                    .shadow(8.dp, RoundedCornerShape(8.dp))
-                                    .background(tc.p, RoundedCornerShape(8.dp))
-                                    .border(1.dp, tc.br, RoundedCornerShape(8.dp)).verticalScroll(rememberScrollState()).padding(4.dp)
-                                    .testTag("seq3-source-suggestions"),
-                            ) {
-                                sourceSuggestions.forEachIndexed { index, suggestion ->
-                                    Seq3SourceSuggestionRow(
-                                        suggestion = suggestion,
-                                        prefix = suggestionTrigger.prefix,
-                                        active = index == selectedSuggestionIndex,
-                                        onClick = { insertSuggestion(index) },
+                            // The list opens under the line the suggestion belongs to, or above it
+                            // when the viewport has no room below. The caret rectangle comes from
+                            // the layout of the visible text, so the hidden marker lines are
+                            // taken out of the raw offset first.
+                            val layout = textLayout
+                            // The cursor rectangle gives the column; the line's own top and bottom
+                            // (a cursor is shorter than the 18sp line) bound the list's way.
+                            val anchor = layout?.let {
+                                val visible = seq3SourceVisibleOffset(suggestionTrigger.start, hiddenRanges)
+                                    .coerceIn(0, it.layoutInput.text.length)
+                                val line = it.getLineForOffset(visible)
+                                Rect(it.getCursorRect(visible).left, it.getLineTop(line), 0f, it.getLineBottom(line))
+                            }
+                            Box(Modifier.matchParentSize()) {
+                                Column(
+                                    Modifier.anchoredAtCaret(
+                                        left = anchor?.left ?: 0f,
+                                        top = (anchor?.top ?: 0f) - scroll.value,
+                                        bottom = (anchor?.bottom ?: lineHeightPx) - scroll.value,
+                                        gap = with(density) { 2.dp.toPx() },
                                     )
+                                        .widthIn(min = 210.dp, max = 320.dp).width(IntrinsicSize.Max).heightIn(max = 208.dp)
+                                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                                        .background(tc.p, RoundedCornerShape(8.dp))
+                                        .border(1.dp, tc.br, RoundedCornerShape(8.dp)).verticalScroll(rememberScrollState()).padding(4.dp)
+                                        .testTag("seq3-source-suggestions"),
+                                ) {
+                                    sourceSuggestions.forEachIndexed { index, suggestion ->
+                                        Seq3SourceSuggestionRow(
+                                            suggestion = suggestion,
+                                            prefix = suggestionTrigger.prefix,
+                                            active = index == selectedSuggestionIndex,
+                                            onClick = { insertSuggestion(index) },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -952,7 +980,12 @@ internal data class Seq3SourceSuggestion(
     val cursorOffset: Int = insertion.length,
     /** Tab-able fields inside [insertion] (offsets in the raw insertion); the first is selected. */
     val fields: List<SourceSnippetField> = emptyList(),
-)
+    /** The picture in front of the row. */
+    val glyph: Seq3SourceGlyph,
+) {
+    /** True when accepting this entry would only add blanks to the word [query] that was typed in full. */
+    fun isTypedInFull(query: String): Boolean = keyword.equals(query, ignoreCase = true) && insertion.trim().equals(keyword, ignoreCase = true)
+}
 
 internal data class Seq3SourceSuggestionTrigger(
     val start: Int,
@@ -960,6 +993,8 @@ internal data class Seq3SourceSuggestionTrigger(
     val query: String,
     val prefix: String = "/",
 )
+
+private const val SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH = 2
 
 internal fun seq3SourceSuggestionTrigger(source: String, selection: TextRange): Seq3SourceSuggestionTrigger? {
     if (selection.start != selection.end) return null
@@ -974,20 +1009,103 @@ internal fun seq3SourceSuggestionTrigger(source: String, selection: TextRange): 
         if (slash > 0 && source[slash - 1].isLetterOrDigitOrUnderscore()) return null
         return Seq3SourceSuggestionTrigger(slash, end, query, "/")
     }
-    if (query.isEmpty()) return null
+    // A bare word needs two letters: a single `a` is far more likely the start of a name or a message.
+    if (query.length < SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH) return null
     val lineStart = source.lastIndexOf('\n', (queryStart - 1).coerceAtLeast(0)).let { it + 1 }
     val beforeToken = source.substring(lineStart, queryStart)
     if (beforeToken.any { !it.isWhitespace() }) return null
     return Seq3SourceSuggestionTrigger(queryStart, end, query, "")
 }
 
+/** [enclosingBlock] is the innermost open block (`alt`, `par`, ...) at the typing position: the
+ *  divider that block owns is offered only inside it. */
 internal fun seq3SourceSuggestions(
     dialect: Seq3Dialect,
     query: String,
     participantAliases: List<String> = emptyList(),
+    enclosingBlock: String? = null,
 ): List<Seq3SourceSuggestion> =
-    sourceSuggestionEntries(dialect, participantAliases)
+    sourceSuggestionEntries(dialect, participantAliases, enclosingBlock)
         .filter { it.keyword.startsWith(query, ignoreCase = true) }
+
+/**
+ * The suggestions to show for [trigger] in [source]. A word typed in full that has nothing to expand
+ * (`end`, `else`) shows no list, so Enter after it is an ordinary newline. The blocks come from the
+ * lines before the trigger, with the rules the editor's indentation and the import both use.
+ */
+internal fun seq3SourceActiveSuggestions(
+    source: String,
+    trigger: Seq3SourceSuggestionTrigger,
+    dialect: Seq3Dialect,
+    participantAliases: List<String>,
+): List<Seq3SourceSuggestion> {
+    val block = seq3SourceIndentStateAfter(source.substring(0, trigger.start.coerceIn(0, source.length)), dialect).innermostBlock
+    val matches = seq3SourceSuggestions(dialect, trigger.query, participantAliases, block)
+    if (trigger.prefix.isEmpty() && matches.all { it.isTypedInFull(trigger.query) }) return emptyList()
+    return matches
+}
+
+/** The word that divides a [block] into operands in [dialect], or null when that block has none. As
+ *  in the import, only `alt`, `par` and `critical` blocks can be divided; PlantUML writes every
+ *  divider `else`, Mermaid has `else`, `and` and `option`. */
+internal fun seq3SourceDividerWord(block: String?, dialect: Seq3Dialect): String? = when (block) {
+    "alt" -> "else"
+    "par" -> if (dialect == Seq3Dialect.PLANTUML) "else" else "and"
+    "critical" -> if (dialect == Seq3Dialect.PLANTUML) "else" else "option"
+    else -> null
+}
+
+/** [raw] (an offset into the source) as an offset into the text with the [hidden] ranges taken out. */
+internal fun seq3SourceVisibleOffset(raw: Int, hidden: List<Seq3SourceRange>): Int {
+    var removed = 0
+    for (range in hidden) {
+        if (range.start >= raw) break
+        removed += minOf(range.endExclusive, raw) - range.start
+    }
+    return raw - removed
+}
+
+/** Which side of the caret line a suggestion list takes, and how tall it may be there. */
+internal data class Seq3SourceListSlot(val below: Boolean, val room: Float)
+
+/**
+ * The side for a list [listHeight] tall next to a caret line spanning [caretTop]..[caretBottom] in
+ * an area [areaHeight] tall: below the line, above it when the list does not fit below, and the
+ * roomier side (the list is then cut to its [Seq3SourceListSlot.room]) when it fits on neither.
+ */
+internal fun seq3SourceSuggestionSlot(
+    caretTop: Float,
+    caretBottom: Float,
+    listHeight: Float,
+    areaHeight: Float,
+    gap: Float,
+): Seq3SourceListSlot {
+    val roomBelow = (areaHeight - caretBottom - gap).coerceAtLeast(0f)
+    val roomAbove = (caretTop - gap).coerceAtLeast(0f)
+    return when {
+        listHeight <= roomBelow -> Seq3SourceListSlot(true, roomBelow)
+        listHeight <= roomAbove -> Seq3SourceListSlot(false, roomAbove)
+        roomBelow >= roomAbove -> Seq3SourceListSlot(true, roomBelow)
+        else -> Seq3SourceListSlot(false, roomAbove)
+    }
+}
+
+/** The top of the list in [slot]: right under the caret line, or ending right above it. */
+internal fun seq3SourceSuggestionTop(slot: Seq3SourceListSlot, caretTop: Float, caretBottom: Float, listHeight: Float, gap: Float): Float =
+    if (slot.below) caretBottom + gap else (caretTop - gap - listHeight).coerceAtLeast(0f)
+
+/** Places its child at [left] (kept inside the parent) and under the caret line, or above it. */
+private fun Modifier.anchoredAtCaret(left: Float, top: Float, bottom: Float, gap: Float): Modifier =
+    layout { measurable, constraints ->
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val natural = measurable.measure(loose)
+        val slot = seq3SourceSuggestionSlot(top, bottom, natural.height.toFloat(), constraints.maxHeight.toFloat(), gap)
+        // A list taller than its side is cut there and scrolls.
+        val placeable = if (natural.height <= slot.room) natural else measurable.measure(loose.copy(maxHeight = slot.room.toInt()))
+        val x = left.coerceIn(0f, (constraints.maxWidth - placeable.width).coerceAtLeast(0).toFloat())
+        val y = seq3SourceSuggestionTop(slot, top, bottom, placeable.height.toFloat(), gap)
+        layout(constraints.maxWidth, constraints.maxHeight) { placeable.place(x.roundToInt(), y.roundToInt()) }
+    }
 
 /** A guided block: its opener, one starter message so the block is valid at once, and `end`.  The
  *  starter message uses the first two declared participants when they exist. */
@@ -1003,33 +1121,68 @@ internal fun seq3SourceBlockSnippet(
     return snippet to sourceSnippetFields(snippet, "condition" to false, from to true, to to true, label to false)
 }
 
-private fun sourceSuggestionEntries(dialect: Seq3Dialect, participantAliases: List<String>): List<Seq3SourceSuggestion> {
-    val note = if (dialect == Seq3Dialect.MERMAID) "Note over A: note text" else "note over A: note text"
-    val participant = if (dialect == Seq3Dialect.MERMAID) "participant Alias as Name" else "participant \"Name\" as Alias"
-    val actor = if (dialect == Seq3Dialect.MERMAID) "actor Alias as Name" else "actor \"Name\" as Alias"
+private fun sourceSuggestionEntries(
+    dialect: Seq3Dialect,
+    participantAliases: List<String>,
+    enclosingBlock: String?,
+): List<Seq3SourceSuggestion> {
+    val mermaid = dialect == Seq3Dialect.MERMAID
+    val note = if (mermaid) "Note over A: note text" else "note over A: note text"
+    val participant = if (mermaid) "participant Alias as Name" else "participant \"Name\" as Alias"
+    val actor = if (mermaid) "actor Alias as Name" else "actor \"Name\" as Alias"
     val entries = mutableListOf(
         Seq3SourceSuggestion(
             "participant", participant,
-            if (dialect == Seq3Dialect.MERMAID) "participant  as " else "participant \"\" as ",
-            cursorOffset = if (dialect == Seq3Dialect.MERMAID) "participant ".length else "participant \"".length,
+            if (mermaid) "participant  as " else "participant \"\" as ",
+            cursorOffset = if (mermaid) "participant ".length else "participant \"".length,
+            glyph = Seq3SourceGlyph.PARTICIPANT,
         ),
         Seq3SourceSuggestion(
             "actor", actor,
-            if (dialect == Seq3Dialect.MERMAID) "actor  as " else "actor \"\" as ",
-            cursorOffset = if (dialect == Seq3Dialect.MERMAID) "actor ".length else "actor \"".length,
+            if (mermaid) "actor  as " else "actor \"\" as ",
+            cursorOffset = if (mermaid) "actor ".length else "actor \"".length,
+            glyph = Seq3SourceGlyph.ACTOR,
         ),
-        Seq3SourceSuggestion("title", "title Diagram title", "title "),
-        Seq3SourceSuggestion("note", note, if (dialect == Seq3Dialect.MERMAID) "Note over A: " else "note over A: "),
-        Seq3SourceSuggestion("activate", "activate Alias", "activate "),
-        Seq3SourceSuggestion("deactivate", "deactivate Alias", "deactivate "),
-        Seq3SourceSuggestion("create", "create Alias (before its message)", "create "),
-        Seq3SourceSuggestion("destroy", "destroy Alias (after its message)", "destroy "),
+        Seq3SourceSuggestion("title", "title Diagram title", "title ", glyph = Seq3SourceGlyph.TITLE),
+        Seq3SourceSuggestion("note", note, if (mermaid) "Note over A: " else "note over A: ", glyph = Seq3SourceGlyph.NOTE),
+        Seq3SourceSuggestion("activate", "activate Alias", "activate ", glyph = Seq3SourceGlyph.ACTIVATION),
+        Seq3SourceSuggestion("deactivate", "deactivate Alias", "deactivate ", glyph = Seq3SourceGlyph.ACTIVATION),
+        // The import reads `create` as the creating statement of the next message; Mermaid declares
+        // the new lifeline with it, PlantUML names one that is already declared.
+        if (mermaid) Seq3SourceSuggestion(
+            "create", "create participant Alias as Name (before its message)", "create participant ", glyph = Seq3SourceGlyph.CREATE,
+        ) else Seq3SourceSuggestion(
+            "create", "create Alias (before its message)", "create ", glyph = Seq3SourceGlyph.CREATE,
+        ),
+        Seq3SourceSuggestion("destroy", "destroy Alias (after its message)", "destroy ", glyph = Seq3SourceGlyph.DESTROY),
     )
+    // The three arrow styles of the dialect, ready to fill in: the first two declared participants
+    // are the sender and receiver when they exist.
+    listOf(
+        Triple("call", "Call", Seq3SourceGlyph.ARROW_SOLID),
+        Triple("return", "Return", Seq3SourceGlyph.ARROW_DASHED),
+        Triple("async", "Async", Seq3SourceGlyph.ARROW_ASYNC),
+    ).forEach { (keyword, style, glyph) ->
+        val from = participantAliases.getOrNull(0) ?: "From"
+        val to = participantAliases.getOrNull(1) ?: "To"
+        val label = "message label"
+        val line = sourceMessageLine(from, to, style, dialect, label)
+        entries += Seq3SourceSuggestion(
+            keyword, sourceMessageLine("A", "B", style, dialect, "label"), line,
+            fields = sourceSnippetFields(line, from to true, to to true, label to false),
+            glyph = glyph,
+        )
+    }
     listOf("loop", "alt", "opt", "par", "critical", "break", "group").forEach { keyword ->
         val (insertion, fields) = seq3SourceBlockSnippet(keyword, dialect, participantAliases)
-        entries += Seq3SourceSuggestion(keyword, "$keyword condition … end", insertion, "$keyword condition\n    ".length, fields)
+        entries += Seq3SourceSuggestion(
+            keyword, "$keyword condition … end", insertion, "$keyword condition\n    ".length, fields, Seq3SourceGlyph.BLOCK,
+        )
     }
-    entries += Seq3SourceSuggestion("end", "end current fragment", "end")
+    seq3SourceDividerWord(enclosingBlock, dialect)?.let { word ->
+        entries += Seq3SourceSuggestion(word, "$word condition", "$word ", glyph = Seq3SourceGlyph.DIVIDER)
+    }
+    entries += Seq3SourceSuggestion("end", "end current fragment", "end", glyph = Seq3SourceGlyph.END)
     return entries
 }
 
@@ -1080,12 +1233,17 @@ private fun Seq3SourceSuggestionRow(
     onClick: () -> Unit,
 ) {
     val tc = tc()
+    // Arrow keys move the choice through a list longer than its window: keep it in view.
+    val inView = remember { BringIntoViewRequester() }
+    LaunchedEffect(active) { if (active) runCatching { inView.bringIntoView() } }
     Row(
-        Modifier.fillMaxWidth().background(if (active) tc.abg else Color.Transparent, RoundedCornerShape(5.dp))
+        Modifier.fillMaxWidth().bringIntoViewRequester(inView)
+            .background(if (active) tc.abg else Color.Transparent, RoundedCornerShape(5.dp))
             .clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Seq3SourceGlyphIcon(suggestion.glyph, if (active) tc.ac else tc.ts, Modifier.testTag("seq3-source-suggestion-glyph-${suggestion.keyword}"))
         AppText("$prefix${suggestion.keyword}", color = if (active) tc.ac else tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         AppText(suggestion.syntax, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
@@ -1617,10 +1775,7 @@ internal fun seq3SourceLineNumberMap(source: String, dialect: Seq3Dialect, showM
 private fun transformSeq3SourceOutput(
     buffer: TextFieldBuffer,
     dialect: Seq3Dialect,
-    text: Color,
-    keyword: Color,
-    comment: Color,
-    directive: Color,
+    palette: Seq3SourcePalette,
     showMarkers: Boolean,
 ) {
     val rawText = buffer.asCharSequence().toString()
@@ -1630,7 +1785,7 @@ private fun transformSeq3SourceOutput(
         }
     }
     val visible = buffer.asCharSequence().toString()
-    highlightSeq3Source(visible, dialect, text, keyword, comment, directive).spanStyles.forEach { range ->
+    highlightSeq3Source(visible, dialect, palette).spanStyles.forEach { range ->
         if (range.start < range.end) buffer.addStyle(range.item, range.start, range.end)
     }
 }
@@ -1656,33 +1811,3 @@ internal fun seq3SourceHeaderInsertionOffset(source: String, dialect: Seq3Dialec
 
 private val SOURCE_TITLE_LINE = Regex("^title\\b.*", RegexOption.IGNORE_CASE)
 private val SOURCE_PARTICIPANT_LINE = Regex("^(?:participant|actor)\\b.*", RegexOption.IGNORE_CASE)
-
-internal fun highlightSeq3Source(
-    source: String,
-    dialect: Seq3Dialect,
-    text: Color,
-    keyword: Color,
-    comment: Color,
-    directive: Color,
-): AnnotatedString = buildAnnotatedString {
-    append(source)
-    var offset = 0
-    source.split('\n').forEach { line ->
-        val trimmed = line.trimStart()
-        val leading = line.length - trimmed.length
-        val start = offset + leading
-        val lineEnd = offset + line.length
-        val lineColor = when {
-            dialect == Seq3Dialect.MERMAID && trimmed.startsWith("%%") -> comment
-            dialect == Seq3Dialect.PLANTUML && trimmed.startsWith("'") -> comment
-            SOURCE_KEYWORD_LINE.containsMatchIn(trimmed) -> keyword
-            SOURCE_FRAGMENT_LINE.containsMatchIn(trimmed) -> directive
-            else -> text
-        }
-        if (lineColor != text && start < lineEnd) addStyle(SpanStyle(color = lineColor), start, lineEnd)
-        offset = lineEnd + 1
-    }
-}
-
-private val SOURCE_KEYWORD_LINE = Regex("^(?:@startuml|@enduml|sequenceDiagram|participant|actor|title|activate|deactivate|create|destroy|note\\b|Note\\b|end\\b)")
-private val SOURCE_FRAGMENT_LINE = Regex("^(?:loop|alt|opt|par|critical|break|group|else|and|option)\\b")
