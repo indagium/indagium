@@ -51,6 +51,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
@@ -177,7 +178,20 @@ internal fun Seq3SourceEditorPane(
         runCatching { requester.requestFocus() }
     }
     LaunchedEffect(session.id, view.sourceEditorGeneration, editorState) {
-        snapshotFlow { TextFieldValue(editorState.text.toString(), editorState.selection) }.collect { next ->
+        snapshotFlow { TextFieldValue(editorState.text.toString(), editorState.selection) }.collect { typed ->
+            // Typing `end` or a block divider moves its line to the opener's level. The correction
+            // joins the keystroke's undo step: the history below records the text before it once.
+            val outdent = if (typed.text != lastValue.text) {
+                seq3SourceTypedOutdent(lastValue.text, typed.text, typed.selection.start, typed.selection.collapsed, view.sourceEditorDialect)
+            } else null
+            val next = if (outdent == null) typed else {
+                val fixed = TextFieldValue(outdent.text, TextRange(outdent.selectionStart, outdent.selectionEnd))
+                editorState.edit {
+                    replace(0, length, fixed.text)
+                    selection = fixed.selection
+                }
+                fixed
+            }
             if (next.text != lastValue.text) {
                 if (snippetText != next.text) {
                     snippetFields = rebaseSourceSnippetFields(snippetFields, snippetText, next.text)
@@ -231,13 +245,23 @@ internal fun Seq3SourceEditorPane(
     }
 
     fun insertSnippet(snippet: String, fields: List<SourceSnippetField>, header: Boolean) {
-        val next = insertSeq3SourceSnippet(editorState.text.toString(), editorState.selection, snippet, view.sourceEditorDialect, header)
-        val start = next.selection.start - snippet.trim('\n', '\r').length
-        snippetFields = fields.map { it.copy(start = it.start + start, end = it.end + start) }
+        val inserted = insertSeq3SourceSnippet(editorState.text.toString(), editorState.selection, snippet, view.sourceEditorDialect, header)
+        val next = inserted.value
+        snippetFields = fields.map {
+            it.copy(start = inserted.mapSnippetOffset(it.start), end = inserted.mapSnippetOffset(it.end))
+        }
         val first = snippetFields.firstOrNull()
         endpointMenu = null
         setEditorValue(if (first == null) next else next.copy(selection = TextRange(first.start, first.end)), true)
         runCatching { requester.requestFocus() }
+    }
+
+    /** An indentation edit: the same bookkeeping as a snippet insertion, kept to one undo step. */
+    fun applySourceEdit(edit: Seq3SourceEdit) {
+        val old = editorState.text.toString()
+        if (edit.text != old) snippetFields = rebaseSourceSnippetFields(snippetFields, old, edit.text)
+        endpointMenu = null
+        setEditorValue(TextFieldValue(edit.text, TextRange(edit.selectionStart, edit.selectionEnd)), true)
     }
 
     val selection = editorState.selection
@@ -427,6 +451,21 @@ internal fun Seq3SourceEditorPane(
                                     view.textFieldFocused = true
                                     return@onPreviewKeyEvent true
                                 }
+                            }
+                        }
+                        if (event.key == Key.Tab && !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)) {
+                            val range = editorState.selection
+                            applySourceEdit(seq3SourceTab(editorState.text.toString(), range.start, range.end, event.isShiftPressed))
+                            return@onPreviewKeyEvent true
+                        }
+                        if ((event.key == Key.Enter || event.key == Key.NumPadEnter) &&
+                            !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)
+                        ) {
+                            val range = editorState.selection
+                            val edit = seq3SourceEnter(editorState.text.toString(), range.start, range.end, view.sourceEditorDialect)
+                            if (edit != null) {
+                                applySourceEdit(edit)
+                                return@onPreviewKeyEvent true
                             }
                         }
                         if (!(event.isCtrlPressed || event.isMetaPressed)) return@onPreviewKeyEvent false
@@ -834,7 +873,10 @@ internal fun insertSeq3SourceSuggestion(
     val isParticipant = suggestion.keyword.equals("participant", ignoreCase = true) ||
         suggestion.keyword.equals("actor", ignoreCase = true)
     return if (isTitle || isParticipant) {
-        val withoutTrigger = source.removeRange(start, end)
+        // Indentation typed before the trigger goes with it, leaving the same empty line as at column 0.
+        val lineStart = source.lastIndexOf('\n', start - 1) + 1
+        val removalStart = if (source.substring(lineStart, start).isBlank()) lineStart else start
+        val withoutTrigger = source.removeRange(removalStart, end)
         val insertionAt = seq3SourceHeaderInsertionOffset(withoutTrigger, dialect, titleOnly = isTitle)
         insertSeq3SourceAt(withoutTrigger, insertionAt, insertionAt, suggestion.insertion, dialect, suggestion.cursorOffset)
     } else {
@@ -1221,6 +1263,17 @@ private fun sourceMessageLine(from: String, to: String, style: String, dialect: 
     return "$from$separator$arrow${if (dialect == Seq3Dialect.MERMAID) "" else " "}$to: ${sourceEscape(label, dialect)}"
 }
 
+/** A snippet inserted into a source: the new text and caret, and a map from offsets in the raw
+ *  snippet to offsets in the new text (indentation moves them). */
+internal class Seq3SourceInsertion(
+    val value: TextFieldValue,
+    private val contentStart: Int,
+    private val leadingTrim: Int,
+    private val reindented: Seq3SourceReindented,
+) {
+    fun mapSnippetOffset(offset: Int): Int = contentStart + reindented.map(offset - leadingTrim)
+}
+
 private fun insertSeq3SourceSnippet(
     source: String,
     selection: TextRange,
@@ -1228,7 +1281,7 @@ private fun insertSeq3SourceSnippet(
     dialect: Seq3Dialect,
     header: Boolean = false,
     titleHeader: Boolean = false,
-): TextFieldValue {
+): Seq3SourceInsertion {
     val start = if (header) {
         seq3SourceHeaderInsertionOffset(source, dialect, titleOnly = titleHeader)
     } else {
@@ -1236,7 +1289,7 @@ private fun insertSeq3SourceSnippet(
         source.indexOf('\n', caret).let { if (it < 0) source.length else it }
     }
     val end = start
-    return insertSeq3SourceAt(source, start, end, snippet, dialect)
+    return insertSeq3SourceAtMapped(source, start, end, snippet, dialect)
 }
 
 private fun insertSeq3SourceAt(
@@ -1246,21 +1299,37 @@ private fun insertSeq3SourceAt(
     snippet: String,
     dialect: Seq3Dialect,
     cursorOffset: Int = snippet.length,
-): TextFieldValue {
+): TextFieldValue = insertSeq3SourceAtMapped(source, start, end, snippet, dialect, cursorOffset).value
+
+/** Inserts [snippet] over [start, end) with every line indented to the level of the insertion
+ *  point. A whitespace-only stretch before the insertion on its line is replaced, not kept. */
+private fun insertSeq3SourceAtMapped(
+    source: String,
+    start: Int,
+    end: Int,
+    snippet: String,
+    dialect: Seq3Dialect,
+    cursorOffset: Int = snippet.length,
+): Seq3SourceInsertion {
     val clampedStart = start.coerceIn(0, source.length)
     val clampedEnd = end.coerceIn(clampedStart, source.length)
     val terminator = if (dialect == Seq3Dialect.PLANTUML) "@enduml" else null
     val terminatorAt = terminator?.let { source.indexOf(it).takeIf { index -> index >= 0 } } ?: source.length
     val insertionAt = minOf(clampedStart, terminatorAt)
     val replacedEnd = minOf(clampedEnd, terminatorAt).coerceAtLeast(insertionAt)
-    val before = source.substring(0, insertionAt)
+    var before = source.substring(0, insertionAt)
+    val lastLineStart = before.lastIndexOf('\n') + 1
+    if (lastLineStart < before.length && before.substring(lastLineStart).isBlank()) before = before.substring(0, lastLineStart)
     val after = source.substring(replacedEnd)
     val content = snippet.trim('\n', '\r')
+    val leadingTrim = snippet.length - snippet.trimStart('\n', '\r').length
+    val reindented = seq3SourceReindentSnippet(content, seq3SourceIndentStateAfter(before, dialect))
     val prefix = if (before.isNotEmpty() && !before.endsWith('\n')) "\n" else ""
     val suffix = if (after.isNotEmpty() && !after.startsWith('\n')) "\n" else ""
-    val next = before + prefix + content + suffix + after
-    val caret = (before.length + prefix.length + cursorOffset.coerceIn(0, content.length)).coerceIn(0, next.length)
-    return TextFieldValue(next, TextRange(caret))
+    val next = before + prefix + reindented.text + suffix + after
+    val contentStart = before.length + prefix.length
+    val caret = (contentStart + reindented.map(cursorOffset.coerceIn(0, content.length))).coerceIn(0, next.length)
+    return Seq3SourceInsertion(TextFieldValue(next, TextRange(caret)), contentStart, leadingTrim, reindented)
 }
 
 internal data class Seq3SourceLine(

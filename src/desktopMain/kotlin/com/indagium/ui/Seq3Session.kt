@@ -180,6 +180,10 @@ data class Seq3WorkspaceSession(
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
 
+/** The source the editor shows and compares its draft against: [toSource] with nested content
+ *  indented. Exports and the importer keep using the plain [toSource]. */
+private fun Seq3Document.toEditorSource(dialect: Seq3Dialect): String = seq3IndentSource(toSource(dialect), dialect)
+
 /** Restores generated authoring only when every user-editable value of a message is back at the
  *  runtime baseline. Visibility is intentionally ignored because it is an orthogonal display flag:
  *  hiding/showing a message must not make a previously restored row look edited. */
@@ -753,7 +757,7 @@ class Seq3Session(
         val view = viewState(id) ?: return
         view.sourceDraft = source
         view.sourceDraftDirty = source != view.sourceDraftCanonical
-        val currentCanonical = current.document.toSource(view.sourceEditorDialect)
+        val currentCanonical = current.document.toEditorSource(view.sourceEditorDialect)
         if (view.sourceDraftDirty) {
             view.sourceDraftStale = currentCanonical != view.sourceDraftCanonical
             if (view.sourceDraftStale) view.sourceEvidenceLossPending = false
@@ -766,7 +770,7 @@ class Seq3Session(
     }
 
     private fun refreshSourceDraft(view: Seq3ViewState, document: Seq3Document, force: Boolean = false) {
-        val canonical = document.toSource(view.sourceEditorDialect)
+        val canonical = document.toEditorSource(view.sourceEditorDialect)
         if (force || !view.sourceDraftInitialized || view.sourceDraftCanonical != canonical) {
             view.sourceDraft = canonical
             view.sourceDraftCanonical = canonical
@@ -785,7 +789,7 @@ class Seq3Session(
     private fun updateSourceDraftForDocument(id: String, document: Seq3Document) {
         val view = workspaceViewStates[id] ?: return
         if (!view.sourceDraftInitialized) return
-        val currentCanonical = document.toSource(view.sourceEditorDialect)
+        val currentCanonical = document.toEditorSource(view.sourceEditorDialect)
         val hasDraft = view.sourceDraft != view.sourceDraftCanonical
         view.sourceDraftDirty = hasDraft
         if (hasDraft) {
@@ -819,7 +823,7 @@ class Seq3Session(
         // already contains this exact revision.
         if (view.sourceDraft != source) updateSourceDraftText(id, source)
         val latest = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
-        val currentCanonical = latest.document.toSource(dialect)
+        val currentCanonical = latest.document.toEditorSource(dialect)
         val stale = view.sourceDraftStale ||
             (view.sourceDraft != view.sourceDraftCanonical && view.sourceDraftCanonical != currentCanonical)
         if (stale) {
@@ -868,7 +872,7 @@ class Seq3Session(
         view.sourceLiveLastAppliedText = source
         // Keep the text as typed. This baseline is only the current diagram's canonical form for
         // stale protection; advancing it must not increment the editor generation or move focus.
-        view.sourceDraftCanonical = appliedDocument.toSource(dialect)
+        view.sourceDraftCanonical = appliedDocument.toEditorSource(dialect)
         view.sourceDraftDirty = source != view.sourceDraftCanonical
         view.sourceDraftStale = false
         view.sourceDiagnostics = emptyList()
@@ -922,7 +926,7 @@ class Seq3Session(
         view.sourceEditorDialect = dialect
         seq3ClearSelection(view, clearFocus = true)
         reloadSourceDraft(id)
-        return result.copy(canonicalSource = result.document.toSource(dialect).trimEnd('\n'))
+        return result.copy(canonicalSource = result.document.toEditorSource(dialect).trimEnd('\n'))
     }
 
     private fun importSourceText(
@@ -946,7 +950,7 @@ class Seq3Session(
                 val untitled = success.document.copy(title = "")
                 return success.copy(
                     document = untitled,
-                    canonicalSource = untitled.toSource(dialect).trimEnd('\n'),
+                    canonicalSource = untitled.toEditorSource(dialect).trimEnd('\n'),
                 )
             }
             return success
@@ -1275,7 +1279,7 @@ class Seq3Session(
                 listOf(Seq3SourceDiagnostic(1, "Source dialect changed. Reload source to continue.")),
             )
         }
-        val currentCanonical = current.document.toSource(dialect)
+        val currentCanonical = current.document.toEditorSource(dialect)
         val stale = view?.sourceDraftInitialized == true && view.sourceDraft != view.sourceDraftCanonical &&
             view.sourceDraftCanonical != currentCanonical
         if (stale) {
@@ -1295,7 +1299,7 @@ class Seq3Session(
                     imported = imported.document,
                 ),
             ),
-        ).let { stable -> stable.copy(canonicalSource = stable.document.toSource(dialect).trimEnd('\n')) }
+        ).let { stable -> stable.copy(canonicalSource = stable.document.toEditorSource(dialect).trimEnd('\n')) }
         if (success.document != current.document) {
             if (!applyCommand(id, Seq3Command.ReplaceDocument(success.document))) {
                 return Seq3SourceImportResult.Failure(emptyList())
