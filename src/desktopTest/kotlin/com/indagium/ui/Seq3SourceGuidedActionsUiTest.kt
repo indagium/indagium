@@ -372,6 +372,63 @@ class Seq3SourceGuidedActionsUiTest {
     }
 
     @Test
+    fun backspaceAtTheNavigatedLineStartOfAStatementBelowAnIndentedMarkerChangesNothing() {
+        val sessionId = startWorkspace("source-backspace-navigated")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        toggleMode("seq3-source-live-toggle")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        val raw = "@startuml\nparticipant A\nparticipant B\nalt ok\n    ' indagium-seq3:v1 abc123\n    B -> A: hi\nend\n@enduml"
+        editor.performTextReplacement(raw)
+        rule.waitForIdle()
+        assertEquals(raw, view.sourceDraft)
+
+        // The caret goes to the statement's visible line start by real navigation, as in the app.
+        editor.performTextInputSelection(TextRange(raw.indexOf("B -> A") + 3))
+        editor.performKeyInput { pressKey(Key.MoveHome) }
+        rule.waitForIdle()
+        editor.performKeyInput { pressKey(Key.Backspace) }
+        rule.waitForIdle()
+        assertEquals(raw, view.sourceDraft, "Backspace must not eat the hidden marker or join the statement onto `alt ok`")
+
+        // Delete at the visible start of the statement removes its first character, not the marker's.
+        editor.performKeyInput { pressKey(Key.Delete) }
+        rule.waitForIdle()
+        val statement = raw.indexOf("    B -> A")
+        assertEquals(raw.removeRange(statement, statement + 1), view.sourceDraft)
+        assertTrue(view.sourceDraft.contains("    ' indagium-seq3:v1 abc123\n"))
+    }
+
+    @Test
+    fun deleteAtTheNavigatedEndOfTheLineAboveAnIndentedMarkerChangesNothing() {
+        val sessionId = startWorkspace("source-delete-navigated")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        toggleMode("seq3-source-live-toggle")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        val raw = "@startuml\nparticipant A\nparticipant B\nalt ok\n    ' indagium-seq3:v1 abc123\n    B -> A: hi\nend\n@enduml"
+        editor.performTextReplacement(raw)
+        rule.waitForIdle()
+
+        editor.performTextInputSelection(TextRange(raw.indexOf("alt ok") + 2))
+        editor.performKeyInput { pressKey(Key.MoveEnd) }
+        editor.performKeyInput { pressKey(Key.Delete) }
+        rule.waitForIdle()
+        assertEquals(raw, view.sourceDraft, "Delete must not join the marker onto `alt ok`")
+
+        val withBlank = raw.replace("abc123\n", "abc123\n\n")
+        editor.performTextReplacement(withBlank)
+        rule.waitForIdle()
+        editor.performTextInputSelection(TextRange(withBlank.indexOf("alt ok") + 2))
+        editor.performKeyInput { pressKey(Key.MoveEnd) }
+        editor.performKeyInput { pressKey(Key.Delete) }
+        rule.waitForIdle()
+        assertEquals(raw, view.sourceDraft, "Delete removes the blank line below the markers instead")
+    }
+
+    @Test
     fun joiningAStatementLineOntoThePreviousOneIsOneUndoStep() {
         val sessionId = startWorkspace("source-join-undo")
         showWorkspace(sessionId)

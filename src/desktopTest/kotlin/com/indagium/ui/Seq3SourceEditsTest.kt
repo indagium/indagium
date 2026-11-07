@@ -89,6 +89,100 @@ class Seq3SourceEditsTest {
         assertNull(deleteBack("no markers\n\nhere", 11))
     }
 
+    // The field maps the visible start of a statement below hidden markers to the raw start of the
+    // marker run, so these carets are where the app actually puts them.
+
+    private val indentedMarker = "    $marker"
+
+    @Test
+    fun backspaceAtTheRawStartOrEndOfAMarkerLineActsAtTheStatementBelow() {
+        val before = "alt ok\n$indentedMarker\n    B -> A: hi"
+        val markerStart = before.indexOf(indentedMarker)
+        val markerLineEnd = markerStart + indentedMarker.length
+        val statement = markerLineEnd + 1
+        listOf(markerStart, markerStart + 2, markerLineEnd).forEach { caret ->
+            val edit = requireNotNull(deleteBack(before, caret)) { "caret $caret" }
+            assertEquals(before, edit.text, "nothing to remove, markers and the join stay (caret $caret)")
+            assertEquals(statement, edit.selectionStart, "the caret goes to the statement it is shown on")
+        }
+    }
+
+    @Test
+    fun backspaceAtTheRawStartOfAMarkerLineRemovesABlankLineBelowTheRun() {
+        val before = "alt ok\n$indentedMarker\n\n    B -> A: hi"
+        val markerStart = before.indexOf(indentedMarker)
+        val edit = requireNotNull(deleteBack(before, markerStart))
+        assertEquals("alt ok\n$indentedMarker\n    B -> A: hi", edit.text)
+        assertEquals(markerStart + indentedMarker.length + 1, edit.selectionStart)
+    }
+
+    @Test
+    fun deleteAtTheRawStartOrEndOfAMarkerLineDeletesFromTheStatementBelowNeverTheMarker() {
+        val before = "alt ok\n$indentedMarker\n    B -> A: hi"
+        val markerStart = before.indexOf(indentedMarker)
+        val markerLineEnd = markerStart + indentedMarker.length
+        val statement = markerLineEnd + 1
+        listOf(markerStart, markerStart + 2, markerLineEnd).forEach { caret ->
+            val edit = requireNotNull(deleteForward(before, caret)) { "caret $caret" }
+            assertEquals(before.removeRange(statement, statement + 1), edit.text, "one character of the statement (caret $caret)")
+            assertEquals(statement, edit.selectionStart)
+            assertTrue(edit.text.contains(indentedMarker), "the marker line is intact")
+        }
+    }
+
+    @Test
+    fun deleteAtTheEndOfTheLineAboveAnIndentedMarkerKeepsTheMarkerRun() {
+        val before = "alt ok\n$indentedMarker\n    B -> A: hi"
+        val edit = requireNotNull(deleteForward(before, "alt ok".length))
+        assertEquals(before, edit.text)
+        val withBlank = "alt ok\n$indentedMarker\n\n    B -> A: hi"
+        assertEquals(before, requireNotNull(deleteForward(withBlank, "alt ok".length)).text)
+    }
+
+    @Test
+    fun aSelectionCoveringTheMarkerRunIsTheCaretShownAtTheStatementBelow() {
+        // Home on the statement line reports the raw selection (marker start, statement start).
+        val before = "alt ok\n$indentedMarker\n    B -> A: hi"
+        val markerStart = before.indexOf(indentedMarker)
+        val statement = markerStart + indentedMarker.length + 1
+        val back = requireNotNull(seq3SourceDeleteNextToMarkers(before, markerStart, statement, puml, forward = false))
+        assertEquals(before, back.text)
+        assertEquals(statement, back.selectionStart)
+        assertEquals(statement, back.selectionEnd)
+        val forward = requireNotNull(seq3SourceDeleteNextToMarkers(before, markerStart, statement, puml, forward = true))
+        assertEquals(before.removeRange(statement, statement + 1), forward.text)
+
+        val withBlank = "alt ok\n$indentedMarker\n\n    B -> A: hi"
+        val blankStart = markerStart + indentedMarker.length + 1
+        val removed = requireNotNull(seq3SourceDeleteNextToMarkers(withBlank, markerStart, blankStart, puml, forward = false))
+        assertEquals(before, removed.text, "the blank line below the run goes")
+
+        val trailing = "alt ok\n$marker\n"
+        val edit = requireNotNull(seq3SourceDeleteNextToMarkers(trailing, "alt ok".length, trailing.length, puml, forward = false))
+        assertEquals("alt o\n$marker\n", edit.text, "a trailing run is shown at the end of the line above")
+    }
+
+    @Test
+    fun aRealSelectionOverMarkersAndTextDeletesAsSelected() {
+        val before = "alt ok\n$indentedMarker\n    B -> A: hi"
+        val markerStart = before.indexOf(indentedMarker)
+        assertNull(seq3SourceDeleteNextToMarkers(before, 2, markerStart + 5, puml, forward = false))
+        assertNull(seq3SourceDeleteNextToMarkers(before, markerStart, before.length, puml, forward = true))
+    }
+
+    @Test
+    fun aTrailingMarkerRunIsShownAsTheEndOfTheLineAboveIt() {
+        val before = "alt ok\n$marker\n"
+        val markerStart = before.indexOf(marker)
+        val back = requireNotNull(deleteBack(before, markerStart))
+        assertEquals("alt o\n$marker\n", back.text, "Backspace deletes the visible character before the run")
+        assertEquals("alt o".length, back.selectionStart)
+        val forward = requireNotNull(deleteForward(before, markerStart))
+        assertEquals(before, forward.text, "nothing is shown after the run")
+        val atEnd = requireNotNull(deleteBack(before, before.length))
+        assertEquals("alt o\n$marker\n", atEnd.text, "the caret after a trailing marker is shown at the end of the line above")
+    }
+
     // ── Typing runs in the editor history ──────────────────────────────────────────────────────
 
     private fun type(text: String, char: Char, run: Seq3SourceTypingRun?, now: Long, at: Int = text.length): Pair<String, Seq3SourceHistoryDecision> {
