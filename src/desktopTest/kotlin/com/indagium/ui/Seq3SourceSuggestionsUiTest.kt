@@ -62,7 +62,7 @@ class Seq3SourceSuggestionsUiTest {
         editor.performKeyInput { pressKey(Key.Enter) }
         rule.waitForIdle()
 
-        assertEquals("@startuml\npar condition\n    \nend", view.sourceDraft)
+        assertEquals("@startuml\npar condition\n    From -> To: message label\nend", view.sourceDraft)
         assertTrue(view.sourceDraftDirty)
         assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
         assertTrue(view.textFieldFocused)

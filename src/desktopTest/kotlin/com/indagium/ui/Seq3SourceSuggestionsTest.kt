@@ -51,7 +51,8 @@ class Seq3SourceSuggestionsTest {
         val suggestion = requireNotNull(seq3SourceSuggestions(Seq3Dialect.PLANTUML, trigger.query).firstOrNull { it.keyword == "par" })
         val result = insertSeq3SourceSuggestion(source, trigger, suggestion)
 
-        assertEquals("@startuml\npar condition\n    \nend\n@enduml", result.text)
-        assertEquals(source.indexOf("/par") + "par condition\n    ".length, result.selection.start)
+        assertEquals("@startuml\npar condition\n    From -> To: message label\nend\n@enduml", result.text)
+        assertEquals("condition", result.text.substring(result.selection.start, result.selection.end))
+        assertEquals(source.indexOf("/par") + "par ".length, result.selection.start)
     }
 }

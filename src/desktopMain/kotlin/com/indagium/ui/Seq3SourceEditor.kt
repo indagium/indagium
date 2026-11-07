@@ -80,7 +80,10 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.delay
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3FragmentKind
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3SourceImportResult
+import com.indagium.diagram3.parseSeq3SourceArrowEndpoints
+import com.indagium.diagram3.parseSeq3SourceParticipant
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import kotlin.math.roundToInt
@@ -291,7 +294,7 @@ internal fun Seq3SourceEditorPane(
         dismissedSuggestionStart = null
     }
     val sourceSuggestions = suggestionTrigger?.let {
-        seq3SourceSuggestions(view.sourceEditorDialect, it.query)
+        seq3SourceSuggestions(view.sourceEditorDialect, it.query, participantChoices.map { choice -> choice.alias })
     }.orEmpty()
     LaunchedEffect(suggestionTrigger?.query, view.sourceEditorDialect) {
         selectedSuggestionIndex = 0
@@ -322,7 +325,10 @@ internal fun Seq3SourceEditorPane(
     fun insertSuggestion(index: Int) {
         val trigger = suggestionTrigger ?: return
         val suggestion = sourceSuggestions.getOrNull(index) ?: return
-        setEditorValue(insertSeq3SourceSuggestion(sourceText, trigger, suggestion, view.sourceEditorDialect), true)
+        val (inserted, fields) = insertSeq3SourceSuggestionWithFields(sourceText, trigger, suggestion, view.sourceEditorDialect)
+        snippetFields = fields
+        endpointMenu = null
+        setEditorValue(inserted, true)
         dismissedSuggestionStart = null
         selectedSuggestionIndex = 0
         runCatching { requester.requestFocus() }
@@ -798,6 +804,8 @@ internal data class Seq3SourceSuggestion(
     val syntax: String,
     val insertion: String,
     val cursorOffset: Int = insertion.length,
+    /** Tab-able fields inside [insertion] (offsets in the raw insertion); the first is selected. */
+    val fields: List<SourceSnippetField> = emptyList(),
 )
 
 internal data class Seq3SourceSuggestionTrigger(
@@ -827,11 +835,29 @@ internal fun seq3SourceSuggestionTrigger(source: String, selection: TextRange): 
     return Seq3SourceSuggestionTrigger(queryStart, end, query, "")
 }
 
-internal fun seq3SourceSuggestions(dialect: Seq3Dialect, query: String): List<Seq3SourceSuggestion> =
-    sourceSuggestionEntries(dialect)
+internal fun seq3SourceSuggestions(
+    dialect: Seq3Dialect,
+    query: String,
+    participantAliases: List<String> = emptyList(),
+): List<Seq3SourceSuggestion> =
+    sourceSuggestionEntries(dialect, participantAliases)
         .filter { it.keyword.startsWith(query, ignoreCase = true) }
 
-private fun sourceSuggestionEntries(dialect: Seq3Dialect): List<Seq3SourceSuggestion> {
+/** A guided block: its opener, one starter message so the block is valid at once, and `end`.  The
+ *  starter message uses the first two declared participants when they exist. */
+internal fun seq3SourceBlockSnippet(
+    keyword: String,
+    dialect: Seq3Dialect,
+    participantAliases: List<String>,
+): Pair<String, List<SourceSnippetField>> {
+    val from = participantAliases.getOrNull(0) ?: "From"
+    val to = participantAliases.getOrNull(1) ?: "To"
+    val label = "message label"
+    val snippet = "$keyword condition\n    ${sourceMessageLine(from, to, "Call", dialect, label)}\nend"
+    return snippet to sourceSnippetFields(snippet, "condition" to false, from to true, to to true, label to false)
+}
+
+private fun sourceSuggestionEntries(dialect: Seq3Dialect, participantAliases: List<String>): List<Seq3SourceSuggestion> {
     val note = if (dialect == Seq3Dialect.MERMAID) "Note over A: note text" else "note over A: note text"
     val participant = if (dialect == Seq3Dialect.MERMAID) "participant Alias as Name" else "participant \"Name\" as Alias"
     val actor = if (dialect == Seq3Dialect.MERMAID) "actor Alias as Name" else "actor \"Name\" as Alias"
@@ -854,8 +880,8 @@ private fun sourceSuggestionEntries(dialect: Seq3Dialect): List<Seq3SourceSugges
         Seq3SourceSuggestion("destroy", "destroy Alias (after its message)", "destroy "),
     )
     listOf("loop", "alt", "opt", "par", "critical", "break", "group").forEach { keyword ->
-        val insertion = "$keyword condition\n    \nend"
-        entries += Seq3SourceSuggestion(keyword, "$keyword condition … end", insertion, "$keyword condition\n    ".length)
+        val (insertion, fields) = seq3SourceBlockSnippet(keyword, dialect, participantAliases)
+        entries += Seq3SourceSuggestion(keyword, "$keyword condition … end", insertion, "$keyword condition\n    ".length, fields)
     }
     entries += Seq3SourceSuggestion("end", "end current fragment", "end")
     return entries
@@ -866,7 +892,15 @@ internal fun insertSeq3SourceSuggestion(
     trigger: Seq3SourceSuggestionTrigger,
     suggestion: Seq3SourceSuggestion,
     dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
-): TextFieldValue {
+): TextFieldValue = insertSeq3SourceSuggestionWithFields(source, trigger, suggestion, dialect).first
+
+/** The inserted value (first field selected) and the suggestion's fields mapped into the new text. */
+internal fun insertSeq3SourceSuggestionWithFields(
+    source: String,
+    trigger: Seq3SourceSuggestionTrigger,
+    suggestion: Seq3SourceSuggestion,
+    dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
+): Pair<TextFieldValue, List<SourceSnippetField>> {
     val start = trigger.start.coerceIn(0, source.length)
     val end = trigger.end.coerceIn(start, source.length)
     val isTitle = suggestion.keyword.equals("title", ignoreCase = true)
@@ -878,9 +912,15 @@ internal fun insertSeq3SourceSuggestion(
         val removalStart = if (source.substring(lineStart, start).isBlank()) lineStart else start
         val withoutTrigger = source.removeRange(removalStart, end)
         val insertionAt = seq3SourceHeaderInsertionOffset(withoutTrigger, dialect, titleOnly = isTitle)
-        insertSeq3SourceAt(withoutTrigger, insertionAt, insertionAt, suggestion.insertion, dialect, suggestion.cursorOffset)
+        insertSeq3SourceAtMapped(withoutTrigger, insertionAt, insertionAt, suggestion.insertion, dialect, suggestion.cursorOffset)
+            .value to emptyList()
     } else {
-        insertSeq3SourceAt(source, start, end, suggestion.insertion, dialect, suggestion.cursorOffset)
+        val inserted = insertSeq3SourceAtMapped(source, start, end, suggestion.insertion, dialect, suggestion.cursorOffset)
+        val fields = suggestion.fields.map {
+            it.copy(start = inserted.mapSnippetOffset(it.start), end = inserted.mapSnippetOffset(it.end))
+        }
+        val first = fields.firstOrNull()
+        (if (first == null) inserted.value else inserted.value.copy(selection = TextRange(first.start, first.end))) to fields
     }
 }
 
@@ -1097,8 +1137,9 @@ private fun Seq3SourceActionForms(
         }, variant = ButtonVariant.Secondary, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"))
         val blocks = listOf("loop", "alt", "opt", "par", "critical", "break", "group")
         SourceCompactMenu("+ Block ▾", "seq3-source-fragment-menu", blocks, onSelect = {
-            val snippet = "${blocks[it]} condition\n    \nend"
-            insertSnippet(snippet, sourceSnippetFields(snippet, "condition" to false), false)
+            val aliases = sourceParticipants(editorState.text.toString(), dialect).map { participant -> participant.alias }
+            val (snippet, fields) = seq3SourceBlockSnippet(blocks[it], dialect, aliases)
+            insertSnippet(snippet, fields, false)
         }, onClose = reclaimFocus)
         SourceCompactMenu("+ Activation ▾", "seq3-source-activation-menu", listOf("Activate", "Deactivate"), onSelect = {
             val snippet = "${if (it == 0) "activate" else "deactivate"} Participant"
@@ -1136,9 +1177,7 @@ private fun sourceUniqueAlias(base: String, participants: List<Seq3SourcePartici
 }
 
 private fun sourceContainsMessage(source: String, dialect: Seq3Dialect): Boolean = source.lineSequence().any { line ->
-    val text = line.trim()
-    if (dialect == Seq3Dialect.MERMAID) Regex("^\\S+(?:-->>|->>|-\\))\\S+:.*$").matches(text)
-    else Regex("^\\S+\\s+(?:-->|->>|->)\\s+\\S+:.*$").matches(text)
+    parseSeq3SourceArrowEndpoints(line, dialect)?.second != null
 }
 
 private fun sourceEscape(value: String, dialect: Seq3Dialect): String {
@@ -1194,17 +1233,9 @@ private fun isDefaultSeq3Title(title: String): Boolean =
 private fun sourceParticipants(source: String, dialect: Seq3Dialect): List<Seq3SourceParticipant> {
     val result = linkedMapOf<String, Seq3SourceParticipant>()
     source.lineSequence().forEach { raw ->
-        val text = raw.trim()
-        val match = if (dialect == Seq3Dialect.MERMAID) {
-            Regex("^(participant|actor)\\s+(\\S+)\\s+as\\s+(.+)$").matchEntire(text)?.let {
-                Seq3SourceParticipant(it.groupValues[2], it.groupValues[3], it.groupValues[1] == "actor")
-            }
-        } else {
-            Regex("^(participant|actor)\\s+\"(.*)\"\\s+as\\s+(\\S+)$").matchEntire(text)?.let {
-                Seq3SourceParticipant(it.groupValues[3], it.groupValues[2], it.groupValues[1] == "actor")
-            }
+        parseSeq3SourceParticipant(raw, dialect)?.let { (alias, name, kind) ->
+            result[alias] = Seq3SourceParticipant(alias, name, kind == Seq3LifelineKind.ACTOR)
         }
-        match?.let { result[it.alias] = it }
     }
     return result.values.toList()
 }
@@ -1231,11 +1262,7 @@ internal fun seq3SourceNoteScope(
     source.lineSequence().forEach { line ->
         if (offset >= cursor) return@forEach
         val trimmed = line.trim()
-        val arrow = if (dialect == Seq3Dialect.MERMAID) {
-            Regex("^(\\S+?)(?:-->>|->>|-\\))(\\S+):").find(trimmed)?.let { it.groupValues[1] to it.groupValues[2] }
-        } else {
-            Regex("^(\\S+)\\s+(?:-->|->>|->)\\s+(\\S+):").find(trimmed)?.let { it.groupValues[1] to it.groupValues[2] }
-        }
+        val arrow = parseSeq3SourceArrowEndpoints(trimmed, dialect)?.let { (from, to) -> to?.let { from to it } }
         if (arrow != null) endpoints = arrow
         offset += line.length + 1
     }

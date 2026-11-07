@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextRange
 import com.indagium.diagram3.Seq3Dialect
+import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
@@ -378,6 +379,21 @@ class Seq3SourceGuidedActionsUiTest {
 
         assertMenuInserts(sessionId, "seq3-source-message-menu", "Call", "From -> To: message label")
         assertMenuInserts(sessionId, "seq3-source-fragment-menu", "loop", "loop condition")
+    }
+
+    @Test
+    fun theBlockMenuInsertsABlockThatImports() {
+        val sessionId = startWorkspace("source-block-valid")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-fragment-menu").performClick()
+        rule.onNodeWithText("alt", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        assertTrue(view.sourceDraft.contains("alt condition\n    From -> To: message label\nend"), view.sourceDraft)
+        val declared = view.sourceDraft.replace("@startuml", "@startuml\nparticipant From\nparticipant To")
+        val imported = com.indagium.diagram3.importSeq3Source(declared, Seq3Dialect.PLANTUML, com.indagium.diagram3.Seq3Document())
+        assertTrue(imported is Seq3SourceImportResult.Success, imported.toString())
     }
 
     private fun buildDiagramWithSnippets(dialect: Seq3Dialect) {

@@ -235,10 +235,13 @@ class Seq3SourceIndentTest {
         val trigger = requireNotNull(seq3SourceSuggestionTrigger(source, TextRange(source.indexOf("al") + 2)))
         val inserted = insertSeq3SourceSuggestion(source, trigger, seq3SourceSuggestions(puml, "alt").first(), puml)
         assertEquals(
-            lines("@startuml", "loop outer", "    A -> B: x", "    alt condition", "        ", "    end", "end", "@enduml"),
+            lines(
+                "@startuml", "loop outer", "    A -> B: x", "    alt condition", "        From -> To: message label",
+                "    end", "end", "@enduml",
+            ),
             inserted.text,
         )
-        assertEquals(inserted.text.indexOf("\n    end"), inserted.selection.start, "caret sits at the end of the indented body line")
+        assertEquals("condition", inserted.text.substring(inserted.selection.start, inserted.selection.end))
     }
 
     @Test

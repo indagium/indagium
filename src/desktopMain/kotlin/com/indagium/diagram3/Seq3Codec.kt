@@ -460,6 +460,8 @@ private fun withinSeq3DocumentBounds(
  * Unlike decoding, this reports the first user-actionable reason so source import can attach a
  * line diagnostic without serializing and reparsing the candidate.
  */
+internal const val SEQ3_HEADER_SIZE_VIOLATION = "Document metadata exceeds the supported header size."
+
 internal fun seq3DocumentBoundsViolation(document: Seq3Document): String? = when {
     document.lifelines.size > MAX_SEQ3_LIFELINES -> "Document has too many lifelines."
     document.messages.size > MAX_SEQ3_MESSAGES -> "Document has too many messages."
@@ -482,7 +484,7 @@ internal fun seq3DocumentBoundsViolation(document: Seq3Document): String? = when
     seq3DocumentStrings(document).any { it.length > MAX_SEQ3_STRING_CHARS } ->
         "Document contains a string exceeding the supported size."
     Json.encode(documentToMap(document)).length > MAX_SEQ3_HEADER_CHARS ->
-        "Document metadata exceeds the supported header size."
+        SEQ3_HEADER_SIZE_VIOLATION
     else -> null
 }
 

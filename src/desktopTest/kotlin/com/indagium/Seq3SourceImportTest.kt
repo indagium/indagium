@@ -192,7 +192,7 @@ class Seq3SourceImportTest {
                 Seq3Document(),
             ),
         )
-        assertTrue(emptyFragment.diagnostics.any { it.message.contains("at least one message") })
+        assertTrue(emptyFragment.diagnostics.any { it.line == 4 && it.message == "Add a message inside loop." })
     }
 
     @Test fun plantUmlRefRoundTripPreservesItsExistingSpan() {

@@ -1099,12 +1099,26 @@ class Seq3Session(
                 movedOutFromMessageId = message.movedOutFromMessageId?.let(::messageId),
             )
         }
+        val baselineOperandIds = baseline.fragments.flatMapTo(hashSetOf()) { fragment -> fragment.elseOperands.map { it.id } }
         val stableFragments = imported.fragments.map { fragment ->
+            val stableId = fragmentIds[fragment.id] ?: fragment.id
+            // Typed dividers get a fresh importer id on every parse.  Hand them the id of the same
+            // position in the previous applied fragment so it does not churn per keystroke.
+            val previousNewOperands = previous.fragments.firstOrNull { it.id == stableId }
+                ?.elseOperands.orEmpty().filter { it.id !in baselineOperandIds }
+            var newOperandIndex = 0
             fragment.copy(
-                id = fragmentIds[fragment.id] ?: fragment.id,
+                id = stableId,
                 messageIds = fragment.messageIds.map(::messageId),
                 occurrenceRefs = fragment.occurrenceRefs.map { it.copy(messageId = messageId(it.messageId)) },
-                elseOperands = fragment.elseOperands.map { operand -> operand.copy(startsAtMessageId = messageId(operand.startsAtMessageId)) },
+                elseOperands = fragment.elseOperands.map { operand ->
+                    val stableOperandId = if (operand.id in baselineOperandIds) {
+                        operand.id
+                    } else {
+                        previousNewOperands.getOrNull(newOperandIndex++)?.id ?: operand.id
+                    }
+                    operand.copy(id = stableOperandId, startsAtMessageId = messageId(operand.startsAtMessageId))
+                },
             )
         }
         return normalized.copy(

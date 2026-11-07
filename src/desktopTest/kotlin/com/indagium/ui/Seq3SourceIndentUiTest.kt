@@ -63,7 +63,10 @@ class Seq3SourceIndentUiTest {
         rule.onNodeWithTag("seq3-source-fragment-menu").performClick()
         rule.onNodeWithText("alt", useUnmergedTree = true).performClick()
         rule.waitForIdle()
-        assertEquals("@startuml\nloop x\n    alt condition\n        \n    end\n    A -> B: hi\nend\n@enduml", text())
+        assertEquals(
+            "@startuml\nloop x\n    alt condition\n        From -> To: message label\n    end\n    A -> B: hi\nend\n@enduml",
+            text(),
+        )
         assertEquals("condition", selectedText())
         undo()
         assertEquals(source, text())
@@ -79,7 +82,7 @@ class Seq3SourceIndentUiTest {
         rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertExists()
         editor.performKeyInput { pressKey(Key.Enter) }
         rule.waitForIdle()
-        assertEquals("@startuml\nloop x\n    alt condition\n        \n    end", text())
+        assertEquals("@startuml\nloop x\n    alt condition\n        From -> To: message label\n    end", text())
     }
 
     private fun enterThenEnd(dialect: Seq3Dialect) {
