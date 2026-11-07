@@ -73,6 +73,12 @@ When a full run goes in the background, check on it rather than just waiting for
   test JVM.
 - **Report** the stuck test and the cycle to the user. Don't silently rerun and hope.
 
+Past hang: the test JVM ran on Gradle's default 512 MB heap. An `OutOfMemoryError` that landed in
+kotlinx.coroutines' `DefaultExecutor` thread killed it, after which no `delay`/`withTimeout` fired,
+and a test sat parked forever. In the dump, the sign is that no `kotlinx.coroutines.DefaultExecutor`
+thread exists while a coroutine waits on a timeout. `desktopTest` now gets `maxHeapSize = "2g"`; any
+`OutOfMemoryError` in the log is a real problem, not flakiness.
+
 Past hang: a JavaCPP class-init deadlock. The FFmpeg load thread held the `Loader` lock while
 another thread was inside `Pointer.<clinit>` waiting for that lock. It is fixed by
 `video/FfmpegNatives.kt`: every production `org.bytedeco` entry point calls `awaitFfmpegNatives()`
