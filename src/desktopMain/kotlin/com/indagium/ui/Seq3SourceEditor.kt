@@ -286,7 +286,11 @@ internal fun Seq3SourceEditorPane(
     ) {
         if (!view.sourceLiveEnabled || !view.sourceDraftInitialized || suggestionsVisible) return@LaunchedEffect
         delay(400)
-        if (editorState.text.toString() == sourceText && view.sourceLiveEnabled && !suggestionsVisible) {
+        // sourceDraft moves on first when New diagram or a reload replaces the source, before this
+        // effect is cancelled; applying sourceText then would bring the replaced text back.
+        if (editorState.text.toString() == sourceText && view.sourceDraft == sourceText &&
+            view.sourceLiveEnabled && !suggestionsVisible
+        ) {
             state.seq3Sessions.applyLiveSourceDraft(session.id, sourceText, view.sourceEditorDialect)
         }
     }
@@ -308,7 +312,10 @@ internal fun Seq3SourceEditorPane(
             session = session,
             view = view,
             editorState = editorState,
-            insertSnippet = ::insertSnippet,
+            // A lambda, not ::insertSnippet: a local function reference's equals() ignores what it
+            // captures, so Compose would treat a reloaded editor's reference as unchanged and keep
+            // the menu callbacks writing into the previous generation's editorState.
+            insertSnippet = { snippet, fields, header -> insertSnippet(snippet, fields, header) },
             reclaimFocus = { runCatching { requester.requestFocus() } },
             showSourceMarkers = showSourceMarkers,
             onToggleSourceMarkers = { showSourceMarkers = !showSourceMarkers },
@@ -1069,7 +1076,7 @@ private fun Seq3SourceActionForms(
             AppText("Starting a new diagram replaces the current source and diagram structure. Linked log evidence will be reviewed separately if it is affected.", color = tc().ts, fontSize = 11.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 AppButton("Keep editing", onClick = { confirmNewDiagram = false; reclaimFocus() }, variant = ButtonVariant.Ghost)
-                AppButton("Replace diagram", onClick = ::applyNewDiagram, variant = ButtonVariant.Primary,
+                AppButton("Replace diagram", onClick = { applyNewDiagram() }, variant = ButtonVariant.Primary,
                     modifier = Modifier.testTag("seq3-source-confirm-new-diagram"))
             }
         }

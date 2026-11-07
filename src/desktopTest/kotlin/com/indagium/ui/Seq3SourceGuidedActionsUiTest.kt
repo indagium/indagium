@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -332,6 +334,52 @@ class Seq3SourceGuidedActionsUiTest {
         assertEquals(source, view.sourceDraft)
     }
 
+    @Test
+    fun guidedMenusReachTheVisibleEditorAfterNewDiagramReloadsIt() {
+        val sessionId = startWorkspace("source-menus-new-diagram")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-insert-participant").performClick()
+        rule.waitForIdle()
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val generation = view.sourceEditorGeneration
+
+        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        rule.onNodeWithTag("seq3-source-confirm-new-diagram").performClick()
+        rule.waitForIdle()
+
+        assertTrue(view.sourceEditorGeneration > generation, "New diagram should reload the editor")
+        assertFalse(view.sourceDraft.contains("Alias"), "New diagram should replace the earlier source: ${view.sourceDraft}")
+        assertMenuInserts(sessionId, "seq3-source-fragment-menu", "loop", "loop condition")
+        assertMenuInserts(sessionId, "seq3-source-message-menu", "Call", "From -> To: message label")
+        assertMenuInserts(sessionId, "seq3-source-activation-menu", "Activate", "activate Participant")
+    }
+
+    @Test
+    fun guidedMenusReachTheVisibleEditorAfterADialectSwitch() {
+        val sessionId = startWorkspace("source-menus-dialect")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-dialect").performClick()
+        rule.onAllNodesWithText("Mermaid", useUnmergedTree = true)[1].performClick()
+        rule.waitForIdle()
+
+        assertMenuInserts(sessionId, "seq3-source-fragment-menu", "loop", "loop condition")
+        assertMenuInserts(sessionId, "seq3-source-activation-menu", "Activate", "activate Participant")
+    }
+
+    @Test
+    fun guidedMenusReachTheVisibleEditorWhenSourceIsVisibleAtFirstComposition() {
+        val sessionId = startWorkspace("source-menus-restored-tile")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.diagramHiddenTiles = listOf(DiagramWorkspaceSectionId.MESSAGES, DiagramWorkspaceSectionId.LIFELINES,
+            DiagramWorkspaceSectionId.ARTIFACTS)
+        showWorkspace(sessionId)
+
+        assertMenuInserts(sessionId, "seq3-source-message-menu", "Call", "From -> To: message label")
+        assertMenuInserts(sessionId, "seq3-source-fragment-menu", "loop", "loop condition")
+    }
+
     private fun buildDiagramWithSnippets(dialect: Seq3Dialect) {
         val sessionId = startWorkspace("source-guided-${dialect.name.lowercase()}")
         showWorkspace(sessionId)
@@ -363,6 +411,17 @@ class Seq3SourceGuidedActionsUiTest {
         assertTrue(view.sourceDiagnostics.isEmpty(), "generated source should import: ${view.sourceDiagnostics}")
         assertEquals(listOf("Alpha", "Beta"), currentSession(sessionId).document.lifelines.map { it.name })
         assertEquals(listOf("Request"), currentSession(sessionId).document.messages.map { it.labelTemplate })
+    }
+
+    private fun assertMenuInserts(sessionId: String, menuTag: String, option: String, expected: String) {
+        rule.onNodeWithTag(menuTag).performClick()
+        rule.onNodeWithText(option, useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        val visible = rule.onNodeWithTag("seq3-source-editor").fetchSemanticsNode().config
+            .getOrNull(SemanticsProperties.EditableText)?.text.orEmpty()
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        assertTrue(visible.contains(expected), "$option should reach the visible editor: $visible")
+        assertEquals(visible, view.sourceDraft, "the draft should match the visible editor after $option")
     }
 
     private fun toggleMode(tag: String) {
