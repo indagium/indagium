@@ -1135,6 +1135,15 @@ tasks.withType<Test>().configureEach {
     }
 }
 
+// Gradle gives a test JVM a 512 MB heap unless told otherwise, and the whole desktopTest suite
+// (about 8,000 tests) runs in one JVM. At that size the "oversized" TestLibraryStoreTest cases
+// failed with OutOfMemoryError, and an OOM that landed in kotlinx.coroutines' DefaultExecutor
+// thread killed it: no delay or timeout fired again, so the run hung at 0% CPU in whichever test
+// was waiting (TestLaneSchedulingTest, DeviceStateTest). The perf blocks below raise it further.
+tasks.withType<Test>().configureEach {
+    maxHeapSize = "2g"
+}
+
 val perfFixture: String? = System.getProperty("indagium.perf.file")
 tasks.withType<Test>().configureEach {
     if (perfFixture != null) {
