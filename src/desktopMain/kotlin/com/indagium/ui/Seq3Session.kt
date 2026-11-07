@@ -10,6 +10,7 @@ import com.indagium.diagram3.Seq3AttachmentMetadata
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.SEQ3_SOURCE_EDIT_LABEL
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
@@ -282,6 +283,11 @@ class Seq3Session(
      *  equality would defeat the dedupe almost every time. */
     private val lastReportedRejectionKey = ConcurrentHashMap<String, String>()
 
+    /** When the last live source edit of a typing burst was applied, per session, so the next one
+     *  can join its diagram undo entry ([seq3SourceUndoMerges]). Read and written under
+     *  `appState.stateLock`; any other command or an undo ends the burst. */
+    private val liveSourceBurstAtMs = HashMap<String, Long>()
+
     internal fun viewState(id: String): Seq3ViewState? {
         if (session(id) == null) return null
         return workspaceViewStates.computeIfAbsent(id) { Seq3ViewState() }
@@ -493,6 +499,7 @@ class Seq3Session(
         draftSaveGenerations.remove(id)
         generations.remove(id)
         workspaceViewStates.remove(id)
+        synchronized(appState.stateLock) { liveSourceBurstAtMs.remove(id) }
         generatedBaselines.remove(id)
         lastReportedRejectionKey.remove(id)
         synchronized(appState.stateLock) {
@@ -743,8 +750,18 @@ class Seq3Session(
         return true
     }
 
-    /** Explicitly discards the draft and reloads the latest diagram source. */
+    /** Explicitly discards the draft and reloads the latest diagram source. An open editor takes
+     *  the text as one undoable edit, so Reload and Discard can be undone with a single Ctrl+Z. */
     fun reloadSourceDraft(id: String): Boolean {
+        val current = session(id) ?: return false
+        val view = viewState(id) ?: return false
+        refreshSourceDraft(view, current.document, force = true, viaEditor = true)
+        return true
+    }
+
+    /** Replaces the draft with the latest diagram source and restarts the editor, dropping its
+     *  history: used after Apply and New diagram, where the old text is no longer meaningful. */
+    private fun resetSourceDraft(id: String): Boolean {
         val current = session(id) ?: return false
         val view = viewState(id) ?: return false
         refreshSourceDraft(view, current.document, force = true)
@@ -769,12 +786,27 @@ class Seq3Session(
         }
     }
 
-    private fun refreshSourceDraft(view: Seq3ViewState, document: Seq3Document, force: Boolean = false) {
+    private fun refreshSourceDraft(
+        view: Seq3ViewState,
+        document: Seq3Document,
+        force: Boolean = false,
+        viaEditor: Boolean = false,
+    ) {
         val canonical = document.toEditorSource(view.sourceEditorDialect)
         if (force || !view.sourceDraftInitialized || view.sourceDraftCanonical != canonical) {
+            // An initialised editor takes a follow-the-diagram refresh (and an explicit reload, see
+            // [viaEditor]) as one undoable edit through the external-text channel, keeping its
+            // history and caret. Anything else restarts the editor with a new generation.
+            val inEditor = view.sourceDraftInitialized && (!force || viaEditor)
+            val textChanges = view.sourceDraft != canonical
             view.sourceDraft = canonical
             view.sourceDraftCanonical = canonical
-            view.sourceEditorGeneration++
+            if (!inEditor) {
+                view.sourceEditorGeneration++
+            } else if (textChanges) {
+                view.sourceExternalText = canonical
+                view.sourceExternalRevision++
+            }
         }
         view.sourceDraftInitialized = true
         view.sourceDraftDirty = false
@@ -792,7 +824,15 @@ class Seq3Session(
         val currentCanonical = document.toEditorSource(view.sourceEditorDialect)
         val hasDraft = view.sourceDraft != view.sourceDraftCanonical
         view.sourceDraftDirty = hasDraft
-        if (hasDraft) {
+        // The draft is exactly what the diagram last accepted (live import sets lastApplied to the
+        // text as typed, which differs from the canonical form only by identity markers), with
+        // nothing waiting on the user: there is no pending edit to protect, so a change to the
+        // diagram's source form is adopted rather than locking the editor.
+        val noPendingEdits = view.sourceDraft == view.sourceLiveLastAppliedText &&
+            view.sourceDiagnostics.isEmpty() && !view.sourceEvidenceLossPending
+        if (hasDraft && noPendingEdits && currentCanonical != view.sourceDraftCanonical) {
+            refreshSourceDraft(view, document)
+        } else if (hasDraft) {
             view.sourceDraftStale = currentCanonical != view.sourceDraftCanonical
             if (view.sourceDraftStale) view.sourceEvidenceLossPending = false
         } else {
@@ -864,7 +904,9 @@ class Seq3Session(
                 imported = success.document,
             ),
         )
-        if (stableDocument != latest.document && !applyCommand(id, Seq3Command.ReplaceDocument(stableDocument))) {
+        if (stableDocument != latest.document &&
+            !applyCommand(id, Seq3Command.ReplaceDocument(stableDocument, SEQ3_SOURCE_EDIT_LABEL), mergeBurst = true)
+        ) {
             return Seq3SourceImportResult.Failure(emptyList())
         }
         val appliedDocument = session(id)?.document ?: stableDocument
@@ -920,12 +962,14 @@ class Seq3Session(
             return result
         }
 
-        if (result.document != current.document && !applyCommand(id, Seq3Command.ReplaceDocument(result.document))) {
+        if (result.document != current.document &&
+            !applyCommand(id, Seq3Command.ReplaceDocument(result.document, SEQ3_SOURCE_EDIT_LABEL))
+        ) {
             return Seq3SourceImportResult.Failure(emptyList())
         }
         view.sourceEditorDialect = dialect
         seq3ClearSelection(view, clearFocus = true)
-        reloadSourceDraft(id)
+        resetSourceDraft(id)
         return result.copy(canonicalSource = result.document.toEditorSource(dialect).trimEnd('\n'))
     }
 
@@ -1253,8 +1297,10 @@ class Seq3Session(
     /** Applies [command] and, only if it actually changed anything, pushes the resulting
      *  [Seq3UndoEntry] and marks the session dirty. Phases 4-5's every editing verb (set target,
      *  merge, group, hide, regenerate-apply, …) must route through this, never mutate
-     *  [Seq3WorkspaceSession.document] directly, or ⌘Z silently stops covering that verb. */
-    fun applyCommand(id: String, command: Seq3Command): Boolean {
+     *  [Seq3WorkspaceSession.document] directly, or ⌘Z silently stops covering that verb.
+     *  [mergeBurst] is set only by the live source editor: within one typing burst its edits
+     *  share the first one's undo entry. */
+    fun applyCommand(id: String, command: Seq3Command, mergeBurst: Boolean = false): Boolean {
         val document = synchronized(appState.stateLock) {
             val current = sessions.firstOrNull { it.id == id } ?: return@synchronized null
             val result = applySeq3Command(current.document, command)
@@ -1265,10 +1311,13 @@ class Seq3Session(
             // present. Once authoring normalization is applied, that is a true no-op and must not
             // create a misleading undo entry.
             if (updatedDocument == current.document) return@synchronized null
+            val now = clock()
+            val merges = mergeBurst && seq3SourceUndoMerges(current.undoStack.lastOrNull()?.label, liveSourceBurstAtMs[id], now)
+            if (mergeBurst) liveSourceBurstAtMs[id] = now else liveSourceBurstAtMs.remove(id)
             sessions = sessions.map {
                 if (it.id == id) it.copy(
                     document = updatedDocument,
-                    undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH),
+                    undoStack = if (merges) it.undoStack else (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH),
                 ) else it
             }
             updatedDocument
@@ -1315,7 +1364,7 @@ class Seq3Session(
             ),
         ).let { stable -> stable.copy(canonicalSource = stable.document.toEditorSource(dialect).trimEnd('\n')) }
         if (success.document != current.document) {
-            if (!applyCommand(id, Seq3Command.ReplaceDocument(success.document))) {
+            if (!applyCommand(id, Seq3Command.ReplaceDocument(success.document, SEQ3_SOURCE_EDIT_LABEL))) {
                 return Seq3SourceImportResult.Failure(emptyList())
             }
         }
@@ -1323,7 +1372,7 @@ class Seq3Session(
         // A same-document import is still an explicit reconciliation: canonicalize all matching
         // linked notes/library snapshots now, without manufacturing a no-op ReplaceDocument undo.
         syncLiveLinkedNote(id)
-        reloadSourceDraft(id)
+        resetSourceDraft(id)
         return success
     }
 
@@ -1356,6 +1405,7 @@ class Seq3Session(
         val document = synchronized(appState.stateLock) {
             val current = sessions.firstOrNull { it.id == id } ?: return@synchronized null
             val entry = current.undoStack.lastOrNull() ?: return@synchronized null
+            liveSourceBurstAtMs.remove(id)
             sessions = sessions.map {
                 if (it.id == id) it.copy(document = entry.before, undoStack = it.undoStack.dropLast(1)) else it
             }

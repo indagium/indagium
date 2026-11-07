@@ -9,7 +9,8 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
-import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasSetTextAction
@@ -216,7 +217,7 @@ class Seq3SourceAndQueueInteractionsUiTest {
         assertEquals(draft, view.sourceDraft, "a queue edit preserves the uncommitted source text")
         assertTrue(view.sourceDraftStale)
         rule.onNodeWithTag("seq3-source-stale").assertIsDisplayed()
-        rule.onNodeWithTag("seq3-source-apply").assertIsNotEnabled()
+        rule.onNodeWithTag("seq3-source-apply").assertDoesNotExist()
 
         rule.onNodeWithTag("seq3-source-reload").performClick()
         rule.waitForIdle()
@@ -224,6 +225,86 @@ class Seq3SourceAndQueueInteractionsUiTest {
         assertFalse(view.sourceDraftStale)
         assertFalse(view.sourceDraftDirty)
         assertTrue(view.sourceDraft.contains("Visual insert"))
+    }
+
+    @Test
+    fun typingAfterACanvasEditStillApplies() {
+        val sessionId = startEmptyWorkspace("source-after-canvas")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement("@startuml\nparticipant \"Alpha\" as A\nparticipant \"Beta\" as B\nA -> B: First\n@enduml")
+        rule.waitUntil(5_000) { currentSession(sessionId).document.messages.size == 1 }
+        val generation = view.sourceEditorGeneration
+
+        val ids = currentSession(sessionId).document.lifelines.map { it.id }
+        assertTrue(state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec(ids[0], ids[1], "Canvas"))))
+        rule.waitForIdle()
+
+        assertFalse(view.sourceDraftStale, "a canvas edit does not lock a source with nothing pending")
+        rule.onNodeWithTag("seq3-source-stale").assertDoesNotExist()
+        assertTrue(view.sourceDraft.contains("Canvas"), view.sourceDraft)
+        assertTrue(editorText().contains("Canvas"), "the visible editor follows the diagram: ${editorText()}")
+        assertEquals(generation, view.sourceEditorGeneration, "the editor is not restarted")
+
+        editor.performTextReplacement(view.sourceDraft.replace("Canvas", "Typed"))
+        rule.waitUntil(5_000) { currentSession(sessionId).document.messages.any { it.labelTemplate == "Typed" } }
+        assertFalse(view.sourceDraftStale)
+        rule.onNodeWithTag("seq3-source-stale").assertDoesNotExist()
+    }
+
+    @Test
+    fun reloadIsOneCtrlZAwayFromTheDiscardedDraft() {
+        val sessionId = startEmptyWorkspace("source-reload-undo")
+        seedTwoLifelines(sessionId)
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-live-toggle").performClick()
+        rule.waitForIdle()
+        val draft = view.sourceDraft.replace("@startuml", "@startuml\ntitle Source draft")
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement(draft)
+        rule.waitForIdle()
+        state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec("a", "b", "Visual insert")))
+        rule.waitForIdle()
+        assertTrue(view.sourceDraftStale)
+        val generation = view.sourceEditorGeneration
+
+        rule.onNodeWithTag("seq3-source-reload").performClick()
+        rule.waitForIdle()
+        assertEquals(generation, view.sourceEditorGeneration, "Reload keeps the editor and its history")
+        assertTrue(view.sourceDraft.contains("Visual insert"))
+        assertFalse(view.sourceDraft.contains("Source draft"))
+        assertFalse(view.sourceDraftStale)
+
+        ctrlZ()
+        rule.waitForIdle()
+        assertEquals(draft, view.sourceDraft, "one Ctrl+Z brings the discarded draft back")
+    }
+
+    @Test
+    fun discardingAnInvalidDraftIsOneCtrlZAwayFromIt() {
+        val sessionId = startEmptyWorkspace("source-discard-undo")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-live-toggle").performClick()
+        rule.waitForIdle()
+        val canonical = view.sourceDraft
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement("not PlantUML")
+        rule.onNodeWithTag("seq3-source-apply").performClick()
+        rule.waitForIdle()
+        assertTrue(view.sourceDiagnostics.isNotEmpty())
+
+        rule.onNodeWithTag("seq3-source-reload").performClick()
+        rule.waitForIdle()
+        assertEquals(canonical, view.sourceDraft)
+        assertTrue(view.sourceDiagnostics.isEmpty())
+
+        ctrlZ()
+        rule.waitForIdle()
+        assertEquals("not PlantUML", view.sourceDraft, "one Ctrl+Z brings the discarded draft back")
     }
 
     @Test
@@ -377,6 +458,15 @@ class Seq3SourceAndQueueInteractionsUiTest {
 
         assertEquals("Focused title", currentSession(sessionId).document.title)
         assertEquals(undoCount, currentSession(sessionId).undoStack.size, "text focus keeps both platform chords out of diagram history")
+    }
+
+    private fun editorText(): String =
+        rule.onNodeWithTag("seq3-source-editor").fetchSemanticsNode().config.getOrNull(SemanticsProperties.EditableText)?.text.orEmpty()
+
+    private fun ctrlZ() {
+        rule.onNodeWithTag("seq3-source-editor").performKeyInput {
+            withKeyDown(if (isMacOs) Key.MetaLeft else Key.CtrlLeft) { pressKey(Key.Z) }
+        }
     }
 
     private fun startEmptyWorkspace(tabId: String): String {

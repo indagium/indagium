@@ -1184,6 +1184,13 @@ internal class Seq3ViewState {
     var sourceEvidenceLossPending by mutableStateOf(false)
     var sourceDialectChangePending by mutableStateOf<Seq3Dialect?>(null)
     var sourceEditorGeneration by mutableStateOf(0)
+    /** New source text from outside the editor (a canvas edit, Reload, Discard) for the mounted
+     *  pane to apply as one undoable edit. The revision makes a repeat of the same text a new
+     *  delivery; unlike [sourceEditorGeneration] it keeps the editor, its history and its caret. */
+    var sourceExternalText by mutableStateOf<String?>(null)
+    var sourceExternalRevision by mutableStateOf(0)
+    /** The clock the editor's undo history measures typing pauses with; a test replaces it. */
+    var sourceClockMs: () -> Long = System::currentTimeMillis
     var sourceFocusRequestGeneration by mutableStateOf(0)
 
     /** Fixed identity baseline for source imports until the user reloads or changes dialect. The

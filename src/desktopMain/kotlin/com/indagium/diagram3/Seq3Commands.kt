@@ -55,7 +55,7 @@ sealed class Seq3Command {
      *  point as every other verb; this is simply the pure, already-resolved apply step for "set the
      *  document to X". Unapplied (nothing to undo) when [document] is byte-identical to the current
      *  one — mirrors every other command's "a no-op edit pushes no undo entry" contract. */
-    data class ReplaceDocument(val document: Seq3Document) : Seq3Command()
+    data class ReplaceDocument(val document: Seq3Document, val label: String = "Add message") : Seq3Command()
 
     /** Adds a message with explicit endpoints, timestamp, and queue position as one undoable edit. */
     data class AddCustomMessage(val spec: Seq3CustomMessageSpec) : Seq3Command()
@@ -191,6 +191,9 @@ sealed class Seq3Command {
      *  resulting document style on its next pass. */
     data class SetMessageLabelStyle(val style: Seq3MessageLabelStyle) : Seq3Command()
 }
+
+/** The undo label of an edit made in the diagram source editor. */
+const val SEQ3_SOURCE_EDIT_LABEL = "Edit source"
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
  *  per-command inverse, is what makes "apply is one undo step" trivially true for every command
@@ -379,7 +382,7 @@ private fun dispatchReplaceMessage(document: Seq3Document, command: Seq3Command.
 
 private fun dispatchReplaceDocument(document: Seq3Document, command: Seq3Command.ReplaceDocument): Outcome {
     if (command.document == document) return unapplied(document, "No change")
-    return applied(command.document, "Add message")
+    return applied(command.document, command.label)
 }
 
 private fun dispatchAddCustomMessage(document: Seq3Document, command: Seq3Command.AddCustomMessage): Outcome =

@@ -1977,4 +1977,121 @@ class Seq3SessionTest {
 
         assertEquals(2, state.seq3Sessions.scannedEntryCount(id))
     }
+
+    // ── Source editor: canvas edits and undo bursts ───────────────────────────────────────────
+
+    private fun liveSource(label: String) = listOf(
+        "@startuml",
+        "participant \"Alpha\" as A",
+        "participant \"Beta\" as B",
+        "A -> B: $label",
+        "@enduml",
+    ).joinToString("\n")
+
+    @Test
+    fun aCanvasEditFollowsTheLiveSourceInsteadOfLockingIt() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, liveSource("first"), Seq3Dialect.PLANTUML))
+        val generation = view.sourceEditorGeneration
+        val revision = view.sourceExternalRevision
+        val ids = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.map { it.id }
+
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec(ids[0], ids[1], "Canvas"))))
+
+        assertFalse(view.sourceDraftStale, "nothing is pending, so the draft follows the diagram")
+        assertFalse(view.sourceDraftDirty)
+        assertTrue(view.sourceDraft.contains("Canvas"), view.sourceDraft)
+        assertEquals(generation, view.sourceEditorGeneration, "the editor is not restarted")
+        assertEquals(revision + 1, view.sourceExternalRevision)
+        assertEquals(view.sourceDraft, view.sourceExternalText)
+
+        val typed = view.sourceDraft.replace("Canvas", "Typed")
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, typed, Seq3Dialect.PLANTUML))
+        assertTrue(state.seq3Sessions.sessions.single { it.id == id }.document.messages.any { it.labelTemplate == "Typed" })
+        assertFalse(view.sourceDraftStale)
+    }
+
+    @Test
+    fun aCanvasEditStillLocksTheSourceWhileTypedTextIsPending() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, liveSource("first"), Seq3Dialect.PLANTUML))
+        val ids = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.map { it.id }
+        val pending = liveSource("first") + "\nnot applied yet"
+        state.seq3Sessions.updateSourceDraftText(id, pending)
+
+        state.seq3Sessions.applyCommand(id, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec(ids[0], ids[1], "Canvas")))
+
+        assertTrue(view.sourceDraftStale)
+        assertEquals(pending, view.sourceDraft)
+    }
+
+    @Test
+    fun reloadDeliversTheDiagramSourceThroughTheEditorChannel() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        val generation = view.sourceEditorGeneration
+        val canonical = view.sourceDraft
+        state.seq3Sessions.updateSourceDraftText(id, "$canonical\n' draft")
+        val revision = view.sourceExternalRevision
+
+        assertTrue(state.seq3Sessions.reloadSourceDraft(id))
+
+        assertEquals(canonical, view.sourceDraft)
+        assertEquals(canonical, view.sourceExternalText)
+        assertEquals(revision + 1, view.sourceExternalRevision)
+        assertEquals(generation, view.sourceEditorGeneration, "Reload keeps the editor and its history")
+    }
+
+    @Test
+    fun liveSourceEditsInOneBurstAreOneDiagramUndoStepLabelledEditSource() {
+        val state = state()
+        var now = 1_000_000L
+        val session = Seq3Session(state, clock = { now })
+        val id = session.beginEmpty("log")!!
+        assertTrue(session.prepareSourceDraft(id))
+        val original = session.sessions.single { it.id == id }.document
+
+        listOf("one", "two", "three").forEach { label ->
+            assertIs<Seq3SourceImportResult.Success>(session.applyLiveSourceDraft(id, liveSource(label), Seq3Dialect.PLANTUML))
+            now += 600
+        }
+        val burst = session.sessions.single { it.id == id }
+        assertEquals(1, burst.undoStack.size, "three edits in one burst share one entry")
+        assertEquals("Edit source", burst.undoStack.single().label)
+        assertEquals("three", burst.document.messages.single().labelTemplate)
+
+        assertTrue(session.undo(id))
+        assertEquals(original, session.sessions.single { it.id == id }.document, "one undo reverts the whole burst")
+    }
+
+    @Test
+    fun aPauseOrAnotherCommandEndsTheLiveSourceBurst() {
+        val state = state()
+        var now = 1_000_000L
+        val session = Seq3Session(state, clock = { now })
+        val id = session.beginEmpty("log")!!
+        assertTrue(session.prepareSourceDraft(id))
+        fun stackSize() = session.sessions.single { it.id == id }.undoStack.size
+
+        session.applyLiveSourceDraft(id, liveSource("one"), Seq3Dialect.PLANTUML)
+        now += 1_500
+        session.applyLiveSourceDraft(id, liveSource("two"), Seq3Dialect.PLANTUML)
+        assertEquals(2, stackSize(), "a pause over a second starts a new entry")
+
+        now += 100
+        val ids = session.sessions.single { it.id == id }.document.lifelines.map { it.id }
+        assertTrue(session.applyCommand(id, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec(ids[0], ids[1], "Canvas"))))
+        now += 100
+        session.applyLiveSourceDraft(id, session.viewState(id)!!.sourceDraft.replace("Canvas", "Typed"), Seq3Dialect.PLANTUML)
+        assertEquals(4, stackSize(), "a canvas command in between keeps the next source edit separate")
+        assertEquals(listOf("Edit source", "Edit source", "Add custom message", "Edit source"), session.sessions.single { it.id == id }.undoStack.map { it.label })
+    }
 }

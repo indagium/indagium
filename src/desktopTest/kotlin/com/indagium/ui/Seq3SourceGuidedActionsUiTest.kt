@@ -22,6 +22,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.withKeyDown
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.graphics.toArgb
@@ -311,6 +312,110 @@ class Seq3SourceGuidedActionsUiTest {
         assertEquals("authored call", updated.labelTemplate)
         assertEquals(listOf(evidence), updated.occurrences)
         assertFalse(view.sourceDraftDirty)
+    }
+
+    private fun markedDiagram() = Seq3Document(
+        title = "Evidence source",
+        lifelines = listOf(
+            Seq3Lifeline("alpha", "Alpha", setOf("Alpha"), 0),
+            Seq3Lifeline("beta", "Beta", setOf("Beta"), 1),
+        ),
+        messages = listOf(
+            Seq3Message(
+                id = "stable-message-id",
+                match = Seq3Match("Alpha", "original call"),
+                fromLifelineId = "alpha",
+                toLifelineId = "beta",
+                labelTemplate = "original call",
+                kind = Seq3Kind.CALL,
+                occurrences = listOf(Seq3Occurrence(41, 1_234, "00:00:01.234", 7, 9, 'I', "original call")),
+            ),
+        ),
+    )
+
+    @Test
+    fun backspaceAndDeleteNextToHiddenMarkersRemoveTheBlankLineAndKeepTheMarkers() {
+        val sessionId = startWorkspace("source-backspace-markers")
+        state.seq3Sessions.applyCommand(sessionId, Seq3Command.ReplaceDocument(markedDiagram()))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.waitForIdle()
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        toggleMode("seq3-source-live-toggle")
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        val original = view.sourceDraft
+        val marker = "' indagium-seq3:v1 "
+        val markerStart = original.indexOf(marker)
+        val markerLineEnd = original.indexOf('\n', markerStart) + 1
+        assertTrue(markerStart > 0)
+        val withBlank = original.substring(0, markerLineEnd) + "\n" + original.substring(markerLineEnd)
+
+        editor.performTextReplacement(withBlank)
+        rule.waitForIdle()
+        assertEquals(withBlank, view.sourceDraft)
+        editor.performTextInputSelection(TextRange(markerLineEnd))
+        editor.performKeyInput { pressKey(Key.Backspace) }
+        rule.waitForIdle()
+        assertEquals(original, view.sourceDraft, "Backspace removes the blank line, not the marker above it")
+
+        editor.performTextReplacement(withBlank)
+        rule.waitForIdle()
+        editor.performTextInputSelection(TextRange(markerStart - 1))
+        editor.performKeyInput { pressKey(Key.Delete) }
+        rule.waitForIdle()
+        assertEquals(original, view.sourceDraft, "Delete at the end of the line above removes the blank line below the markers")
+
+        editor.performTextInputSelection(TextRange(markerLineEnd))
+        editor.performKeyInput { pressKey(Key.Backspace) }
+        rule.waitForIdle()
+        assertEquals(original, view.sourceDraft, "with no blank line to remove, Backspace leaves the markers alone")
+    }
+
+    @Test
+    fun joiningAStatementLineOntoThePreviousOneIsOneUndoStep() {
+        val sessionId = startWorkspace("source-join-undo")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        toggleMode("seq3-source-live-toggle")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        val source = "@startuml\nparticipant A\nparticipant B\n@enduml"
+        editor.performTextReplacement(source)
+        rule.waitForIdle()
+
+        editor.performTextInputSelection(TextRange(source.indexOf("participant B")))
+        editor.performKeyInput { pressKey(Key.Backspace) }
+        rule.waitForIdle()
+        assertEquals("@startuml\nparticipant Aparticipant B\n@enduml", view.sourceDraft)
+
+        editor.performKeyInput { withKeyDown(if (isMacOs) Key.MetaLeft else Key.CtrlLeft) { pressKey(Key.Z) } }
+        rule.waitForIdle()
+        assertEquals(source, view.sourceDraft, "one Ctrl+Z splits the lines again")
+    }
+
+    @Test
+    fun typingARunOfCharactersIsOneUndoStepPerWord() {
+        val sessionId = startWorkspace("source-word-undo")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        toggleMode("seq3-source-live-toggle")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.sourceClockMs = { 1_000L }
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement("")
+        rule.waitForIdle()
+        "xyz uvw".forEach { editor.performTextInput(it.toString()) }
+        rule.waitForIdle()
+        assertEquals("xyz uvw", view.sourceDraft)
+
+        fun undo() {
+            editor.performKeyInput { withKeyDown(if (isMacOs) Key.MetaLeft else Key.CtrlLeft) { pressKey(Key.Z) } }
+            rule.waitForIdle()
+        }
+        undo()
+        assertEquals("xyz", view.sourceDraft, "the second word, with its space, is one step")
+        undo()
+        assertEquals("", view.sourceDraft, "the first word is one step")
     }
 
     @Test

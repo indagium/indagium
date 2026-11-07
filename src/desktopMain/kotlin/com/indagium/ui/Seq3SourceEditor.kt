@@ -161,6 +161,10 @@ internal fun Seq3SourceEditorPane(
     var skipHistoryText by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<String?>(null) }
     val undo = remember(session.id, view.sourceEditorGeneration) { mutableStateListOf<TextFieldValue>() }
     val redo = remember(session.id, view.sourceEditorGeneration) { mutableStateListOf<TextFieldValue>() }
+    // The typing run the history is currently extending, and the last external revision this editor
+    // has seen. Plain holders: only the key handlers and the collector below read or write them.
+    val typingRun = remember(session.id, view.sourceEditorGeneration) { arrayOfNulls<Seq3SourceTypingRun>(1) }
+    val seenExternalRevision = remember(session.id, view.sourceEditorGeneration) { intArrayOf(view.sourceExternalRevision) }
     val scroll = rememberScrollState()
     val horizontalScroll = rememberScrollState()
     val gutterListState = rememberLazyListState()
@@ -201,8 +205,13 @@ internal fun Seq3SourceEditorPane(
                     snippetText = next.text
                 }
                 if (skipHistoryText != next.text) {
-                    undo += lastValue
-                    if (undo.size > 500) undo.removeAt(0)
+                    // A typing run is one undo step: only its first character records the text before it.
+                    val decision = seq3SourceHistoryDecision(lastValue.text, next.text, next.selection, typingRun[0], view.sourceClockMs())
+                    typingRun[0] = decision.run
+                    if (decision.pushStep) {
+                        undo += lastValue
+                        if (undo.size > 500) undo.removeAt(0)
+                    }
                     redo.clear()
                 }
                 skipHistoryText = null
@@ -231,6 +240,7 @@ internal fun Seq3SourceEditorPane(
 
     fun setEditorValue(next: TextFieldValue, record: Boolean = true) {
         val current = currentEditorValue()
+        typingRun[0] = null
         if (next.text != current.text && record) {
             undo += current
             if (undo.size > 500) undo.removeAt(0)
@@ -265,6 +275,20 @@ internal fun Seq3SourceEditorPane(
         if (edit.text != old) snippetFields = rebaseSourceSnippetFields(snippetFields, old, edit.text)
         endpointMenu = null
         setEditorValue(TextFieldValue(edit.text, TextRange(edit.selectionStart, edit.selectionEnd)), true)
+    }
+
+    // Text that changes from outside (a canvas edit, Reload, Discard) arrives as one undoable edit:
+    // the editor, its history and its focus stay, and the caret keeps its place in the text.
+    LaunchedEffect(session.id, view.sourceEditorGeneration, view.sourceExternalRevision) {
+        if (seenExternalRevision[0] == view.sourceExternalRevision) return@LaunchedEffect
+        seenExternalRevision[0] = view.sourceExternalRevision
+        val external = view.sourceExternalText ?: return@LaunchedEffect
+        val current = currentEditorValue()
+        if (external == current.text) return@LaunchedEffect
+        snippetFields = rebaseSourceSnippetFields(snippetFields, current.text, external)
+        endpointMenu = null
+        val caret = seq3SourceMapCaret(current.text, external, current.selection.start)
+        setEditorValue(TextFieldValue(external, TextRange(caret)), record = true)
     }
 
     val selection = editorState.selection
@@ -471,6 +495,27 @@ internal fun Seq3SourceEditorPane(
                             val edit = seq3SourceEnter(editorState.text.toString(), range.start, range.end, view.sourceEditorDialect)
                             if (edit != null) {
                                 applySourceEdit(edit)
+                                return@onPreviewKeyEvent true
+                            }
+                        }
+                        if ((event.key == Key.Backspace || event.key == Key.Delete) &&
+                            !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)
+                        ) {
+                            val range = editorState.selection
+                            val edit = seq3SourceDeleteNextToMarkers(
+                                editorState.text.toString(),
+                                range.start,
+                                range.end,
+                                view.sourceEditorDialect,
+                                forward = event.key == Key.Delete,
+                                showMarkers = showSourceMarkers,
+                            )
+                            if (edit != null) {
+                                if (edit.text == editorState.text.toString()) {
+                                    editorState.edit { this.selection = TextRange(edit.selectionStart, edit.selectionEnd) }
+                                } else {
+                                    applySourceEdit(edit)
+                                }
                                 return@onPreviewKeyEvent true
                             }
                         }
@@ -717,16 +762,6 @@ private fun Seq3SourceStatusStrip(
                     horizontalPadding = 6.dp,
                     modifier = Modifier.testTag("seq3-source-reload"),
                 )
-                if (!view.sourceLiveEnabled) {
-                    AppButton(
-                        "Apply",
-                        onClick = { applySeq3SourceDraft(state, session, view) },
-                        variant = ButtonVariant.Primary,
-                        enabled = false,
-                        horizontalPadding = 6.dp,
-                        modifier = Modifier.testTag("seq3-source-apply"),
-                    )
-                }
             }
             view.sourceEvidenceLossPending && view.sourceLiveEnabled -> {
                 AppText(
