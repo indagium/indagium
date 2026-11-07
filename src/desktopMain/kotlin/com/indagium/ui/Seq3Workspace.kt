@@ -9,6 +9,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -206,6 +207,9 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
     // log view, not this diagram header, and made the title area noisy without changing the
     // diagram's scope. Scope changes still happen through the regenerate sheet.
     val subtitle = if (session.document.sourceFile.isNullOrBlank()) "Manual diagram" else "$tabName · $scanned rows"
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    val headerWidthDp = maxWidth.value
+    val outputVariant = seq3HeaderOutputVariant(headerWidthDp)
     Row(
         Modifier.fillMaxWidth().background(tc.p)
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -220,9 +224,12 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
         // subtitle below it is a second, independently-sized child, and a long source filename
         // ("bugreport-2026-08-21-113355-…​.log · 128400 rows") would otherwise stretch the whole
         // identity block past the title's own cap and squeeze the right cluster.
-        Column(Modifier.widthIn(max = TITLE_FIELD_MAX_WIDTH)) {
+        // Capped to what the narrow header leaves it, so the right cluster keeps its room and the
+        // title ellipsizes instead of pushing the actions out.
+        Column(Modifier.widthIn(max = minOf(TITLE_FIELD_MAX_WIDTH, seq3HeaderIdentityMaxDp(headerWidthDp, outputVariant).dp))
+            .testTag("seq3-header-identity")) {
             Seq3TitleField(state, session, view)
-            AppText(subtitle, color = tc.ts, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+            AppText(subtitle, color = tc.ts, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Row(
             Modifier.weight(1f),
@@ -243,14 +250,19 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Seq3DiagramPresentationGroup(state, session)
+            // Weighted without filling: the output actions are measured first, so a narrow header
+            // squeezes the presentation group and never pushes Edit/Copy/Attach (or "⋯") out.
+            Box(Modifier.weight(1f, fill = false).testTag("seq3-header-presentation")) {
+                Seq3DiagramPresentationGroup(state, session, view)
+            }
             // Placed right before the OUTPUT group's leading hairline (not the diagram-
             // presentation group's) so it reads as "still generating — the actions on the right
             // are about to have something to act on", not as a stray note mid-cluster.
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
             Seq3HeaderHairline()
-            Seq3OutputGroup(state, session, view)
+            Seq3OutputGroup(state, session, view, outputVariant)
         }
+    }
     }
 }
 
@@ -301,20 +313,24 @@ internal fun seq3PanelVisible(view: Seq3ViewState): Boolean =
  *  instead of running directly into the panes toggles on one side and the output actions on the
  *  other. */
 @Composable
-private fun Seq3DiagramPresentationGroup(state: AppState, session: Seq3WorkspaceSession) {
+private fun Seq3DiagramPresentationGroup(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // The one dialect control, shared with the Source tile's dropdown: it changes the diagram's
+        // dialect and the editor's together, and asks first when the editor holds an unapplied draft.
         SegmentedControl(
             options = listOf("PlantUML", "Mermaid"),
             selectedIndices = setOf(if (session.dialect == Seq3Dialect.PLANTUML) 0 else 1),
             onToggle = { index ->
-                state.seq3Sessions.setDialect(
-                    session.id,
+                changeSeq3Dialect(
+                    state, session, view,
                     if (index == 0) Seq3Dialect.PLANTUML else Seq3Dialect.MERMAID,
+                    focusEditor = false,
                 )
             },
+            modifier = Modifier.testTag("seq3-header-dialect"),
         )
         Seq3InlinePrefixToggles(state, session)
         Seq3MessageLabelStyleToggle(state, session)
@@ -363,20 +379,85 @@ internal fun seq3ToggleMessageLabelStyle(state: AppState, session: Seq3Workspace
  *  old bare "+" icon button). Both go dim/disabled the same way when there is nothing to copy or
  *  attach yet ([Seq3Document.lifelines] empty). */
 @Composable
-private fun Seq3OutputGroup(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+private fun Seq3OutputGroup(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    variant: Seq3HeaderOutputVariant = Seq3HeaderOutputVariant.INLINE,
+) {
     Row(
+        Modifier.testTag("seq3-header-output"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Seq3EditPlantUmlButton(state, session, view)
-        Seq3CopyDropdown(state, session)
-        Seq3AttachmentAction(state, session)
+        when (variant) {
+            Seq3HeaderOutputVariant.INLINE -> {
+                Seq3EditPlantUmlButton(state, session, view)
+                Seq3CopyDropdown(state, session)
+                Seq3AttachmentAction(state, session)
+            }
+            Seq3HeaderOutputVariant.FOLDED -> Seq3OutputOverflowMenu(state, session, view)
+        }
+    }
+}
+
+/** The narrow header's "⋯" menu: Edit, Copy and Attach, folded into one menu when they do not fit
+ *  the header side by side ([seq3HeaderOutputVariant]). The items do what the buttons do. */
+@Composable
+private fun Seq3OutputOverflowMenu(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+    val tc = tc()
+    val document = session.document
+    val hasContent = document.lifelines.isNotEmpty()
+    Seq3DropdownButton(
+        label = "⋯",
+        modifier = Modifier.width(28.dp).testTag("seq3-header-more"),
+        fixedHeight = 28.dp,
+        menuWidth = 200.dp,
+        menuOffsetY = SEQ3_HEADER_MENU_OFFSET_Y,
+        anchorContent = { AppText("⋯", color = tc.tx, fontSize = 14.sp) },
+        menuAlignment = Alignment.TopEnd,
+    ) { close ->
+        Box(Modifier.testTag("seq3-header-more-menu")) {
+            Column {
+                Seq3DropdownMenuItem(label = "Edit source") {
+                    openSeq3SourceEditor(state, session, view)
+                    close()
+                }
+                Seq3OverflowRule()
+                Seq3CopyTarget.entries.forEach { target ->
+                    Seq3DropdownMenuItem(label = seq3OverflowCopyLabel(target), enabled = hasContent) {
+                        runSeq3CopyTarget(state, document, target)
+                        close()
+                    }
+                }
+                Seq3OverflowRule()
+                listOf(Seq3AttachmentMode.SNAPSHOT, Seq3AttachmentMode.LINKED).forEach { mode ->
+                    Seq3DropdownMenuItem(label = attachmentActionLabel(mode), enabled = hasContent) {
+                        attach(state, session, mode)
+                        close()
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
+private fun Seq3OverflowRule() {
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(tc().br))
+    }
+}
+
+/** The "⋯" menu's label for a copy target: the Copy menu's labels are headed by "Copy ▾" there. */
+internal fun seq3OverflowCopyLabel(target: Seq3CopyTarget): String = when (target) {
+    Seq3CopyTarget.DOWNLOAD_PNG -> seq3CopyTargetLabel(target)
+    else -> "Copy ${seq3CopyTargetLabel(target)}"
+}
+
+@Composable
 private fun Seq3EditPlantUmlButton(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
-    TooltipArea(tooltip = { ToolbarTooltip("Edit PlantUML source") }) {
+    TooltipArea(tooltip = { ToolbarTooltip("Edit source") }) {
         ToolbarBtn(
             label = "Edit",
             modifier = Modifier.height(28.dp).testTag("seq3-source-edit"),
@@ -415,29 +496,35 @@ private fun Seq3CopyDropdown(state: AppState, session: Seq3WorkspaceSession) {
     ) { close ->
         Seq3CopyTarget.entries.forEach { target ->
             Seq3DropdownMenuItem(label = seq3CopyTargetLabel(target), enabled = hasContent) {
-                when (target) {
-                    // The only item here that can throw (rasterizing the layout) — wrapped the
-                    // same way copyRichPreview's own PNG render is, so a bad document can't crash
-                    // the workspace out from under an otherwise plain clipboard action.
-                    Seq3CopyTarget.PNG_IMAGE,
-                    Seq3CopyTarget.DOWNLOAD_PNG -> runCatching {
-                        val png = Seq3RenderCache.brandedPngBytes(
-                            Seq3RenderCache.layout(document),
-                            resolveSeq3ThemeColors(document, state.settings).toSeq3RasterTheme(),
-                        )
-                        when (target) {
-                            Seq3CopyTarget.PNG_IMAGE -> state.copyImageToClipboard(
-                                png,
-                                document.title.ifBlank { "Sequence diagram v3" },
-                            )
-                            Seq3CopyTarget.DOWNLOAD_PNG -> state.downloadSeq3Png(png, document.title)
-                        }
-                    }
-                    else -> seq3CopyTargetText(target, document)?.let(state::copyToClipboard)
-                }
+                runSeq3CopyTarget(state, document, target)
                 close()
             }
         }
+    }
+}
+
+/** What a `Copy ▾` item does, shared with the narrow header's "⋯" menu. */
+private fun runSeq3CopyTarget(state: AppState, document: Seq3Document, target: Seq3CopyTarget) {
+    when (target) {
+        // The only item here that can throw (rasterizing the layout) — wrapped the
+        // same way copyRichPreview's own PNG render is, so a bad document can't crash
+        // the workspace out from under an otherwise plain clipboard action.
+        Seq3CopyTarget.PNG_IMAGE,
+        Seq3CopyTarget.DOWNLOAD_PNG -> runCatching {
+            val png = Seq3RenderCache.brandedPngBytes(
+                Seq3RenderCache.layout(document),
+                resolveSeq3ThemeColors(document, state.settings).toSeq3RasterTheme(),
+            )
+            when (target) {
+                Seq3CopyTarget.PNG_IMAGE -> state.copyImageToClipboard(
+                    png,
+                    document.title.ifBlank { "Sequence diagram v3" },
+                )
+                Seq3CopyTarget.DOWNLOAD_PNG -> state.downloadSeq3Png(png, document.title)
+                else -> Unit
+            }
+        }
+        else -> seq3CopyTargetText(target, document)?.let(state::copyToClipboard)
     }
 }
 
@@ -1192,6 +1279,9 @@ internal class Seq3ViewState {
     /** The clock the editor's undo history measures typing pauses with; a test replaces it. */
     var sourceClockMs: () -> Long = System::currentTimeMillis
     var sourceFocusRequestGeneration by mutableStateOf(0)
+    /** A one-shot request, from the empty canvas, for the editor to insert a new participant: the
+     *  mounted editor pane consumes it once the draft is ready. */
+    var sourceInsertParticipantRequest by mutableStateOf(false)
 
     /** Fixed identity baseline for source imports until the user reloads or changes dialect. The
      *  most recent successful live result is tracked separately so newly-authored rows can retain
@@ -1246,6 +1336,10 @@ internal class Seq3ViewState {
     /** The tiled diagram workspace arrangement. This view state is saved in the per-library-item
      *  `seq3View` autosave token and never enters the diagram document or its undo history. */
     var diagramTileLayout by mutableStateOf(diagramWorkspaceDefaultLayout())
+
+    /** The width (dp) of the tiling host, reported by [DiagramWorkspaceTilingHost]: Edit opens the
+     *  Source tile beside the preview only when this is wide enough. Runtime-only, 0 until measured. */
+    var diagramHostWidthDp by mutableStateOf(0f)
 
     /** Hidden tiles keep their nodes in [diagramTileLayout], so showing one restores its place. */
     var diagramHiddenTiles by mutableStateOf(listOf(DiagramWorkspaceSectionId.SOURCE))
@@ -1866,6 +1960,9 @@ internal fun Seq3DropdownButton(
     // only the visible content of the trigger changes. `null` (the default) keeps every pre-existing
     // call site rendering exactly as before.
     anchorContent: (@Composable () -> Unit)? = null,
+    // Which corner of the trigger the menu hangs from: TopEnd for a trigger at the right edge of a
+    // narrow window, where a menu growing rightwards would leave the window.
+    menuAlignment: Alignment = Alignment.TopStart,
     menu: @Composable (close: () -> Unit) -> Unit,
 ) {
     val tc = tc()
@@ -1933,7 +2030,7 @@ internal fun Seq3DropdownButton(
         }
         if (open) {
             Popup(
-                alignment = Alignment.TopStart,
+                alignment = menuAlignment,
                 offset = IntOffset(0, with(density) { menuOffsetY.roundToPx() }),
                 onDismissRequest = ::closeAndReclaimFocus,
                 properties = PopupProperties(focusable = false),

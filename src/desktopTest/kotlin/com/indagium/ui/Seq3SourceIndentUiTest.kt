@@ -184,6 +184,7 @@ class Seq3SourceIndentUiTest {
             it.activateTab(tab.id)
         }
         val id = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
                 Box(Modifier.size(1280.dp, 900.dp)) { Seq3Workspace(state, id) }

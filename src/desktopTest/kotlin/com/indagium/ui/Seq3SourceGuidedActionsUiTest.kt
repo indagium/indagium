@@ -73,7 +73,8 @@ class Seq3SourceGuidedActionsUiTest {
         view.diagramHiddenTiles = listOf(DiagramWorkspaceSectionId.MESSAGES, DiagramWorkspaceSectionId.LIFELINES,
             DiagramWorkspaceSectionId.ARTIFACTS, DiagramWorkspaceSectionId.PREVIEW)
         showWorkspace(sessionId, width = 560, height = 760)
-        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-header-more").performClick()
+        rule.onNodeWithText("Edit source", useUnmergedTree = true).performClick()
         val opener = rule.onNodeWithTag("seq3-source-message-menu")
         val openerBounds = opener.getBoundsInRoot()
         opener.performClick()
@@ -151,17 +152,17 @@ class Seq3SourceGuidedActionsUiTest {
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
         val originalSource = view.sourceDraft
 
-        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        openMoreItem("seq3-source-new-diagram")
         rule.onNodeWithTag("seq3-source-confirm-new-diagram").assertIsDisplayed()
         assertEquals(original, currentSession(sessionId).document)
         assertEquals(originalSource, view.sourceDraft)
 
         rule.onNodeWithText("Keep editing", useUnmergedTree = true).performClick()
-        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        openMoreItem("seq3-source-new-diagram")
         rule.onNodeWithTag("seq3-source-confirm-new-diagram").performClick()
         rule.waitForIdle()
 
-        assertTrue(currentSession(sessionId).document.title.isEmpty())
+        assertEquals("Existing diagram", currentSession(sessionId).document.title, "New diagram keeps a real title")
         assertTrue(currentSession(sessionId).document.lifelines.isEmpty())
         assertTrue(view.sourceDraft.contains("@startuml"))
     }
@@ -189,7 +190,7 @@ class Seq3SourceGuidedActionsUiTest {
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
         val originalSource = view.sourceDraft
 
-        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        openMoreItem("seq3-source-new-diagram")
         rule.onNodeWithTag("seq3-source-confirm-new-diagram").performClick()
         rule.onNodeWithText("Remove log evidence?", useUnmergedTree = true).assertIsDisplayed()
         assertEquals(original, currentSession(sessionId).document)
@@ -200,14 +201,14 @@ class Seq3SourceGuidedActionsUiTest {
         assertEquals(original, currentSession(sessionId).document)
         assertEquals(originalSource, view.sourceDraft)
 
-        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        openMoreItem("seq3-source-new-diagram")
         rule.onNodeWithTag("seq3-source-confirm-new-diagram").performClick()
         rule.onNodeWithText("Remove evidence and apply", useUnmergedTree = true).performClick()
         rule.waitForIdle()
 
         assertTrue(currentSession(sessionId).document.lifelines.isEmpty())
         assertTrue(currentSession(sessionId).document.messages.isEmpty())
-        assertTrue(currentSession(sessionId).document.title.isEmpty())
+        assertEquals("Evidence diagram", currentSession(sessionId).document.title, "New diagram keeps a real title")
         assertFalse(view.sourceEvidenceLossPending)
     }
 
@@ -287,15 +288,17 @@ class Seq3SourceGuidedActionsUiTest {
         toggleMode("seq3-source-live-toggle")
         val editor = rule.onNodeWithTag("seq3-source-editor")
         assertTrue(view.sourceDraft.contains(marker), "the editable draft retains identity/evidence markers")
+        rule.onNodeWithTag("seq3-source-more").performClick()
         rule.onNodeWithTag("seq3-source-toggle-markers").assertIsDisplayed()
+        rule.onNodeWithTag("seq3-source-more").performClick()
         saveScreenshot("seq3-source-marker-folded.png", editor.captureToImage())
 
         val markerCount = view.sourceDraft.windowed(marker.length).count { it == marker }
-        rule.onNodeWithTag("seq3-source-toggle-markers").performClick()
+        openMoreItem("seq3-source-toggle-markers")
         rule.waitForIdle()
         assertTrue(view.sourceDraft.contains(marker), "showing markers changes only the view projection")
         saveScreenshot("seq3-source-marker-visible.png", editor.captureToImage())
-        rule.onNodeWithTag("seq3-source-toggle-markers").performClick()
+        openMoreItem("seq3-source-toggle-markers")
         rule.waitForIdle()
         val labelStart = view.sourceDraft.indexOf("original call")
         editor.performTextInputSelection(TextRange(labelStart, labelStart + "original call".length))
@@ -552,7 +555,7 @@ class Seq3SourceGuidedActionsUiTest {
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
         val generation = view.sourceEditorGeneration
 
-        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        openMoreItem("seq3-source-new-diagram")
         rule.onNodeWithTag("seq3-source-confirm-new-diagram").performClick()
         rule.waitForIdle()
 
@@ -673,14 +676,20 @@ class Seq3SourceGuidedActionsUiTest {
         assertTrue(currentSession(sessionId).document.messages.isEmpty())
         assertFalse(view.sourceEvidenceLossPending)
 
-        rule.onNodeWithTag("seq3-source-new-diagram").performClick()
+        openMoreItem("seq3-source-new-diagram")
         rule.waitForIdle()
         rule.onNodeWithTag("seq3-source-confirm-new-diagram").assertDoesNotExist()
-        assertTrue(currentSession(sessionId).document.title.isEmpty())
+        assertEquals("Untitled diagram", currentSession(sessionId).document.title, "New diagram keeps a real title")
         assertTrue(currentSession(sessionId).document.lifelines.isEmpty())
         assertEquals(dialect, view.sourceEditorDialect)
         assertTrue(view.sourceDraft.startsWith(if (dialect == Seq3Dialect.MERMAID) "sequenceDiagram" else "@startuml"))
         assertTrue(view.sourceDraft.contains(if (dialect == Seq3Dialect.MERMAID) "sequenceDiagram" else "@enduml"))
+    }
+
+    /** Opens the source toolbar's "⋯" menu and picks the item with [tag]. */
+    private fun openMoreItem(tag: String) {
+        rule.onNodeWithTag("seq3-source-more").performClick()
+        rule.onNodeWithTag(tag).performClick()
     }
 
     private fun startWorkspace(tabId: String): String {
@@ -694,7 +703,7 @@ class Seq3SourceGuidedActionsUiTest {
             it.tabs = listOf(tab)
             it.activateTab(tab.id)
         }
-        return requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        return requireNotNull(state.seq3Sessions.beginEmpty(tab.id)).also { state.seq3Sessions.setDialect(it, Seq3Dialect.PLANTUML) }
     }
 
     private fun currentSession(sessionId: String) =

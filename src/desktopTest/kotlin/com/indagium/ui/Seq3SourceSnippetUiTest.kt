@@ -20,6 +20,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
+import com.indagium.diagram3.Seq3Dialect
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -45,6 +46,7 @@ class Seq3SourceSnippetUiTest {
         state.tabs = listOf(tab)
         state.activateTab(tab.id)
         val id = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         rule.setContent { CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
             Box(Modifier.size(1280.dp, 900.dp)) { Seq3Workspace(state, id) }
         } }

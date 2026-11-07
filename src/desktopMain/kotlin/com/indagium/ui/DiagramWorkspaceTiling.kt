@@ -172,6 +172,32 @@ internal fun setDiagramWorkspaceTileVisible(view: Seq3ViewState, id: DiagramWork
     return true
 }
 
+/** The host width from which Edit opens the Source tile beside the preview rather than under it. */
+internal const val DIAGRAM_SOURCE_BESIDE_MIN_DP = 1100f
+
+/**
+ * The layout Edit opens the Source tile in: [layout] with Source moved to the right of Preview, or null
+ * to leave [layout] alone. That happens when the host is under [DIAGRAM_SOURCE_BESIDE_MIN_DP] wide, and
+ * when the tiles are not in their default arrangement (Source stacked under Preview, the other tiles
+ * where they start): a layout the user arranged is theirs. Sizes do not count as arranging.
+ */
+internal fun diagramWorkspaceSourceBesidePreview(layout: DiagramWorkspaceLayout, hostWidthDp: Float): DiagramWorkspaceLayout? {
+    if (hostWidthDp < DIAGRAM_SOURCE_BESIDE_MIN_DP) return null
+    if (tileShape(layout) != tileShape(diagramWorkspaceDefaultLayout())) return null
+    return dropTile(
+        layout,
+        DiagramWorkspaceSectionId.SOURCE,
+        TileDropTarget.OnSection(DiagramWorkspaceSectionId.PREVIEW, TileEdge.RIGHT),
+        DIAGRAM_WORKSPACE_CHROME_SPEC.loneColumns,
+    )
+}
+
+// The arrangement of a tree without its weights and pinned sizes: splits' axes and the order of their leaves.
+private fun tileShape(node: DiagramWorkspaceLayout): String = when (node) {
+    is TileLeaf -> node.section.key
+    is TileSplit -> "${node.axis}(${node.children.joinToString(",") { tileShape(it) }})"
+}
+
 private const val DIAGRAM_HOST_PAD_DP = 6
 private const val DIAGRAM_STACK_BELOW_DP = 760f
 private const val DIAGRAM_STACKED_HEIGHT_SHARE = 0.72f
@@ -247,7 +273,8 @@ private fun diagramWorkspaceSlot(
 
 /** The Messages header carries the mode switch and the add button, so below [SEQ3_MESSAGES_SUMMARY_MIN_DP]
  *  the count goes (the footer and the switch already say it) and below [SEQ3_MESSAGES_ICON_MIN_DP] the icon,
- *  rather than letting the title shrink to "Me…". */
+ *  rather than letting the title shrink to "Me…". The title shares its room with the count, so the count
+ *  needs a wide tile: at a 1440 dp window the Messages tile is about 410 dp, which keeps the title whole. */
 internal fun seq3MessagesHeaderParts(widthDp: Float): TileHeaderParts =
     TileHeaderParts(showIcon = widthDp >= SEQ3_MESSAGES_ICON_MIN_DP, showSummary = widthDp >= SEQ3_MESSAGES_SUMMARY_MIN_DP)
 
@@ -255,8 +282,8 @@ internal fun seq3MessagesHeaderParts(widthDp: Float): TileHeaderParts =
 internal fun seq3MessagesSummaryCount(document: Seq3Document, mode: Seq3MessagesMode): Int =
     if (mode == Seq3MessagesMode.SEQUENCE) seq3DrawnRowRefs(document).size else document.messages.size
 
-internal const val SEQ3_MESSAGES_SUMMARY_MIN_DP = 400f
-internal const val SEQ3_MESSAGES_ICON_MIN_DP = 360f
+internal const val SEQ3_MESSAGES_SUMMARY_MIN_DP = 520f
+internal const val SEQ3_MESSAGES_ICON_MIN_DP = 420f
 
 /**
  * Diagram equivalent of [LogViewTilingHost]: the saved view tree is the actual layout source for four live tiles, not a set of
@@ -307,7 +334,10 @@ internal fun DiagramWorkspaceTilingHost(
         Box(
             Modifier.fillMaxSize()
                 .padding(start = DIAGRAM_HOST_PAD_DP.dp, top = DIAGRAM_HOST_PAD_DP.dp)
-                .onSizeChanged { sizePx = it }
+                .onSizeChanged {
+                    sizePx = it
+                    view.diagramHostWidthDp = it.width / density
+                }
                 .testTag("diagram-tiling-host"),
         ) {
             val widthDp = sizePx.width / density

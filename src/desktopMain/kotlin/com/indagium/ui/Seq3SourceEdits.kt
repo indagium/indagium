@@ -226,6 +226,18 @@ internal fun seq3SourceVisibleRawLines(
     }
 }
 
+/**
+ * The line numbers the gutter shows for raw source lines [rawLines] (a diagnostic's lines): while
+ * [showMarkers] is false the gutter counts only the visible lines, 1..n, so a raw line is mapped to
+ * the visible line that stands in for it (see [seq3SourceVisibleRawLines]) and then to its place
+ * among the visible lines. With markers shown the numbers are the raw ones.
+ */
+internal fun seq3SourceDisplayLines(source: String, rawLines: List<Int>, dialect: Seq3Dialect, showMarkers: Boolean): List<Int> {
+    if (rawLines.isEmpty()) return emptyList()
+    val numbers = seq3SourceLineNumberMap(source, dialect, showMarkers)
+    return seq3SourceVisibleRawLines(source, rawLines, dialect, showMarkers).map { numbers.indexOfLine(it) + 1 }
+}
+
 /** Where the caret goes to show raw source line [rawLine]: the first character after its
  *  indentation (a blank line's end), on the nearest visible line. */
 internal fun seq3SourceCaretOffsetForLine(source: String, rawLine: Int, dialect: Seq3Dialect, showMarkers: Boolean): Int {

@@ -922,6 +922,7 @@ class Seq3SessionTest {
     fun sourceDraftIsInvalidatedBySourceChangingVisualEditsAndExplicitReloadRestoresIt() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         awaitGenerated(state, id)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
@@ -963,6 +964,7 @@ class Seq3SessionTest {
     fun sourceDialectSwitchRebuildsTheDraftAndStalenessUsesTheSelectedLanguage() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         awaitGenerated(state, id)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
@@ -1152,6 +1154,7 @@ class Seq3SessionTest {
     fun emptyLiveSourceClearsAuthoredStructureAndEvidenceLossWaitsForConfirmation() {
         val manualState = state()
         val manualId = manualState.seq3Sessions.beginEmpty("log")!!
+        manualState.seq3Sessions.setDialect(manualId, Seq3Dialect.PLANTUML)
         val manualView = manualState.seq3Sessions.viewState(manualId)!!
         manualState.seq3Sessions.prepareSourceDraft(manualId)
         val authored = """
@@ -1188,6 +1191,7 @@ class Seq3SessionTest {
         val generatedId = generatedState.seq3Sessions.begin("log", setOf(1, 2))!!
         awaitGenerated(generatedState, generatedId)
         val generatedView = generatedState.seq3Sessions.viewState(generatedId)!!
+        generatedState.seq3Sessions.setDialect(generatedId, Seq3Dialect.PLANTUML)
         generatedState.seq3Sessions.prepareSourceDraft(generatedId)
         val withEvidence = generatedState.seq3Sessions.sessions.single { it.id == generatedId }.document
         generatedState.seq3Sessions.updateSourceDraftText(generatedId, "")
@@ -1253,6 +1257,7 @@ class Seq3SessionTest {
     fun presentationOnlyVisualChangesDoNotStalePlantUmlDraft() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         awaitGenerated(state, id)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
@@ -1992,6 +1997,7 @@ class Seq3SessionTest {
     fun aCanvasEditFollowsTheLiveSourceInsteadOfLockingIt() {
         val state = state()
         val id = state.seq3Sessions.beginEmpty("log")!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
         assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, liveSource("first"), Seq3Dialect.PLANTUML))
@@ -2018,6 +2024,7 @@ class Seq3SessionTest {
     fun aCanvasEditKeepsTheHalfTypedWordOfATrimmedPreview() {
         val state = state()
         val id = state.seq3Sessions.beginEmpty("log")!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
         val preview = liveSource("first")
@@ -2040,6 +2047,7 @@ class Seq3SessionTest {
     fun theNextLiveApplyAfterTheListClosesRecordsTheFullDraft() {
         val state = state()
         val id = state.seq3Sessions.beginEmpty("log")!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
         val preview = liveSource("first")
@@ -2057,6 +2065,7 @@ class Seq3SessionTest {
     fun aCanvasEditStillLocksTheSourceWhileTypedTextIsPending() {
         val state = state()
         val id = state.seq3Sessions.beginEmpty("log")!!
+        state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
         val view = state.seq3Sessions.viewState(id)!!
         assertTrue(state.seq3Sessions.prepareSourceDraft(id))
         assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, liveSource("first"), Seq3Dialect.PLANTUML))
@@ -2095,6 +2104,7 @@ class Seq3SessionTest {
         var now = 1_000_000L
         val session = Seq3Session(state, clock = { now })
         val id = session.beginEmpty("log")!!
+        session.setDialect(id, Seq3Dialect.PLANTUML)
         assertTrue(session.prepareSourceDraft(id))
         val original = session.sessions.single { it.id == id }.document
 
@@ -2117,6 +2127,7 @@ class Seq3SessionTest {
         var now = 1_000_000L
         val session = Seq3Session(state, clock = { now })
         val id = session.beginEmpty("log")!!
+        session.setDialect(id, Seq3Dialect.PLANTUML)
         assertTrue(session.prepareSourceDraft(id))
         fun stackSize() = session.sessions.single { it.id == id }.undoStack.size
 

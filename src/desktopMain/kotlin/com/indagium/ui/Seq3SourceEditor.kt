@@ -98,9 +98,37 @@ import kotlin.math.roundToInt
 
 internal fun openSeq3SourceEditor(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     if (!state.seq3Sessions.prepareSourceDraft(session.id)) return
+    // On a wide window the editor opens beside the preview, if the user has not arranged the tiles.
+    if (DiagramWorkspaceSectionId.SOURCE in view.diagramHiddenTiles) {
+        diagramWorkspaceSourceBesidePreview(view.diagramTileLayout, view.diagramHostWidthDp)?.let { view.diagramTileLayout = it }
+    }
     setDiagramWorkspaceTileVisible(view, DiagramWorkspaceSectionId.SOURCE, true)
     view.sourceFocusRequestGeneration++
     state.autosaveInBackground()
+}
+
+/**
+ * The one dialect control, behind both the header's PlantUML/Mermaid toggle and the Source tile's
+ * dropdown: the diagram's dialect and the editor's change together. An unapplied draft asks first
+ * ([Seq3ViewState.sourceDialectChangePending], answered in the editor pane, so the Source tile is
+ * shown for the question); [focusEditor] moves the keyboard focus into the editor afterwards.
+ */
+internal fun changeSeq3Dialect(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    dialect: Seq3Dialect,
+    focusEditor: Boolean,
+) {
+    val unchanged = session.dialect == dialect && (!view.sourceDraftInitialized || view.sourceEditorDialect == dialect)
+    if (unchanged) return
+    if (view.sourceDraftInitialized && view.sourceEditorDialect != dialect && view.sourceHasUnappliedDraft()) {
+        view.sourceDialectChangePending = dialect
+        if (setDiagramWorkspaceTileVisible(view, DiagramWorkspaceSectionId.SOURCE, true)) state.autosaveInBackground()
+        return
+    }
+    state.seq3Sessions.switchSourceDraftDialect(session.id, dialect)
+    if (focusEditor) view.sourceFocusRequestGeneration++
 }
 
 internal fun reloadSeq3SourceDraft(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
@@ -137,7 +165,7 @@ internal fun applySeq3SourceDraft(
     view.sourceFocusRequestGeneration++
 }
 
-private fun Seq3ViewState.sourceHasUnappliedDraft(): Boolean =
+internal fun Seq3ViewState.sourceHasUnappliedDraft(): Boolean =
     sourceDraftStale || (sourceDraftDirty && sourceDraft != sourceLiveLastAppliedText)
 
 @Composable
@@ -270,6 +298,13 @@ internal fun Seq3SourceEditorPane(
     val caretDiagnostic = seq3SourceDiagnosticAtCaret(
         sourceText, editorState.selection.start, view.sourceDiagnostics, view.sourceEditorDialect, showSourceMarkers,
     )
+    // The numbers the gutter shows for the diagnostics' lines: the status strip and the issues list
+    // use the same numbering as the gutter (visible lines 1..n while markers are hidden).
+    val diagnosticNumbers = remember(sourceText, view.sourceDiagnostics, view.sourceEditorDialect, showSourceMarkers) {
+        view.sourceDiagnostics.zip(
+            seq3SourceDisplayLines(sourceText, view.sourceDiagnostics.map { it.line }, view.sourceEditorDialect, showSourceMarkers),
+        ).toMap()
+    }
 
     fun currentEditorValue(): TextFieldValue = TextFieldValue(editorState.text.toString(), editorState.selection)
 
@@ -348,6 +383,14 @@ internal fun Seq3SourceEditorPane(
         endpointMenu = null
         val caret = seq3SourceMapCaret(current.text, external, current.selection.start)
         setEditorValue(TextFieldValue(external, TextRange(caret)), record = true)
+    }
+
+    // The empty canvas' "+ Participant": once the draft is ready the editor inserts a new participant.
+    LaunchedEffect(session.id, view.sourceEditorGeneration, view.sourceInsertParticipantRequest, view.sourceDraftInitialized) {
+        if (!view.sourceInsertParticipantRequest || !view.sourceDraftInitialized) return@LaunchedEffect
+        view.sourceInsertParticipantRequest = false
+        val (snippet, fields) = seq3SourceParticipantSnippet(editorState.text.toString(), view.sourceEditorDialect, false)
+        insertSnippet(snippet, fields, true)
     }
 
     val selection = editorState.selection
@@ -448,6 +491,8 @@ internal fun Seq3SourceEditorPane(
                 userScrollEnabled = false,
             ) {
                 items(lineCount) { index ->
+                    // The tag keeps the raw line (a stable name for the source line); the number
+                    // shown counts the visible lines.
                     val line = visibleLines.lineNumberAt(index)
                     val hasDiagnostic = line in diagnosticLines
                     Box(
@@ -459,7 +504,7 @@ internal fun Seq3SourceEditorPane(
                         contentAlignment = Alignment.CenterEnd,
                     ) {
                         AppText(
-                            line.toString(),
+                            (index + 1).toString(),
                             color = if (hasDiagnostic) tc.warn else tc.td,
                             fontSize = 11.sp,
                             fontFamily = MONO,
@@ -666,6 +711,7 @@ internal fun Seq3SourceEditorPane(
         if (showSourceIssues && view.sourceDiagnostics.isNotEmpty()) {
             Seq3SourceIssuesList(
                 diagnostics = view.sourceDiagnostics,
+                lineNumbers = diagnosticNumbers,
                 caretDiagnostic = caretDiagnostic,
                 onJump = { goToLine(it) },
                 onFix = { applyIssueFix(it) },
@@ -681,6 +727,7 @@ internal fun Seq3SourceEditorPane(
             view = view,
             suggestionsVisible = suggestionsVisible,
             caretDiagnostic = caretDiagnostic,
+            caretDiagnosticLine = caretDiagnostic?.let { diagnosticNumbers[it] },
             onReviewEvidence = { showEvidenceLossDialog = true },
             onToggleIssues = {
                 showSourceIssues = !showSourceIssues
@@ -700,8 +747,8 @@ internal fun Seq3SourceEditorPane(
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             Column(
-                Modifier.width(420.dp).background(tc.p, RoundedCornerShape(12.dp))
-                    .border(1.dp, tc.br, RoundedCornerShape(12.dp)).padding(18.dp),
+                Modifier.width(420.dp).background(tc.p, RoundedCornerShape(8.dp))
+                    .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 AppText("Remove log evidence?", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -767,8 +814,8 @@ internal fun Seq3SourceEditorPane(
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             Column(
-                Modifier.width(390.dp).background(tc.p, RoundedCornerShape(12.dp))
-                    .border(1.dp, tc.br, RoundedCornerShape(12.dp)).padding(18.dp),
+                Modifier.width(390.dp).background(tc.p, RoundedCornerShape(8.dp))
+                    .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 AppText("Discard source draft?", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -810,6 +857,7 @@ private fun Seq3SourceStatusStrip(
     view: Seq3ViewState,
     suggestionsVisible: Boolean,
     caretDiagnostic: Seq3SourceDiagnostic?,
+    caretDiagnosticLine: Int?,
     onReviewEvidence: () -> Unit,
     onToggleIssues: () -> Unit,
 ) {
@@ -869,7 +917,7 @@ private fun Seq3SourceStatusStrip(
                 // The message for the line the caret is on, so a typo is explained where it is made.
                 if (caretDiagnostic != null) {
                     AppText(
-                        "Line ${caretDiagnostic.line}: ${caretDiagnostic.message}",
+                        "Line ${caretDiagnosticLine ?: caretDiagnostic.line}: ${caretDiagnostic.message}",
                         color = tc().tx,
                         fontSize = 11.sp,
                         modifier = Modifier.weight(1f).testTag("seq3-source-caret-message"),
@@ -927,6 +975,7 @@ private fun Seq3SourceStatusStrip(
 @Composable
 private fun Seq3SourceIssuesList(
     diagnostics: List<Seq3SourceDiagnostic>,
+    lineNumbers: Map<Seq3SourceDiagnostic, Int>,
     caretDiagnostic: Seq3SourceDiagnostic?,
     onJump: (Int) -> Unit,
     onFix: (Seq3SourceFix) -> Unit,
@@ -959,7 +1008,7 @@ private fun Seq3SourceIssuesList(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    AppText("Line ${diagnostic.line}", color = tc.warn, fontSize = 11.sp, fontFamily = MONO)
+                    AppText("Line ${lineNumbers[diagnostic] ?: diagnostic.line}", color = tc.warn, fontSize = 11.sp, fontFamily = MONO)
                     AppText(diagnostic.message, color = tc.tx, fontSize = 11.sp, modifier = Modifier.weight(1f))
                     diagnostic.fix?.let { fix ->
                         AppButton(
@@ -1267,10 +1316,7 @@ private fun Seq3SourceDialectSelector(state: AppState, session: Seq3WorkspaceSes
         "${sourceDialectName(view.sourceEditorDialect)} ▾", "seq3-source-dialect",
         listOf("PlantUML", "Mermaid"), onSelect = { index ->
             val dialect = if (index == 0) Seq3Dialect.PLANTUML else Seq3Dialect.MERMAID
-            if (dialect != view.sourceEditorDialect) {
-                if (view.sourceHasUnappliedDraft()) view.sourceDialectChangePending = dialect
-                else state.seq3Sessions.switchSourceDraftDialect(session.id, dialect)
-            }
+            changeSeq3Dialect(state, session, view, dialect, focusEditor = false)
             view.sourceFocusRequestGeneration++
         }, onClose = { view.sourceFocusRequestGeneration++ },
     )
@@ -1346,6 +1392,8 @@ private fun SourceCompactMenu(
     onSelect: (Int) -> Unit,
     tags: List<String> = emptyList(),
     onClose: () -> Unit = {},
+    variant: ButtonVariant = ButtonVariant.Secondary,
+    horizontalPadding: androidx.compose.ui.unit.Dp = 7.dp,
 ) {
     val density = LocalDensity.current
     var open by remember { mutableStateOf(false) }
@@ -1363,7 +1411,8 @@ private fun SourceCompactMenu(
     Box {
         AppButton(label, onClick = {
             open = !open
-        }, variant = ButtonVariant.Secondary, horizontalPadding = 7.dp, modifier = Modifier.testTag(tag))
+        }, variant = variant, textColor = if (variant == ButtonVariant.Ghost) tc().tx else null,
+            horizontalPadding = horizontalPadding, modifier = Modifier.testTag(tag))
         if (open) Popup(
             alignment = Alignment.TopStart,
             offset = with(density) { IntOffset(0, 32.dp.roundToPx()) },
@@ -1401,10 +1450,7 @@ private fun Seq3SourceActionForms(
     val dialect = view.sourceEditorDialect
     var confirmNewDiagram by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
     fun addParticipant(actor: Boolean) {
-        val alias = sourceUniqueAlias("Alias", sourceParticipants(editorState.text.toString(), dialect))
-        val snippet = sourceParticipantDeclaration(alias, "Name", actor, dialect)
-        val fields = if (dialect == Seq3Dialect.MERMAID) sourceSnippetFields(snippet, alias to false, "Name" to false).reversed()
-            else sourceSnippetFields(snippet, "Name" to false, alias to false)
+        val (snippet, fields) = seq3SourceParticipantSnippet(editorState.text.toString(), dialect, actor)
         insertSnippet(snippet, fields, true)
     }
     fun addMessage(style: String) {
@@ -1412,7 +1458,7 @@ private fun Seq3SourceActionForms(
         insertSnippet(snippet, sourceSnippetFields(snippet, "From" to true, "To" to true, "message label" to false), false)
     }
     fun applyNewDiagram() {
-        val starter = seq3SourceStarter(dialect)
+        val starter = seq3SourceStarter(dialect, state.seq3Sessions.newSourceDiagramTitle(session.id))
         confirmNewDiagram = false
         when (val result = state.seq3Sessions.startNewSourceDiagram(session.id, starter, dialect)) {
             is Seq3SourceImportResult.Failure -> view.sourceDiagnostics = result.diagnostics
@@ -1422,42 +1468,57 @@ private fun Seq3SourceActionForms(
         }
         reclaimFocus()
     }
-    FlowRow(Modifier.fillMaxWidth().background(tc().p).padding(horizontal = 6.dp, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(4.dp),
-        itemVerticalAlignment = Alignment.CenterVertically) {
-        AppButton(if (showSourceMarkers) "Hide markers" else "Show markers", onClick = { onToggleSourceMarkers(); reclaimFocus() },
-            variant = ButtonVariant.Secondary, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-toggle-markers"))
-        AppButton("+ Participant", onClick = { addParticipant(false) }, variant = ButtonVariant.Secondary,
-            horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-participant"))
-        AppButton("+ Actor", onClick = { addParticipant(true) }, variant = ButtonVariant.Secondary,
-            horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-actor"))
-        SourceCompactMenu("+ Message ▾", "seq3-source-message-menu", listOf("Call", "Return", "Async"),
-            onSelect = { addMessage(listOf("Call", "Return", "Async")[it]) }, onClose = reclaimFocus)
-        AppButton("+ Note", onClick = {
-            val scope = seq3SourceNoteScope(editorState.text.toString(), editorState.selection.start, dialect,
-                sourceParticipants(editorState.text.toString(), dialect).map { it.alias }) ?: "Participant"
-            val snippet = "${if (dialect == Seq3Dialect.MERMAID) "Note" else "note"} over $scope: note text"
-            insertSnippet(snippet, sourceSnippetFields(snippet, "note text" to false), false)
-        }, variant = ButtonVariant.Secondary, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"))
-        val blocks = listOf("loop", "alt", "opt", "par", "critical", "break", "group")
-        SourceCompactMenu("+ Block ▾", "seq3-source-fragment-menu", blocks, onSelect = {
-            val aliases = sourceParticipants(editorState.text.toString(), dialect).map { participant -> participant.alias }
-            val (snippet, fields) = seq3SourceBlockSnippet(blocks[it], dialect, aliases)
-            insertSnippet(snippet, fields, false)
-        }, onClose = reclaimFocus)
-        SourceCompactMenu("+ Activation ▾", "seq3-source-activation-menu", listOf("Activate", "Deactivate"), onSelect = {
-            val snippet = "${if (it == 0) "activate" else "deactivate"} Participant"
-            insertSnippet(snippet, sourceSnippetFields(snippet, "Participant" to true), false)
-        }, onClose = reclaimFocus)
-        AppButton("New diagram", onClick = {
-            val latest = state.seq3Sessions.sessions.firstOrNull { it.id == session.id } ?: session
-            if (seq3SourceHasUserContent(view.sourceDraft, dialect, latest.document.title) || seq3DocumentHasUserContent(latest.document))
-                confirmNewDiagram = true else applyNewDiagram()
-        }, variant = ButtonVariant.Secondary, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-new-diagram"))
+    val hasMarkers = seq3SourceHasMarkers(editorState.text.toString(), dialect)
+    val tcNow = tc()
+    // The insert buttons are one group; New diagram and Show markers sit apart in the "⋯" menu, which
+    // lists Show markers only while the source has markers to show.
+    Row(Modifier.fillMaxWidth().background(tcNow.p).padding(horizontal = 6.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
+        FlowRow(Modifier.weight(1f, fill = false).border(0.5.dp, tcNow.br, CORNER_MD).background(tcNow.p2, CORNER_MD).padding(2.dp)
+            .testTag("seq3-source-insert-group"),
+            horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp),
+            itemVerticalAlignment = Alignment.CenterVertically) {
+            AppButton("+ Participant", onClick = { addParticipant(false) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
+                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-participant"))
+            AppButton("+ Actor", onClick = { addParticipant(true) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
+                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-actor"))
+            SourceCompactMenu("+ Message ▾", "seq3-source-message-menu", listOf("Call", "Return", "Async"),
+                onSelect = { addMessage(listOf("Call", "Return", "Async")[it]) }, onClose = reclaimFocus, variant = ButtonVariant.Ghost)
+            AppButton("+ Note", onClick = {
+                val scope = seq3SourceNoteScope(editorState.text.toString(), editorState.selection.start, dialect,
+                    sourceParticipants(editorState.text.toString(), dialect).map { it.alias }) ?: "Participant"
+                val snippet = "${if (dialect == Seq3Dialect.MERMAID) "Note" else "note"} over $scope: note text"
+                insertSnippet(snippet, sourceSnippetFields(snippet, "note text" to false), false)
+            }, variant = ButtonVariant.Ghost, textColor = tcNow.tx, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"))
+            val blocks = listOf("loop", "alt", "opt", "par", "critical", "break", "group")
+            SourceCompactMenu("+ Block ▾", "seq3-source-fragment-menu", blocks, onSelect = {
+                val aliases = sourceParticipants(editorState.text.toString(), dialect).map { participant -> participant.alias }
+                val (snippet, fields) = seq3SourceBlockSnippet(blocks[it], dialect, aliases)
+                insertSnippet(snippet, fields, false)
+            }, onClose = reclaimFocus, variant = ButtonVariant.Ghost)
+            SourceCompactMenu("+ Activation ▾", "seq3-source-activation-menu", listOf("Activate", "Deactivate"), onSelect = {
+                val snippet = "${if (it == 0) "activate" else "deactivate"} Participant"
+                insertSnippet(snippet, sourceSnippetFields(snippet, "Participant" to true), false)
+            }, onClose = reclaimFocus, variant = ButtonVariant.Ghost)
+        }
+        val moreItems = buildList {
+            add("New diagram")
+            if (hasMarkers) add(if (showSourceMarkers) "Hide markers" else "Show markers")
+        }
+        SourceCompactMenu("⋯", "seq3-source-more", moreItems, onSelect = { index ->
+            if (index == 0) {
+                val latest = state.seq3Sessions.sessions.firstOrNull { it.id == session.id } ?: session
+                if (seq3SourceHasUserContent(view.sourceDraft, dialect, latest.document.title) || seq3DocumentHasUserContent(latest.document))
+                    confirmNewDiagram = true else applyNewDiagram()
+            } else {
+                onToggleSourceMarkers()
+                reclaimFocus()
+            }
+        }, tags = listOf("seq3-source-new-diagram", "seq3-source-toggle-markers"), onClose = reclaimFocus, horizontalPadding = 9.dp)
     }
     if (confirmNewDiagram) Dialog(onDismissRequest = { confirmNewDiagram = false; reclaimFocus() },
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(420.dp).background(tc().p, RoundedCornerShape(12.dp)).border(1.dp, tc().br, RoundedCornerShape(12.dp)).padding(18.dp),
+        Column(Modifier.width(420.dp).background(tc().p, RoundedCornerShape(8.dp)).border(1.dp, tc().br, RoundedCornerShape(8.dp)).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
             AppText("Replace current diagram?", color = tc().tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             AppText("Starting a new diagram replaces the current source and diagram structure. Linked log evidence will be reviewed separately if it is affected.", color = tc().ts, fontSize = 11.sp)
@@ -1468,6 +1529,16 @@ private fun Seq3SourceActionForms(
             }
         }
     }
+}
+
+/** The declaration and tab fields of a new participant (or actor) with an unused alias, as the
+ *  "+ Participant" and "+ Actor" buttons insert it. */
+internal fun seq3SourceParticipantSnippet(source: String, dialect: Seq3Dialect, actor: Boolean): Pair<String, List<SourceSnippetField>> {
+    val alias = sourceUniqueAlias("Alias", sourceParticipants(source, dialect))
+    val snippet = sourceParticipantDeclaration(alias, "Name", actor, dialect)
+    val fields = if (dialect == Seq3Dialect.MERMAID) sourceSnippetFields(snippet, alias to false, "Name" to false).reversed()
+        else sourceSnippetFields(snippet, "Name" to false, alias to false)
+    return snippet to fields
 }
 
 private fun sourceUniqueAlias(base: String, participants: List<Seq3SourceParticipant>): String {
@@ -1512,6 +1583,10 @@ private fun sourceEscape(value: String, dialect: Seq3Dialect): String {
         }
     }
 }
+
+/** Whether [source] holds identity marker lines, which the editor hides until asked to show them. */
+internal fun seq3SourceHasMarkers(source: String, dialect: Seq3Dialect): Boolean =
+    source.contains("indagium-seq3:v1") && source.lineSequence().any { isSeq3SourceMarkerLine(it, dialect) }
 
 internal fun seq3SourceStarter(dialect: Seq3Dialect, title: String = ""): String = buildString {
     append(sourceStartHint(dialect))

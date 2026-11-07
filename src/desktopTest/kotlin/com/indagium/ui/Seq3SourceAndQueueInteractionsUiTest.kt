@@ -548,8 +548,10 @@ class Seq3SourceAndQueueInteractionsUiTest {
         rule.onNodeWithTag("seq3-source-issue-${view.sourceDiagnostics.indexOf(diagnostic)}").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("seq3-source-caret-message").assertIsDisplayed()
+        val shownLine = editorText().lines().indexOfFirst { it.contains("Pay") } + 1
+        assertTrue(shownLine in 1 until diagnostic.line, "the gutter counts the visible lines: $shownLine of raw ${diagnostic.line}")
         assertEquals(
-            "Line ${diagnostic.line}: ${diagnostic.message}",
+            "Line $shownLine: ${diagnostic.message}",
             rule.onNodeWithTag("seq3-source-caret-message").fetchSemanticsNode().config.getOrNull(SemanticsProperties.Text)?.joinToString("") { it.text },
         )
         rule.onNodeWithTag("seq3-source-gutter-line-${diagnostic.line}").assertIsDisplayed()
@@ -641,7 +643,7 @@ class Seq3SourceAndQueueInteractionsUiTest {
             it.tabs = listOf(tab)
             it.activateTab(tab.id)
         }
-        return requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        return requireNotNull(state.seq3Sessions.beginEmpty(tab.id)).also { state.seq3Sessions.setDialect(it, Seq3Dialect.PLANTUML) }
     }
 
     private fun seedTwoLifelines(sessionId: String) {

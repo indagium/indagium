@@ -455,7 +455,7 @@ private const val SEQ3_RAIL_BAR_DP = 3f
 private const val SEQ3_RAIL_STEP_DP = 4f
 private const val SEQ3_RAIL_MAX_BARS = 3
 private const val SEQ3_MESSAGES_TOGGLE_LABELS_MIN_WIDTH_DP = 460f
-private const val SEQ3_MESSAGES_ADD_LABEL_MIN_WIDTH_DP = 330f
+private const val SEQ3_MESSAGES_ADD_LABEL_MIN_WIDTH_DP = 400f
 private const val SEQ3_SEQUENCE_GRIP_LEFT_DP = 3f
 private const val SEQ3_SEQUENCE_GRIP_RIGHT_DP = 23f
 

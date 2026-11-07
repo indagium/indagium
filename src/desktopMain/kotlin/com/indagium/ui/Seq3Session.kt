@@ -729,6 +729,8 @@ class Seq3Session(
         val current = session(id) ?: return false
         val view = viewState(id) ?: return false
         if (!view.sourceDraftInitialized) {
+            // The editor opens in the diagram's own dialect, the one the header control shows.
+            view.sourceEditorDialect = current.dialect
             refreshSourceDraft(view, current.document)
             view.sourceFocusRequestGeneration++
         } else if (!view.sourceDraftDirty && !view.sourceDraftStale) {
@@ -739,10 +741,12 @@ class Seq3Session(
 
     /** Switches the detached source draft to another text dialect after the UI has resolved any
      *  dirty-draft confirmation. A dialect switch always starts from the latest document source;
-     *  the caller must not invoke this while an unconfirmed draft should be kept. */
+     *  the caller must not invoke this while an unconfirmed draft should be kept. The diagram's own
+     *  dialect (the header control, saved with the diagram) changes with it: there is one dialect. */
     fun switchSourceDraftDialect(id: String, dialect: Seq3Dialect): Boolean {
         val current = session(id) ?: return false
         val view = viewState(id) ?: return false
+        setDialect(id, dialect)
         if (view.sourceEditorDialect == dialect && view.sourceDraftInitialized) return true
         view.sourceEditorDialect = dialect
         view.sourceDraftInitialized = false
@@ -1290,11 +1294,27 @@ class Seq3Session(
         applyCommand(id, Seq3Command.SetTitle(trimmed))
     }
 
-    /** Changes only the source dialect used by the explicit note action. */
+    /** Changes the diagram's dialect: the one the note action writes and the source editor opens
+     *  in. It is saved with the diagram's library draft. Callers that also show the source editor
+     *  go through [switchSourceDraftDialect] so the editor follows. */
     fun setDialect(id: String, dialect: Seq3Dialect) {
         if (session(id)?.dialect == dialect) return
         replace(id) { it.copy(dialect = dialect, dirty = true) }
+        scheduleDraftSave(id)
         syncLiveLinkedNote(id)
+    }
+
+    /** The title a New diagram keeps: the diagram's own, or, when it has none, a fresh default
+     *  that no other diagram of the same log already uses. A diagram without a title would show
+     *  as "Sequence diagram v3" in the header and as plain "Diagram" in the tab. */
+    fun newSourceDiagramTitle(id: String): String {
+        val current = session(id) ?: return BASE_UNTITLED_TITLE
+        current.document.title.trim().takeIf { it.isNotEmpty() }?.let { return it }
+        val others = current.sourceTabId?.let(appState::tab)
+            ?.let { libraryStore.forSource(sourceIdentity(it)) }.orEmpty()
+            .filter { it.id != current.libraryItemId }
+            .map { it.title }
+        return defaultSeq3Title(others.toSet())
     }
 
     // ── Undo stack: every mutation routes through applySeq3Command ──────────────────────────────

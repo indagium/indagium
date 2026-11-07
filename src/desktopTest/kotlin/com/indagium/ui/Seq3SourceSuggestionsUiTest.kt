@@ -272,7 +272,7 @@ class Seq3SourceSuggestionsUiTest {
             it.tabs = listOf(tab)
             it.activateTab(tab.id)
         }
-        return requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        return requireNotNull(state.seq3Sessions.beginEmpty(tab.id)).also { state.seq3Sessions.setDialect(it, Seq3Dialect.PLANTUML) }
     }
 
     private fun currentSession(sessionId: String) =

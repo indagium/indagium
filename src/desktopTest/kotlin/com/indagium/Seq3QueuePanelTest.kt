@@ -690,9 +690,10 @@ class Seq3QueuePanelTest {
 
     @Test
     fun theMessagesHeaderDropsItsCountAndIconBeforeTheTitleCanShrink() {
-        assertEquals(TileHeaderParts(showIcon = true, showSummary = true), seq3MessagesHeaderParts(460f))
-        // The standard ~370dp tile: the title keeps its room, so no count there.
-        assertEquals(TileHeaderParts(showIcon = true, showSummary = false), seq3MessagesHeaderParts(370f))
+        assertEquals(TileHeaderParts(showIcon = true, showSummary = true), seq3MessagesHeaderParts(540f))
+        assertEquals(TileHeaderParts(showIcon = true, showSummary = false), seq3MessagesHeaderParts(460f))
+        // The ~410dp tile of a 1440dp window: the title keeps its room, so no count and no icon there.
+        assertEquals(TileHeaderParts(showIcon = false, showSummary = false), seq3MessagesHeaderParts(412f))
         assertEquals(TileHeaderParts(showIcon = false, showSummary = false), seq3MessagesHeaderParts(340f))
     }
 }

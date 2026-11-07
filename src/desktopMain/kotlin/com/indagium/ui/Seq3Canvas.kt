@@ -155,6 +155,10 @@ private const val MAX_ZOOM = 4f
 private const val MIN_FIT_ZOOM = 0.15f
 private const val MAX_FIT_ZOOM = 2.5f
 
+// Fit width leaves the diagram no bigger than this while the Source tile is open: the tiles beside the
+// preview leave it a narrow viewport, and a small diagram blown up to fill it only looks coarse.
+private const val MAX_FIT_ZOOM_WITH_SOURCE = 1.25f
+
 // Floor for density/zoom before dividing by them in seq3PointerPxToLayoutUnits — guards against a
 // division blow-up, not a meaningful measurement in its own right.
 private const val SEQ3_MIN_SAFE_DENSITY_OR_ZOOM = 0.001f
@@ -234,8 +238,24 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
     Column(modifier.fillMaxSize().background(docTheme.bg)) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (layout.lifelines.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    Modifier.fillMaxSize().testTag("seq3-canvas-empty"),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
+                ) {
                     AppText(if (session.generating) "Generating…" else "No lifelines to diagram", color = docTheme.ts, fontSize = 12.sp)
+                    // The first thing a manual diagram needs: the same participant the source toolbar adds.
+                    if (!session.generating) {
+                        AppButton(
+                            "+ Participant",
+                            onClick = {
+                                openSeq3SourceEditor(state, session, view)
+                                view.sourceInsertParticipantRequest = true
+                            },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.testTag("seq3-canvas-empty-add-participant"),
+                        )
+                    }
                 }
             } else {
                 Seq3CanvasContent(state, session, view, document, layout, docTheme)
@@ -421,7 +441,7 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
     ) {
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText(
-                "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden" +
+                seq3CanvasStatusSummary(document, shown, scanned, hidden) +
                     "$elidedOccurrencesSuffix$elidedMessagesSuffix$linkedNoteDriftedSuffix",
                 color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false),
@@ -439,6 +459,13 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
         }
         Seq3CanvasZoomToolbarControls(view)
     }
+}
+
+/** The status bar's counts. A manual diagram (no source log in its document) has no scanned rows, so
+ *  "0 scanned" is left out for it. */
+internal fun seq3CanvasStatusSummary(document: Seq3Document, shown: Int, scanned: Int, hidden: Int): String {
+    val scannedPart = if (document.sourceFile.isNullOrBlank()) "" else " · $scanned scanned"
+    return "$shown shown$scannedPart · ${document.lifelines.size} lifelines · $hidden hidden"
 }
 
 // ── Scrollable, zoomable, pointer-interactive content ──────────────────────────────────────────
@@ -473,11 +500,12 @@ private fun Seq3CanvasContent(
         val viewportHeight = maxHeight.value.toDouble()
         val viewportWidthPx = viewportWidth * density
         val viewportHeightPx = viewportHeight * density
-        LaunchedEffect(layout, viewportWidth, viewportHeight, view.zoomMode) {
+        val sourceVisible = DiagramWorkspaceSectionId.SOURCE in diagramWorkspaceVisibleTiles(view)
+        LaunchedEffect(layout, viewportWidth, viewportHeight, view.zoomMode, sourceVisible) {
             if (viewportWidth <= 0.0 || viewportHeight <= 0.0) return@LaunchedEffect
             val target = when (view.zoomMode) {
                 Seq3ZoomMode.FIT -> seq3FitHeightZoom(layout.height, viewportHeight)
-                Seq3ZoomMode.FIT_WIDTH -> seq3FitWidthZoom(layout.width, viewportWidth)
+                Seq3ZoomMode.FIT_WIDTH -> seq3FitWidthZoom(layout.width, viewportWidth, seq3FitWidthMaxZoom(sourceVisible))
                 Seq3ZoomMode.MANUAL -> null
             }
             if (target != null) view.zoom = target
@@ -3777,10 +3805,13 @@ internal fun seq3FitHeightZoom(contentHeight: Double, viewportHeight: Double): F
     return (viewportHeight / contentHeight).toFloat().coerceIn(MIN_FIT_ZOOM, MAX_FIT_ZOOM)
 }
 
-internal fun seq3FitWidthZoom(contentWidth: Double, viewportWidth: Double): Float {
+internal fun seq3FitWidthZoom(contentWidth: Double, viewportWidth: Double, maxZoom: Float = MAX_FIT_ZOOM): Float {
     if (contentWidth <= 0.0 || viewportWidth <= 0.0) return 1f
-    return (viewportWidth / contentWidth).toFloat().coerceIn(MIN_FIT_ZOOM, MAX_FIT_ZOOM)
+    return (viewportWidth / contentWidth).toFloat().coerceIn(MIN_FIT_ZOOM, maxZoom)
 }
+
+/** The most Fit width enlarges a diagram: 125% while the Source tile is open, the usual cap otherwise. */
+internal fun seq3FitWidthMaxZoom(sourceVisible: Boolean): Float = if (sourceVisible) MAX_FIT_ZOOM_WITH_SOURCE else MAX_FIT_ZOOM
 
 /** Converts a pointer coordinate from physical pixels on the zoomed canvas to layout units. */
 internal fun seq3PointerPxToLayoutUnits(pointerPx: Float, density: Float, zoom: Float): Double {
