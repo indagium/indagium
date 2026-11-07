@@ -35,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -47,6 +48,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.key.Key
@@ -78,9 +80,12 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3SourceDiagnostic
+import com.indagium.diagram3.Seq3SourceFix
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.parseSeq3SourceArrowEndpoints
 import com.indagium.diagram3.parseSeq3SourceParticipant
@@ -176,7 +181,10 @@ internal fun Seq3SourceEditorPane(
     var endpointMenu by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Int?>(null) }
     var ignoreEndpointRelease by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
     var showEvidenceLossDialog by remember(session.id) { mutableStateOf(false) }
-    var showSourceDiagnosticsDialog by remember(session.id) { mutableStateOf(false) }
+    // The in-tile issues list under the editor, opened from the status strip.
+    var showSourceIssues by remember(session.id) { mutableStateOf(false) }
+    var viewportPx by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
     var pendingNewDiagramEvidenceRemoval by remember(session.id) { mutableStateOf<Pair<String, Seq3Dialect>?>(null) }
     LaunchedEffect(session.id) {
         if (!view.sourceDraftInitialized) state.seq3Sessions.prepareSourceDraft(session.id)
@@ -236,6 +244,15 @@ internal fun Seq3SourceEditorPane(
         gutterListState.scrollToItem(firstLine, offset)
     }
 
+    // The visible lines the diagnostics belong to: a diagnostic on a hidden marker line lands on
+    // the line shown in its place, and the line the caret is on picks its message for the strip.
+    val diagnosticLines = remember(sourceText, view.sourceDiagnostics, view.sourceEditorDialect, showSourceMarkers) {
+        seq3SourceVisibleRawLines(sourceText, view.sourceDiagnostics.map { it.line }, view.sourceEditorDialect, showSourceMarkers).toSet()
+    }
+    val caretDiagnostic = seq3SourceDiagnosticAtCaret(
+        sourceText, editorState.selection.start, view.sourceDiagnostics, view.sourceEditorDialect, showSourceMarkers,
+    )
+
     fun currentEditorValue(): TextFieldValue = TextFieldValue(editorState.text.toString(), editorState.selection)
 
     fun setEditorValue(next: TextFieldValue, record: Boolean = true) {
@@ -275,6 +292,30 @@ internal fun Seq3SourceEditorPane(
         if (edit.text != old) snippetFields = rebaseSourceSnippetFields(snippetFields, old, edit.text)
         endpointMenu = null
         setEditorValue(TextFieldValue(edit.text, TextRange(edit.selectionStart, edit.selectionEnd)), true)
+    }
+
+    /** Moves the caret to raw source line [rawLine] (the nearest visible line when that one is a
+     *  hidden marker line), gives the editor focus back and scrolls the line into view. */
+    fun goToLine(rawLine: Int) {
+        val text = editorState.text.toString()
+        val line = seq3SourceVisibleRawLines(text, listOf(rawLine), view.sourceEditorDialect, showSourceMarkers).first()
+        val offset = seq3SourceCaretOffsetForLine(text, line, view.sourceEditorDialect, showSourceMarkers)
+        endpointMenu = null
+        editorState.edit { this.selection = TextRange(offset) }
+        runCatching { requester.requestFocus() }
+        val lineHeight = lineHeightPx.roundToInt()
+        val top = visibleLines.indexOfLine(line) * lineHeight
+        val visibleFrom = scroll.value
+        if (top < visibleFrom || (viewportPx > 0 && top + lineHeight > visibleFrom + viewportPx)) {
+            scope.launch { scroll.scrollTo((top - (viewportPx - lineHeight).coerceAtLeast(0) / 2).coerceAtLeast(0)) }
+        }
+    }
+
+    /** A diagnostic's quick fix as one undoable editor edit. */
+    fun applyIssueFix(fix: Seq3SourceFix) {
+        val range = editorState.selection
+        applySourceEdit(seq3SourceApplyFix(editorState.text.toString(), fix, range.start, range.end))
+        runCatching { requester.requestFocus() }
     }
 
     // Text that changes from outside (a canvas edit, Reload, Discard) arrives as one undoable edit:
@@ -387,10 +428,13 @@ internal fun Seq3SourceEditorPane(
             ) {
                 items(lineCount) { index ->
                     val line = visibleLines.lineNumberAt(index)
-                    val hasDiagnostic = view.sourceDiagnostics.any { it.line == line }
+                    val hasDiagnostic = line in diagnosticLines
                     Box(
-                        Modifier.fillMaxWidth().height(lineHeightDp).padding(end = 8.dp)
-                            .testTag("seq3-source-gutter-line-$line"),
+                        Modifier.fillMaxWidth().height(lineHeightDp)
+                            .background(if (hasDiagnostic) tc.warnBg else Color.Transparent)
+                            .padding(end = 8.dp)
+                            .testTag("seq3-source-gutter-line-$line")
+                            .semantics { if (hasDiagnostic) stateDescription = "Has issue" },
                         contentAlignment = Alignment.CenterEnd,
                     ) {
                         AppText(
@@ -422,6 +466,7 @@ internal fun Seq3SourceEditorPane(
                 },
                 scrollState = scroll,
                 modifier = Modifier.weight(1f).fillMaxHeight().padding(top = 8.dp, bottom = 8.dp)
+                    .onSizeChanged { viewportPx = it.height }
                     .testTag("seq3-source-editor")
                     .focusRequester(requester)
                     .onFocusChanged { view.textFieldFocused = it.hasFocus }
@@ -582,36 +627,30 @@ internal fun Seq3SourceEditorPane(
                 },
             )
         }
+        if (showSourceIssues && view.sourceDiagnostics.isNotEmpty()) {
+            Seq3SourceIssuesList(
+                diagnostics = view.sourceDiagnostics,
+                caretDiagnostic = caretDiagnostic,
+                onJump = { goToLine(it) },
+                onFix = { applyIssueFix(it) },
+                onClose = {
+                    showSourceIssues = false
+                    runCatching { requester.requestFocus() }
+                },
+            )
+        }
         Seq3SourceStatusStrip(
             state = state,
             session = session,
             view = view,
             suggestionsVisible = suggestionsVisible,
+            caretDiagnostic = caretDiagnostic,
             onReviewEvidence = { showEvidenceLossDialog = true },
-            onShowDiagnostics = { showSourceDiagnosticsDialog = true },
+            onToggleIssues = {
+                showSourceIssues = !showSourceIssues
+                runCatching { requester.requestFocus() }
+            },
         )
-    }
-
-    if (showSourceDiagnosticsDialog && view.sourceDiagnostics.isNotEmpty()) {
-        Dialog(
-            onDismissRequest = { showSourceDiagnosticsDialog = false; runCatching { requester.requestFocus() } },
-            properties = DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            Column(
-                Modifier.width(460.dp).heightIn(max = 420.dp).background(tc.p, RoundedCornerShape(12.dp))
-                    .border(1.dp, tc.br, RoundedCornerShape(12.dp)).verticalScroll(rememberScrollState()).padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                AppText("Source diagnostics", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                view.sourceDiagnostics.forEach { diagnostic ->
-                    AppText("Line ${diagnostic.line}: ${diagnostic.message}", color = tc.warn, fontSize = 11.sp)
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    AppButton("Close", onClick = { showSourceDiagnosticsDialog = false; runCatching { requester.requestFocus() } },
-                        variant = ButtonVariant.Ghost)
-                }
-            }
-        }
     }
 
     if (showEvidenceLossDialog && view.sourceEvidenceLossPending) {
@@ -734,8 +773,9 @@ private fun Seq3SourceStatusStrip(
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     suggestionsVisible: Boolean,
+    caretDiagnostic: Seq3SourceDiagnostic?,
     onReviewEvidence: () -> Unit,
-    onShowDiagnostics: () -> Unit,
+    onToggleIssues: () -> Unit,
 ) {
     val warning = view.sourceDraftStale || view.sourceDiagnostics.isNotEmpty() ||
         (view.sourceEvidenceLossPending && view.sourceLiveEnabled)
@@ -750,7 +790,7 @@ private fun Seq3SourceStatusStrip(
                 AppText(
                     "Diagram changed. Reload source to continue.",
                     color = tc().warn,
-                    fontSize = 10.sp,
+                    fontSize = 11.sp,
                     modifier = Modifier.weight(1f).testTag("seq3-source-stale"),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -758,7 +798,7 @@ private fun Seq3SourceStatusStrip(
                 AppButton(
                     "Reload",
                     onClick = { reloadSeq3SourceDraft(state, session, view) },
-                    variant = ButtonVariant.Ghost,
+                    variant = ButtonVariant.Secondary,
                     horizontalPadding = 6.dp,
                     modifier = Modifier.testTag("seq3-source-reload"),
                 )
@@ -767,7 +807,7 @@ private fun Seq3SourceStatusStrip(
                 AppText(
                     "This edit removes linked log evidence.",
                     color = tc().warn,
-                    fontSize = 10.sp,
+                    fontSize = 11.sp,
                     modifier = Modifier.weight(1f).testTag("seq3-source-evidence-review-status"),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -784,22 +824,34 @@ private fun Seq3SourceStatusStrip(
                 AppText(
                     "Invalid · preview unchanged (${view.sourceDiagnostics.size})",
                     color = tc().warn,
-                    fontSize = 10.sp,
-                    modifier = Modifier.weight(1f).testTag("seq3-source-draft-status"),
+                    fontSize = 11.sp,
+                    modifier = (if (caretDiagnostic == null) Modifier.weight(1f) else Modifier.widthIn(max = 210.dp))
+                        .testTag("seq3-source-draft-status"),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                // The message for the line the caret is on, so a typo is explained where it is made.
+                if (caretDiagnostic != null) {
+                    AppText(
+                        "Line ${caretDiagnostic.line}: ${caretDiagnostic.message}",
+                        color = tc().tx,
+                        fontSize = 11.sp,
+                        modifier = Modifier.weight(1f).testTag("seq3-source-caret-message"),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 AppButton(
                     "Details",
-                    onClick = onShowDiagnostics,
-                    variant = ButtonVariant.Ghost,
+                    onClick = onToggleIssues,
+                    variant = ButtonVariant.Secondary,
                     horizontalPadding = 6.dp,
                     modifier = Modifier.testTag("seq3-source-diagnostics-details"),
                 )
                 AppButton(
                     "Discard",
                     onClick = { reloadSeq3SourceDraft(state, session, view) },
-                    variant = ButtonVariant.Ghost,
+                    variant = ButtonVariant.Secondary,
                     horizontalPadding = 6.dp,
                     modifier = Modifier.testTag("seq3-source-reload"),
                 )
@@ -808,7 +860,7 @@ private fun Seq3SourceStatusStrip(
                 AppText(
                     "Draft",
                     color = tc().ac,
-                    fontSize = 10.sp,
+                    fontSize = 11.sp,
                     modifier = Modifier.weight(1f).testTag("seq3-source-draft-status"),
                 )
                 if (!view.sourceLiveEnabled) {
@@ -824,12 +876,63 @@ private fun Seq3SourceStatusStrip(
                 AppButton(
                     "Discard",
                     onClick = { reloadSeq3SourceDraft(state, session, view) },
-                    variant = ButtonVariant.Ghost,
+                    variant = ButtonVariant.Secondary,
                     horizontalPadding = 6.dp,
                     modifier = Modifier.testTag("seq3-source-reload"),
                 )
             }
             else -> Box(Modifier.weight(1f))
+        }
+    }
+}
+
+/** The in-tile issues list under the editor: one row per diagnostic with its line and message.
+ *  A row moves the caret to that line; a diagnostic with a quick fix offers it as a button. */
+@Composable
+private fun Seq3SourceIssuesList(
+    diagnostics: List<Seq3SourceDiagnostic>,
+    caretDiagnostic: Seq3SourceDiagnostic?,
+    onJump: (Int) -> Unit,
+    onFix: (Seq3SourceFix) -> Unit,
+    onClose: () -> Unit,
+) {
+    val tc = tc()
+    Column(Modifier.fillMaxWidth().background(tc.p).testTag("seq3-source-issues")) {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+        Row(
+            Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText(
+                if (diagnostics.size == 1) "1 issue" else "${diagnostics.size} issues",
+                color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
+            )
+            AppButton(
+                "Close", onClick = onClose, variant = ButtonVariant.Secondary, horizontalPadding = 6.dp,
+                modifier = Modifier.testTag("seq3-source-issues-close"),
+            )
+        }
+        Column(Modifier.fillMaxWidth().heightIn(max = 132.dp).verticalScroll(rememberScrollState()).padding(bottom = 4.dp)) {
+            diagnostics.forEachIndexed { index, diagnostic ->
+                Row(
+                    Modifier.fillMaxWidth()
+                        .background(if (diagnostic == caretDiagnostic) tc.warnBg else Color.Transparent)
+                        .clickable { onJump(diagnostic.line) }
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                        .testTag("seq3-source-issue-$index"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppText("Line ${diagnostic.line}", color = tc.warn, fontSize = 11.sp, fontFamily = MONO)
+                    AppText(diagnostic.message, color = tc.tx, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    diagnostic.fix?.let { fix ->
+                        AppButton(
+                            fix.label, onClick = { onFix(fix) }, variant = ButtonVariant.Secondary, horizontalPadding = 6.dp,
+                            modifier = Modifier.testTag("seq3-source-issue-fix-$index"),
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1409,6 +1512,13 @@ internal data class Seq3SourceLineNumberMap(
     private val visibleLineNumbers: List<Int>? = null,
 ) {
     fun lineNumberAt(index: Int): Int = visibleLineNumbers?.getOrElse(index) { index + 1 } ?: index + 1
+
+    /** The row index showing raw line [line]; the nearest following row when that line is hidden. */
+    fun indexOfLine(line: Int): Int {
+        val numbers = visibleLineNumbers ?: return (line - 1).coerceIn(0, (lineCount - 1).coerceAtLeast(0))
+        val found = numbers.binarySearch(line)
+        return (if (found >= 0) found else -found - 1).coerceIn(0, numbers.lastIndex)
+    }
 
     fun asList(): List<Int> = visibleLineNumbers ?: (1..lineCount).toList()
 }

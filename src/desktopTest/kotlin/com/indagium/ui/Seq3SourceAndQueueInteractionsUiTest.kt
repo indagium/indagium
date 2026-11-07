@@ -19,6 +19,8 @@ import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
@@ -83,9 +85,15 @@ class Seq3SourceAndQueueInteractionsUiTest {
             "the parser should locate the malformed first source line"
         }
         rule.onNodeWithTag("seq3-source-draft-status").assertIsDisplayed()
+        rule.onNodeWithTag("seq3-source-issues").assertDoesNotExist()
         rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
-        rule.onNodeWithText("Line 1: ${firstLineDiagnostic.message}", useUnmergedTree = true).assertIsDisplayed()
-        rule.onNodeWithText("Close", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("seq3-source-issues").assertIsDisplayed()
+        rule.onNode(isDialog()).assertDoesNotExist()
+        rule.onAllNodesWithText("Line 1", useUnmergedTree = true).onFirst().assertIsDisplayed()
+        rule.onAllNodesWithText(firstLineDiagnostic.message, useUnmergedTree = true).onFirst().assertIsDisplayed()
+        rule.onNodeWithTag("seq3-source-issues-close").performClick()
+        rule.onNodeWithTag("seq3-source-issues").assertDoesNotExist()
+        rule.onNodeWithTag("seq3-source-editor").assertIsFocused()
 
         rule.onNodeWithTag("seq3-source-reload").performClick()
         rule.waitForIdle()
@@ -459,6 +467,159 @@ class Seq3SourceAndQueueInteractionsUiTest {
         assertEquals("Focused title", currentSession(sessionId).document.title)
         assertEquals(undoCount, currentSession(sessionId).undoStack.size, "text focus keeps both platform chords out of diagram history")
     }
+
+    @Test
+    fun clickingAnIssueMovesTheCaretToItsLineWhileMarkersStayHidden() {
+        val sessionId = startEmptyWorkspace("source-issue-jump")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val edited = openMarkedSourceWithUnknownParticipant(sessionId)
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isNotEmpty() }
+        val diagnostic = view.sourceDiagnostics.first { it.fix != null }
+        assertFalse(editorText().contains("indagium-seq3"), "the markers are hidden in the editor: ${editorText()}")
+        assertTrue(edited.contains("indagium-seq3:v1"))
+
+        rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
+        rule.onNodeWithTag("seq3-source-issue-${view.sourceDiagnostics.indexOf(diagnostic)}").performClick()
+        rule.waitForIdle()
+
+        val visible = editorText()
+        val caretLine = visible.substring(0, caretInVisibleText()).count { it == '\n' }
+        assertTrue(visible.lines()[caretLine].contains("Pay"), "the caret is on the line with the problem: '${visible.lines()[caretLine]}'")
+        assertTrue(diagnostic.line > caretLine + 1, "the diagnostic's raw line ${diagnostic.line} is past the visible line ${caretLine + 1}")
+        assertTrue(view.textFieldFocused, "the editor takes its focus back after a row click")
+        rule.onNodeWithTag("seq3-source-editor").assertIsFocused()
+    }
+
+    @Test
+    fun clickingAnIssueScrollsItsLineIntoView() {
+        val sessionId = startEmptyWorkspace("source-issue-scroll")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val body = (1..80).joinToString("\n") { if (it == 40) "A -> Pay: bad" else "A -> B: m$it" }
+        rule.onNodeWithTag("seq3-source-editor")
+            .performTextReplacement("@startuml\nparticipant \"A\" as A\nparticipant \"B\" as B\n$body\n@enduml")
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isNotEmpty() }
+        val line = view.sourceDiagnostics.first { it.fix != null }.line
+        rule.onNodeWithTag("seq3-source-gutter-line-$line").assertDoesNotExist()
+
+        rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
+        rule.onNodeWithTag("seq3-source-issue-${view.sourceDiagnostics.indexOfFirst { it.fix != null }}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("seq3-source-gutter-line-$line").assertIsDisplayed()
+    }
+
+    @Test
+    fun anIssueFixIsOneEditorEditAndOneCtrlZUndoesIt() {
+        val sessionId = startEmptyWorkspace("source-issue-fix")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val edited = openMarkedSourceWithUnknownParticipant(sessionId)
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isNotEmpty() }
+        val index = view.sourceDiagnostics.indexOfFirst { it.fix != null }
+        val fix = requireNotNull(view.sourceDiagnostics[index].fix)
+        val generation = view.sourceEditorGeneration
+        assertEquals("Add participant Pay", fix.label)
+
+        rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
+        rule.onNodeWithTag("seq3-source-issue-fix-$index", useUnmergedTree = true).assertIsDisplayed().performClick()
+        rule.waitForIdle()
+        assertTrue(view.sourceDraft.contains(fix.text), view.sourceDraft)
+        assertEquals(generation, view.sourceEditorGeneration, "the fix is an edit, not an editor restart")
+        rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.any { it.name == "Pay" } }
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isEmpty() }
+        rule.onNodeWithTag("seq3-source-issues").assertDoesNotExist()
+        rule.onNodeWithTag("seq3-source-editor").assertIsFocused()
+
+        ctrlZ()
+        rule.waitForIdle()
+        assertEquals(edited, view.sourceDraft, "one Ctrl+Z takes the fix back")
+    }
+
+    @Test
+    fun theStatusStripExplainsTheLineTheCaretIsOn() {
+        val sessionId = startEmptyWorkspace("source-caret-message")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        openMarkedSourceWithUnknownParticipant(sessionId)
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isNotEmpty() }
+        val diagnostic = view.sourceDiagnostics.first { it.fix != null }
+        rule.onNodeWithTag("seq3-source-caret-message").assertDoesNotExist() // the caret is on the last line
+
+        rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
+        rule.onNodeWithTag("seq3-source-issue-${view.sourceDiagnostics.indexOf(diagnostic)}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("seq3-source-caret-message").assertIsDisplayed()
+        assertEquals(
+            "Line ${diagnostic.line}: ${diagnostic.message}",
+            rule.onNodeWithTag("seq3-source-caret-message").fetchSemanticsNode().config.getOrNull(SemanticsProperties.Text)?.joinToString("") { it.text },
+        )
+        rule.onNodeWithTag("seq3-source-gutter-line-${diagnostic.line}").assertIsDisplayed()
+        assertEquals(
+            "Has issue",
+            rule.onNodeWithTag("seq3-source-gutter-line-${diagnostic.line}").fetchSemanticsNode().config.getOrNull(SemanticsProperties.StateDescription),
+            "the line is tinted in the gutter",
+        )
+    }
+
+    @Test
+    fun thePreviewSaysItIsOutOfDateWhileTheSourceIsInvalidAndNotAfterItIsFixed() {
+        val sessionId = startEmptyWorkspace("source-out-of-date")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-canvas-out-of-date").assertDoesNotExist()
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-editor")
+            .performTextReplacement("@startuml\nparticipant \"A\" as A\nA -> Pay: hi\n@enduml")
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isNotEmpty() }
+        rule.onNodeWithTag("seq3-canvas-out-of-date", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithText("Out of date: showing the last valid diagram", useUnmergedTree = true).assertIsDisplayed()
+
+        val index = view.sourceDiagnostics.indexOfFirst { it.fix != null }
+        rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
+        rule.onNodeWithTag("seq3-source-issue-fix-$index", useUnmergedTree = true).performClick()
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isEmpty() && currentSession(sessionId).document.lifelines.any { it.name == "Pay" } }
+        rule.waitUntil(5_000) { rule.onAllNodesWithTag("seq3-canvas-out-of-date", useUnmergedTree = true).fetchSemanticsNodes().isEmpty() }
+    }
+
+    @Test
+    fun discardNeedsNoDialogAndOneCtrlZBringsTheInvalidDraftBack() {
+        val sessionId = startEmptyWorkspace("source-discard-no-dialog")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.waitForIdle()
+        val canonical = view.sourceDraft
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement("not PlantUML")
+        rule.waitUntil(5_000) { view.sourceDiagnostics.isNotEmpty() }
+
+        rule.onNodeWithTag("seq3-source-reload").performClick()
+        rule.waitForIdle()
+        rule.onNode(isDialog()).assertDoesNotExist()
+        assertEquals(canonical, view.sourceDraft)
+        assertTrue(view.sourceDiagnostics.isEmpty())
+
+        ctrlZ()
+        rule.waitForIdle()
+        assertEquals("not PlantUML", view.sourceDraft, "one Ctrl+Z brings the discarded draft back")
+    }
+
+    /** Opens the editor on a diagram with a marked message, then types an arrow to a participant that
+     *  was never declared after it. Returns the typed text; the identity markers above stay hidden. */
+    private fun openMarkedSourceWithUnknownParticipant(sessionId: String): String {
+        seedTwoLifelines(sessionId)
+        state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec("a", "b", "First")))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.waitForIdle()
+        val canonical = requireNotNull(state.seq3Sessions.viewState(sessionId)).sourceDraft
+        assertTrue(canonical.contains("indagium-seq3:v1"), canonical)
+        val alias = requireNotNull(Regex("(?m)^participant .* as (\\w+)").find(canonical)) { canonical }.groupValues[1]
+        val edited = canonical.replace("@enduml", "$alias -> Pay: second\n@enduml")
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement(edited)
+        return edited
+    }
+
+    private fun caretInVisibleText(): Int =
+        rule.onNodeWithTag("seq3-source-editor").fetchSemanticsNode().config.getOrNull(SemanticsProperties.TextSelectionRange)?.start ?: -1
 
     private fun editorText(): String =
         rule.onNodeWithTag("seq3-source-editor").fetchSemanticsNode().config.getOrNull(SemanticsProperties.EditableText)?.text.orEmpty()

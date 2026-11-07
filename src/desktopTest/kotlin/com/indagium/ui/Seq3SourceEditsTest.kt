@@ -3,6 +3,8 @@ package com.indagium.ui
 import androidx.compose.ui.text.TextRange
 import com.indagium.diagram3.SEQ3_SOURCE_EDIT_LABEL
 import com.indagium.diagram3.Seq3Dialect
+import com.indagium.diagram3.Seq3SourceDiagnostic
+import com.indagium.diagram3.Seq3SourceFix
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -162,5 +164,86 @@ class Seq3SourceEditsTest {
         assertEquals(0, seq3SourceMapCaret("abc", "", 3))
         assertEquals(0, seq3SourceMapCaret("", "abc", 0))
         assertEquals(2, seq3SourceMapCaret("ab", "abcd", 99), "an out-of-range caret is clamped first")
+    }
+
+    // ── Issues list: raw diagnostic lines, hidden markers, quick fixes ──────────────────────────
+
+    private val withMarkers = "@startuml\n$marker\nA -> B: one\n$marker\nA -> Pay: two\n@enduml"
+
+    @Test
+    fun aRawLineIsTheLineHoldingTheOffset() {
+        assertEquals(1, seq3SourceRawLineAt("a\nb\nc", 0))
+        assertEquals(1, seq3SourceRawLineAt("a\nb\nc", 1), "the line break belongs to the line it ends")
+        assertEquals(2, seq3SourceRawLineAt("a\nb\nc", 2))
+        assertEquals(3, seq3SourceRawLineAt("a\nb\nc", 99), "an offset past the end is clamped")
+    }
+
+    @Test
+    fun aDiagnosticOnAHiddenMarkerLineMapsToTheNextVisibleLine() {
+        // Raw lines: 1 @startuml, 2 marker, 3 one, 4 marker, 5 two, 6 @enduml.
+        assertEquals(listOf(1, 3, 3, 5, 5, 6), seq3SourceVisibleRawLines(withMarkers, listOf(1, 2, 3, 4, 5, 6), puml, showMarkers = false))
+        assertEquals(listOf(2, 4), seq3SourceVisibleRawLines(withMarkers, listOf(2, 4), puml, showMarkers = true), "shown markers hide nothing")
+        assertEquals(listOf(6, 1), seq3SourceVisibleRawLines(withMarkers, listOf(99, 0), puml, showMarkers = false), "out of range is clamped")
+    }
+
+    @Test
+    fun aTrailingMarkerRunMapsBackToTheLastVisibleLine() {
+        val source = "@startuml\nA -> B: one\n$marker\n"
+        assertEquals(listOf(2, 2, 2), seq3SourceVisibleRawLines(source, listOf(3, 4, 2), puml, showMarkers = false))
+    }
+
+    @Test
+    fun theCaretLandsAfterTheIndentationOfTheVisibleLine() {
+        val source = "@startuml\n$marker\n    A -> Pay: two\n\n@enduml"
+        assertEquals(source.indexOf("A -> Pay"), seq3SourceCaretOffsetForLine(source, 3, puml, showMarkers = false))
+        assertEquals(source.indexOf("A -> Pay"), seq3SourceCaretOffsetForLine(source, 2, puml, showMarkers = false), "a marker line shows the line after it")
+        assertEquals(source.indexOf("\n\n@enduml") + 1, seq3SourceCaretOffsetForLine(source, 4, puml, showMarkers = false), "a blank line ends where it starts")
+        assertEquals(source.indexOf(marker), seq3SourceCaretOffsetForLine(source, 2, puml, showMarkers = true))
+    }
+
+    @Test
+    fun aLineIndexInTheVisibleNumberingIsFoundByItsRawNumber() {
+        val map = seq3SourceLineNumberMap(withMarkers, puml, showMarkers = false)
+        assertEquals(4, map.lineCount)
+        assertEquals(0, map.indexOfLine(1))
+        assertEquals(1, map.indexOfLine(3))
+        assertEquals(2, map.indexOfLine(5))
+        assertEquals(3, map.indexOfLine(6))
+        assertEquals(1, map.indexOfLine(2), "a hidden line is the row that follows it")
+        assertEquals(3, map.indexOfLine(99), "past the end is the last row")
+        assertEquals(4, seq3SourceLineNumberMap("a\nb\nc\nd\ne", puml, showMarkers = false).indexOfLine(5))
+    }
+
+    @Test
+    fun theDiagnosticAtTheCaretIsFoundOnItsVisibleLine() {
+        val onTwo = Seq3SourceDiagnostic(5, "Participant 'Pay' isn't declared.")
+        val onMarker = Seq3SourceDiagnostic(4, "on the marker above two")
+        val caretOnTwo = withMarkers.indexOf("A -> Pay") + 3
+        assertEquals(onTwo, seq3SourceDiagnosticAtCaret(withMarkers, caretOnTwo, listOf(onTwo), puml, showMarkers = false))
+        assertEquals(onMarker, seq3SourceDiagnosticAtCaret(withMarkers, caretOnTwo, listOf(onMarker), puml, showMarkers = false), "a hidden line is shown as the line after it")
+        assertNull(seq3SourceDiagnosticAtCaret(withMarkers, withMarkers.indexOf("A -> B") + 1, listOf(onTwo), puml, showMarkers = false))
+        assertNull(seq3SourceDiagnosticAtCaret(withMarkers, 0, emptyList(), puml, showMarkers = false))
+    }
+
+    @Test
+    fun aQuickFixInsertsOneLineAndTheCaretStaysOnItsText() {
+        val source = "@startuml\nparticipant \"A\" as A\nA -> Pay: hi\n@enduml"
+        val fix = Seq3SourceFix("Add participant Pay", 3, "participant \"Pay\" as Pay")
+        val caret = source.indexOf("-> Pay")
+        val edit = seq3SourceApplyFix(source, fix, caret, caret)
+        assertEquals("@startuml\nparticipant \"A\" as A\nparticipant \"Pay\" as Pay\nA -> Pay: hi\n@enduml", edit.text)
+        assertEquals(edit.text.indexOf("-> Pay"), edit.selectionStart, "the caret moves down with its text")
+        val above = seq3SourceApplyFix(source, fix, 2, 2)
+        assertEquals(2, above.selectionStart, "a caret above the insertion does not move")
+        val atLineStart = source.indexOf("A -> Pay")
+        assertEquals(edit.text.indexOf("A -> Pay"), seq3SourceApplyFix(source, fix, atLineStart, atLineStart).selectionStart, "a caret at the line start goes with that line")
+    }
+
+    @Test
+    fun aQuickFixPastTheLastLineAppends() {
+        val fix = Seq3SourceFix("Add", 99, "x")
+        assertEquals("a\nx", seq3SourceApplyFix("a", fix, 0, 0).text)
+        assertEquals("a\nx", seq3SourceApplyFix("a\n", fix, 0, 0).text)
+        assertEquals("x", seq3SourceApplyFix("", fix, 0, 0).text)
     }
 }

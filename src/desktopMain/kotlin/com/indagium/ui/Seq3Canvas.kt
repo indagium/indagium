@@ -419,11 +419,24 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AppText(
-            "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden" +
-                "$elidedOccurrencesSuffix$elidedMessagesSuffix$linkedNoteDriftedSuffix",
-            color = tc.ts, fontSize = 10.sp,
-        )
+        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            AppText(
+                "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden" +
+                    "$elidedOccurrencesSuffix$elidedMessagesSuffix$linkedNoteDriftedSuffix",
+                color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            // The source behind this preview is invalid or stale, so the diagram shown is the last
+            // one the source produced, not what the editor says now.
+            if (view.sourceDiagnostics.isNotEmpty() || view.sourceDraftStale) {
+                AppText(
+                    "Out of date: showing the last valid diagram",
+                    color = tc.warn, fontSize = 10.sp, maxLines = 1,
+                    modifier = Modifier.background(tc.warnBg, CORNER_SM).padding(horizontal = 6.dp, vertical = 2.dp)
+                        .testTag("seq3-canvas-out-of-date"),
+                )
+            }
+        }
         Seq3CanvasZoomToolbarControls(view)
     }
 }
