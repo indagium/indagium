@@ -171,6 +171,25 @@ class Seq3SourceEditsTest {
     }
 
     @Test
+    fun aSelectionInsideAHiddenRunCollapsesToWhereItIsShown() {
+        val before = "alt ok\n$indentedMarker\n    B -> A: hi"
+        val runStart = before.indexOf(indentedMarker)
+        val statement = runStart + indentedMarker.length + 1
+        fun shown(text: String, start: Int, end: Int) = seq3SourceShownCaretAtHiddenRun(text, start, end, puml)
+        assertEquals(statement, shown(before, runStart, statement), "the whole run: shown at the statement")
+        assertEquals(statement, shown(before, statement, runStart), "a reversed selection is the same")
+        assertEquals(statement, shown(before, runStart + 2, runStart + 9), "a part of the run")
+        val two = "alt ok\n$indentedMarker\n$indentedMarker\n    B -> A: hi"
+        assertEquals(two.indexOf("    B"), shown(two, runStart, two.indexOf("    B")), "a run of two marker lines")
+        val trailing = "alt ok\n$marker\n"
+        assertEquals("alt ok".length, shown(trailing, "alt ok".length, trailing.length), "a trailing run: its start")
+        assertNull(shown(before, runStart, runStart), "a collapsed caret is left alone")
+        assertNull(shown(before, 2, statement + 3), "a real selection over text and markers keeps its meaning")
+        assertNull(shown(before, runStart - 3, statement), "reaching into the line above")
+        assertNull(shown("no markers\nhere", 0, 5))
+    }
+
+    @Test
     fun aTrailingMarkerRunIsShownAsTheEndOfTheLineAboveIt() {
         val before = "alt ok\n$marker\n"
         val markerStart = before.indexOf(marker)

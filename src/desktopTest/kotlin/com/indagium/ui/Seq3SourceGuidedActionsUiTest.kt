@@ -428,6 +428,51 @@ class Seq3SourceGuidedActionsUiTest {
         assertEquals(raw, view.sourceDraft, "Delete removes the blank line below the markers instead")
     }
 
+    private val markedStatementSource =
+        "@startuml\nparticipant A\nparticipant B\nalt ok\n    ' indagium-seq3:v1 abc123\n    B -> A: hi\nend\n@enduml"
+
+    /** Hidden markers, an indented marker line, the caret at the statement below it by real Home. */
+    private fun withCaretAtTheShownStatementStart(act: (androidx.compose.ui.test.SemanticsNodeInteraction) -> Unit, expected: (String, Int) -> String) {
+        val sessionId = startWorkspace("source-edit-at-run")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        toggleMode("seq3-source-live-toggle")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        val raw = markedStatementSource
+        editor.performTextReplacement(raw)
+        rule.waitForIdle()
+        editor.performTextInputSelection(TextRange(raw.indexOf("B -> A") + 3))
+        editor.performKeyInput { pressKey(Key.MoveHome) }
+        rule.waitForIdle()
+
+        act(editor)
+        rule.waitForIdle()
+        val statement = raw.indexOf("    B -> A")
+        assertEquals(expected(raw, statement), view.sourceDraft)
+        assertTrue(view.sourceDraft.contains("    ' indagium-seq3:v1 abc123\n"), "the marker line is intact")
+
+        editor.performKeyInput { withKeyDown(if (isMacOs) Key.MetaLeft else Key.CtrlLeft) { pressKey(Key.Z) } }
+        rule.waitForIdle()
+        assertEquals(raw, view.sourceDraft, "one Ctrl+Z restores the previous text")
+    }
+
+    @Test
+    fun aTypedCharacterAtTheShownStatementStartLandsThereAndKeepsTheMarker() =
+        withCaretAtTheShownStatementStart({ it.performTextInput("x") }) { raw, at -> raw.substring(0, at) + "x" + raw.substring(at) }
+
+    @Test
+    fun pastedTextAtTheShownStatementStartLandsThereAndKeepsTheMarker() =
+        withCaretAtTheShownStatementStart({ it.performTextInput("pasted text ") }) { raw, at -> raw.substring(0, at) + "pasted text " + raw.substring(at) }
+
+    @Test
+    fun enterAtTheShownStatementStartBreaksTheLineThereAndKeepsTheMarker() =
+        withCaretAtTheShownStatementStart({ it.performKeyInput { pressKey(Key.Enter) } }) { raw, at -> raw.substring(0, at) + "\n" + raw.substring(at) }
+
+    @Test
+    fun tabAtTheShownStatementStartIndentsThereAndKeepsTheMarker() =
+        withCaretAtTheShownStatementStart({ it.performKeyInput { pressKey(Key.Tab) } }) { raw, at -> raw.substring(0, at) + "    " + raw.substring(at) }
+
     @Test
     fun joiningAStatementLineOntoThePreviousOneIsOneUndoStep() {
         val sessionId = startWorkspace("source-join-undo")

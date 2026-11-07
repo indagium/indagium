@@ -21,6 +21,21 @@ internal const val SEQ3_SOURCE_TYPING_PAUSE_MS = 1000L
 internal const val SEQ3_SOURCE_UNDO_BURST_MS = 1000L
 
 /**
+ * Where a visible caret is when the field reports the raw selection [selectionStart]..[selectionEnd]
+ * and it lies entirely inside a hidden marker run: the field maps a collapsed visible point at a
+ * hole to the whole hole. That is the start of the statement after the run, or the start of the run
+ * when nothing is shown after it. Null for a collapsed selection and for a real selection, one that
+ * reaches outside a hidden run, which keeps its meaning.
+ */
+internal fun seq3SourceShownCaretAtHiddenRun(source: String, selectionStart: Int, selectionEnd: Int, dialect: Seq3Dialect): Int? {
+    if (selectionStart == selectionEnd || !source.contains("indagium-seq3:v1")) return null
+    val low = minOf(selectionStart, selectionEnd)
+    val high = maxOf(selectionStart, selectionEnd)
+    val run = seq3SourceMarkerDeletionRanges(source, dialect).firstOrNull { low >= it.start && high <= it.endExclusive } ?: return null
+    return if (run.endExclusive < source.length) run.endExclusive else run.start
+}
+
+/**
  * Backspace (or, with [forward], Delete) next to the hidden marker run of a statement. The default
  * edit would delete a character of a marker, or a whole marker line with it: Backspace at the start
  * of a line removes the newline that ends the marker line above it, and Delete at the end of a line
@@ -50,14 +65,8 @@ internal fun seq3SourceDeleteNextToMarkers(
     // A visible caret at a hidden run is a RAW selection covering the run (the field maps the
     // collapsed point to the whole hole), so it is a caret here; any other selection deletes as
     // selected.
-    var shownAtRun: Int? = null
-    if (selectionStart != selectionEnd) {
-        val low = minOf(selectionStart, selectionEnd)
-        val high = maxOf(selectionStart, selectionEnd)
-        val run = seq3SourceMarkerDeletionRanges(source, dialect).firstOrNull { low >= it.start && high <= it.endExclusive }
-            ?: return null
-        shownAtRun = if (run.endExclusive < source.length) run.endExclusive else run.start
-    }
+    val shownAtRun = seq3SourceShownCaretAtHiddenRun(source, selectionStart, selectionEnd, dialect)
+    if (selectionStart != selectionEnd && shownAtRun == null) return null
     val lines = seq3SourceLines(source)
     // The lines the editor hides: marker lines and the empty last line after a trailing marker.
     val hidden = hiddenSourceLineIndices(lines, source, dialect)

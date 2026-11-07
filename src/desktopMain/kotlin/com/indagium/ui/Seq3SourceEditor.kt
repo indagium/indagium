@@ -194,6 +194,14 @@ internal fun Seq3SourceEditorPane(
     }
     LaunchedEffect(session.id, view.sourceEditorGeneration, editorState) {
         snapshotFlow { TextFieldValue(editorState.text.toString(), editorState.selection) }.collect { typed ->
+            // A caret shown at a hidden marker run is a raw selection covering the run, and the next
+            // edit would replace it: collapse it to where it is shown before anything is typed.
+            val shownCaret = if (showSourceMarkers || typed.text != lastValue.text) null else
+                seq3SourceShownCaretAtHiddenRun(typed.text, typed.selection.start, typed.selection.end, view.sourceEditorDialect)
+            if (shownCaret != null) {
+                editorState.edit { selection = TextRange(shownCaret) }
+                return@collect
+            }
             // Typing `end` or a block divider moves its line to the opener's level. The correction
             // joins the keystroke's undo step: the history below records the text before it once.
             val outdent = if (typed.text != lastValue.text) {
