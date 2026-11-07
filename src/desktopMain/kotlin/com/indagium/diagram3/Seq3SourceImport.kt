@@ -66,7 +66,9 @@ private data class SourceActivationDirective(
     val afterOwnRow: Boolean = false,
 )
 
-private data class SourceEmissionAnchor(val line: Int, val messageId: String, val occurrenceEntryId: Int?)
+/** A marked message's physical source line: [line] is 1-based and raw (marker lines included). The
+ *  editor runs [sourceEmissionAnchors] on its live text to link a caret line to a diagram message. */
+internal data class SourceEmissionAnchor(val line: Int, val messageId: String, val occurrenceEntryId: Int?)
 
 private data class OpenSourceActivation(val alias: String, val start: SourceEmissionAnchor)
 
@@ -1269,9 +1271,20 @@ private fun unparsedStatementMessage(text: String): String {
     val word = text.takeWhile { !it.isWhitespace() }.lowercase()
     val recognised = word in NOT_SUPPORTED_WORDS ||
         text.startsWith("==") || text.startsWith("|||") || text.startsWith("||") || text.startsWith("...") ||
-        text.startsWith("!") || ARROW_SHAPE.containsMatchIn(text.substringBefore(':'))
+        text.startsWith("!") || arrowAfterSingleParticipant(text.substringBefore(':'))
     return if (recognised) "Not supported yet: $text" else "Unrecognized statement: $text"
 }
+
+/** An arrow whose left side is one participant token, an identifier or a quoted name: an arrow form
+ *  the model cannot hold. Anything else in front of an arrow (`x    B -> Alice`) is noise, not a
+ *  statement the dialect has. */
+private fun arrowAfterSingleParticipant(head: String): Boolean {
+    val arrow = ARROW_SHAPE.find(head) ?: return false
+    val before = head.substring(0, arrow.range.first + 1).trim()
+    return SINGLE_PARTICIPANT_TOKEN.matches(before)
+}
+
+private val SINGLE_PARTICIPANT_TOKEN = Regex("(?:\"[^\"]+\"|[\\p{L}\\p{N}_.$-]+)")
 
 private fun sourceMarkerOperandIds(source: String, dialect: Seq3Dialect): Set<String> =
     source.lineSequence().mapNotNull { line ->
@@ -1407,7 +1420,7 @@ private fun sourceDirectives(source: String): List<String> = source.lineSequence
     .toList()
 
 /** Finds the marked emissions in canonical exporter output, retaining their physical source line. */
-private fun sourceEmissionAnchors(source: String, dialect: Seq3Dialect): List<SourceEmissionAnchor> {
+internal fun sourceEmissionAnchors(source: String, dialect: Seq3Dialect): List<SourceEmissionAnchor> {
     val emissions = mutableListOf<SourceEmissionAnchor>()
     var pending: SourceMarker? = null
     source.lineSequence().forEachIndexed { index, raw ->

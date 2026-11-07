@@ -33,6 +33,7 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -44,6 +45,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -51,6 +53,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
@@ -92,9 +95,16 @@ import com.indagium.diagram3.Seq3SourceFix
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.parseSeq3SourceArrowEndpoints
 import com.indagium.diagram3.parseSeq3SourceParticipant
+import com.indagium.diagram3.sourceEmissionAnchors
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
 import kotlin.math.roundToInt
+
+/** A caret that settles on a message's line links the diagram to it after this pause. */
+internal const val SEQ3_SOURCE_LINK_DEBOUNCE_MS = 150L
+
+/** Only a caret move this soon after a key or pointer press in the editor counts as the user's. */
+internal const val SEQ3_SOURCE_LINK_INPUT_WINDOW_MS = 1000L
 
 internal fun openSeq3SourceEditor(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     if (!state.seq3Sessions.prepareSourceDraft(session.id)) return
@@ -217,6 +227,19 @@ internal fun Seq3SourceEditorPane(
     var viewportPx by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(0) }
     // The editor's last text layout (of the visible text), which places the suggestion list at the caret.
     var textLayout by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<TextLayoutResult?>(null) }
+    // The find bar: its two fields, the current match, and the request (bumped by Cmd+F) to move
+    // the keyboard into the find field. The fields are the bar's focus children.
+    var findValue by remember(session.id) { mutableStateOf(TextFieldValue("")) }
+    var replaceValue by remember(session.id) { mutableStateOf("") }
+    var findIndex by remember(session.id) { mutableStateOf(-1) }
+    var findFocusGeneration by remember(session.id) { mutableStateOf(0) }
+    val findRequester = remember(session.id) { FocusRequester() }
+    val findWasOpen = remember(session.id) { booleanArrayOf(false) }
+    var editorHasFocus by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
+    var findBarHasFocus by remember(session.id) { mutableStateOf(false) }
+    // When a key or the pointer last went to the editor: only a caret move right after one is the
+    // user's, and only that links the diagram. An edit that arrives from outside is never one.
+    val lastEditorInputMs = remember(session.id, view.sourceEditorGeneration) { longArrayOf(Long.MIN_VALUE / 2) }
     val scope = rememberCoroutineScope()
     var pendingNewDiagramEvidenceRemoval by remember(session.id) { mutableStateOf<Pair<String, Seq3Dialect>?>(null) }
     LaunchedEffect(session.id) {
@@ -224,6 +247,12 @@ internal fun Seq3SourceEditorPane(
     }
     LaunchedEffect(session.id, view.sourceFocusRequestGeneration) {
         runCatching { requester.requestFocus() }
+    }
+    DisposableEffect(session.id) {
+        onDispose {
+            view.sourceEditorFocused = false
+            view.sourceFindOpen = false
+        }
     }
     LaunchedEffect(session.id, view.sourceEditorGeneration, editorState) {
         snapshotFlow { TextFieldValue(editorState.text.toString(), editorState.selection) }.collect { typed ->
@@ -284,6 +313,23 @@ internal fun Seq3SourceEditorPane(
     val hiddenRanges = remember(sourceText, view.sourceEditorDialect, showSourceMarkers) {
         if (showSourceMarkers) emptyList() else seq3SourceMarkerDeletionRanges(sourceText, view.sourceEditorDialect)
     }
+    // The marked messages of the live text (raw lines) and the visible line the focused message is
+    // drawn from: it is tinted, and the gutter marks it, whoever focused the message.
+    val anchors = remember(sourceText, view.sourceEditorDialect) {
+        if (sourceText.contains("indagium-seq3:v1")) sourceEmissionAnchors(sourceText, view.sourceEditorDialect) else emptyList()
+    }
+    val focusedMessage = view.focusedMessageId
+    val focusedOccurrence = if (view.selectedOccurrenceMessageId == focusedMessage) view.selectedOccurrenceEntryId else null
+    val linkedRawLine = remember(anchors, focusedMessage, focusedOccurrence, sourceText, view.sourceEditorDialect, showSourceMarkers) {
+        focusedMessage?.let { seq3SourceLineOfMessage(anchors, it, focusedOccurrence) }?.let { line ->
+            seq3SourceVisibleRawLines(sourceText, listOf(line), view.sourceEditorDialect, showSourceMarkers).first()
+        }
+    }
+    val findMatches = remember(sourceText, findValue.text, view.sourceEditorDialect, showSourceMarkers, view.sourceFindOpen) {
+        if (view.sourceFindOpen) seq3SourceFindMatches(sourceText, findValue.text, view.sourceEditorDialect, showSourceMarkers)
+        else emptyList()
+    }
+    val currentFind = if (findMatches.isEmpty()) -1 else findIndex.coerceIn(0, findMatches.lastIndex)
     LaunchedEffect(scroll.value, lineCount, lineHeightPx) {
         val firstLine = (scroll.value / lineHeightPx).toInt().coerceIn(0, lineCount - 1)
         val offset = (scroll.value - firstLine * lineHeightPx).roundToInt()
@@ -347,6 +393,18 @@ internal fun Seq3SourceEditorPane(
         setEditorValue(TextFieldValue(edit.text, TextRange(edit.selectionStart, edit.selectionEnd)), true)
     }
 
+    /** Scrolls raw source line [rawLine] (the nearest visible line when that one is a hidden marker
+     *  line) into view, centred when it was outside; the caret and the focus stay where they are. */
+    fun revealLine(rawLine: Int) {
+        val line = seq3SourceVisibleRawLines(editorState.text.toString(), listOf(rawLine), view.sourceEditorDialect, showSourceMarkers).first()
+        val lineHeight = lineHeightPx.roundToInt()
+        val top = visibleLines.indexOfLine(line) * lineHeight
+        val visibleFrom = scroll.value
+        if (top < visibleFrom || (viewportPx > 0 && top + lineHeight > visibleFrom + viewportPx)) {
+            scope.launch { scroll.scrollTo((top - (viewportPx - lineHeight).coerceAtLeast(0) / 2).coerceAtLeast(0)) }
+        }
+    }
+
     /** Moves the caret to raw source line [rawLine] (the nearest visible line when that one is a
      *  hidden marker line), gives the editor focus back and scrolls the line into view. */
     fun goToLine(rawLine: Int) {
@@ -356,12 +414,7 @@ internal fun Seq3SourceEditorPane(
         endpointMenu = null
         editorState.edit { this.selection = TextRange(offset) }
         runCatching { requester.requestFocus() }
-        val lineHeight = lineHeightPx.roundToInt()
-        val top = visibleLines.indexOfLine(line) * lineHeight
-        val visibleFrom = scroll.value
-        if (top < visibleFrom || (viewportPx > 0 && top + lineHeight > visibleFrom + viewportPx)) {
-            scope.launch { scroll.scrollTo((top - (viewportPx - lineHeight).coerceAtLeast(0) / 2).coerceAtLeast(0)) }
-        }
+        revealLine(line)
     }
 
     /** A diagnostic's quick fix as one undoable editor edit. */
@@ -369,6 +422,107 @@ internal fun Seq3SourceEditorPane(
         val range = editorState.selection
         applySourceEdit(seq3SourceApplyFix(editorState.text.toString(), fix, range.start, range.end))
         runCatching { requester.requestFocus() }
+    }
+
+    /** Cmd/Ctrl+/: comments or uncomments the selected lines as one undoable edit. */
+    fun toggleComment() {
+        val text = editorState.text.toString()
+        val range = editorState.selection
+        // A caret shown at a hidden marker run is a raw selection over the run: it stands for the
+        // start of the statement after it, which is the line the user means.
+        val shown = if (showSourceMarkers) null else seq3SourceShownCaretAtHiddenRun(text, range.start, range.end, view.sourceEditorDialect)
+        val edit = seq3SourceToggleComment(text, shown ?: range.start, shown ?: range.end, view.sourceEditorDialect)
+        if (edit.text == text) return
+        applySourceEdit(edit)
+    }
+
+    /** Selects match [index] of [matches] in the editor and scrolls it into view; the keyboard stays
+     *  wherever it is, normally in the find bar. */
+    fun selectFindMatch(matches: List<Seq3SourceRange>, index: Int) {
+        val match = matches.getOrNull(index) ?: return
+        findIndex = index
+        endpointMenu = null
+        editorState.edit { this.selection = TextRange(match.start, match.endExclusive) }
+        revealLine(seq3SourceRawLineAt(editorState.text.toString(), match.start))
+    }
+
+    fun stepFind(forward: Boolean) {
+        selectFindMatch(findMatches, seq3SourceFindStep(findMatches, currentFind, forward))
+    }
+
+    /** Cmd/Ctrl+F: opens the bar with the selected text (one line) as the query and the keyboard in its field. */
+    fun openFind() {
+        val text = editorState.text.toString()
+        val range = editorState.selection
+        val selected = if (range.collapsed) "" else text.substring(range.min, range.max)
+        val usable = selected.isNotBlank() && selected.length <= 200 && '\n' !in selected &&
+            seq3SourceShownCaretAtHiddenRun(text, range.start, range.end, view.sourceEditorDialect) == null
+        if (usable) findValue = TextFieldValue(selected, TextRange(0, selected.length))
+        view.sourceFindOpen = true
+        findFocusGeneration++
+    }
+
+    /** Replace: the current match becomes the replacement, then the next match is selected. */
+    fun replaceCurrentMatch() {
+        val match = findMatches.getOrNull(currentFind) ?: return
+        val edit = seq3SourceReplaceMatch(editorState.text.toString(), match, replaceValue)
+        applySourceEdit(edit)
+        val remaining = seq3SourceFindMatches(edit.text, findValue.text, view.sourceEditorDialect, showSourceMarkers)
+        selectFindMatch(remaining, seq3SourceFindIndexFrom(remaining, edit.selectionEnd))
+    }
+
+    /** Replace all: every match in one edit, so one undo step brings them all back. */
+    fun replaceEveryMatch() {
+        if (findMatches.isEmpty()) return
+        val range = editorState.selection
+        applySourceEdit(seq3SourceReplaceAll(editorState.text.toString(), findMatches, replaceValue, range.start, range.end))
+        findIndex = 0
+    }
+
+    // Typing in the find field moves to the first match at or after where the editor's selection is.
+    LaunchedEffect(session.id, findValue.text, view.sourceFindOpen) {
+        if (!view.sourceFindOpen || findValue.text.isEmpty()) return@LaunchedEffect
+        selectFindMatch(findMatches, seq3SourceFindIndexFrom(findMatches, editorState.selection.min))
+    }
+    LaunchedEffect(session.id, findFocusGeneration) {
+        if (findFocusGeneration == 0) return@LaunchedEffect
+        runCatching { findRequester.requestFocus() }
+        findValue = findValue.copy(selection = TextRange(0, findValue.text.length))
+    }
+    // Closing the bar, by Esc or its button, gives the keyboard back to the editor.
+    LaunchedEffect(session.id, view.sourceFindOpen) {
+        if (view.sourceFindOpen) findWasOpen[0] = true
+        else if (findWasOpen[0]) {
+            findWasOpen[0] = false
+            runCatching { requester.requestFocus() }
+        }
+    }
+
+    // A caret that settles on a marked message statement focuses that message in the diagram. Only a
+    // caret the user moved links (a key or the pointer just went to the editor); one that moved
+    // because the text was replaced from outside, or by a find or an issue jump, does not.
+    val caretRawLine = seq3SourceRawLineAt(sourceText, editorState.selection.end)
+    LaunchedEffect(session.id, view.sourceEditorGeneration, caretRawLine, editorState.selection.end, anchors) {
+        delay(SEQ3_SOURCE_LINK_DEBOUNCE_MS)
+        if (view.sourceClockMs() - lastEditorInputMs[0] > SEQ3_SOURCE_LINK_INPUT_WINDOW_MS) return@LaunchedEffect
+        val anchor = seq3SourceAnchorAtLine(anchors, caretRawLine) ?: return@LaunchedEffect
+        if (view.focusedMessageId == anchor.messageId) return@LaunchedEffect
+        val latest = state.seq3Sessions.sessions.firstOrNull { it.id == session.id } ?: return@LaunchedEffect
+        if (latest.document.messages.none { it.id == anchor.messageId }) return@LaunchedEffect
+        view.focusedMessageId = anchor.messageId
+        view.scrollRequestId = anchor.messageId
+    }
+
+    // The other way: a message the canvas (or the lists, or j/k) focuses has its line scrolled into
+    // view. The caret stays; the line is tinted by [linkedRawLine].
+    val lastReveal = remember(session.id, view.sourceEditorGeneration) { arrayOf<Pair<String?, String?>>(view.focusedMessageId to view.scrollRequestId) }
+    LaunchedEffect(session.id, view.sourceEditorGeneration, view.focusedMessageId, view.scrollRequestId) {
+        val key = view.focusedMessageId to view.scrollRequestId
+        if (lastReveal[0] == key) return@LaunchedEffect
+        lastReveal[0] = key
+        val id = view.scrollRequestId ?: view.focusedMessageId ?: return@LaunchedEffect
+        val occurrence = if (view.selectedOccurrenceMessageId == id) view.selectedOccurrenceEntryId else null
+        seq3SourceLineOfMessage(anchors, id, occurrence)?.let { revealLine(it) }
     }
 
     // Text that changes from outside (a canvas edit, Reload, Discard) arrives as one undoable edit:
@@ -484,6 +638,28 @@ internal fun Seq3SourceEditorPane(
                 showEvidenceLossDialog = true
             },
         )
+        if (view.sourceFindOpen) {
+            Seq3SourceFindBar(
+                findValue = findValue,
+                onFindValue = { findValue = it },
+                replaceValue = replaceValue,
+                onReplaceValue = { replaceValue = it },
+                current = currentFind,
+                total = findMatches.size,
+                findRequester = findRequester,
+                onFocusChanged = { hasFocus ->
+                    findBarHasFocus = hasFocus
+                    view.sourceEditorFocused = editorHasFocus || findBarHasFocus
+                    view.textFieldFocused = view.sourceEditorFocused
+                },
+                onStep = { forward -> stepFind(forward) },
+                onReplace = { replaceCurrentMatch() },
+                onReplaceAll = { replaceEveryMatch() },
+                onSelectAll = { findValue = findValue.copy(selection = TextRange(0, findValue.text.length)) },
+                onReclaimEditor = { runCatching { requester.requestFocus() } },
+                onClose = { view.sourceFindOpen = false },
+            )
+        }
         Row(Modifier.weight(1f).fillMaxWidth().background(tc.p2)) {
             LazyColumn(
                 Modifier.width(42.dp).fillMaxHeight().padding(top = 8.dp, bottom = 8.dp),
@@ -495,17 +671,21 @@ internal fun Seq3SourceEditorPane(
                     // shown counts the visible lines.
                     val line = visibleLines.lineNumberAt(index)
                     val hasDiagnostic = line in diagnosticLines
+                    val isLinked = line == linkedRawLine
                     Box(
                         Modifier.fillMaxWidth().height(lineHeightDp)
-                            .background(if (hasDiagnostic) tc.warnBg else Color.Transparent)
+                            .background(if (hasDiagnostic) tc.warnBg else if (isLinked) tc.abg else Color.Transparent)
                             .padding(end = 8.dp)
                             .testTag("seq3-source-gutter-line-$line")
-                            .semantics { if (hasDiagnostic) stateDescription = "Has issue" },
+                            .semantics {
+                                val parts = listOfNotNull("Has issue".takeIf { hasDiagnostic }, "Linked line".takeIf { isLinked })
+                                if (parts.isNotEmpty()) stateDescription = parts.joinToString(", ")
+                            },
                         contentAlignment = Alignment.CenterEnd,
                     ) {
                         AppText(
                             (index + 1).toString(),
-                            color = if (hasDiagnostic) tc.warn else tc.td,
+                            color = if (hasDiagnostic) tc.warn else if (isLinked) tc.ac else tc.td,
                             fontSize = 11.sp,
                             fontFamily = MONO,
                         )
@@ -529,8 +709,16 @@ internal fun Seq3SourceEditorPane(
                     .onSizeChanged { viewportPx = it.height }
                     .testTag("seq3-source-editor")
                     .focusRequester(requester)
-                    .onFocusChanged { view.textFieldFocused = it.hasFocus }
+                    .onFocusChanged {
+                        // The editor and the find bar are one focus area for the window's shortcuts and the Esc rule.
+                        editorHasFocus = it.hasFocus
+                        view.sourceEditorFocused = editorHasFocus || findBarHasFocus
+                        view.textFieldFocused = view.sourceEditorFocused
+                    }
                     .horizontalScroll(horizontalScroll)
+                    .onPointerEvent(PointerEventType.Press, pass = PointerEventPass.Initial) {
+                        lastEditorInputMs[0] = view.sourceClockMs()
+                    }
                     .onPointerEvent(PointerEventType.Release, pass = PointerEventPass.Final) {
                         if (ignoreEndpointRelease) ignoreEndpointRelease = false
                         else {
@@ -541,6 +729,7 @@ internal fun Seq3SourceEditorPane(
                     }
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        lastEditorInputMs[0] = view.sourceClockMs()
                         if (event.key == Key.Escape && endpointMenu != null) {
                             endpointMenu = null
                             return@onPreviewKeyEvent true
@@ -640,12 +829,40 @@ internal fun Seq3SourceEditorPane(
                                 }
                                 true
                             }
+                            event.key == Key.F && !event.isShiftPressed && !event.isAltPressed -> {
+                                openFind()
+                                true
+                            }
+                            event.key == Key.Slash && !event.isShiftPressed && !event.isAltPressed -> {
+                                toggleComment()
+                                true
+                            }
                             else -> false
                         }
                     },
                 decorator = TextFieldDecorator { inner ->
                     // At least the viewport wide, so the suggestion list never sits outside the box.
                     Box(Modifier.widthIn(min = with(density) { horizontalScroll.viewportSize.toDp() })) {
+                        // Behind the text: the linked message's line, and the find matches (the current one stronger).
+                        if (linkedRawLine != null || findMatches.isNotEmpty()) {
+                            Box(
+                                Modifier.matchParentSize().drawBehind {
+                                    textLayout?.let { layout ->
+                                        drawSeq3SourceHighlights(
+                                            layout = layout,
+                                            scrollY = scroll.value.toFloat(),
+                                            linkedLine = linkedRawLine?.let { visibleLines.indexOfLine(it) },
+                                            linkedColor = tc.abg,
+                                            matches = findMatches,
+                                            current = currentFind,
+                                            hidden = hiddenRanges,
+                                            matchColor = tc.searchMatchBg,
+                                            currentColor = tc.searchCurrentBg,
+                                        )
+                                    }
+                                },
+                            )
+                        }
                         if (editorState.text.isEmpty()) {
                             AppText(sourceStartHint(view.sourceEditorDialect), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
                         }
@@ -846,6 +1063,140 @@ internal fun Seq3SourceEditorPane(
                     )
                 }
             }
+        }
+    }
+}
+
+/** The find bar over the editor: a find row (field, "n of m", previous, next, close) and a replace
+ *  row (field, Replace, Replace all). Enter steps to the next match (Shift+Enter the previous) in the
+ *  find field and replaces in the replace field. */
+@Composable
+private fun Seq3SourceFindBar(
+    findValue: TextFieldValue,
+    onFindValue: (TextFieldValue) -> Unit,
+    replaceValue: String,
+    onReplaceValue: (String) -> Unit,
+    current: Int,
+    total: Int,
+    findRequester: FocusRequester,
+    onFocusChanged: (Boolean) -> Unit,
+    onStep: (Boolean) -> Unit,
+    onReplace: () -> Unit,
+    onReplaceAll: () -> Unit,
+    onSelectAll: () -> Unit,
+    onReclaimEditor: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val tc = tc()
+    val hasQuery = findValue.text.isNotEmpty()
+    Column(
+        Modifier.fillMaxWidth().background(tc.p).onFocusChanged { onFocusChanged(it.hasFocus) }.testTag("seq3-source-find-bar"),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            InlineField(
+                value = findValue,
+                onValue = onFindValue,
+                placeholder = "Find",
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f).widthIn(min = 60.dp)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when {
+                            event.key == Key.Enter || event.key == Key.NumPadEnter -> { onStep(!event.isShiftPressed); true }
+                            (event.isCtrlPressed || event.isMetaPressed) && event.key == Key.F -> { onSelectAll(); true }
+                            else -> false
+                        }
+                    }
+                    .focusRequester(findRequester)
+                    .testTag("seq3-source-find-field"),
+                onCancel = onClose,
+            )
+            AppText(
+                when {
+                    !hasQuery -> ""
+                    total == 0 -> "No results"
+                    else -> "${current + 1} of $total"
+                },
+                color = tc.ts,
+                fontSize = 11.sp,
+                maxLines = 1,
+                modifier = Modifier.widthIn(min = 56.dp).testTag("seq3-source-find-count"),
+            )
+            // A clicked button takes the keyboard focus with it: the find field gets it back.
+            SquareIconButton("↑", fontSize = 12.sp, onClick = { onStep(false); runCatching { findRequester.requestFocus() } }, enabled = total > 0, size = 20.dp,
+                modifier = Modifier.testTag("seq3-source-find-prev"), tooltip = "Previous match (Shift+Enter)")
+            SquareIconButton("↓", fontSize = 12.sp, onClick = { onStep(true); runCatching { findRequester.requestFocus() } }, enabled = total > 0, size = 20.dp,
+                modifier = Modifier.testTag("seq3-source-find-next"), tooltip = "Next match (Enter)")
+            SquareIconButton("×", fontSize = 14.sp, onClick = onClose, size = 20.dp,
+                modifier = Modifier.testTag("seq3-source-find-close"), tooltip = "Close (Esc)")
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            InlineField(
+                value = replaceValue,
+                onValue = onReplaceValue,
+                placeholder = "Replace with",
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f).widthIn(min = 60.dp)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter)) {
+                            onReplace()
+                            true
+                        } else false
+                    }
+                    .testTag("seq3-source-replace-field"),
+                onCancel = onClose,
+            )
+            // The replace buttons hand the keyboard to the editor, where one undo brings the text back.
+            AppButton("Replace", onClick = { onReplace(); onReclaimEditor() }, variant = ButtonVariant.Secondary, enabled = total > 0,
+                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-replace-one"))
+            AppButton("Replace all", onClick = { onReplaceAll(); onReclaimEditor() }, variant = ButtonVariant.Secondary, enabled = total > 0,
+                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-replace-all"))
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+    }
+}
+
+/** Paints, behind the editor text, the tinted line of the linked message ([linkedLine] is its row in
+ *  the visible text) and the find [matches] (raw offsets, [hidden] runs taken out) in the visible
+ *  part of [layout], which is [scrollY] scrolled. */
+@Suppress("LongParameterList")
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSeq3SourceHighlights(
+    layout: TextLayoutResult,
+    scrollY: Float,
+    linkedLine: Int?,
+    linkedColor: Color,
+    matches: List<Seq3SourceRange>,
+    current: Int,
+    hidden: List<Seq3SourceRange>,
+    matchColor: Color,
+    currentColor: Color,
+) {
+    val lineCount = layout.lineCount
+    if (linkedLine != null && linkedLine in 0 until lineCount) {
+        val top = layout.getLineTop(linkedLine) - scrollY
+        val bottom = layout.getLineBottom(linkedLine) - scrollY
+        if (bottom > 0f && top < size.height) {
+            drawRect(linkedColor, androidx.compose.ui.geometry.Offset(0f, top), androidx.compose.ui.geometry.Size(size.width, bottom - top))
+        }
+    }
+    if (matches.isEmpty() || lineCount == 0) return
+    val textLength = layout.layoutInput.text.length
+    matches.forEachIndexed { index, match ->
+        val start = seq3SourceVisibleOffset(match.start, hidden).coerceIn(0, textLength)
+        val end = seq3SourceVisibleOffset(match.endExclusive, hidden).coerceIn(start, textLength)
+        val line = layout.getLineForOffset(start)
+        val top = layout.getLineTop(line) - scrollY
+        if (top > size.height || layout.getLineBottom(line) - scrollY < 0f) return@forEachIndexed
+        translate(top = -scrollY) {
+            drawPath(layout.getPathForRange(start, end), if (index == current) currentColor else matchColor)
         }
     }
 }

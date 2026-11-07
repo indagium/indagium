@@ -179,6 +179,32 @@ class Seq3SourceGrammarTest {
         assertEquals("Unrecognized statement: made up grammar", garbage.single().message)
     }
 
+    @Test fun anArrowAfterOneParticipantTokenIsNotSupportedYet() {
+        val plantLines = listOf("Loop -> B", "\"My Service\" -> B", "A -> B -> A")
+        plantLines.forEach { line ->
+            val message = rejected(source(plant, "participant A", "participant B", line), plant).single().message
+            assertEquals("Not supported yet: $line", message, line)
+        }
+        val mermaidLines = listOf("A->B: open arrow", "A-xB", "B--)A")
+        mermaidLines.forEach { line ->
+            val message = rejected(source(mermaid, "participant A", "participant B", line), mermaid).single().message
+            assertTrue(message.startsWith("Not supported yet: "), "$line: $message")
+        }
+    }
+
+    @Test fun anArrowAfterMoreThanOneTokenIsUnrecognisedStatement() {
+        val plantLines = listOf("x    B -> Alice: hi", "do this A -> B: hi", "A B -> C")
+        plantLines.forEach { line ->
+            val message = rejected(source(plant, "participant A", "participant B", line), plant).single().message
+            assertEquals("Unrecognized statement: $line", message, line)
+        }
+        val mermaidLines = listOf("x    B->>Alice: hi", "A B->B: open arrow")
+        mermaidLines.forEach { line ->
+            val message = rejected(source(mermaid, "participant A", "participant B", line), mermaid).single().message
+            assertEquals("Unrecognized statement: $line", message, line)
+        }
+    }
+
     @Test fun anUnmarkedMermaidRectIsReportedAndItsEndClosesItAlone() {
         val diagnostics = rejected(
             source(

@@ -2974,6 +2974,8 @@ private fun handleGlobalKey(
     // Diagram undo accepts either platform chord even when it is received through a nested
     // editor. Text controls and the detached source draft keep their own undo history.
     if (handleDiagramUndoKey(ev, state)) return true
+    // Find and comment toggle belong to the diagram source editor while it has the keyboard.
+    if (diagramSourceOwnsChord(ev, state)) return false
     if (!ev.isActionKey) return false
     return when {
         ev.isShiftPressed && ev.key == Key.F -> { state.updateFilterVisible(!state.filterVisible); true }
@@ -3009,6 +3011,17 @@ internal fun handleDiagramUndoKey(event: KeyEvent, state: AppState): Boolean {
     if (view?.textFieldFocused == true) return false
     state.seq3Sessions.undoActive()
     return true
+}
+
+/** Cmd/Ctrl+F (find) and Cmd/Ctrl+/ (toggle comment) while the diagram source editor or its find bar
+ *  holds focus: the editor handles them itself, so the window's global handler (the log Find, the
+ *  shortcuts sheet) must let them through. */
+internal fun diagramSourceOwnsChord(event: KeyEvent, state: AppState): Boolean {
+    if (event.type != KeyEventType.KeyDown || !(event.isCtrlPressed || event.isMetaPressed)) return false
+    if (event.isShiftPressed || event.isAltPressed || (event.key != Key.F && event.key != Key.Slash)) return false
+    if (state.activeSurface !is ActiveSurface.Diagram3) return false
+    val view = state.seq3Sessions.activeSessionId?.let(state.seq3Sessions::viewState)
+    return view?.sourceEditorFocused == true
 }
 
 private fun navigateTab(state: AppState, delta: Int) {

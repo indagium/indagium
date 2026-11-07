@@ -1279,6 +1279,12 @@ internal class Seq3ViewState {
     /** The clock the editor's undo history measures typing pauses with; a test replaces it. */
     var sourceClockMs: () -> Long = System::currentTimeMillis
     var sourceFocusRequestGeneration by mutableStateOf(0)
+    /** True while the source editor or its find bar holds focus: Cmd/Ctrl+F and Cmd/Ctrl+/ then
+     *  belong to the editor, not to the window's global shortcuts (see [diagramSourceOwnsChord]). */
+    var sourceEditorFocused by mutableStateOf(false)
+    /** The editor's find bar is open. Escape then closes the bar only: it must not also restore a
+     *  maximized tile or clear the selection (see [applySeq3Escape]). */
+    var sourceFindOpen by mutableStateOf(false)
     /** A one-shot request, from the empty canvas, for the editor to insert a new participant: the
      *  mounted editor pane consumes it once the draft is ready. */
     var sourceInsertParticipantRequest by mutableStateOf(false)
@@ -2249,6 +2255,10 @@ internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, vie
     applySeq3EscapeTransient(view) ?: applySeq3EscapeWorkspace(state, session, view)
 
 private fun applySeq3EscapeTransient(view: Seq3ViewState): Boolean? = when {
+    // The find bar is the most local layer of the source tile: Escape closes it and nothing else,
+    // whichever of its fields (or the editor) holds the keyboard. The editor pane gives its own
+    // focus back once the flag is cleared.
+    view.sourceFindOpen -> { view.sourceFindOpen = false; true }
     view.sourceEvidenceLossPending -> {
         view.sourceEvidenceLossPending = false
         true

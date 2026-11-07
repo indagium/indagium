@@ -5,13 +5,15 @@ import com.indagium.diagram3.SEQ3_SOURCE_EDIT_LABEL
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3SourceDiagnostic
 import com.indagium.diagram3.Seq3SourceFix
+import com.indagium.diagram3.SourceEmissionAnchor
 
 /*
  * Edit rules of the PlantUML / Mermaid source editor that are neither indentation nor autocomplete,
  * pure and UI-free so they can be unit tested: Backspace and Delete next to the hidden identity
  * markers, how a typing run is grouped into undo steps, how a burst of live source edits shares one
  * diagram undo entry, where the caret goes when the text is replaced from outside the editor, and how
- * the issues list maps a diagnostic's raw source line to the text the user sees and edits.
+ * the issues list maps a diagnostic's raw source line to the text the user sees and edits, how a
+ * caret line and a diagram message find each other, and the comment toggle.
  */
 
 /** Typing breaks into a new editor undo step after this long without a keystroke. */
@@ -281,3 +283,73 @@ internal fun seq3SourceApplyFix(source: String, fix: Seq3SourceFix, selectionSta
     fun shift(position: Int) = position.coerceIn(0, source.length).let { if (it >= at) it + inserted else it }
     return Seq3SourceEdit(next, shift(selectionStart), shift(selectionEnd))
 }
+
+/** The line-comment prefix of [dialect]: `'` for PlantUML, `%%` for Mermaid. */
+internal fun seq3SourceCommentPrefix(dialect: Seq3Dialect): String = if (dialect == Seq3Dialect.MERMAID) "%%" else "'"
+
+/**
+ * Cmd/Ctrl+/. The lines the selection touches (a selection that ends at the start of a line leaves
+ * that line alone) are commented with the dialect's prefix, or uncommented when every one of them
+ * already is. Blank lines are skipped, and identity marker lines are never touched, shown or hidden:
+ * a marker is itself a comment line and toggling it would orphan its statement. The comment goes at
+ * the indentation, so the lines stay aligned. The selection keeps covering the same lines. When no
+ * line qualifies the edit equals [source].
+ */
+internal fun seq3SourceToggleComment(source: String, selectionStart: Int, selectionEnd: Int, dialect: Seq3Dialect): Seq3SourceEdit {
+    val first = minOf(selectionStart, selectionEnd).coerceIn(0, source.length)
+    val last = maxOf(selectionStart, selectionEnd).coerceIn(first, source.length)
+    val lines = seq3SourceLines(source)
+    val firstIndex = lines.indexOfLast { it.start <= first }
+    var lastIndex = lines.indexOfLast { it.start <= last }
+    if (last > first && lastIndex > firstIndex && lines[lastIndex].start == last) lastIndex--
+    val touched = (firstIndex..lastIndex).map { lines[it] }
+        .filter { it.text.isNotBlank() && !isSeq3SourceMarkerLine(it.text, dialect) }
+    if (touched.isEmpty()) return Seq3SourceEdit(source, selectionStart, selectionEnd)
+    val prefix = seq3SourceCommentPrefix(dialect)
+    fun indentEnd(line: Seq3SourceLine) = line.start + line.text.takeWhile { it == ' ' || it == '\t' }.length
+    val uncomment = touched.all { source.startsWith(prefix, indentEnd(it)) }
+    // (position in the old text, characters added there or, when negative, removed from there)
+    val changes = touched.map { line ->
+        val at = indentEnd(line)
+        if (uncomment) at to -(prefix.length + if (source.getOrNull(at + prefix.length) == ' ') 1 else 0)
+        else at to prefix.length + 1
+    }
+    val text = buildString(source.length + changes.size * (prefix.length + 1)) {
+        var copied = 0
+        changes.forEach { (at, delta) ->
+            append(source, copied, at)
+            if (delta > 0) {
+                append(prefix).append(' ')
+                copied = at
+            } else {
+                copied = at - delta
+            }
+        }
+        append(source, copied, source.length)
+    }
+    val collapsed = selectionStart == selectionEnd
+    // A selection start in front of the indentation stays in front of the new prefix, so the
+    // selection still begins with the comment; a caret moves along with the text it stood in.
+    fun map(offset: Int, isStart: Boolean): Int = offset + changes.sumOf { (at, delta) ->
+        when {
+            delta > 0 -> if (if (isStart && !collapsed) offset > at else offset >= at) delta else 0
+            else -> -(offset - at).coerceIn(0, -delta)
+        }
+    }
+    val selectionIsReversed = selectionStart > selectionEnd
+    val newStart = map(selectionStart, isStart = !selectionIsReversed)
+    val newEnd = map(selectionEnd, isStart = selectionIsReversed)
+    return Seq3SourceEdit(text, newStart, newEnd)
+}
+
+/** The raw line of the arrow a message is drawn from, for message [messageId]: the one belonging
+ *  to occurrence [occurrenceEntryId] when that is given and marked, else the first. Null when the
+ *  source holds no marked statement of that message. */
+internal fun seq3SourceLineOfMessage(anchors: List<SourceEmissionAnchor>, messageId: String, occurrenceEntryId: Int? = null): Int? {
+    val own = anchors.filter { it.messageId == messageId }
+    return (own.firstOrNull { occurrenceEntryId != null && it.occurrenceEntryId == occurrenceEntryId } ?: own.firstOrNull())?.line
+}
+
+/** The marked message statement on raw line [rawLine], or null when that line is not one. */
+internal fun seq3SourceAnchorAtLine(anchors: List<SourceEmissionAnchor>, rawLine: Int): SourceEmissionAnchor? =
+    anchors.firstOrNull { it.line == rawLine }
