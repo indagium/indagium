@@ -72,6 +72,11 @@ When a full run goes in the background, check on it rather than just waiting for
   initialization monitor` / `waiting to lock` lines for a deadlock. Then stop the task and kill the
   test JVM.
 - **Report** the stuck test and the cycle to the user. Don't silently rerun and hope.
+- **Don't wait with a `pgrep -f` loop.** `until ! pgrep -f watched-test.sh; do sleep 5; done` matches
+  its own shell, whose command line contains the pattern, so it never ends (three such loops ran for
+  hours). Run the test command itself as the background task and wait for its completion
+  notification. On macOS, use `ps -ww` when looking for processes: plain `ps` truncates long command
+  lines and hides them.
 
 Past hang: the test JVM ran on Gradle's default 512 MB heap. An `OutOfMemoryError` that landed in
 kotlinx.coroutines' `DefaultExecutor` thread killed it, after which no `delay`/`withTimeout` fired,
