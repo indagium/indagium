@@ -449,7 +449,8 @@ internal fun CommitTextField(
         rememberDictationControl(
             targetId = proseTargetId,
             enabled = enabled,
-            onTranscript = ::insertTranscript,
+            // A lambda, not ::insertTranscript: a local function reference ignores its captures in equals, so rememberUpdatedState would keep the first one.
+            onTranscript = { insertTranscript(it) },
             onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
             onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
         )

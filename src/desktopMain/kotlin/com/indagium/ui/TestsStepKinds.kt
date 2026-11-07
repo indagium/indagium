@@ -319,7 +319,8 @@ internal fun RecordedRowKindEditor(session: TestStepRecordingSession, row: Recor
                 onScript = { call -> edit { it.copy(script = call) } },
                 onNewScript = addScript,
             )
-            RecordedDeviceStateChecks(row, enabled, ::edit)
+            // A lambda, not ::edit: a local function reference ignores its captures in equals, so a memoized click handler would keep the previous row.
+            RecordedDeviceStateChecks(row, enabled, { edit(it) })
         }
     }
 }

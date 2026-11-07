@@ -15,6 +15,7 @@ import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.testing.authoring.EVENT_SCRIPT_PLACEHOLDER_COMMAND
 import com.indagium.testing.authoring.EnvironmentEvent
 import com.indagium.testing.authoring.InputSource
+import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.touchCommand
 import com.indagium.testing.model.ScriptCall
@@ -153,6 +154,71 @@ class ExternalEventRowUiTest {
 
         assertEquals(StepKind.MANUAL, external().stepKind)
         assertNull(external().script)
+    }
+
+    /** The Details tile is not keyed by row: selecting another row reuses its editor, and the button must follow the selection. */
+    @Test
+    fun anAddedDeviceCheckGoesToTheRowSelectedNow() {
+        suiteId = (state.createTestSuite("Hub") as StoreResult.Ok).value.id
+        caseId = (state.createTestCase(suiteId, TestCase("", "Plug")) as StoreResult.Ok).value.id
+        session = TestStepRecordingSession("fixture-device")
+        session.accept(touchCommand(MirrorTouchAction.DOWN, 540, 1200), null, 960, InputSource.DEVICE)
+        session.accept(touchCommand(MirrorTouchAction.UP, 540, 1200), null, 1_000, InputSource.DEVICE)
+        session.environmentSink.environmentEvents(
+            listOf(
+                EnvironmentEvent("usb.devices", "", "0781:5581 Ultra", atMs = 9_000, sinceMs = 8_000),
+                EnvironmentEvent("wifi.enabled", "true", "false", atMs = 19_000, sinceMs = 18_000),
+            ),
+        )
+        runBlocking { session.stopAndDrain() }
+        check(state.registerTestStepRecording(session, suiteId, caseId) is StoreResult.Ok)
+        rule.setContent { TestsWorkspace(state) }
+        state.testsView.selectedSuiteId = suiteId
+        state.testsView.selectedCaseId = caseId
+        rule.waitForIdle()
+        selectExternalDraftForReview()
+        val (first, second) = session.snapshot.value.steps.drop(1)
+
+        rule.runOnIdle { state.testsView.recordingSelectedRowId = second.id }
+        rule.waitForIdle()
+        rule.onNodeWithText("+ Add check").performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
+
+        val steps = session.snapshot.value.steps
+        assertEquals(first.checks.size, steps.single { it.id == first.id }.checks.size, "the row selected before stays as it was")
+        assertEquals(second.checks.size + 1, steps.single { it.id == second.id }.checks.size)
+    }
+
+    /** The same editor reuse for rows the author added: their kind editor has its own "+ Add check". */
+    @Test
+    fun anAddedDeviceCheckGoesToTheAuthorAddedRowSelectedNow() {
+        suiteId = (state.createTestSuite("Hub") as StoreResult.Ok).value.id
+        caseId = (state.createTestCase(suiteId, TestCase("", "Plug")) as StoreResult.Ok).value.id
+        session = TestStepRecordingSession("fixture-device")
+        session.accept(touchCommand(MirrorTouchAction.DOWN, 540, 1200), null, 960, InputSource.DEVICE)
+        session.accept(touchCommand(MirrorTouchAction.UP, 540, 1200), null, 1_000, InputSource.DEVICE)
+        runBlocking { session.stopAndDrain() }
+        assertTrue(session.insertReviewedRow(0, RecordedTestStep(action = "Plug the hub in", stepKind = StepKind.MANUAL)))
+        assertTrue(session.insertReviewedRow(1, RecordedTestStep(action = "Plug the stick in", stepKind = StepKind.MANUAL)))
+        check(state.registerTestStepRecording(session, suiteId, caseId) is StoreResult.Ok)
+        rule.setContent { TestsWorkspace(state) }
+        state.testsView.selectedSuiteId = suiteId
+        state.testsView.selectedCaseId = caseId
+        rule.waitForIdle()
+        rule.onNodeWithText("Review draft").performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
+        val (first, second) = session.snapshot.value.steps
+
+        rule.runOnIdle { state.testsView.recordingSelectedRowId = first.id }
+        rule.waitForIdle()
+        rule.runOnIdle { state.testsView.recordingSelectedRowId = second.id }
+        rule.waitForIdle()
+        rule.onNodeWithText("+ Add check").performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
+
+        val steps = session.snapshot.value.steps
+        assertEquals(0, steps.single { it.id == first.id }.checks.size, "the row selected before stays as it was")
+        assertEquals(1, steps.single { it.id == second.id }.checks.size)
     }
 
     @Test

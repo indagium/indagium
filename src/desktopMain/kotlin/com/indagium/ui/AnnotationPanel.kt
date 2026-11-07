@@ -2630,7 +2630,8 @@ internal fun MarkdownInlineOrTextField(
         targetId = stableVoiceTargetId,
         enabled = enabled,
         onInteractionActiveChange = { assistanceDialogOpen = it },
-        onTranscript = ::applyVoiceTranscript,
+        // A lambda, not ::applyVoiceTranscript: a local function reference ignores its captures in equals, so rememberUpdatedState would keep the first one.
+        onTranscript = { applyVoiceTranscript(it) },
         onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection },
         onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
     )

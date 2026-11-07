@@ -535,7 +535,8 @@ internal fun AnnotationMarkdownEditorDialog(
         available = !locked && !hasConflict && !previewMode,
         editorFocused = editorFocused,
         targetId = voiceTargetId,
-        onValueChange = ::updateEditor,
+        // A lambda, not ::updateEditor: a local function reference ignores its captures in equals, so rememberUpdatedState would keep the first one.
+        onValueChange = { updateEditor(it) },
         onFocusRestored = { runCatching { editorFocusRequester.requestFocus() } },
         anchorState = proofreadingAnchor,
     )
@@ -554,7 +555,8 @@ internal fun AnnotationMarkdownEditorDialog(
     val dictation = rememberDictationControl(
         targetId = voiceTargetId,
         enabled = !locked && !hasConflict && !previewMode,
-        onTranscript = ::insertVoice,
+        // A lambda, not ::insertVoice: a local function reference ignores its captures in equals, so rememberUpdatedState would keep the first one.
+        onTranscript = { insertVoice(it) },
         onBeforeAction = {
             if (voiceInsertionSelection == null) voiceInsertionSelection = editorValue.selection
         },

@@ -80,7 +80,8 @@ internal fun ExternalEventRowEditor(session: TestStepRecordingSession, row: Reco
         },
     )
     if (row.stepKind == StepKind.MANUAL) ManualCompletionPicker(row.manualCompletion, enabled) { mode -> edit { it.copy(manualCompletion = mode) } }
-    RecordedDeviceStateChecks(row, enabled, ::edit)
+    // A lambda, not ::edit: a local function reference ignores its captures in equals, so a memoized click handler would keep the previous row.
+    RecordedDeviceStateChecks(row, enabled, { edit(it) })
 }
 
 /**
