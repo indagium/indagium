@@ -50,6 +50,28 @@ git tag v1.9.1 && git push --tags
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).
 
+### Watch long test runs for hangs
+
+The full `desktopTest` suite has about 8,000 tests. It takes about 10 minutes on a developer Mac, and
+CI's whole `verify` job (compile included, on a slow shared runner) takes about 35 minutes. A
+run can hang forever instead of failing: there is no per-test timeout, and a JVM deadlock never ends
+on its own. One full run once sat at 0% CPU for 2.5 hours before anyone noticed.
+
+When a full run goes in the background, check on it rather than just waiting for the notification:
+- **Progress:** Gradle writes `build/test-results/desktopTest/TEST-*.xml` as each test class finishes.
+  If no new file has appeared for **10 minutes**, or a local run passes **30 minutes**, treat it as hung.
+- **Confirm:** the test JVM (`ps` shows `Gradle Test Executor`) sits at about 0% CPU.
+- **Diagnose before killing:** `jstack <pid>` on that JVM, saved to a file. Look at the `Test worker`
+  thread for the stuck test, and at `waiting on the Class initialization monitor` / `waiting to lock`
+  lines for a deadlock. Then stop the task and kill the test JVM.
+- **Report** the stuck test and the cycle to the user. Don't silently rerun and hope.
+
+Known hang: JavaCPP class-init deadlock. The `indagium-ffmpeg-load` thread holds the `Loader` lock
+and waits for `Pointer`'s class init. Meanwhile a capture preview coroutine left over from a capture
+UI test (`FfmpegCaptureVideoExporter.coverageEndMs`) is initializing `Pointer` and waiting for the
+`Loader` lock. `CaptureSnapshotExportLifecycleTest` can also hang. A temporary Gradle init script
+that calls `filter.excludeTestsMatching(...)` on `desktopTest` skips it locally.
+
 ## Architecture
 
 Indagium is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~155k lines across 16 packages.
