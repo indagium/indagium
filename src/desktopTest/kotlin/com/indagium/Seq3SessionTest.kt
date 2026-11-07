@@ -143,6 +143,76 @@ class Seq3SessionTest {
     }
 
     @Test
+    fun everyWayOfCreatingANewDiagramStartsInPlantUml() {
+        val notedTab = mkTab("notes-log", "sample.log", taggedEntries()).copy(
+            annotations = Annotations(blocks = listOf(AnnBlock.LogRef(id = "b1", logIds = listOf(1, 2), caption = "ref"))),
+        )
+        val state = stateFor(notedTab)
+
+        val fromLog = state.seq3Sessions.begin(notedTab.id, setOf(1, 2))!!
+        val empty = state.seq3Sessions.beginEmpty(notedTab.id)!!
+        val fromNotes = state.seq3Sessions.beginFromNotes(notedTab.id)!!
+
+        listOf(fromLog, empty, fromNotes).forEach { id ->
+            assertEquals(Seq3Dialect.PLANTUML, state.seq3Sessions.sessions.single { it.id == id }.dialect, id)
+            assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+            val view = state.seq3Sessions.viewState(id)!!
+            assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect, id)
+            assertTrue(view.sourceDraft.trimStart().startsWith("@startuml"), id)
+        }
+        // The blank draft written to the library at creation carries the dialect too.
+        assertEquals(Seq3Dialect.PLANTUML, state.seq3Sessions.libraryForTab(notedTab).first().parsed?.dialect)
+    }
+
+    @Test
+    fun aNewDiagramInTheSourceEditorKeepsThePlantUmlDialect() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        val view = state.seq3Sessions.viewState(id)!!
+        val starter = com.indagium.ui.seq3SourceStarter(view.sourceEditorDialect, state.seq3Sessions.newSourceDiagramTitle(id))
+
+        assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.startNewSourceDiagram(id, starter, view.sourceEditorDialect))
+
+        assertEquals(Seq3Dialect.PLANTUML, state.seq3Sessions.sessions.single { it.id == id }.dialect)
+        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
+        assertTrue(starter.contains("@startuml"))
+    }
+
+    @Test
+    fun aSavedMermaidDiagramReopensAsMermaidAndAPlantUmlOneAsPlantUml() {
+        val root = createTempDirectory("indagium-seq3-dialect-reopen").toFile()
+        val libraryFile = File(root, "library.cache")
+        val tab = mkTab("log", "sample.log", twoTagEntries())
+        fun newState(stateFile: String) = AppState(
+            File(root, stateFile),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(libraryFile),
+        ).also {
+            it.tabs = listOf(tab)
+            it.activateTab(tab.id)
+        }
+        val state = newState("state.cache")
+        val mermaidId = state.seq3Sessions.beginEmpty(tab.id)!!
+        state.seq3Sessions.setDialect(mermaidId, Seq3Dialect.MERMAID)
+        val plantUmlId = state.seq3Sessions.beginEmpty(tab.id)!!
+        state.seq3Sessions.flush(mermaidId)
+        state.seq3Sessions.flush(plantUmlId)
+        val mermaidItem = state.seq3Sessions.sessions.single { it.id == mermaidId }.libraryItemId!!
+        val plantUmlItem = state.seq3Sessions.sessions.single { it.id == plantUmlId }.libraryItemId!!
+        assertEquals(Seq3Dialect.MERMAID, DiagramLibraryStore(libraryFile).get(mermaidItem)?.parsed?.dialect)
+        assertEquals(Seq3Dialect.PLANTUML, DiagramLibraryStore(libraryFile).get(plantUmlItem)?.parsed?.dialect)
+
+        val restored = newState("restored.cache")
+        assertTrue(restored.seq3Sessions.openLibraryItem(mermaidItem, tab.id))
+        assertEquals(Seq3Dialect.MERMAID, restored.seq3Sessions.activeSession!!.dialect)
+        assertTrue(restored.seq3Sessions.prepareSourceDraft(restored.seq3Sessions.activeSessionId!!))
+        assertTrue(restored.seq3Sessions.viewState(restored.seq3Sessions.activeSessionId!!)!!.sourceDraft.startsWith("sequenceDiagram"))
+        assertTrue(restored.seq3Sessions.openLibraryItem(plantUmlItem, tab.id))
+        assertEquals(Seq3Dialect.PLANTUML, restored.seq3Sessions.activeSession!!.dialect)
+    }
+
+    @Test
     fun beginEmptySavesAReopenableBlankDraftWithoutGeneratingLogContent() {
         val root = createTempDirectory("indagium-seq3-empty").toFile()
         val libraryFile = File(root, "library.cache")
@@ -1602,6 +1672,8 @@ class Seq3SessionTest {
     fun confirmedMarkerRemovalAppliesEvidenceFreeCandidateAsOneUndoStep() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        // These assertions are written against Mermaid text; a new diagram is PlantUML by default.
+        state.seq3Sessions.setDialect(id, Seq3Dialect.MERMAID)
         awaitGenerated(state, id)
         val blockId = requireNotNull(state.seq3Sessions.attachLiveLink(id))
         val original = (state.tab("log")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text
@@ -1636,6 +1708,8 @@ class Seq3SessionTest {
     fun syncLiveLinkedNoteSkipsADriftedLinkButStillSyncsAnUndriftedSiblingLink() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        // These assertions are written against Mermaid text; a new diagram is PlantUML by default.
+        state.seq3Sessions.setDialect(id, Seq3Dialect.MERMAID)
         awaitGenerated(state, id)
 
         val driftedBlockId = requireNotNull(state.seq3Sessions.attachLiveLink(id))

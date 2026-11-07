@@ -97,22 +97,22 @@ class Seq3WorkspaceUxUiTest {
         showWorkspace(sessionId, 1280, 900)
         rule.onNodeWithTag("seq3-source-edit").performClick()
         rule.waitForIdle()
-        assertEquals(Seq3Dialect.MERMAID, currentSession(sessionId).dialect)
-        assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect, "the editor opens in the diagram's dialect")
-        assertTrue(view.sourceDraft.startsWith("sequenceDiagram"), view.sourceDraft)
-
-        rule.onNode(hasText("PlantUML") and hasAnyAncestor(hasTestTag("seq3-header-dialect")), useUnmergedTree = true).performClick()
-        rule.waitForIdle()
-        assertEquals(Seq3Dialect.PLANTUML, currentSession(sessionId).dialect)
-        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
+        assertEquals(Seq3Dialect.PLANTUML, currentSession(sessionId).dialect, "a new diagram starts in PlantUML")
+        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect, "the editor opens in the diagram's dialect")
         assertTrue(view.sourceDraft.startsWith("@startuml"), view.sourceDraft)
 
-        rule.onNodeWithTag("seq3-source-dialect").performClick()
-        rule.onNode(hasText("Mermaid") and hasAnyAncestor(hasTestTag("seq3-source-dialect-options")), useUnmergedTree = true).performClick()
+        rule.onNode(hasText("Mermaid") and hasAnyAncestor(hasTestTag("seq3-header-dialect")), useUnmergedTree = true).performClick()
         rule.waitForIdle()
-        assertEquals(Seq3Dialect.MERMAID, currentSession(sessionId).dialect, "the dropdown moves the header's dialect too")
+        assertEquals(Seq3Dialect.MERMAID, currentSession(sessionId).dialect)
         assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect)
         assertTrue(view.sourceDraft.startsWith("sequenceDiagram"), view.sourceDraft)
+
+        rule.onNodeWithTag("seq3-source-dialect").performClick()
+        rule.onNode(hasText("PlantUML") and hasAnyAncestor(hasTestTag("seq3-source-dialect-options")), useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(Seq3Dialect.PLANTUML, currentSession(sessionId).dialect, "the dropdown moves the header's dialect too")
+        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
+        assertTrue(view.sourceDraft.startsWith("@startuml"), view.sourceDraft)
     }
 
     @Test
@@ -123,21 +123,21 @@ class Seq3WorkspaceUxUiTest {
         rule.onNodeWithTag("seq3-source-edit").performClick()
         rule.waitForIdle()
         view.sourceLiveEnabled = false
-        rule.onNodeWithTag("seq3-source-editor").performTextReplacement("sequenceDiagram\nA->>B: hello")
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement("@startuml\nA -> B: hello\n@enduml")
         rule.waitForIdle()
         assertTrue(view.sourceHasUnappliedDraft())
 
-        rule.onNode(hasText("PlantUML") and hasAnyAncestor(hasTestTag("seq3-header-dialect")), useUnmergedTree = true).performClick()
+        rule.onNode(hasText("Mermaid") and hasAnyAncestor(hasTestTag("seq3-header-dialect")), useUnmergedTree = true).performClick()
         rule.waitForIdle()
-        assertEquals(Seq3Dialect.PLANTUML, view.sourceDialectChangePending)
-        assertEquals(Seq3Dialect.MERMAID, currentSession(sessionId).dialect, "nothing changes until the question is answered")
-        assertEquals("sequenceDiagram\nA->>B: hello", view.sourceDraft)
+        assertEquals(Seq3Dialect.MERMAID, view.sourceDialectChangePending)
+        assertEquals(Seq3Dialect.PLANTUML, currentSession(sessionId).dialect, "nothing changes until the question is answered")
+        assertEquals("@startuml\nA -> B: hello\n@enduml", view.sourceDraft)
 
         rule.onNodeWithTag("seq3-source-confirm-dialect-switch").performClick()
         rule.waitForIdle()
-        assertEquals(Seq3Dialect.PLANTUML, currentSession(sessionId).dialect)
-        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
-        assertTrue(view.sourceDraft.startsWith("@startuml"), view.sourceDraft)
+        assertEquals(Seq3Dialect.MERMAID, currentSession(sessionId).dialect)
+        assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect)
+        assertTrue(view.sourceDraft.startsWith("sequenceDiagram"), view.sourceDraft)
     }
 
     // ── Source beside the preview ────────────────────────────────────────────────────────────────

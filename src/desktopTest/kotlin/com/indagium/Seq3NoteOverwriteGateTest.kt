@@ -173,10 +173,10 @@ class Seq3NoteOverwriteGateTest {
 
     // Splices an extra line into the fenced body WITHOUT touching the header's declared hash — the
     // same "hand-edited fence" shape Seq3CodecTest's own tamper helper uses, applied here to a REAL
-    // generated note (default MERMAID dialect) rather than a hand-built fixture document.
+    // generated note (default PLANTUML dialect) rather than a hand-built fixture document.
     private fun handEdited(noteText: String): String {
-        val tampered = noteText.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over X: hand-edited\n")
-        check(tampered != noteText) { "fixture note text did not contain the expected mermaid header to tamper" }
+        val tampered = noteText.replaceFirst("@startuml\n", "@startuml\nnote over X: hand-edited\n")
+        check(tampered != noteText) { "fixture note text did not contain the expected PlantUML header to tamper" }
         return tampered
     }
 

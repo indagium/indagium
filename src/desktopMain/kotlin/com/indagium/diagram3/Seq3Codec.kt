@@ -141,7 +141,10 @@ fun seq3SourceHash(source: String): String = MessageDigest.getInstance("SHA-256"
  */
 fun encodeSeq3Note(
     document: Seq3Document,
-    dialect: Seq3Dialect = Seq3Dialect.MERMAID,
+    // Encoding writes NEW data, so a caller that names no dialect gets PlantUML. The READ side
+    // ([parseSeq3Note]) deliberately keeps Mermaid as the fallback for a stored header with no
+    // (or an unknown) dialect field: every note written before PlantUML became the default.
+    dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
     caption: String = "",
     exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
     attachment: Seq3AttachmentMetadata? = null,
@@ -195,6 +198,9 @@ fun parseSeq3Note(text: String): ParsedSeq3? {
     @Suppress("UNCHECKED_CAST")
     val map = runCatching { Json.decode(jsonText) }.getOrNull() as? Map<String, Any?> ?: return null
 
+    // READ fallback, frozen on purpose: a header with no (or an unknown) dialect field was written
+    // by a build whose only dialect was Mermaid, and must reopen as Mermaid. New notes always
+    // carry an explicit dialect (see [encodeSeq3Note]).
     val dialect = when (map.str("dialect")) {
         "plantuml" -> Seq3Dialect.PLANTUML
         else -> Seq3Dialect.MERMAID

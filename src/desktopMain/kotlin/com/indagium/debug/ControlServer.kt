@@ -1616,8 +1616,8 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "build_sequence_diagram",
-        "Generate a UML sequence diagram from a range of a tab's log lines and return its Mermaid " +
-            "(or PlantUML) source, lifelines, and messages. Lifelines are ranked automatically from " +
+        "Generate a UML sequence diagram from a range of a tab's log lines and return its PlantUML " +
+            "(or Mermaid) source, lifelines, and messages. Lifelines are ranked automatically from " +
             "tag activity (errors, message-shape diversity, same-thread peers, raw count); a message's " +
             "target lifeline is inferred only from adjacent-entry evidence (same-thread handoff or a " +
             "shared correlation token) above a confidence bar — anything short of that is reported " +
@@ -1639,7 +1639,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             descriptions = mapOf(
                 "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
                 "endLineId" to "Last log line id of the range (inclusive).",
-                "dialect" to "Output syntax. Defaults to mermaid.",
+                "dialect" to "Output syntax. Defaults to plantuml.",
                 "maxLifelines" to "Lifeline cap; clamped to a hard maximum of 32. Defaults to 8.",
                 "threadHandoffs" to "Whether a same-thread (pid+tid, bounded gap) handoff between adjacent entries may " +
                     "resolve a message's target lifeline. Defaults to true.",

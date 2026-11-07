@@ -142,8 +142,9 @@ data class Seq3WorkspaceSession(
      *  (possibly since-changed) global setting. */
     val exportMode: DiagramExportMode? = null,
     /** Dialect used by the explicit note action. Changing it never mutates the document or writes
-     *  an annotation by itself. */
-    val dialect: Seq3Dialect = Seq3Dialect.MERMAID,
+     *  an annotation by itself. A NEW diagram starts in PlantUML; opening a saved diagram or note
+     *  always passes the dialect it was stored with, so Mermaid ones stay Mermaid. */
+    val dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
     /** Notes-panel prose to re-anchor onto this session's document every time [Seq3Session.
      *  publishGenerated] runs — set once by [Seq3Session.beginFromNotes], empty for every other
      *  session (an ordinary [Seq3Session.begin] or [Seq3Session.beginEdit]). Two production paths

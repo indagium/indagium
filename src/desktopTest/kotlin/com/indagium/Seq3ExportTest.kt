@@ -8,6 +8,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3RasterTheme
+import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.model.AnnBlock
 import com.indagium.model.AnnotationLogBlockStyle
@@ -74,7 +75,7 @@ class Seq3ExportTest {
         id: String = "n1",
         caption: String = "",
         exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
-    ): AnnBlock.Note = AnnBlock.Note(id, encodeSeq3Note(document, caption = caption, exportMode = exportMode))
+    ): AnnBlock.Note = AnnBlock.Note(id, encodeSeq3Note(document, Seq3Dialect.MERMAID, caption = caption, exportMode = exportMode))
 
     private fun tabWith(vararg blocks: AnnBlock, frameStamp: String? = null) = mkTab(
         "t1", "bugreport.txt", listOf(

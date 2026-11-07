@@ -1221,7 +1221,7 @@ internal class IndagiumToolOperations(
         val startId = args.int("startLineId")
         val endId = args.int("endLineId")
         val range = if (startId != null && endId != null) Seq3Range.Ids(startId, endId) else Seq3Range.VisibleView
-        val dialect = if (args.str("dialect").equals("plantuml", ignoreCase = true)) Seq3Dialect.PLANTUML else Seq3Dialect.MERMAID
+        val dialect = if (args.str("dialect").equals("mermaid", ignoreCase = true)) Seq3Dialect.MERMAID else Seq3Dialect.PLANTUML
         val options = Seq3GenerateOptions(
             title = args.str("title") ?: "",
             sourceFile = File(tab.filename).name,

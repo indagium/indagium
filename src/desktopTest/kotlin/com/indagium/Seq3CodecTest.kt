@@ -93,6 +93,40 @@ class Seq3CodecTest {
     }
 
     @Test
+    fun anUnspecifiedDialectEncodesAsPlantUmlAndRoundTripsWithItsHeader() {
+        val original = fixedDocument()
+        val text = encodeSeq3Note(original)
+
+        assertTrue(text.startsWith("<!-- indagium:diagram3 v1 "))
+        assertTrue(text.contains("\"dialect\":\"plantuml\""))
+        assertTrue(text.contains("```plantuml\n"))
+        val parsed = parseSeq3Note(text)
+        assertNotNull(parsed)
+        assertEquals(Seq3Dialect.PLANTUML, parsed.dialect)
+        assertEquals(original, parsed.document)
+        assertTrue(parsed.sourceHashMatches)
+        assertTrue(parsed.source.contains("@startuml"))
+        // Re-encoding what was parsed (save -> reopen -> save) keeps the dialect and the bytes.
+        assertEquals(text, encodeSeq3Note(parsed.document, parsed.dialect))
+    }
+
+    @Test
+    fun aStoredNoteWithNoDialectFieldStillDecodesAsMermaid() {
+        val source = "sequenceDiagram\n"
+        val documentMap = mapOf(
+            "lifelines" to emptyList<Any?>(),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val header = mapOf("sourceHash" to seq3SourceHash(source), "document" to documentMap)
+        val parsed = parseSeq3Note("<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n")
+
+        assertNotNull(parsed)
+        assertEquals(Seq3Dialect.MERMAID, parsed.dialect)
+    }
+
+    @Test
     fun lifelineVisibilityRoundTripsAndOldDefaultRemainsVisible() {
         val original = fixedDocument().copy(
             lifelines = fixedDocument().lifelines.mapIndexed { index, lifeline ->
@@ -137,7 +171,7 @@ class Seq3CodecTest {
 
     @Test
     fun stripSeq3NoteHeaderLeavesOnlyTheFencedBody() {
-        val text = encodeSeq3Note(fixedDocument())
+        val text = encodeSeq3Note(fixedDocument(), Seq3Dialect.MERMAID)
         val stripped = stripSeq3NoteHeader(text)
 
         assertFalse(stripped.contains("indagium:diagram3"))
@@ -165,7 +199,7 @@ class Seq3CodecTest {
 
     @Test
     fun sourceHashMismatchSetsAWarningButStillReturnsTheDocument() {
-        val text = encodeSeq3Note(fixedDocument())
+        val text = encodeSeq3Note(fixedDocument(), Seq3Dialect.MERMAID)
         // Splice an extra line into the fenced body WITHOUT touching the header's declared hash,
         // exactly the "hand-edited fence" scenario this warning exists for.
         val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
@@ -184,7 +218,7 @@ class Seq3CodecTest {
 
     @Test
     fun adoptingADriftedNoteClearsTheSourceHashWarningOnReparse() {
-        val text = encodeSeq3Note(fixedDocument())
+        val text = encodeSeq3Note(fixedDocument(), Seq3Dialect.MERMAID)
         val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
         val parsedBeforeAdopt = parseSeq3Note(tampered)
         assertNotNull(parsedBeforeAdopt)
@@ -200,7 +234,7 @@ class Seq3CodecTest {
 
     @Test
     fun adoptingPreservesTheHandEditedFenceBodyByteForByte() {
-        val text = encodeSeq3Note(fixedDocument())
+        val text = encodeSeq3Note(fixedDocument(), Seq3Dialect.MERMAID)
         // A deliberately odd body — mixed indentation, a trailing-space line, a blank line in the
         // middle — so a byte-for-byte comparison actually exercises more than "still has words in
         // it". This is the whole point of adoptSeq3NoteSource: the text the user wrote must survive
@@ -224,7 +258,7 @@ class Seq3CodecTest {
 
     @Test
     fun adoptingSwitchesTheNoteToSourceExportMode() {
-        val text = encodeSeq3Note(fixedDocument(), exportMode = DiagramExportMode.IMAGE)
+        val text = encodeSeq3Note(fixedDocument(), Seq3Dialect.MERMAID, exportMode = DiagramExportMode.IMAGE)
         val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
 
         val adopted = adoptSeq3NoteSource(tampered)
@@ -278,7 +312,7 @@ class Seq3CodecTest {
 
     @Test
     fun seq3NoteHasHandEditIsTrueForATamperedFence() {
-        val text = encodeSeq3Note(fixedDocument())
+        val text = encodeSeq3Note(fixedDocument(), Seq3Dialect.MERMAID)
         val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
 
         assertTrue(seq3NoteHasHandEdit(tampered))

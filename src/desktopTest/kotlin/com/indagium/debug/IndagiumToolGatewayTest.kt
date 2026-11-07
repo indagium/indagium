@@ -1133,6 +1133,21 @@ class IndagiumToolGatewayTest {
     }
 
     @Test
+    fun sequenceDiagramDefaultsToPlantUmlAndStillHonoursMermaid() {
+        val default = operations.toolGateway.execute("build_sequence_diagram", mapOf("tabId" to "t1")) as Map<*, *>
+        assertNull(default["error"])
+        assertEquals("plantuml", default["dialect"])
+        assertTrue((default["source"] as String).contains("@startuml"))
+
+        val mermaid = operations.toolGateway.execute(
+            "build_sequence_diagram",
+            mapOf("tabId" to "t1", "dialect" to "Mermaid"),
+        ) as Map<*, *>
+        assertEquals("mermaid", mermaid["dialect"])
+        assertTrue((mermaid["source"] as String).contains("sequenceDiagram"))
+    }
+
+    @Test
     fun sequenceDiagramReportsNoArrowsForAnEmptyRange() {
         val result = operations.toolGateway.execute(
             "build_sequence_diagram",

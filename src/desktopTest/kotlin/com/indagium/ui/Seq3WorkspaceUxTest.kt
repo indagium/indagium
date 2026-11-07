@@ -203,34 +203,35 @@ class Seq3WorkspaceUxTest {
             val id = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
             val view = requireNotNull(state.seq3Sessions.viewState(id))
             fun session() = state.seq3Sessions.sessions.single { it.id == id }
-            assertEquals(Seq3Dialect.MERMAID, session().dialect)
+            assertEquals(Seq3Dialect.PLANTUML, session().dialect, "a new diagram starts in PlantUML")
+            assertEquals(Seq3Dialect.PLANTUML, requireNotNull(DiagramLibraryStore(libraryFile).get(requireNotNull(session().libraryItemId))).parsed?.dialect)
 
             // The editor opens in the diagram's dialect, not in a default of its own.
             assertTrue(state.seq3Sessions.prepareSourceDraft(id))
-            assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect)
-            assertTrue(view.sourceDraft.startsWith("sequenceDiagram"), view.sourceDraft)
-
-            // Switching the editor changes the diagram's dialect with it, and it is saved with the diagram.
-            assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, Seq3Dialect.PLANTUML))
-            assertEquals(Seq3Dialect.PLANTUML, session().dialect)
             assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
             assertTrue(view.sourceDraft.startsWith("@startuml"), view.sourceDraft)
+
+            // Switching the editor changes the diagram's dialect with it, and it is saved with the diagram.
+            assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, Seq3Dialect.MERMAID))
+            assertEquals(Seq3Dialect.MERMAID, session().dialect)
+            assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect)
+            assertTrue(view.sourceDraft.startsWith("sequenceDiagram"), view.sourceDraft)
             state.seq3Sessions.flush(id)
             val savedItem = DiagramLibraryStore(libraryFile).get(requireNotNull(session().libraryItemId))
-            assertEquals(Seq3Dialect.PLANTUML, savedItem?.parsed?.dialect)
+            assertEquals(Seq3Dialect.MERMAID, savedItem?.parsed?.dialect)
 
             // The header control: setDialect alone saves too, and a restored session opens the editor in it.
-            state.seq3Sessions.setDialect(id, Seq3Dialect.MERMAID)
+            state.seq3Sessions.setDialect(id, Seq3Dialect.PLANTUML)
             state.seq3Sessions.flush(id)
             val reopenedItem = requireNotNull(DiagramLibraryStore(libraryFile).get(requireNotNull(session().libraryItemId)))
-            assertEquals(Seq3Dialect.MERMAID, reopenedItem.parsed?.dialect)
+            assertEquals(Seq3Dialect.PLANTUML, reopenedItem.parsed?.dialect)
             state.seq3Sessions.close(id)
             assertTrue(state.seq3Sessions.openLibraryItem(reopenedItem.id, tab.id))
             val reopened = state.seq3Sessions.sessions.single()
-            assertEquals(Seq3Dialect.MERMAID, reopened.dialect)
+            assertEquals(Seq3Dialect.PLANTUML, reopened.dialect)
             val reopenedView = requireNotNull(state.seq3Sessions.viewState(reopened.id))
             assertTrue(state.seq3Sessions.prepareSourceDraft(reopened.id))
-            assertEquals(Seq3Dialect.MERMAID, reopenedView.sourceEditorDialect)
+            assertEquals(Seq3Dialect.PLANTUML, reopenedView.sourceEditorDialect)
             state.close()
         } finally {
             root.deleteRecursively()

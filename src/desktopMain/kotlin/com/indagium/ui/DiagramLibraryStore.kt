@@ -47,7 +47,7 @@ data class DiagramLibrarySnapshot(val encodedDiagramNote: String) {
     companion object {
         fun create(
             document: Seq3Document,
-            dialect: Seq3Dialect = Seq3Dialect.MERMAID,
+            dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
             caption: String = "",
             exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
         ): DiagramLibrarySnapshot = DiagramLibrarySnapshot(encodeSeq3Note(document, dialect, caption, exportMode))
