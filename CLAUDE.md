@@ -58,12 +58,19 @@ run can hang forever instead of failing: there is no per-test timeout, and a JVM
 on its own. One full run once sat at 0% CPU for 2.5 hours before anyone noticed.
 
 When a full run goes in the background, check on it rather than just waiting for the notification:
-- **Progress:** Gradle writes `build/test-results/desktopTest/TEST-*.xml` as each test class finishes.
-  If no new file has appeared for **10 minutes**, or a local run passes **30 minutes**, treat it as hung.
-- **Confirm:** the test JVM (`ps` shows `Gradle Test Executor`) sits at about 0% CPU.
-- **Diagnose before killing:** `jstack <pid>` on that JVM, saved to a file. Look at the `Test worker`
-  thread for the stuck test, and at `waiting on the Class initialization monitor` / `waiting to lock`
-  lines for a deadlock. Then stop the task and kill the test JVM.
+- **Progress is not visible on disk.** `build/test-results/desktopTest/TEST-*.xml` files appear only
+  when the whole task ends, so a missing file says nothing. Read progress from the test JVM instead:
+  `pgrep -f "worker.tmpdir=<checkout>/build"` finds it.
+- **Sample it every few minutes:**
+  - its CPU time: `ps -o time= -p <pid>`;
+  - the test it is in: the first `com.indagium.…Test` frame of the `Test worker` thread in `jstack <pid>`.
+- **Treat the run as hung** if any of these holds:
+  - CPU time barely grows between samples (a deadlock);
+  - the same test frame stays on top for about **8 minutes** (a busy hang);
+  - a local run passes **30 minutes**.
+- **Diagnose before killing:** save that `jstack` to a file. Look at `waiting on the Class
+  initialization monitor` / `waiting to lock` lines for a deadlock. Then stop the task and kill the
+  test JVM.
 - **Report** the stuck test and the cycle to the user. Don't silently rerun and hope.
 
 Past hang: a JavaCPP class-init deadlock. The FFmpeg load thread held the `Loader` lock while
