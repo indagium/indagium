@@ -3322,20 +3322,21 @@ private fun UpdateSavedFilterButton(
 ) {
     val tc = tc()
     val density = LocalDensity.current.density
-    val leftShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
-    val rightShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
     var open by remember { mutableStateOf(false) }
     val ordered = remember(presets, origin?.id) {
         if (origin == null) presets else presets.filter { it.id == origin.id } + presets.filter { it.id != origin.id }
     }
     Box(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+        // Ghost, like "+ Save current filter…" and "+ New folder…" below it: the section's actions
+        // share one quiet style, only "Clear filters" is outlined.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            // Mirrors the ▾ button's width so the label is centred like the buttons below it.
+            Spacer(Modifier.width(24.dp))
             AppButton(
-                if (origin != null) "Update \"${origin.name}\"" else "Update existing…",
+                if (origin != null) "↻ Update \"${origin.name}\"" else "↻ Update existing…",
                 onClick = { if (origin != null) onUpdate(origin.id) else open = !open },
-                variant = ButtonVariant.Secondary,
+                variant = ButtonVariant.Ghost,
                 modifier = Modifier.weight(1f),
-                shape = leftShape,
                 labelOverflow = TextOverflow.Ellipsis,
                 tooltip = if (origin != null) "Overwrite this saved filter with the current changes"
                 else "Choose a saved filter to overwrite with the current changes",
@@ -3343,10 +3344,9 @@ private fun UpdateSavedFilterButton(
             AppButton(
                 "▾",
                 onClick = { open = !open },
-                variant = ButtonVariant.Secondary,
-                modifier = Modifier.width(22.dp),
+                variant = ButtonVariant.Ghost,
+                modifier = Modifier.width(24.dp),
                 horizontalPadding = 0.dp,
-                shape = rightShape,
                 tooltip = "Update another saved filter",
             )
         }
