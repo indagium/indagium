@@ -262,9 +262,9 @@ class HomeLayoutTest {
         val topH = 592f * 1.6f / 2.6f
         assertRect(HomeRect(0f, 0f, 496f, topH), geo.cardOf(OPEN)!!)
         assertRect(HomeRect(504f, 0f, 496f, topH), geo.cardOf(CAPTURE)!!)
-        // Tests and Diagrams share the bottom row.
-        assertRect(HomeRect(0f, topH + 8f, 496f, 592f - topH), geo.cardOf(TESTS)!!)
-        assertRect(HomeRect(504f, topH + 8f, 496f, 592f - topH), geo.cardOf(DIAGRAMS)!!)
+        // Diagrams and Tests share the bottom row, Diagrams on the left.
+        assertRect(HomeRect(0f, topH + 8f, 496f, 592f - topH), geo.cardOf(DIAGRAMS)!!)
+        assertRect(HomeRect(504f, topH + 8f, 496f, 592f - topH), geo.cardOf(TESTS)!!)
         assertEquals(3, geo.gaps.size)
     }
 
@@ -450,7 +450,7 @@ class HomeLayoutTest {
     @Test
     fun theDefaultLayoutAndEveryPresetPlaceTheDiagramsSection() {
         assertTrue(DIAGRAMS in homeLeafSections(DEFAULT_HOME_LAYOUT))
-        assertShape(col(row(leaf(OPEN), leaf(CAPTURE)), row(leaf(TESTS), leaf(DIAGRAMS))), DEFAULT_HOME_LAYOUT)
+        assertShape(col(row(leaf(OPEN), leaf(CAPTURE)), row(leaf(DIAGRAMS), leaf(TESTS))), DEFAULT_HOME_LAYOUT)
         assertEquals("Diagrams", com.indagium.ui.homeSectionTitle(DIAGRAMS))
         for (preset in HomeLayoutPreset.entries) {
             val placed = DIAGRAMS in homeLeafSections(preset.layout) || DIAGRAMS in preset.hidden
@@ -458,6 +458,48 @@ class HomeLayoutTest {
         }
         // Logs only is the one preset that hides it, with the other two.
         assertEquals(listOf(CAPTURE, TESTS, DIAGRAMS), HomeLayoutPreset.LOGS_ONLY.hidden)
+    }
+
+    @Test
+    fun theDefaultIsOpenAndCaptureOnTopWithDiagramsAndTestsBelow() {
+        assertShape(col(row(leaf(OPEN), leaf(CAPTURE)), row(leaf(DIAGRAMS), leaf(TESTS))), DEFAULT_HOME_LAYOUT)
+        // The top row stays somewhat taller, as before.
+        assertWeights(listOf(1.6f, 1f), DEFAULT_HOME_LAYOUT)
+        val geo = homeGeometry(DEFAULT_HOME_LAYOUT, HOST_W, HOST_H, 8f)
+        val open = geo.cardOf(OPEN)!!
+        val capture = geo.cardOf(CAPTURE)!!
+        val diagrams = geo.cardOf(DIAGRAMS)!!
+        val tests = geo.cardOf(TESTS)!!
+        assertTrue(open.x < capture.x && open.y == capture.y, "Open left of Capture on top")
+        assertTrue(diagrams.x < tests.x && diagrams.y == tests.y, "Diagrams left of Tests below")
+        assertTrue(open.y + open.h <= diagrams.y, "the top row sits above the bottom row")
+        assertTrue(open.h > diagrams.h, "the top row is taller")
+        assertEquals(listOf(OPEN, CAPTURE, DIAGRAMS, TESTS), homeLeafSections(DEFAULT_HOME_LAYOUT))
+    }
+
+    @Test
+    fun presetsPutDiagramsBeforeTestsWhereTheyShareARowOrColumn() {
+        assertShape(row(leaf(OPEN), leaf(CAPTURE), col(leaf(DIAGRAMS), leaf(TESTS))), HomeLayoutPreset.THREE_COLUMNS.layout)
+        assertShape(col(leaf(OPEN), row(leaf(CAPTURE), leaf(DIAGRAMS), leaf(TESTS))), HomeLayoutPreset.LOGS_ON_TOP.layout)
+        assertShape(row(leaf(OPEN), col(leaf(CAPTURE), leaf(DIAGRAMS), leaf(TESTS))), HomeLayoutPreset.LOGS_LEFT_STACKED.layout)
+        assertSame(DEFAULT_HOME_LAYOUT, HomeLayoutPreset.DEFAULT.layout)
+        // Logs only is unchanged.
+        assertShape(leaf(OPEN), HomeLayoutPreset.LOGS_ONLY.layout)
+        assertEquals(listOf(CAPTURE, TESTS, DIAGRAMS), HomeLayoutPreset.LOGS_ONLY.hidden)
+        for (preset in HomeLayoutPreset.entries) {
+            val order = homeLeafSections(preset.layout)
+            if (DIAGRAMS in order && TESTS in order) assertTrue(order.indexOf(DIAGRAMS) < order.indexOf(TESTS), preset.name)
+        }
+    }
+
+    @Test
+    fun aSavedLayoutEqualToThePreviousDefaultIsKeptAsTheUserSavedIt() {
+        // Settings always store the layout, so a stored tree that equals the old default cannot be told from one the user chose; the
+        // sanitizer therefore never rewrites it. Only a fresh install or the Default preset gets the new arrangement.
+        val previousDefault = col(row(leaf(OPEN), leaf(CAPTURE), weight = 1.6f), row(leaf(TESTS), leaf(DIAGRAMS)))
+        val state = sanitizeHomeLayoutState(previousDefault, emptyList())
+        assertEquals(previousDefault, state.layout)
+        assertFalse(HomeLayoutPreset.DEFAULT.isActiveIn(AppSettings(homeLayout = previousDefault)))
     }
 
     @Test

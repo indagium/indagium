@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import com.indagium.model.AppSettings
 import com.indagium.model.HomeDiagramSegment
+import com.indagium.model.HomeDiagramsView
 import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeSectionId
 import kotlinx.serialization.json.JsonArray
@@ -57,11 +58,18 @@ internal fun JsonObject.homeDiagramsSegmentFromJson(): HomeDiagramSegment =
         ?.let { name -> HomeDiagramSegment.entries.firstOrNull { it.name == name } }
         ?: HomeDiagramSegment.NO_TICKET
 
-/** Writes the New tab's settings keys, in the order the settings object has always had them, followed by the Diagrams segment (appended last). */
+/** The Diagrams section's remembered Grid | List choice as read from the settings object; an absent or unknown name gives [HomeDiagramsView.LIST]. */
+internal fun JsonObject.homeDiagramsViewFromJson(): HomeDiagramsView =
+    (this["homeDiagramsView"] as? JsonPrimitive)?.contentOrNull
+        ?.let { name -> HomeDiagramsView.entries.firstOrNull { it.name == name } }
+        ?: HomeDiagramsView.LIST
+
+/** Writes the New tab's settings keys, in the order the settings object has always had them, followed by the Diagrams segment and view (appended last). */
 internal fun JsonObjectBuilder.putHomeSettings(settings: AppSettings) {
     put("homeLayout", homeLayoutJson(settings.homeLayout))
     put("homeHiddenSections", homeHiddenSectionsJson(settings.homeHiddenSections))
     put("homeLayoutTipDismissed", settings.homeLayoutTipDismissed)
     put("homeOpenActionsHeightDp", settings.homeOpenActionsHeightDp)
     put("homeDiagramsSegment", settings.homeDiagramsSegment.name)
+    put("homeDiagramsView", settings.homeDiagramsView.name)
 }

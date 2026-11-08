@@ -1309,6 +1309,13 @@ enum class HomeDiagramSegment {
     ALL,
 }
 
+/** How the New tab's Diagrams section shows its diagrams: one row each ([LIST], the default) or cards with a preview image ([GRID]). Stored by
+ *  name in the settings JSON only, so a new value goes last. */
+enum class HomeDiagramsView {
+    LIST,
+    GRID,
+}
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -1665,6 +1672,8 @@ data class AppSettings(
     // The segment of the New tab's Diagrams section (No ticket | Ticket | All), remembered app-wide. JSON-only
     // (ui/HomeLayoutSettingsJson.kt); appended last to keep positional callers stable.
     val homeDiagramsSegment: HomeDiagramSegment = HomeDiagramSegment.NO_TICKET,
+    // How that section lays its diagrams out (Grid | List), remembered app-wide. JSON-only (ui/HomeLayoutSettingsJson.kt); appended last.
+    val homeDiagramsView: HomeDiagramsView = HomeDiagramsView.LIST,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1814,7 +1823,7 @@ enum class ChromeEdge { TOP, LEFT, RIGHT, BOTTOM }
 
 const val DEFAULT_HOME_TOP_WEIGHT: Float = 1.6f
 
-/** Open + Capture side by side on top, Tests and Diagrams side by side below (weights 1.6 : 1). */
+/** Open + Capture side by side on top, Diagrams and Tests side by side below (weights 1.6 : 1). */
 val DEFAULT_HOME_LAYOUT: HomeLayoutNode = HomeLayoutSplit(
     HomeSplitAxis.COLUMN,
     listOf(
@@ -1825,7 +1834,7 @@ val DEFAULT_HOME_LAYOUT: HomeLayoutNode = HomeLayoutSplit(
         ),
         HomeLayoutSplit(
             HomeSplitAxis.ROW,
-            listOf(HomeLayoutLeaf(HomeSectionId.TESTS), HomeLayoutLeaf(HomeSectionId.DIAGRAMS)),
+            listOf(HomeLayoutLeaf(HomeSectionId.DIAGRAMS), HomeLayoutLeaf(HomeSectionId.TESTS)),
         ),
     ),
 )

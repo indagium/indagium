@@ -4,6 +4,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.DEFAULT_HOME_LAYOUT
 import com.indagium.model.DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP
 import com.indagium.model.HomeDiagramSegment
+import com.indagium.model.HomeDiagramsView
 import com.indagium.model.HomeLayoutLeaf
 import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeLayoutSplit
@@ -98,7 +99,7 @@ class HomeLayoutSettingCodecTest {
         assertEquals("""{"section":"open","w":1.0}""", homeLayoutJson(HomeLayoutLeaf(HomeSectionId.OPEN)).toString())
         val json = homeLayoutJson(DEFAULT_HOME_LAYOUT).toString()
         assertTrue(json.startsWith("""{"split":"column","w":1.0,"children":[{"split":"row","w":1.6,"children":["""), json)
-        assertTrue(json.contains("""{"section":"tests","w":1.0}"""), json)
+        assertTrue(json.contains("""{"section":"diagrams","w":1.0},{"section":"tests","w":1.0}"""), json)
     }
 
     @Test
@@ -269,6 +270,43 @@ class HomeLayoutSettingCodecTest {
         // A bad segment never costs the rest of the settings.
         val settings = decode("""{"fontSize":17,"homeDiagramsSegment":"nope"}""")
         assertEquals(17, settings.fontSize)
+    }
+
+    @Test
+    fun theDiagramsViewDefaultsToListAndRoundTrips() {
+        assertEquals(HomeDiagramsView.LIST, AppSettings().homeDiagramsView)
+        assertEquals(HomeDiagramsView.LIST, decode("{}").homeDiagramsView)
+        for (view in HomeDiagramsView.entries) {
+            val json = AppSettings(homeDiagramsView = view).settingsJson()
+            assertTrue(json.contains(""""homeDiagramsView":"${view.name}""""), json)
+            assertEquals(view, decode(json).homeDiagramsView, view.name)
+        }
+    }
+
+    @Test
+    fun anUnknownOrMalformedDiagramsViewFallsBackToList() {
+        for (raw in listOf(
+            """{"homeDiagramsView":"TILES"}""",
+            """{"homeDiagramsView":"grid"}""",
+            """{"homeDiagramsView":1}""",
+            """{"homeDiagramsView":null}""",
+            """{"homeDiagramsView":["GRID"]}""",
+            """{"homeDiagramsView":{}}""",
+        )) {
+            assertEquals(HomeDiagramsView.LIST, decode(raw).homeDiagramsView, raw)
+        }
+        // The rest of the settings still decode, and the segment is independent of the view.
+        val settings = decode("""{"fontSize":17,"homeDiagramsView":"nope","homeDiagramsSegment":"ALL"}""")
+        assertEquals(17, settings.fontSize)
+        assertEquals(HomeDiagramSegment.ALL, settings.homeDiagramsSegment)
+    }
+
+    @Test
+    fun theLegacyPositionalTokenLeavesTheDiagramsViewAtItsDefault() {
+        val legacyToken = listOf("LIGHT", "12", "true", "", "5").joinToString("|") { value ->
+            if (value.isEmpty()) "~" else Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray())
+        }
+        assertEquals(HomeDiagramsView.LIST, settingsFromToken(legacyToken)!!.homeDiagramsView)
     }
 
     @Test

@@ -1082,6 +1082,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         homeOpenActionsHeightDp = o.intOrDefault("homeOpenActionsHeightDp", DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP)
             .coerceIn(MIN_HOME_OPEN_ACTIONS_HEIGHT_DP, MAX_HOME_OPEN_ACTIONS_HEIGHT_DP),
         homeDiagramsSegment = o.homeDiagramsSegmentFromJson(),
+        homeDiagramsView = o.homeDiagramsViewFromJson(),
     ).withLogViewLayoutSettingsFrom(o).withChromeSettingsFrom(o).withHolidaySettingsFrom(o).withTestsWorkspaceLayoutSettingsFrom(o)
 }.getOrNull()
 

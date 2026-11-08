@@ -160,7 +160,7 @@ enum class HomeLayoutPreset(val label: String, val layout: HomeLayoutNode, val h
             HomeSplitAxis.ROW,
             homeLeaf(HomeSectionId.OPEN),
             homeLeaf(HomeSectionId.CAPTURE),
-            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.TESTS), homeLeaf(HomeSectionId.DIAGRAMS)),
+            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.DIAGRAMS), homeLeaf(HomeSectionId.TESTS)),
         ),
     ),
     LOGS_ON_TOP(
@@ -168,7 +168,7 @@ enum class HomeLayoutPreset(val label: String, val layout: HomeLayoutNode, val h
         homeSplit(
             HomeSplitAxis.COLUMN,
             homeLeaf(HomeSectionId.OPEN, 1.6f),
-            homeSplit(HomeSplitAxis.ROW, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS), homeLeaf(HomeSectionId.DIAGRAMS)),
+            homeSplit(HomeSplitAxis.ROW, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.DIAGRAMS), homeLeaf(HomeSectionId.TESTS)),
         ),
     ),
     LOGS_LEFT_STACKED(
@@ -176,7 +176,7 @@ enum class HomeLayoutPreset(val label: String, val layout: HomeLayoutNode, val h
         homeSplit(
             HomeSplitAxis.ROW,
             homeLeaf(HomeSectionId.OPEN, 1.6f),
-            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS), homeLeaf(HomeSectionId.DIAGRAMS)),
+            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.DIAGRAMS), homeLeaf(HomeSectionId.TESTS)),
         ),
     ),
     DEFAULT("Default", DEFAULT_HOME_LAYOUT),

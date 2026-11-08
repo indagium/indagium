@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import com.indagium.model.HomeDiagramSegment
+import com.indagium.model.HomeDiagramsView
 import com.indagium.utils.computeLogFingerprint
 import com.indagium.utils.scanArchiveCandidates
 import kotlinx.coroutines.currentCoroutineContext
@@ -26,6 +27,12 @@ internal fun homeDiagramSegmentLabel(segment: HomeDiagramSegment): String = when
     HomeDiagramSegment.TICKET -> "Ticket"
     HomeDiagramSegment.ALL -> "All"
 }
+
+internal fun homeDiagramsViewLabels(): List<String> = listOf("Grid", "List")
+
+internal fun homeDiagramsViewIndex(view: HomeDiagramsView): Int = if (view == HomeDiagramsView.GRID) 0 else 1
+
+internal fun homeDiagramsViewAt(index: Int): HomeDiagramsView = if (index == 0) HomeDiagramsView.GRID else HomeDiagramsView.LIST
 
 private const val HOME_DIAGRAM_PARTICIPANTS_SHOWN = 3
 private const val HOME_DIAGRAM_NO_PARTICIPANTS = "No participants yet"
@@ -55,6 +62,8 @@ internal data class HomeDiagramRow(
     val updated: String,
     val ticketLabel: String,
     val noTicketBadge: Boolean,
+    /** The diagram's last change; with [id] it names the revision a Grid preview was drawn from. */
+    val updatedAt: Long = 0L,
 )
 
 private const val HOME_DIAGRAM_UNTITLED = "Untitled diagram"
@@ -77,8 +86,19 @@ internal fun homeDiagramRows(
                 updated = "Updated " + formatRelativeTime(nowMs - summary.updatedAt, summary.updatedAt),
                 ticketLabel = if (segment != HomeDiagramSegment.NO_TICKET && summary.hasTicket) summary.ticketLabel else "",
                 noTicketBadge = segment == HomeDiagramSegment.ALL && !summary.hasTicket,
+                updatedAt = summary.updatedAt,
             )
         }
+}
+
+private const val HOME_DIAGRAM_GRID_MIN_CARD_DP = 140f
+private const val HOME_DIAGRAM_GRID_MAX_COLUMNS = 6
+
+/** How many cards sit per row in a section [availableWidthDp] wide with [gapDp] between cards: as many as keep each at least a minimum width, 1 to 6. */
+internal fun homeDiagramGridColumns(availableWidthDp: Float, gapDp: Float = 8f): Int {
+    if (!availableWidthDp.isFinite()) return 1
+    val fit = ((availableWidthDp + gapDp) / (HOME_DIAGRAM_GRID_MIN_CARD_DP + gapDp)).toInt()
+    return fit.coerceIn(1, HOME_DIAGRAM_GRID_MAX_COLUMNS)
 }
 
 /** The line shown instead of the list when [segment] has no rows for [query]; [offersNew] is true when "New diagram" is the way forward (nothing was searched for). */

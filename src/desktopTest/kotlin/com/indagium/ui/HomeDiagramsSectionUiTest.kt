@@ -30,12 +30,16 @@ import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Range
 import com.indagium.model.AnnBlock
 import com.indagium.model.HomeDiagramSegment
+import com.indagium.model.HomeDiagramsView
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -43,7 +47,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** The New tab's Diagrams section as a user drives it: segments, search, "+ New diagram", opening each kind of row, the row menu
- *  (Rename, Delete with its confirmation) and the empty states. */
+ *  (Rename, Delete with its confirmation), the empty states and the Grid | List view with its previews. */
 class HomeDiagramsSectionUiTest {
     @get:Rule
     val rule = createComposeRule()
@@ -60,8 +64,14 @@ class HomeDiagramsSectionUiTest {
     private val loginSource = DiagramSourceIdentity.NONE
     private val ticketSource = DiagramSourceIdentity(File(root, "checkout.log").absolutePath, "2:feedface")
 
+    @Before
+    fun resetThumbnails() {
+        HomeDiagramThumbnails.clearForTest()
+    }
+
     @After
     fun tearDown() {
+        HomeDiagramThumbnails.clearForTest()
         state.seq3Sessions.sessions.toList().forEach { state.seq3Sessions.close(it.id) }
         state.close()
         root.deleteRecursively()
@@ -460,5 +470,226 @@ class HomeDiagramsSectionUiTest {
         rule.waitForIdle()
         assertEquals("Login flow", store.get(login.id)?.title)
         assertEquals(1, store.all().size)
+    }
+
+    // ---- Grid | List ------------------------------------------------------------------------------------------
+
+    private fun clickView(label: String) {
+        rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag("home-diagrams-view"))).performClick()
+        rule.waitForIdle()
+    }
+
+    private fun waitForThumb(id: String) {
+        rule.waitUntil(10_000) { rule.onAllNodesWithTag("home-diagrams-thumb-$id", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test
+    fun listIsTheDefaultViewAndNeverDrawsAPreview() {
+        val login = addDiagram("Login flow", loginSource, "Client", "Auth server")
+        show()
+
+        assertEquals(HomeDiagramsView.LIST, state.settings.homeDiagramsView)
+        rule.onNodeWithTag("home-diagrams-view").assertIsDisplayed()
+        rule.onNodeWithTag("home-diagrams-list").assertIsDisplayed()
+        rule.onAllNodesWithTag("home-diagrams-grid").assertCountEquals(0)
+        rule.onAllNodesWithTag("home-diagrams-thumb-${login.id}", useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithTag("home-diagrams-thumb-placeholder-${login.id}", useUnmergedTree = true).assertCountEquals(0)
+        Thread.sleep(200)
+        assertEquals(0, HomeDiagramThumbnails.renderCount, "List mode draws no previews")
+    }
+
+    @Test
+    fun theGridListSwitchIsRememberedAndSwapsTheLayout() {
+        val login = addDiagram("Login flow", loginSource, "Client", "Auth server")
+        show()
+
+        clickView("Grid")
+        assertEquals(HomeDiagramsView.GRID, state.settings.homeDiagramsView)
+        rule.onNodeWithTag("home-diagrams-grid").assertIsDisplayed()
+        rule.onAllNodesWithTag("home-diagrams-list").assertCountEquals(0)
+        rule.onNodeWithTag("home-diagrams-row-${login.id}").assertIsDisplayed()
+
+        clickView("List")
+        assertEquals(HomeDiagramsView.LIST, state.settings.homeDiagramsView)
+        rule.onNodeWithTag("home-diagrams-list").assertIsDisplayed()
+        rule.onAllNodesWithTag("home-diagrams-grid").assertCountEquals(0)
+        assertTrue(reclaimed >= 2, "every switch click gave root focus back")
+    }
+
+    @Test
+    fun aRememberedGridViewIsShownOnOpen() {
+        val login = addDiagram("Login flow", loginSource, "Client")
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+
+        rule.onNodeWithTag("home-diagrams-grid").assertIsDisplayed()
+        rule.onNodeWithTag("home-diagrams-open-${login.id}").assertIsDisplayed()
+    }
+
+    @Test
+    fun aGridCardSaysTitleParticipantsUpdatedTimeAndTicket() {
+        val login = addDiagram("Login flow", loginSource, "Client", "Auth server")
+        val payment = addDiagram("Payment retry", ticketSource, "Checkout")
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID, homeDiagramsSegment = HomeDiagramSegment.ALL) }
+        show()
+
+        rule.onNodeWithText("Login flow").assertIsDisplayed()
+        rule.onNodeWithText("Client, Auth server").assertExists()
+        rule.onAllNodesWithText("Updated", substring = true).assertCountEquals(2)
+        rule.onAllNodesWithTag("home-diagrams-no-ticket", useUnmergedTree = true).assertCountEquals(1)
+        rule.onNodeWithTag("home-diagrams-ticket-${payment.id}", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithText("checkout.log", useUnmergedTree = true).assertExists()
+        rule.onAllNodesWithTag("home-diagrams-ticket-${login.id}", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun aGridCardShowsAPlaceholderThenTheDrawnPreview() {
+        val login = addDiagram("Login flow", loginSource, "Client", "Auth server")
+        val release = CountDownLatch(1)
+        HomeDiagramThumbnails.beforeRenderForTest = { release.await(10, TimeUnit.SECONDS) }
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+
+        rule.onNodeWithTag("home-diagrams-thumb-placeholder-${login.id}", useUnmergedTree = true).assertIsDisplayed()
+        rule.onAllNodesWithTag("home-diagrams-thumb-${login.id}", useUnmergedTree = true).assertCountEquals(0)
+        assertEquals(0, HomeDiagramThumbnails.renderCount)
+
+        release.countDown()
+        waitForThumb(login.id)
+        rule.onNodeWithTag("home-diagrams-thumb-${login.id}", useUnmergedTree = true).assertIsDisplayed()
+        rule.onAllNodesWithTag("home-diagrams-thumb-placeholder-${login.id}", useUnmergedTree = true).assertCountEquals(0)
+        assertEquals(1, HomeDiagramThumbnails.renderCount)
+    }
+
+    @Test
+    fun aDiagramThatCannotBeDrawnKeepsThePlaceholder() {
+        val sketch = addDiagram("Empty sketch", loginSource)
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+        Thread.sleep(300)
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("home-diagrams-thumb-placeholder-${sketch.id}", useUnmergedTree = true).assertIsDisplayed()
+        rule.onAllNodesWithTag("home-diagrams-thumb-${sketch.id}", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun aDrawnPreviewIsReusedWhenTheViewIsToggledBack() {
+        val login = addDiagram("Login flow", loginSource, "Client", "Auth server")
+        show()
+
+        clickView("Grid")
+        waitForThumb(login.id)
+        val drawn = HomeDiagramThumbnails.renderCount
+        clickView("List")
+        clickView("Grid")
+        rule.onNodeWithTag("home-diagrams-thumb-${login.id}", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals(drawn, HomeDiagramThumbnails.renderCount, "the cached picture shows at once, nothing is drawn again")
+    }
+
+    @Test
+    fun switchingBackToListStopsDrawing() {
+        addDiagram("Login flow", loginSource, "Client")
+        addDiagram("Sketch", loginSource, "Cache")
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+        rule.waitUntil(10_000) { HomeDiagramThumbnails.renderCount == 2 }
+
+        clickView("List")
+        addDiagram("Third", loginSource, "Bus")
+        rule.waitForIdle()
+        Thread.sleep(200)
+        assertEquals(2, HomeDiagramThumbnails.renderCount, "a list row never triggers a draw")
+    }
+
+    @Test
+    fun clickingAGridCardOpensItLikeARow() {
+        val login = addDiagram("Login flow", loginSource, "Client")
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+
+        rule.onNodeWithTag(rowTag(login.id)).performClick()
+        rule.waitForIdle()
+
+        val session = state.seq3Sessions.sessions.single()
+        assertEquals(login.id, session.libraryItemId)
+        assertNull(session.sourceTabId)
+        assertEquals(ActiveSurface.Diagram3(session.id), state.activeSurface)
+        assertTrue(reclaimed >= 1)
+    }
+
+    @Test
+    fun aGridCardMenuRenamesAndDeletes() {
+        val login = addDiagram("Login flow", loginSource, "Client")
+        val keep = addDiagram("Sketch", loginSource, "Cache")
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+
+        openMenu(login.id)
+        rule.onNodeWithTag("home-diagrams-menu").assertIsDisplayed()
+        rule.onNodeWithTag("home-diagrams-rename-${login.id}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").performTextClearance()
+        rule.onNodeWithTag("profile-name-field").performTextInput("Sign-in flow")
+        rule.onNodeWithText("Rename").performClick()
+        rule.waitForIdle()
+        assertEquals("Sign-in flow", store.get(login.id)?.title)
+        rule.onNodeWithText("Sign-in flow").assertIsDisplayed()
+
+        openMenu(login.id)
+        rule.onNodeWithTag("home-diagrams-delete-${login.id}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete saved diagram?").assertIsDisplayed()
+        rule.onNodeWithText("Delete").performClick()
+        rule.waitForIdle()
+
+        assertNull(store.get(login.id))
+        assertNotNull(store.get(keep.id))
+        rule.onAllNodesWithTag(rowTag(login.id)).assertCountEquals(0)
+        rule.onNodeWithTag(rowTag(keep.id)).assertIsDisplayed()
+        assertNull(HomeDiagramThumbnails.cache.keys().firstOrNull { it.id == login.id }, "a deleted diagram's preview is dropped")
+    }
+
+    @Test
+    fun searchAndEmptyStatesWorkInTheGridToo() {
+        val login = addDiagram("Login flow", loginSource, "Client", "Auth server")
+        val sketch = addDiagram("Sketch", loginSource, "Cache")
+        state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+
+        rule.onNodeWithTag("home-diagrams-search").performTextInput("auth")
+        rule.waitForIdle()
+        rule.onNodeWithTag(rowTag(login.id)).assertIsDisplayed()
+        rule.onAllNodesWithTag(rowTag(sketch.id)).assertCountEquals(0)
+
+        rule.onNodeWithTag("home-diagrams-search").performTextClearance()
+        rule.onNodeWithTag("home-diagrams-search").performTextInput("zzz")
+        rule.waitForIdle()
+        rule.onNodeWithText("Nothing matches \"zzz\"").assertExists()
+        rule.onAllNodesWithTag("home-diagrams-grid").assertCountEquals(0)
+
+        rule.onNodeWithTag("home-diagrams-search").performTextClearance()
+        clickSegment("Ticket")
+        rule.onNodeWithText("No diagrams with a ticket yet", substring = true).assertExists()
+        clickSegment("All")
+        rule.onNodeWithTag(rowTag(login.id)).assertIsDisplayed()
+        assertEquals(HomeDiagramsView.GRID, state.settings.homeDiagramsView)
+    }
+
+    @Test
+    fun theGridRendersEvidence() {
+        val ids = mutableListOf(addDiagram("Login flow", loginSource, "Client", "Auth server", "Cache").id)
+        ids += addDiagram("Payment retry with a very long title that has to be cut off at the edge of the card", ticketSource, "Checkout", "Gateway").id
+        ids += addDiagram("Crash trace", DiagramSourceIdentity(File(root, "BUG-42.zip").absolutePath + "!FS/logs/logcat.log", "1:a"), "App").id
+        state.updateSettings { it.copy(homeDiagramsSegment = HomeDiagramSegment.ALL, homeDiagramsView = HomeDiagramsView.GRID) }
+        show()
+        ids.forEach(::waitForThumb)
+        rule.waitForIdle()
+        val image = rule.onRoot().captureToImage()
+        val pixels = image.toPixelMap()
+        val rendered = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_ARGB)
+        for (y in 0 until image.height) for (x in 0 until image.width) rendered.setRGB(x, y, pixels[x, y].toArgb())
+        val directory = File("build/home-layout-qa").apply { mkdirs() }
+        assertTrue(ImageIO.write(rendered, "png", File(directory, "home-diagrams-grid.png")))
     }
 }

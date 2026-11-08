@@ -127,7 +127,7 @@ class HomeTilingUiTest {
     }
 
     @Test
-    fun defaultLayoutShowsOpenLeftOfCaptureAndBothAboveTestsLeftOfDiagrams() {
+    fun defaultLayoutShowsOpenLeftOfCaptureAndBothAboveDiagramsLeftOfTests() {
         setHost()
         saveEvidenceScreenshot("home-wide-open.png", rule.onNodeWithTag("home-test-root").captureToImage())
         val open = bounds("home-card-open")
@@ -136,9 +136,11 @@ class HomeTilingUiTest {
         val diagrams = bounds("home-card-diagrams")
         assertTrue(open.right <= capture.left, "open $open should be left of capture $capture")
         assertTrue(open.bottom <= tests.top && capture.bottom <= tests.top, "open and capture should sit above tests")
-        assertTrue(tests.right <= diagrams.left, "tests $tests should be left of diagrams $diagrams")
+        assertTrue(diagrams.right <= tests.left, "diagrams $diagrams should be left of tests $tests")
         assertTrue(open.bottom <= diagrams.top && capture.bottom <= diagrams.top, "open and capture should sit above diagrams")
-        assertEquals(capture.right.value, diagrams.right.value, 0.5f, "the bottom row spans the same width as the top one")
+        assertEquals(capture.right.value, tests.right.value, 0.5f, "the bottom row spans the same width as the top one")
+        assertEquals(open.left.value, diagrams.left.value, 0.5f, "Diagrams starts under Open")
+        assertTrue(open.height > diagrams.height, "the top row is taller")
     }
 
     @Test

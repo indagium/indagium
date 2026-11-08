@@ -4,6 +4,7 @@ import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Range
 import com.indagium.model.HomeDiagramSegment
+import com.indagium.model.HomeDiagramsView
 import com.indagium.ui.DiagramLibrarySnapshot
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.DiagramLibrarySummary
@@ -12,11 +13,15 @@ import com.indagium.ui.DiagramTicketFilter
 import com.indagium.ui.HomeDiagramLogFile
 import com.indagium.ui.HomeDiagramLogProblem
 import com.indagium.ui.homeDiagramLogProblemNotice
+import com.indagium.ui.homeDiagramGridColumns
 import com.indagium.ui.homeDiagramMatches
 import com.indagium.ui.homeDiagramParticipantsLabel
 import com.indagium.ui.homeDiagramRows
 import com.indagium.ui.homeDiagramSegmentLabel
 import com.indagium.ui.homeDiagramsEmpty
+import com.indagium.ui.homeDiagramsViewAt
+import com.indagium.ui.homeDiagramsViewIndex
+import com.indagium.ui.homeDiagramsViewLabels
 import com.indagium.ui.resolveDiagramLogFile
 import com.indagium.ui.ticketFilter
 import java.io.File
@@ -57,6 +62,33 @@ class HomeDiagramsTest {
         assertEquals(DiagramTicketFilter.TICKET, HomeDiagramSegment.TICKET.ticketFilter())
         assertEquals(DiagramTicketFilter.ALL, HomeDiagramSegment.ALL.ticketFilter())
         assertEquals(listOf("No ticket", "Ticket", "All"), HomeDiagramSegment.entries.map(::homeDiagramSegmentLabel))
+    }
+
+    @Test
+    fun theViewSwitchReadsGridThenListAndMapsBothWays() {
+        assertEquals(listOf("Grid", "List"), homeDiagramsViewLabels())
+        for (view in HomeDiagramsView.entries) assertEquals(view, homeDiagramsViewAt(homeDiagramsViewIndex(view)), view.name)
+        assertEquals(0, homeDiagramsViewIndex(HomeDiagramsView.GRID))
+        assertEquals(1, homeDiagramsViewIndex(HomeDiagramsView.LIST))
+    }
+
+    @Test
+    fun cardsPerRowFollowTheTileWidth() {
+        assertEquals(1, homeDiagramGridColumns(0f))
+        assertEquals(1, homeDiagramGridColumns(176f), "the narrowest tile shows one card per row")
+        assertEquals(2, homeDiagramGridColumns(300f))
+        assertEquals(3, homeDiagramGridColumns(450f))
+        assertEquals(6, homeDiagramGridColumns(5000f), "never more than six")
+        assertEquals(1, homeDiagramGridColumns(Float.NaN))
+        assertTrue(homeDiagramGridColumns(600f) >= homeDiagramGridColumns(400f), "a wider tile never shows fewer")
+    }
+
+    @Test
+    fun rowsCarryTheUpdatedAtThatKeysTheirPreview() {
+        val all = summaries()
+        val rows = homeDiagramRows(all, HomeDiagramSegment.ALL, "", now).associateBy { it.title }
+        assertEquals(now - 1_000, rows.getValue("Login flow").updatedAt)
+        assertEquals(now - 3 * 86_400_000L, rows.getValue("Crash trace").updatedAt)
     }
 
     @Test
