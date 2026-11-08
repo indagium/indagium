@@ -1,14 +1,18 @@
 package com.indagium.ui
 
+import com.indagium.model.AppSettings
+import com.indagium.model.HomeDiagramSegment
 import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeSectionId
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 
 // The New tab layout's settings-JSON codec (AppSettings.homeLayout / homeHiddenSections / homeLayoutTipDismissed). It lives
 // here, not in AutosaveCodec.kt, which is already at detekt's per-file function limit. Shapes:
@@ -45,4 +49,19 @@ internal fun JsonObject.homeLayoutSettingsFromJson(): HomeLayoutSettings {
         hidden = state.hidden,
         tipDismissed = (this["homeLayoutTipDismissed"] as? JsonPrimitive)?.booleanOrNull ?: false,
     )
+}
+
+/** The Diagrams section's remembered segment as read from the settings object; an absent or unknown name gives [HomeDiagramSegment.NO_TICKET]. */
+internal fun JsonObject.homeDiagramsSegmentFromJson(): HomeDiagramSegment =
+    (this["homeDiagramsSegment"] as? JsonPrimitive)?.contentOrNull
+        ?.let { name -> HomeDiagramSegment.entries.firstOrNull { it.name == name } }
+        ?: HomeDiagramSegment.NO_TICKET
+
+/** Writes the New tab's settings keys, in the order the settings object has always had them, followed by the Diagrams segment (appended last). */
+internal fun JsonObjectBuilder.putHomeSettings(settings: AppSettings) {
+    put("homeLayout", homeLayoutJson(settings.homeLayout))
+    put("homeHiddenSections", homeHiddenSectionsJson(settings.homeHiddenSections))
+    put("homeLayoutTipDismissed", settings.homeLayoutTipDismissed)
+    put("homeOpenActionsHeightDp", settings.homeOpenActionsHeightDp)
+    put("homeDiagramsSegment", settings.homeDiagramsSegment.name)
 }

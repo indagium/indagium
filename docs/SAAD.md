@@ -773,13 +773,15 @@ platforms is unavailable in the current environment.
 ### 6.3 The New tab: a tiling launcher
 
 The New tab (`HomeScreen`, `ui/HomeScreen.kt`; the same session-only tab that §6.2 calls the capture launcher) is a
-window-manager-style host of three sections, `HomeSectionId` `OPEN` (Open a log, `HomeOpenZone`), `CAPTURE`
-(`HomeCaptureSection`) and `TESTS` (`HomeTestsSection`, §26.15). `HomeScreen` only builds one `HomeSectionSlot` (icon, title,
+window-manager-style host of four sections, `HomeSectionId` `OPEN` (Open a log, `HomeOpenZone`), `CAPTURE`
+(`HomeCaptureSection`), `TESTS` (`HomeTestsSection`, §26.15) and `DIAGRAMS` (`HomeDiagramsSection`, below). `HomeScreen` only builds one `HomeSectionSlot` (icon, title,
 optional header action, body) per section and hands them to `HomeTilingHost` (`ui/HomeTiling.kt`).
 
 - **Model.** The arrangement is a split tree in `AppSettings.homeLayout` (`model/Model.kt`): `HomeLayoutLeaf(section, weight)` and
-  `HomeLayoutSplit(axis, children, weight)`, axis `ROW` or `COLUMN`. The default is `COLUMN[ROW[open, capture] at 1.6, tests at 1]`
-  (`DEFAULT_HOME_LAYOUT`). Hidden sections live in `homeHiddenSections` and are kept out of the tree until restored. `ui/HomeLayout.kt`
+  `HomeLayoutSplit(axis, children, weight)`, axis `ROW` or `COLUMN`. The default is `COLUMN[ROW[open, capture] at 1.6, ROW[tests, diagrams] at 1]`
+  (`DEFAULT_HOME_LAYOUT`). A layout saved before `DIAGRAMS` existed lacks it and gets it from `sanitizeHomeLayoutState` like any
+  other missing section: appended at the trailing page edge (a full-width row below a `COLUMN` root, right of a `ROW` root), unless the
+  saved hidden list names it. Hidden sections live in `homeHiddenSections` and are kept out of the tree until restored. `ui/HomeLayout.kt`
   is UI-free: normalisation (empty splits dropped, single-child splits collapsed, same-axis child splits flattened), `dropHomeSection`,
   `resizeHomeSplit` (the neighbour pair's total weight is constant; clamped to `HOME_MIN_PAIR_SHARE` and `HOME_MIN_SECTION_DP`),
   `homeGeometry` (the one source of card and gap rectangles for layout, drop overlay and preset icons),
@@ -804,6 +806,17 @@ optional header action, body) per section and hands them to `HomeTilingHost` (`u
   viewport height clamped to 320-560 dp; grips and splitters are off, hide and presets still work.
 - **Presets and tip.** The top bar shows a mini-icon per preset (drawn from `homeGeometry`; the active one is `isActiveIn`) and a
   dismissible tip (`homeLayoutTipDismissed`); once dismissed, a "?" button shows it again.
+
+The Diagrams section (`ui/HomeDiagramsSection.kt`, pure half `ui/HomeDiagrams.kt`) lists the diagram library
+(`Seq3Session.listLibrary`) under a `No ticket | Ticket | All` segmented control (`AppSettings.homeDiagramsSegment`, default No ticket),
+a search box (title, participants and ticket label; session-only `AppState.homeDiagramsQuery`) and "+ New diagram"
+(`Seq3Session.beginStandalone`). A diagram's ticket is its source log. A row opens through `HomeDiagramOpener` (`AppState.homeDiagramOpener`):
+a diagram without a ticket opens in its own Diagram tab; a ticket diagram opens against the open tab with the same source path and content
+fingerprint, else the file (or archive entry, `scanArchiveCandidates` + `AppState.openArchiveEntry`) is opened and awaited on the app's IO scope
+(`AppState.launchInBackground`, so it outlives the New tab), and when the log is gone, changed or cannot be opened the saved diagram opens log-free
+with a `DiagramNotice`. Anything opened from the section closes the New tab (`AppState.closeLauncherAfterOpen`), as opening a log does. The row
+menu renames (`Seq3Session.renameLibraryItem`: an open workspace through `SetTitle`, a closed item by re-encoding its snapshot) and deletes
+(`DiagramLibraryDeleteDialog`; only the library record goes, an open workspace of it closes, log notes are never touched).
 
 The Capture section is condensed: a device row (status, Refresh, pairing and tools actions, a picker when several devices are
 attached), a one-line summary of the recording options (`captureSettingsSummary`) with "Change…" opening `CaptureOptionsDialog`
@@ -1807,7 +1820,7 @@ stays local to the text editor; Ctrl+Z/Cmd+Z elsewhere restores the active sessi
 | `Dialogs.kt` / `NoteRewrite.kt` / `NoteRewriteDialog.kt` | Shared Markdown note editor and text-only rewrite preview; selection snapshots are guarded against stale drafts and Apply is one undoable editor change |
 | `AiSidebar.kt` | The AI panel and the Notes edit lock (the Video / Notes / AI column is now tiles, §6.4) |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
-| `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
+| `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`, `HomeDiagramsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
 | `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter hit areas inset by the 8 dp card corner, section cards with grip/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
 | `TilingHost.kt` / `TileLayout.kt` / `TileScrolling.kt` | The generic tiling surface and its pure engine (§6.3, §6.4): fixed-order flat `Layout`, cards, headers, invisible splitters with a draft layout committed on release, drop overlay; trees, geometry, resize, drops, projection and scrolling columns (`TileScrollRegion`); the scroll offsets, wheel scrollables, viewport clip and scrollbar of those columns |
 | `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
@@ -2571,13 +2584,15 @@ lives only in the OS keychain (§26.9.3). Test suites, runs and issues are store
 `AppSettings.proofreading` is also keyed-JSON-only; it defaults to enabled English (`en-US`), with
 `en-GB` as the alternate variant. The frozen positional settings decoder is unchanged.
 
-The New tab's tiling (§6.3) adds three more JSON-only settings, appended last to `settingsJson()` after `workflowAiSelections`
+The New tab's tiling (§6.3) adds four more JSON-only settings (the fourth, `homeDiagramsSegment`, below), appended last to `settingsJson()` after `workflowAiSelections`
 (`ui/AutosaveCodec.kt:698-701`) and decoded by `homeLayoutSettingsFromJson()` (`ui/HomeLayoutSettingsJson.kt`), called from
 `settingsFromJson` (`:905`); like the rest they never enter the positional form.
 
-- `homeLayout`: the split tree. A split is `{"split":"row"|"column","w":1.6,"children":[...]}`, a leaf `{"section":"open"|"capture"|"tests","w":1}`.
+- `homeLayout`: the split tree. A split is `{"split":"row"|"column","w":1.6,"children":[...]}`, a leaf `{"section":"open"|"capture"|"tests"|"diagrams","w":1}`.
 - `homeHiddenSections`: an array of the same section keys, in the order they were hidden.
 - `homeLayoutTipDismissed`: a boolean, default `false`.
+- `homeDiagramsSegment`: the Diagrams section's segment, `NO_TICKET` (default), `TICKET` or `ALL`; an unknown or malformed value reads as the default.
+  All four are written by `putHomeSettings` (`ui/HomeLayoutSettingsJson.kt`).
 
 The decoder never throws, and a hand-edited or corrupt file still yields a layout holding every section exactly once. A node that is
 malformed, names an unknown section id, or nests deeper than `HOME_LAYOUT_MAX_DEPTH` (8) is dropped, then `sanitizeHomeLayoutState`

@@ -5547,6 +5547,26 @@ class AppState(
         openHomeTab()
     }
 
+    /**
+     * Closes the New tab [launcherTabId] once something opened from it (a Diagram tab) took the screen: an open action from the
+     * New tab consumes it, like [publishOpenedTab] does for a log and [openTestsTab] for Tests. Does nothing when that tab is gone,
+     * is not a New tab, or is still the surface on screen (nothing took over).
+     */
+    internal fun closeLauncherAfterOpen(launcherTabId: String?) {
+        val launcher = synchronized(stateLock) {
+            launcherTabId?.takeIf { id ->
+                tabs.any { it.id == id && it.isCaptureLauncher } && activeSurface != ActiveSurface.Log(id)
+            }
+        } ?: return
+        closeTab(launcher)
+    }
+
+    /** Runs [block] on the app's IO scope, which outlives any composable: used by an open action that must finish after the New tab it started from is gone. */
+    internal fun launchInBackground(block: suspend CoroutineScope.() -> Unit): Job = ioScope.launch(block = block)
+
+    /** The New tab's Diagrams section opens a ticket diagram through this; see [HomeDiagramOpener]. */
+    internal val homeDiagramOpener: HomeDiagramOpener by lazy { HomeDiagramOpener(this) }
+
     // The New tab's "Before start" choices ARE the saved capture settings (the same values the
     // Settings dialog's own "Before start" block edits), so whatever a user picked for the last
     // capture is what the next one — and the next app start — begins with. They used to live in a
@@ -6413,6 +6433,9 @@ class AppState(
      *  the grid/list layout choice in `AppSettings.homeRecentsLayout`, which is a standing
      *  preference) — a leftover search string surviving a restart would be confusing, not helpful. */
     var homeRecentFilter by mutableStateOf("")
+
+    /** The New tab's Diagrams section search text (ui/HomeDiagramsSection.kt). Session-only for the same reason as [homeRecentFilter]. */
+    var homeDiagramsQuery by mutableStateOf("")
 
     /** The home tab's Recent-files filter-pill row (Type/Modified/Size/Sort — ui/HomeScreen.kt's
      *  [RecentFilters]). Session-only for the same reason as [homeRecentFilter] just above: a
@@ -13606,6 +13629,11 @@ class AppState(
     fun cancelFolderPicker() {
         pendingFolderPicker = null
     }
+
+    /** Opens (or activates) [candidate] of [zipFile] as a log tab like the archive picker does, but with the large-file and memory
+     *  prompts of any other open; null when none was started (the prompt took the decision, or it could not be opened). */
+    internal fun openArchiveEntry(zipFile: File, candidate: ZipLogCandidate, origin: TabRef? = null): String? =
+        openZipEntry(zipFile, candidate, bypassSplitPrompt = false, originGroupId = tabGroupIdForOrigin(origin))
 
     // Jar-URL-style "!" separator for the source path — for display/dedup only (a zip-extracted
     // tab can't be re-opened from this path directly), matching openFile()'s sourcePath dedup.

@@ -1301,6 +1301,14 @@ enum class HomeRecentsLayout {
     LIST,
 }
 
+/** Which diagrams the New tab's Diagrams section lists: the ones without a source log ("ticket"), the ones with one, or all. Stored by
+ *  name in the settings JSON only, so a new value goes last. */
+enum class HomeDiagramSegment {
+    NO_TICKET,
+    TICKET,
+    ALL,
+}
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -1654,6 +1662,9 @@ data class AppSettings(
     val lastSeenHolidayAnnouncementVersion: String = "",
     /** Idle minutes before eligible background log rows are released; 0 disables unloading. */
     val inactiveTabUnloadMinutes: Int = DEFAULT_INACTIVE_TAB_UNLOAD_MINUTES,
+    // The segment of the New tab's Diagrams section (No ticket | Ticket | All), remembered app-wide. JSON-only
+    // (ui/HomeLayoutSettingsJson.kt); appended last to keep positional callers stable.
+    val homeDiagramsSegment: HomeDiagramSegment = HomeDiagramSegment.NO_TICKET,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1661,6 +1672,7 @@ enum class HomeSectionId(val key: String) {
     OPEN("open"),
     CAPTURE("capture"),
     TESTS("tests"),
+    DIAGRAMS("diagrams"),
     ;
 
     companion object {
@@ -1802,7 +1814,7 @@ enum class ChromeEdge { TOP, LEFT, RIGHT, BOTTOM }
 
 const val DEFAULT_HOME_TOP_WEIGHT: Float = 1.6f
 
-/** Open + Capture side by side on top, Tests full width below (weights 1.6 : 1). */
+/** Open + Capture side by side on top, Tests and Diagrams side by side below (weights 1.6 : 1). */
 val DEFAULT_HOME_LAYOUT: HomeLayoutNode = HomeLayoutSplit(
     HomeSplitAxis.COLUMN,
     listOf(
@@ -1811,7 +1823,10 @@ val DEFAULT_HOME_LAYOUT: HomeLayoutNode = HomeLayoutSplit(
             listOf(HomeLayoutLeaf(HomeSectionId.OPEN), HomeLayoutLeaf(HomeSectionId.CAPTURE)),
             weight = DEFAULT_HOME_TOP_WEIGHT,
         ),
-        HomeLayoutLeaf(HomeSectionId.TESTS),
+        HomeLayoutSplit(
+            HomeSplitAxis.ROW,
+            listOf(HomeLayoutLeaf(HomeSectionId.TESTS), HomeLayoutLeaf(HomeSectionId.DIAGRAMS)),
+        ),
     ),
 )
 

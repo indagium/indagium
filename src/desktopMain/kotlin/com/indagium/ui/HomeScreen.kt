@@ -35,6 +35,7 @@ import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.automirrored.outlined.Subject
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.FolderZip
@@ -324,7 +325,7 @@ private const val MILLIS_PER_HOUR = 60 * MILLIS_PER_MINUTE
 private const val MILLIS_PER_DAY = 24 * MILLIS_PER_HOUR
 private const val RECENT_DAYS_BEFORE_ABSOLUTE_DATE = 7L
 
-private fun formatRelativeTime(deltaMs: Long, epochMs: Long): String {
+internal fun formatRelativeTime(deltaMs: Long, epochMs: Long): String {
     val delta = deltaMs.coerceAtLeast(0L)
     return when {
         delta < MILLIS_PER_MINUTE -> "just now"
@@ -366,8 +367,9 @@ private fun pickNoteFileAndOpen(state: AppState) {
 }
 
 /** The home tab: `+` in the tab strip opens this (see [AppState.openHomeTab]/[AppState.ensureHomeTab]).
- *  A tiling launcher ([HomeTilingHost]) of three sections the user can drag, resize, hide and restore: "Open a log"
- *  ([HomeOpenZone]), the device-capture launcher ([HomeCaptureSection]) and a Tests entry point. The arrangement is
+ *  A tiling launcher ([HomeTilingHost]) of four sections the user can drag, resize, hide and restore: "Open a log"
+ *  ([HomeOpenZone]), the device-capture launcher ([HomeCaptureSection]), a Tests entry point and the saved sequence diagrams
+ *  ([HomeDiagramsSection]). The arrangement is
  *  stored in settings (`AppSettings.homeLayout`).
  *
  *  Routed directly from App.kt's surface `when` (never through [FileView]) so filter/notes/AI/
@@ -396,6 +398,13 @@ internal fun HomeScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = HOME_SECTION_BODY_PADDING,
                 )
+            },
+        ),
+        HomeSectionId.DIAGRAMS to HomeSectionSlot(
+            icon = Icons.Outlined.AccountTree,
+            title = homeSectionTitle(HomeSectionId.DIAGRAMS),
+            body = {
+                HomeDiagramsSection(state = state, launcherTabId = tab.id, onReclaimFocus = onReclaimFocus, modifier = Modifier.fillMaxSize())
             },
         ),
         HomeSectionId.TESTS to HomeSectionSlot(

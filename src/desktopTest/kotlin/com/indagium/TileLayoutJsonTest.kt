@@ -85,10 +85,11 @@ class TileLayoutJsonTest {
     }
 
     @Test
-    fun homeLayoutJsonIsByteIdenticalToWhatItWasBeforeTheGenericEngine() {
+    fun homeLayoutJsonKeepsItsShapeAndTheDefaultNowHoldsDiagrams() {
         assertEquals(
             """{"split":"column","w":1.0,"children":[{"split":"row","w":1.6,"children":[""" +
-                """{"section":"open","w":1.0},{"section":"capture","w":1.0}]},{"section":"tests","w":1.0}]}""",
+                """{"section":"open","w":1.0},{"section":"capture","w":1.0}]},""" +
+                """{"split":"row","w":1.0,"children":[{"section":"tests","w":1.0},{"section":"diagrams","w":1.0}]}]}""",
             homeLayoutJson(DEFAULT_HOME_LAYOUT).toString(),
         )
         assertEquals("""{"section":"tests","w":2.5}""", homeLayoutJson(HomeLayoutLeaf(HomeSectionId.TESTS, 2.5f)).toString())

@@ -2085,7 +2085,11 @@ class Seq3Session(
      *  diagram is opened, and the fallback for a ticket diagram whose log no longer exists: the
      *  item's self-contained snapshot is shown and edited, and its record keeps its ticket. An
      *  already open session of the item is activated instead of duplicated. */
-    fun openLibraryItemWithoutLog(id: String): String? = openLibraryItemSession(id, tabId = null, origin = null)
+    fun openLibraryItemWithoutLog(id: String): String? = openLibraryItemWithoutLog(id, origin = null)
+
+    /** As above, and the new Diagram tab joins the tab group of [origin] (the New tab it was opened from). */
+    internal fun openLibraryItemWithoutLog(id: String, origin: TabRef?): String? =
+        openLibraryItemSession(id, tabId = null, origin = origin)
 
     private fun openLibraryItemSession(id: String, tabId: String?, origin: TabRef?): String? {
         // Capture this before any store work or publication. `origin` is independent of tabId:
@@ -2146,6 +2150,42 @@ class Seq3Session(
     fun deleteLibraryItem(id: String): Boolean {
         synchronized(appState.stateLock) { sessions.filter { it.libraryItemId == id } }.forEach { close(it.id) }
         return libraryStore.delete(id).also { deleted -> if (deleted) libraryRevision++ }
+    }
+
+    /**
+     * Gives the saved diagram [id] the title [title] (trimmed) and returns whether it was renamed. The title lives in the diagram
+     * itself, so an open workspace of the item renames through the ordinary [Seq3Command.SetTitle] (one undo step, and the same
+     * save that every edit takes, flushed here so the record is current when this returns); an item nobody has open has its
+     * stored snapshot re-encoded with the new title. Either way only the library record and its snapshot change: the item's
+     * ticket, its attachments and the notes that hold snapshots of it are untouched. False for an unknown id, a blank title,
+     * one over [MAX_DIAGRAM_LIBRARY_TITLE_CHARS] and a save the library rejects. Renaming to the title it has is a no-op that
+     * returns true.
+     */
+    fun renameLibraryItem(id: String, title: String): Boolean {
+        val trimmed = title.trim()
+        if (trimmed.isEmpty() || trimmed.length > MAX_DIAGRAM_LIBRARY_TITLE_CHARS) return false
+        val item = libraryStore.get(id) ?: return false
+        val open = synchronized(appState.stateLock) { sessions.firstOrNull { it.libraryItemId == id } }
+        if (open != null) {
+            if (open.document.title != trimmed) {
+                updateTitle(open.id, trimmed)
+                flush(open.id)
+            }
+            return libraryStore.get(id)?.title == trimmed
+        }
+        val parsed = item.parsed ?: return false
+        if (item.title == trimmed && parsed.document.title == trimmed) return true
+        val encoded = encodeSeq3Note(
+            parsed.document.copy(title = trimmed),
+            parsed.dialect,
+            parsed.caption,
+            parsed.exportMode,
+            parsed.attachment,
+        )
+        val result = libraryStore.tryUpdate(id) { it.copy(title = trimmed, snapshot = DiagramLibrarySnapshot(encoded), updatedAt = clock()) }
+        val saved = result?.isSuccess == true
+        if (saved) libraryRevision++
+        return saved
     }
 
     /** Removes the library's durable back-reference when a Note attachment is deleted. */

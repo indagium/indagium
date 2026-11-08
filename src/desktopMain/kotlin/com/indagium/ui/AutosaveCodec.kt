@@ -705,11 +705,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("tracker", trackerSettingsJson(tracker))
     put("testing", testingSettingsJson(testing))
     put("workflowAiSelections", workflowAiSelectionsJson(workflowAiSelections))
-    // New tab tiling layout, JSON form only (see HomeLayoutSettingsJson.kt).
-    put("homeLayout", homeLayoutJson(homeLayout))
-    put("homeHiddenSections", homeHiddenSectionsJson(homeHiddenSections))
-    put("homeLayoutTipDismissed", homeLayoutTipDismissed)
-    put("homeOpenActionsHeightDp", homeOpenActionsHeightDp)
+    // New tab settings (tiling layout, action area height, Diagrams segment), JSON form only (see HomeLayoutSettingsJson.kt).
+    putHomeSettings(this@settingsJson)
     // Log view / compare view tiling layout, JSON form only (see LogViewLayoutSettingsJson.kt).
     putLogViewLayoutSettings(this@settingsJson)
     // Tab strip appearance and chrome placement, JSON form only (see ChromeSettingsJson.kt).
@@ -1084,6 +1081,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         homeLayoutTipDismissed = home.tipDismissed,
         homeOpenActionsHeightDp = o.intOrDefault("homeOpenActionsHeightDp", DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP)
             .coerceIn(MIN_HOME_OPEN_ACTIONS_HEIGHT_DP, MAX_HOME_OPEN_ACTIONS_HEIGHT_DP),
+        homeDiagramsSegment = o.homeDiagramsSegmentFromJson(),
     ).withLogViewLayoutSettingsFrom(o).withChromeSettingsFrom(o).withHolidaySettingsFrom(o).withTestsWorkspaceLayoutSettingsFrom(o)
 }.getOrNull()
 

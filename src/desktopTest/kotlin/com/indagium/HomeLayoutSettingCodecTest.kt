@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.model.AppSettings
 import com.indagium.model.DEFAULT_HOME_LAYOUT
 import com.indagium.model.DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP
+import com.indagium.model.HomeDiagramSegment
 import com.indagium.model.HomeLayoutLeaf
 import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeLayoutSplit
@@ -52,7 +53,11 @@ class HomeLayoutSettingCodecTest {
                     HomeLayoutLeaf(HomeSectionId.TESTS, 2.5f),
                     HomeLayoutSplit(
                         HomeSplitAxis.COLUMN,
-                        listOf(HomeLayoutLeaf(HomeSectionId.OPEN, 1.25f), HomeLayoutLeaf(HomeSectionId.CAPTURE, 0.75f)),
+                        listOf(
+                            HomeLayoutLeaf(HomeSectionId.OPEN, 1.25f),
+                            HomeLayoutLeaf(HomeSectionId.CAPTURE, 0.75f),
+                            HomeLayoutLeaf(HomeSectionId.DIAGRAMS, 0.5f),
+                        ),
                         1.5f,
                     ),
                 ),
@@ -66,7 +71,7 @@ class HomeLayoutSettingCodecTest {
 
         val hiddenCase = AppSettings(
             homeLayout = HomeLayoutLeaf(HomeSectionId.OPEN),
-            homeHiddenSections = listOf(HomeSectionId.TESTS, HomeSectionId.CAPTURE),
+            homeHiddenSections = listOf(HomeSectionId.TESTS, HomeSectionId.CAPTURE, HomeSectionId.DIAGRAMS),
         )
         val decoded = decode(hiddenCase.settingsJson())
         assertEquals(hiddenCase.homeLayout, decoded.homeLayout)
@@ -137,10 +142,10 @@ class HomeLayoutSettingCodecTest {
         val settings = decode(
             """{"homeLayout":{"split":"row","w":1,"children":[
                 {"section":"capture","w":2},{"section":"bogus","w":1},{"section":"capture","w":5},{"section":"open","w":1}]},
-               "homeHiddenSections":["nope","tests","tests",3]}""",
+               "homeHiddenSections":["nope","tests","tests","diagrams",3]}""",
         )
         assertContentEquals(listOf(HomeSectionId.CAPTURE, HomeSectionId.OPEN), homeLeafSections(settings.homeLayout))
-        assertEquals(listOf(HomeSectionId.TESTS), settings.homeHiddenSections)
+        assertEquals(listOf(HomeSectionId.TESTS, HomeSectionId.DIAGRAMS), settings.homeHiddenSections)
         assertEquals(2f, (settings.homeLayout as HomeLayoutSplit).children.first().weight)
         assertValid(settings)
     }
@@ -148,34 +153,58 @@ class HomeLayoutSettingCodecTest {
     @Test
     fun missingSectionsAreAppendedAtTheTrailingEdge() {
         val rowRoot = decode("""{"homeLayout":{"split":"row","children":[{"section":"open"},{"section":"capture"}]}}""")
-        assertContentEquals(listOf(HomeSectionId.OPEN, HomeSectionId.CAPTURE, HomeSectionId.TESTS), homeLeafSections(rowRoot.homeLayout))
+        assertContentEquals(
+            listOf(HomeSectionId.OPEN, HomeSectionId.CAPTURE, HomeSectionId.TESTS, HomeSectionId.DIAGRAMS),
+            homeLeafSections(rowRoot.homeLayout),
+        )
         assertEquals(HomeSplitAxis.ROW, (rowRoot.homeLayout as HomeLayoutSplit).axis)
 
         val leafRoot = decode("""{"homeLayout":{"section":"tests"}}""")
-        assertContentEquals(listOf(HomeSectionId.TESTS, HomeSectionId.OPEN, HomeSectionId.CAPTURE), homeLeafSections(leafRoot.homeLayout))
+        assertContentEquals(
+            listOf(HomeSectionId.TESTS, HomeSectionId.OPEN, HomeSectionId.CAPTURE, HomeSectionId.DIAGRAMS),
+            homeLeafSections(leafRoot.homeLayout),
+        )
         assertValid(leafRoot)
 
         val columnRoot = decode("""{"homeLayout":{"split":"column","children":[{"section":"open"},{"section":"tests"}]},"homeHiddenSections":[]}""")
-        assertEquals(HomeSectionId.CAPTURE, homeLeafSections(columnRoot.homeLayout).last())
+        assertContentEquals(
+            listOf(HomeSectionId.OPEN, HomeSectionId.TESTS, HomeSectionId.CAPTURE, HomeSectionId.DIAGRAMS),
+            homeLeafSections(columnRoot.homeLayout),
+        )
         assertEquals(HomeSplitAxis.COLUMN, (columnRoot.homeLayout as HomeLayoutSplit).axis)
+
+        // A layout saved before the Diagrams section existed (the old default) gets it as a full-width row below.
+        val legacyDefault = decode(
+            """{"homeLayout":{"split":"column","w":1,"children":[{"split":"row","w":1.6,"children":[{"section":"open"},{"section":"capture"}]},
+                {"section":"tests"}]}}""",
+        )
+        assertContentEquals(
+            listOf(HomeSectionId.OPEN, HomeSectionId.CAPTURE, HomeSectionId.TESTS, HomeSectionId.DIAGRAMS),
+            homeLeafSections(legacyDefault.homeLayout),
+        )
+        assertEquals(HomeSplitAxis.COLUMN, (legacyDefault.homeLayout as HomeLayoutSplit).axis)
+        assertEquals(HomeSectionId.DIAGRAMS, ((legacyDefault.homeLayout as HomeLayoutSplit).children.last() as HomeLayoutLeaf).section)
+        assertTrue(legacyDefault.homeHiddenSections.isEmpty())
     }
 
     @Test
     fun aSectionBothInTheTreeAndHiddenStaysVisible() {
-        val settings = decode("""{"homeLayout":{"split":"row","children":[{"section":"open"},{"section":"capture"}]},"homeHiddenSections":["open","tests"]}""")
-        assertEquals(listOf(HomeSectionId.TESTS), settings.homeHiddenSections)
+        val settings = decode(
+            """{"homeLayout":{"split":"row","children":[{"section":"open"},{"section":"capture"}]},"homeHiddenSections":["open","tests","diagrams"]}""",
+        )
+        assertEquals(listOf(HomeSectionId.TESTS, HomeSectionId.DIAGRAMS), settings.homeHiddenSections)
         assertEquals(listOf(HomeSectionId.OPEN, HomeSectionId.CAPTURE), homeLeafSections(settings.homeLayout))
     }
 
     @Test
     fun hidingEverythingFallsBackToTheDefaultLayout() {
-        val settings = decode("""{"homeHiddenSections":["open","capture","tests"]}""")
+        val settings = decode("""{"homeHiddenSections":["open","capture","tests","diagrams"]}""")
         assertEquals(DEFAULT_HOME_LAYOUT, settings.homeLayout)
         assertTrue(settings.homeHiddenSections.isEmpty())
 
         val partial = decode("""{"homeHiddenSections":["capture"]}""")
         assertEquals(listOf(HomeSectionId.CAPTURE), partial.homeHiddenSections)
-        assertContentEquals(listOf(HomeSectionId.OPEN, HomeSectionId.TESTS), homeLeafSections(partial.homeLayout))
+        assertContentEquals(listOf(HomeSectionId.OPEN, HomeSectionId.TESTS, HomeSectionId.DIAGRAMS), homeLeafSections(partial.homeLayout))
         assertValid(partial)
     }
 
@@ -185,13 +214,13 @@ class HomeLayoutSettingCodecTest {
             """{"homeLayout":{"split":"row","w":"NaN","children":[
                 {"section":"open","w":"NaN"},{"section":"capture","w":-4},{"section":"tests","w":0}]}}""",
         )
-        assertEquals(listOf(1f, 1f, 1f), (settings.homeLayout as HomeLayoutSplit).children.map { it.weight })
+        assertEquals(listOf(1f, 1f, 1f, 1f), (settings.homeLayout as HomeLayoutSplit).children.map { it.weight })
         assertValid(settings)
 
         val clamped = decode(
             """{"homeLayout":{"split":"row","children":[{"section":"open","w":0.001},{"section":"capture","w":99999},{"section":"tests","w":"x"}]}}""",
         )
-        assertEquals(listOf(HOME_MIN_WEIGHT, HOME_MAX_WEIGHT, 1f), (clamped.homeLayout as HomeLayoutSplit).children.map { it.weight })
+        assertEquals(listOf(HOME_MIN_WEIGHT, HOME_MAX_WEIGHT, 1f), (clamped.homeLayout as HomeLayoutSplit).children.map { it.weight }.take(3))
 
         val infinity = decode("""{"homeLayout":{"split":"row","children":[{"section":"open","w":"Infinity"},{"section":"capture"},{"section":"tests"}]}}""")
         assertValid(infinity)
@@ -214,6 +243,40 @@ class HomeLayoutSettingCodecTest {
     private fun depthOf(node: HomeLayoutNode): Int = when (node) {
         is HomeLayoutLeaf -> 1
         is HomeLayoutSplit -> 1 + (node.children.maxOfOrNull { depthOf(it) } ?: 0)
+    }
+
+    @Test
+    fun diagramsSegmentRoundTripsAndDefaultsToNoTicket() {
+        assertEquals(HomeDiagramSegment.NO_TICKET, AppSettings().homeDiagramsSegment)
+        assertEquals(HomeDiagramSegment.NO_TICKET, decode("{}").homeDiagramsSegment)
+        for (segment in HomeDiagramSegment.entries) {
+            val json = AppSettings(homeDiagramsSegment = segment).settingsJson()
+            assertTrue(json.contains(""""homeDiagramsSegment":"${segment.name}""""), json)
+            assertEquals(segment, decode(json).homeDiagramsSegment, segment.name)
+        }
+    }
+
+    @Test
+    fun anUnknownOrMalformedDiagramsSegmentFallsBackToNoTicket() {
+        for (raw in listOf(
+            """{"homeDiagramsSegment":"EVERYTHING"}""",
+            """{"homeDiagramsSegment":3}""",
+            """{"homeDiagramsSegment":null}""",
+            """{"homeDiagramsSegment":["ALL"]}""",
+        )) {
+            assertEquals(HomeDiagramSegment.NO_TICKET, decode(raw).homeDiagramsSegment, raw)
+        }
+        // A bad segment never costs the rest of the settings.
+        val settings = decode("""{"fontSize":17,"homeDiagramsSegment":"nope"}""")
+        assertEquals(17, settings.fontSize)
+    }
+
+    @Test
+    fun theLegacyPositionalTokenLeavesTheDiagramsSegmentAtItsDefault() {
+        val legacyToken = listOf("LIGHT", "12", "true", "", "5").joinToString("|") { value ->
+            if (value.isEmpty()) "~" else Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray())
+        }
+        assertEquals(HomeDiagramSegment.NO_TICKET, settingsFromToken(legacyToken)!!.homeDiagramsSegment)
     }
 
     @Test

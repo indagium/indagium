@@ -7,6 +7,7 @@ import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeLayoutSplit
 import com.indagium.model.HomeSectionId
 import com.indagium.model.HomeSectionId.CAPTURE
+import com.indagium.model.HomeSectionId.DIAGRAMS
 import com.indagium.model.HomeSectionId.OPEN
 import com.indagium.model.HomeSectionId.TESTS
 import com.indagium.model.HomeSplitAxis
@@ -63,7 +64,11 @@ private fun assertWeights(expected: List<Float>, node: HomeLayoutNode?) {
     expected.indices.forEach { assertEquals(expected[it], actual[it], EPS, "weight $it of $actual") }
 }
 
-private val threeColumns = HomeLayoutPreset.THREE_COLUMNS.layout
+// The engine tests below were written against the New tab's original three sections. They keep those arrangements as fixtures
+// (the real default and presets now also hold Diagrams, covered by the Diagrams tests at the end).
+private val threeColumns = row(leaf(OPEN), leaf(CAPTURE), leaf(TESTS))
+private val threeSectionDefault = col(row(leaf(OPEN), leaf(CAPTURE), weight = 1.6f), leaf(TESTS))
+private val threeSectionSettings = AppSettings(homeLayout = threeSectionDefault, homeHiddenSections = listOf(DIAGRAMS))
 
 class HomeLayoutTest {
     // ---- normalize / remove -------------------------------------------------------------------------------------
@@ -98,8 +103,8 @@ class HomeLayoutTest {
 
     @Test
     fun removeHomeSectionNormalizesAndReturnsNullForTheLastSection() {
-        assertShape(col(leaf(OPEN), leaf(TESTS)), removeHomeSection(DEFAULT_HOME_LAYOUT, CAPTURE))
-        assertWeights(listOf(1.6f, 1f), removeHomeSection(DEFAULT_HOME_LAYOUT, CAPTURE))
+        assertShape(col(leaf(OPEN), leaf(TESTS)), removeHomeSection(threeSectionDefault, CAPTURE))
+        assertWeights(listOf(1.6f, 1f), removeHomeSection(threeSectionDefault, CAPTURE))
         assertNull(removeHomeSection(leaf(OPEN), OPEN))
         assertShape(leaf(OPEN), removeHomeSection(row(leaf(OPEN), leaf(CAPTURE)), CAPTURE))
     }
@@ -255,6 +260,18 @@ class HomeLayoutTest {
     fun defaultGeometryAt1000By600() {
         val geo = homeGeometry(DEFAULT_HOME_LAYOUT, 1000f, 600f, 8f)
         val topH = 592f * 1.6f / 2.6f
+        assertRect(HomeRect(0f, 0f, 496f, topH), geo.cardOf(OPEN)!!)
+        assertRect(HomeRect(504f, 0f, 496f, topH), geo.cardOf(CAPTURE)!!)
+        // Tests and Diagrams share the bottom row.
+        assertRect(HomeRect(0f, topH + 8f, 496f, 592f - topH), geo.cardOf(TESTS)!!)
+        assertRect(HomeRect(504f, topH + 8f, 496f, 592f - topH), geo.cardOf(DIAGRAMS)!!)
+        assertEquals(3, geo.gaps.size)
+    }
+
+    @Test
+    fun threeSectionGeometryAt1000By600() {
+        val geo = homeGeometry(threeSectionDefault, 1000f, 600f, 8f)
+        val topH = 592f * 1.6f / 2.6f
         val open = geo.cardOf(OPEN)!!
         val capture = geo.cardOf(CAPTURE)!!
         val tests = geo.cardOf(TESTS)!!
@@ -288,7 +305,7 @@ class HomeLayoutTest {
 
     // ---- hit testing --------------------------------------------------------------------------------------------
 
-    private val geometry = homeGeometry(DEFAULT_HOME_LAYOUT, 1000f, 600f, 8f)
+    private val geometry = homeGeometry(threeSectionDefault, 1000f, 600f, 8f)
 
     private fun hit(x: Float, y: Float, dragged: HomeSectionId = TESTS) = homeDropTargetAt(geometry, HOST_W, HOST_H, x, y, dragged)
 
@@ -363,9 +380,10 @@ class HomeLayoutTest {
 
     @Test
     fun shapeEqualityIgnoresWeightsButNotStructure() {
-        assertTrue(homeLayoutShapeEquals(DEFAULT_HOME_LAYOUT, col(row(leaf(OPEN, 3f), leaf(CAPTURE, 7f), weight = 9f), leaf(TESTS, 4f))))
-        assertFalse(homeLayoutShapeEquals(DEFAULT_HOME_LAYOUT, col(row(leaf(CAPTURE), leaf(OPEN)), leaf(TESTS))))
-        assertFalse(homeLayoutShapeEquals(DEFAULT_HOME_LAYOUT, threeColumns))
+        assertTrue(homeLayoutShapeEquals(threeSectionDefault, col(row(leaf(OPEN, 3f), leaf(CAPTURE, 7f), weight = 9f), leaf(TESTS, 4f))))
+        assertFalse(homeLayoutShapeEquals(threeSectionDefault, col(row(leaf(CAPTURE), leaf(OPEN)), leaf(TESTS))))
+        assertFalse(homeLayoutShapeEquals(threeSectionDefault, threeColumns))
+        assertFalse(homeLayoutShapeEquals(DEFAULT_HOME_LAYOUT, threeSectionDefault))
         assertFalse(homeLayoutShapeEquals(leaf(OPEN), row(leaf(OPEN))))
     }
 
@@ -384,18 +402,18 @@ class HomeLayoutTest {
 
     @Test
     fun hidingRemovesTheSectionFromTheTreeAndRemembersIt() {
-        val hidden = AppSettings().withHomeSectionHidden(CAPTURE)
+        val hidden = threeSectionSettings.withHomeSectionHidden(CAPTURE)
         assertShape(col(leaf(OPEN), leaf(TESTS)), hidden.homeLayout)
-        assertEquals(listOf(CAPTURE), hidden.homeHiddenSections)
+        assertEquals(listOf(DIAGRAMS, CAPTURE), hidden.homeHiddenSections)
         val twice = hidden.withHomeSectionHidden(CAPTURE)
         assertSame(hidden, twice)
     }
 
     @Test
     fun hidingTheLastVisibleSectionIsRefused() {
-        val settings = AppSettings().withHomeSectionHidden(CAPTURE).withHomeSectionHidden(TESTS)
+        val settings = threeSectionSettings.withHomeSectionHidden(CAPTURE).withHomeSectionHidden(TESTS)
         assertShape(leaf(OPEN), settings.homeLayout)
-        assertEquals(listOf(CAPTURE, TESTS), settings.homeHiddenSections)
+        assertEquals(listOf(DIAGRAMS, CAPTURE, TESTS), settings.homeHiddenSections)
         assertSame(settings, settings.withHomeSectionHidden(OPEN))
         assertEquals(listOf(OPEN), homeLeafSections(settings.homeLayout))
     }
@@ -407,7 +425,7 @@ class HomeLayoutTest {
         assertShape(row(leaf(OPEN), leaf(TESTS), leaf(CAPTURE)), rowRoot.homeLayout)
         assertTrue(rowRoot.homeHiddenSections.isEmpty())
         // COLUMN root -> bottom.
-        val colRoot = AppSettings().withHomeSectionHidden(CAPTURE).withHomeSectionShown(CAPTURE)
+        val colRoot = threeSectionSettings.withHomeSectionHidden(CAPTURE).withHomeSectionShown(CAPTURE)
         assertShape(col(leaf(OPEN), leaf(TESTS), leaf(CAPTURE)), colRoot.homeLayout)
         // Single leaf root -> right.
         val leafRoot = AppSettings(homeLayout = leaf(OPEN), homeHiddenSections = listOf(CAPTURE, TESTS)).withHomeSectionShown(TESTS)
@@ -420,11 +438,44 @@ class HomeLayoutTest {
 
     @Test
     fun withHomeLayoutSanitizesAgainstTheHiddenList() {
-        val settings = AppSettings(homeLayout = row(leaf(OPEN), leaf(TESTS)), homeHiddenSections = listOf(CAPTURE))
+        val settings = AppSettings(homeLayout = row(leaf(OPEN), leaf(TESTS)), homeHiddenSections = listOf(CAPTURE, DIAGRAMS))
         val updated = settings.withHomeLayout(row(leaf(TESTS, Float.NaN), leaf(OPEN, -3f), leaf(TESTS)))
         assertShape(row(leaf(TESTS), leaf(OPEN)), updated.homeLayout)
-        assertEquals(listOf(CAPTURE), updated.homeHiddenSections)
+        assertEquals(listOf(CAPTURE, DIAGRAMS), updated.homeHiddenSections)
         assertWeights(listOf(1f, 1f), updated.homeLayout)
+    }
+
+    // ---- the Diagrams section -----------------------------------------------------------------------------------
+
+    @Test
+    fun theDefaultLayoutAndEveryPresetPlaceTheDiagramsSection() {
+        assertTrue(DIAGRAMS in homeLeafSections(DEFAULT_HOME_LAYOUT))
+        assertShape(col(row(leaf(OPEN), leaf(CAPTURE)), row(leaf(TESTS), leaf(DIAGRAMS))), DEFAULT_HOME_LAYOUT)
+        assertEquals("Diagrams", com.indagium.ui.homeSectionTitle(DIAGRAMS))
+        for (preset in HomeLayoutPreset.entries) {
+            val placed = DIAGRAMS in homeLeafSections(preset.layout) || DIAGRAMS in preset.hidden
+            assertTrue(placed, "${preset.name} places Diagrams")
+        }
+        // Logs only is the one preset that hides it, with the other two.
+        assertEquals(listOf(CAPTURE, TESTS, DIAGRAMS), HomeLayoutPreset.LOGS_ONLY.hidden)
+    }
+
+    @Test
+    fun aSavedThreeSectionLayoutGetsDiagramsAppendedAtTheTrailingEdge() {
+        // The rule the sanitizer already had for a section a saved tree lacks: it lands at the trailing page edge (below a COLUMN
+        // root, right of a ROW root) with the average weight of its new siblings, and the user's own tree is otherwise untouched.
+        val column = sanitizeHomeLayoutState(threeSectionDefault, emptyList())
+        assertShape(col(row(leaf(OPEN), leaf(CAPTURE)), leaf(TESTS), leaf(DIAGRAMS)), column.layout)
+        assertWeights(listOf(1.6f, 1f, 1.3f), column.layout)
+        assertTrue(column.hidden.isEmpty())
+
+        val rowRoot = sanitizeHomeLayoutState(threeColumns, emptyList())
+        assertShape(row(leaf(OPEN), leaf(CAPTURE), leaf(TESTS), leaf(DIAGRAMS)), rowRoot.layout)
+
+        // A section the user hid stays hidden: Diagrams is not appended when the saved list names it.
+        val hiddenAlready = sanitizeHomeLayoutState(threeColumns, listOf(DIAGRAMS))
+        assertShape(threeColumns, hiddenAlready.layout)
+        assertEquals(listOf(DIAGRAMS), hiddenAlready.hidden)
     }
 }
 

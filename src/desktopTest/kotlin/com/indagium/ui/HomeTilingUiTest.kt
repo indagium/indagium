@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Science
@@ -89,6 +90,9 @@ class HomeTilingUiTest {
         HomeSectionId.TESTS to HomeSectionSlot(Icons.Outlined.Science, homeSectionTitle(HomeSectionId.TESTS)) {
             Text("tests body")
         },
+        HomeSectionId.DIAGRAMS to HomeSectionSlot(Icons.Outlined.AccountTree, homeSectionTitle(HomeSectionId.DIAGRAMS)) {
+            Text("diagrams body")
+        },
     )
 
     private fun setHost(width: Int = 1000, height: Int = 700) {
@@ -123,15 +127,18 @@ class HomeTilingUiTest {
     }
 
     @Test
-    fun defaultLayoutShowsOpenLeftOfCaptureAndBothAboveTests() {
+    fun defaultLayoutShowsOpenLeftOfCaptureAndBothAboveTestsLeftOfDiagrams() {
         setHost()
         saveEvidenceScreenshot("home-wide-open.png", rule.onNodeWithTag("home-test-root").captureToImage())
         val open = bounds("home-card-open")
         val capture = bounds("home-card-capture")
         val tests = bounds("home-card-tests")
+        val diagrams = bounds("home-card-diagrams")
         assertTrue(open.right <= capture.left, "open $open should be left of capture $capture")
         assertTrue(open.bottom <= tests.top && capture.bottom <= tests.top, "open and capture should sit above tests")
-        assertTrue(tests.width > open.width, "tests spans the full width")
+        assertTrue(tests.right <= diagrams.left, "tests $tests should be left of diagrams $diagrams")
+        assertTrue(open.bottom <= diagrams.top && capture.bottom <= diagrams.top, "open and capture should sit above diagrams")
+        assertEquals(capture.right.value, diagrams.right.value, 0.5f, "the bottom row spans the same width as the top one")
     }
 
     @Test
@@ -272,11 +279,14 @@ class HomeTilingUiTest {
         rule.onNodeWithTag("home-drop-preview").assertDoesNotExist()
         assertNotEquals(before.homeLayout, state.settings.homeLayout)
         val root = state.settings.homeLayout
-        assertTrue(root is HomeLayoutSplit && root.axis == HomeSplitAxis.ROW && root.children.size == 3, "tests joined the top row: $root")
+        val topRow = (root as? HomeLayoutSplit)?.children?.firstOrNull() as? HomeLayoutSplit
+        assertTrue(topRow != null && topRow.axis == HomeSplitAxis.ROW && topRow.children.size == 3, "tests joined the top row: $root")
         assertEquals(
             listOf(HomeSectionId.OPEN, HomeSectionId.CAPTURE, HomeSectionId.TESTS),
-            root.children.map { (it as HomeLayoutLeaf).section },
+            topRow.children.map { (it as HomeLayoutLeaf).section },
         )
+        // Diagrams, left alone in the bottom row, keeps the full width there.
+        assertEquals(HomeSectionId.DIAGRAMS, ((root as HomeLayoutSplit).children[1] as HomeLayoutLeaf).section)
         // The capture body kept its remembered click although its card moved.
         rule.onNodeWithTag("capture-clicker").assertExists()
         assertTrue(bounds("home-card-tests").left >= bounds("home-card-capture").right)

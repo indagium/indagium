@@ -122,6 +122,7 @@ internal fun homeSectionTitle(section: HomeSectionId): String = when (section) {
     HomeSectionId.OPEN -> "Open a log"
     HomeSectionId.CAPTURE -> "Capture"
     HomeSectionId.TESTS -> "Run tests"
+    HomeSectionId.DIAGRAMS -> "Diagrams"
 }
 
 /** The caption shown on the drop overlay. */
@@ -155,14 +156,19 @@ private fun homeSplit(axis: HomeSplitAxis, vararg children: HomeLayoutNode, weig
 enum class HomeLayoutPreset(val label: String, val layout: HomeLayoutNode, val hidden: List<HomeSectionId> = emptyList()) {
     THREE_COLUMNS(
         "Three columns",
-        homeSplit(HomeSplitAxis.ROW, homeLeaf(HomeSectionId.OPEN), homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS)),
+        homeSplit(
+            HomeSplitAxis.ROW,
+            homeLeaf(HomeSectionId.OPEN),
+            homeLeaf(HomeSectionId.CAPTURE),
+            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.TESTS), homeLeaf(HomeSectionId.DIAGRAMS)),
+        ),
     ),
     LOGS_ON_TOP(
         "Logs on top",
         homeSplit(
             HomeSplitAxis.COLUMN,
             homeLeaf(HomeSectionId.OPEN, 1.6f),
-            homeSplit(HomeSplitAxis.ROW, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS)),
+            homeSplit(HomeSplitAxis.ROW, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS), homeLeaf(HomeSectionId.DIAGRAMS)),
         ),
     ),
     LOGS_LEFT_STACKED(
@@ -170,14 +176,14 @@ enum class HomeLayoutPreset(val label: String, val layout: HomeLayoutNode, val h
         homeSplit(
             HomeSplitAxis.ROW,
             homeLeaf(HomeSectionId.OPEN, 1.6f),
-            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS)),
+            homeSplit(HomeSplitAxis.COLUMN, homeLeaf(HomeSectionId.CAPTURE), homeLeaf(HomeSectionId.TESTS), homeLeaf(HomeSectionId.DIAGRAMS)),
         ),
     ),
     DEFAULT("Default", DEFAULT_HOME_LAYOUT),
     LOGS_ONLY(
         "Logs only",
         homeLeaf(HomeSectionId.OPEN),
-        listOf(HomeSectionId.CAPTURE, HomeSectionId.TESTS),
+        listOf(HomeSectionId.CAPTURE, HomeSectionId.TESTS, HomeSectionId.DIAGRAMS),
     ),
     ;
 

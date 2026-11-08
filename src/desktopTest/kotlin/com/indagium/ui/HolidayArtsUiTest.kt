@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Science
@@ -201,6 +202,7 @@ class HolidayArtsUiTest {
             HomeSectionId.OPEN to HomeSectionSlot(Icons.Outlined.Description, homeSectionTitle(HomeSectionId.OPEN)) { Text("open") },
             HomeSectionId.CAPTURE to HomeSectionSlot(Icons.Outlined.PhoneAndroid, homeSectionTitle(HomeSectionId.CAPTURE)) { Text("capture") },
             HomeSectionId.TESTS to HomeSectionSlot(Icons.Outlined.Science, homeSectionTitle(HomeSectionId.TESTS)) { Text("tests") },
+            HomeSectionId.DIAGRAMS to HomeSectionSlot(Icons.Outlined.AccountTree, homeSectionTitle(HomeSectionId.DIAGRAMS)) { Text("diagrams") },
         )
         app(lookWith(), width = 600, height = 700) { HomeTilingHost(state = state, slots = slots, onReclaimFocus = {}, modifier = Modifier) }
         assertTrue(bothArts(), "a stacked New tab has no tiling surface; the arts do not need one")

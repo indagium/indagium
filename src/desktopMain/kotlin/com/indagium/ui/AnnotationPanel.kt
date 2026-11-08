@@ -1894,7 +1894,7 @@ internal fun CreateDiagramPopup(
 }
 
 @Composable
-internal fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, onDismiss: () -> Unit, openTabNote: Boolean = false) {
     val tc = tc()
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -1903,10 +1903,11 @@ internal fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, on
         ) {
             AppText("Delete saved diagram?", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             AppText(
-                "\"${title.ifBlank { "Untitled diagram" }}\" will be removed from the diagram library. Existing note snapshots are unchanged.",
+                "\"${title.ifBlank { "Untitled diagram" }}\" will be removed from the diagram library. Existing note snapshots are unchanged." +
+                    if (openTabNote) " Its open Diagram tab will be closed." else "",
                 color = tc.td,
                 fontSize = 11.sp,
-                maxLines = 3,
+                maxLines = 4,
             )
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
