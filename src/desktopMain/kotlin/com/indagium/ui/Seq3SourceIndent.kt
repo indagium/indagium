@@ -9,6 +9,23 @@ import com.indagium.diagram3.Seq3Dialect
  * `option` sit at their opener's level and only count inside the block that owns them; `end` sits at
  * its opener's level. Comment and marker lines never open or close anything and take the level of
  * the statement that follows them. Offsets in every result are raw-text offsets.
+ *
+ * Activations nest the same way. `activate X` opens a level, so the lines up to the matching
+ * `deactivate X` are one level deeper, and `deactivate X` sits at the level its `activate X` has.
+ * Blocks and activations share one stack of open levels, and the indent of a plain line is the
+ * number of levels open (plus Mermaid's body level):
+ * - `deactivate X` closes the innermost open `activate X` wherever it sits in the stack, so
+ *   interleaved activations (`activate A`, `activate B`, `deactivate A`) are fine: A's level is
+ *   removed, B's stays open and the lines after the `deactivate A` are still one level deep;
+ * - a bare `deactivate`, or one whose name matches no open activation (a name still being typed),
+ *   closes the innermost open activation; with none open it is an ordinary line;
+ * - `end` closes the innermost open block and `else` / `and` / `option` belong to it; activations
+ *   opened inside that block are not closed by it, they stay open after the `end`;
+ * - a bare `activate` (no name yet) is an ordinary line until the name is typed;
+ * - Mermaid's `->>+B` / `-->>-A` arrow shorthand does NOT count. Those are message lines that would
+ *   have to be both a body line and an opener or closer, the shorthand is often left unbalanced, and
+ *   the generated source never uses it (it writes explicit `activate` / `deactivate` lines), so such
+ *   lines keep the level of their surroundings. PlantUML's `++` / `--` suffix is treated alike.
  */
 
 internal const val SEQ3_SOURCE_INDENT_WIDTH = 4
@@ -22,23 +39,26 @@ internal data class Seq3SourceEdit(val text: String, val selectionStart: Int, va
 
 private val SEQ3_BLOCK_OPENERS = setOf("loop", "alt", "opt", "par", "critical", "break", "group")
 
+/** One open level: a block (`word` is `loop`, `alt`, ...) or an activation (`word` is the name). */
+private class Seq3IndentFrame(val word: String, val activation: Boolean)
+
 internal fun seq3SourceIndentString(level: Int): String = " ".repeat(level.coerceAtLeast(0) * SEQ3_SOURCE_INDENT_WIDTH)
 
-/** Walks source lines in order, tracking the open blocks. */
+/** Walks source lines in order, tracking the open blocks and activations. */
 internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
-    private val blocks = ArrayList<String>()
+    private val frames = ArrayList<Seq3IndentFrame>()
     private var bodyStarted = false
 
     private val base: Int get() = if (dialect == Seq3Dialect.MERMAID && bodyStarted) 1 else 0
 
     /** The level a plain statement would get on the next line. */
-    val currentLevel: Int get() = base + blocks.size
+    val currentLevel: Int get() = base + frames.size
 
     /** The block (`loop`, `alt`, ...) the next line would sit in, or null outside every block. */
-    val innermostBlock: String? get() = blocks.lastOrNull()
+    val innermostBlock: String? get() = frames.lastOrNull { !it.activation }?.word
 
     fun copy(): Seq3SourceIndentState = Seq3SourceIndentState(dialect).also {
-        it.blocks.addAll(blocks)
+        it.frames.addAll(frames)
         it.bodyStarted = bodyStarted
     }
 
@@ -52,20 +72,41 @@ internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
             return Seq3SourceLineLevel(Seq3SourceLineKind.HEADER, 0)
         }
         if (text.equals("end", ignoreCase = true)) {
-            if (blocks.isEmpty()) return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base)
-            blocks.removeAt(blocks.lastIndex)
-            return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base + blocks.size)
+            val index = frames.indexOfLast { !it.activation }
+            if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base)
+            frames.removeAt(index)
+            return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base + index)
         }
         val word = text.takeWhile { !it.isWhitespace() }.lowercase()
         if (word in SEQ3_BLOCK_OPENERS || (word == "rect" && dialect == Seq3Dialect.MERMAID)) {
             val level = currentLevel
-            blocks += word
+            frames += Seq3IndentFrame(word, activation = false)
             return Seq3SourceLineLevel(Seq3SourceLineKind.OPENER, level)
         }
-        if (blocks.isNotEmpty() && ownsMiddleWord(blocks.last(), word)) {
-            return Seq3SourceLineLevel(Seq3SourceLineKind.MIDDLE, base + blocks.size - 1)
+        // The import reads these two keywords in lower case only.
+        val rawWord = text.takeWhile { !it.isWhitespace() }
+        if (rawWord == "activate" || rawWord == "deactivate") return feedActivation(text, rawWord == "activate")
+        val ownerIndex = frames.indexOfLast { !it.activation }
+        if (ownerIndex >= 0 && ownsMiddleWord(frames[ownerIndex].word, word)) {
+            return Seq3SourceLineLevel(Seq3SourceLineKind.MIDDLE, base + ownerIndex)
         }
         return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel)
+    }
+
+    /** `activate X` opens a level, `deactivate X` closes X's (see the rules at the top of the file). */
+    private fun feedActivation(text: String, activate: Boolean): Seq3SourceLineLevel {
+        val name = text.split(Regex("\\s+")).getOrNull(1).orEmpty()
+        if (activate) {
+            if (name.isEmpty()) return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel)
+            val level = currentLevel
+            frames += Seq3IndentFrame(name, activation = true)
+            return Seq3SourceLineLevel(Seq3SourceLineKind.OPENER, level)
+        }
+        val index = frames.indexOfLast { it.activation && it.word == name }
+            .takeIf { it >= 0 } ?: frames.indexOfLast { it.activation }
+        if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel)
+        frames.removeAt(index)
+        return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base + index)
     }
 
     private fun isComment(text: String): Boolean =
@@ -153,6 +194,22 @@ internal fun seq3SourceReindentSnippet(content: String, context: Seq3SourceInden
     return Seq3SourceReindented(out.toString(), offsets)
 }
 
+/** [content] with every line put after the fixed [indent] and otherwise left as it is: the insertion
+ *  with Auto-indent off. A line keeps its own leading blanks, so a block snippet keeps its shape. */
+internal fun seq3SourceFlatSnippet(content: String, indent: String): Seq3SourceReindented {
+    val offsets = IntArray(content.length + 1)
+    val out = StringBuilder(content.length + 32)
+    var oldStart = 0
+    content.split('\n').forEachIndexed { index, line ->
+        if (index > 0) out.append('\n')
+        val newStart = out.length
+        out.append(indent).append(line)
+        for (column in 0..line.length) offsets[oldStart + column] = newStart + indent.length + column
+        oldStart += line.length + 1
+    }
+    return Seq3SourceReindented(out.toString(), offsets)
+}
+
 private fun lineStartOf(source: String, offset: Int): Int = source.lastIndexOf('\n', (offset - 1).coerceAtLeast(0)).let {
     if (offset <= 0) 0 else it + 1
 }
@@ -164,9 +221,16 @@ private fun leadingWhitespace(line: String): String = line.substring(0, line.len
 /**
  * Enter: a newline plus the indent the next line needs. Text after the caret moves to the new line
  * and loses its old leading spaces. Returns null when the default newline is the better edit (the
- * caret splits a hidden marker line).
+ * caret splits a hidden marker line). With [autoIndent] off the new line only keeps the leading
+ * whitespace of the line it was typed on.
  */
-internal fun seq3SourceEnter(source: String, selectionStart: Int, selectionEnd: Int, dialect: Seq3Dialect): Seq3SourceEdit? {
+internal fun seq3SourceEnter(
+    source: String,
+    selectionStart: Int,
+    selectionEnd: Int,
+    dialect: Seq3Dialect,
+    autoIndent: Boolean = true,
+): Seq3SourceEdit? {
     val start = minOf(selectionStart, selectionEnd).coerceIn(0, source.length)
     val end = maxOf(selectionStart, selectionEnd).coerceIn(start, source.length)
     val lineStart = lineStartOf(source, start)
@@ -181,6 +245,12 @@ internal fun seq3SourceEnter(source: String, selectionStart: Int, selectionEnd: 
     }
     val lineEnd = lineEndOf(source, end)
     if (isSeq3SourceMarkerLine(source.substring(lineStart, lineEnd), dialect)) return null
+    if (!autoIndent) {
+        // Auto-indent off: the new line only repeats the leading blanks of the line it came from.
+        val indent = leadingWhitespace(beforeCaret)
+        val caret = start + 1 + indent.length
+        return Seq3SourceEdit(head + "\n" + indent + tail.trimStart(' ', '\t'), caret, caret)
+    }
     val (levels, afterLevel) = seq3SourceAnalyse(head, dialect)
     val last = levels.last()
     // An `end` or divider typed at the wrong level is moved first; every kind that opens a body
@@ -199,9 +269,9 @@ internal fun seq3SourceEnter(source: String, selectionStart: Int, selectionEnd: 
 }
 
 /**
- * Moves the caret line to its opener's level when it is exactly `end`, or starts with `else`, `and`
- * or `option` inside the block that owns that word. Returns null when nothing needs to move. The
- * caret stays on the same character.
+ * Moves the caret line to its opener's level when it is exactly `end`, starts with `else`, `and` or
+ * `option` inside the block that owns that word, or is a `deactivate` of an open activation.
+ * Returns null when nothing needs to move. The caret stays on the same character.
  */
 internal fun seq3SourceAutoOutdent(source: String, caret: Int, dialect: Seq3Dialect): Seq3SourceEdit? {
     val position = caret.coerceIn(0, source.length)
@@ -220,15 +290,16 @@ internal fun seq3SourceAutoOutdent(source: String, caret: Int, dialect: Seq3Dial
 }
 
 /** The outdent that follows a small typed change, or null for anything else (paste, replacement,
- *  newline, selection). */
+ *  newline, selection) and always null with [autoIndent] off. */
 internal fun seq3SourceTypedOutdent(
     oldText: String,
     newText: String,
     caret: Int,
     collapsed: Boolean,
     dialect: Seq3Dialect,
+    autoIndent: Boolean = true,
 ): Seq3SourceEdit? {
-    if (!collapsed || oldText == newText) return null
+    if (!autoIndent || !collapsed || oldText == newText) return null
     var prefix = 0
     val shortest = minOf(oldText.length, newText.length)
     while (prefix < shortest && oldText[prefix] == newText[prefix]) prefix++

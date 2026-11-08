@@ -1067,7 +1067,7 @@ class Seq3SessionTest {
             assertTrue(state.seq3Sessions.prepareSourceDraft(id))
             assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
             assertTrue(view.sourceLiveEnabled)
-            assertTrue(view.sourceAutocompleteEnabled)
+            assertTrue(state.settings.diagramSourceAutocomplete)
             val editorGeneration = view.sourceEditorGeneration
             val source = when (dialect) {
                 Seq3Dialect.MERMAID -> """

@@ -182,10 +182,6 @@ data class Seq3WorkspaceSession(
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
 
-/** The source the editor shows and compares its draft against: [toSource] with nested content
- *  indented. Exports and the importer keep using the plain [toSource]. */
-private fun Seq3Document.toEditorSource(dialect: Seq3Dialect): String = seq3IndentSource(toSource(dialect), dialect)
-
 /** Restores generated authoring only when every user-editable value of a message is back at the
  *  runtime baseline. Visibility is intentionally ignored because it is an orthogonal display flag:
  *  hiding/showing a message must not make a previously restored row look edited. */
@@ -295,6 +291,32 @@ class Seq3Session(
     }
 
     private fun session(id: String): Seq3WorkspaceSession? = sessions.firstOrNull { it.id == id }
+
+    /** The source the editor shows and compares its draft against: [toSource] with nested content
+     *  indented, unless the app-wide Auto-indent setting is off (then the generated text is shown as
+     *  it is). Exports and the importer keep using the plain [toSource]. */
+    private fun Seq3Document.toEditorSource(dialect: Seq3Dialect): String =
+        if (appState.settings.diagramSourceAutoIndent) seq3IndentSource(toSource(dialect), dialect) else toSource(dialect)
+
+    /** Switches the app-wide Auto-indent setting and brings every open source draft to the new form
+     *  of the diagram's source: a clean draft follows it as one undoable editor edit; a draft with
+     *  typed edits keeps its text and only takes the new base, because the diagram did not change. */
+    fun setSourceAutoIndent(enabled: Boolean) {
+        if (appState.settings.diagramSourceAutoIndent == enabled) return
+        appState.updateSettings { it.copy(diagramSourceAutoIndent = enabled) }
+        workspaceViewStates.forEach { (id, view) ->
+            if (!view.sourceDraftInitialized) return@forEach
+            val document = session(id)?.document ?: return@forEach
+            val canonical = document.toEditorSource(view.sourceEditorDialect)
+            if (canonical == view.sourceDraftCanonical) return@forEach
+            if (view.sourceDraft == view.sourceDraftCanonical) {
+                refreshSourceDraft(view, document)
+            } else if (!view.sourceDraftStale) {
+                view.sourceDraftCanonical = canonical
+                view.sourceDraftDirty = view.sourceDraft != canonical
+            }
+        }
+    }
 
     /** [fn] must be a pure in-memory copy; persistence, autosave scheduling and other side effects
      *  belong after this list update so AppState.stateLock never covers IO or scheduler locks. */

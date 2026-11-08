@@ -35,6 +35,7 @@ import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -181,16 +182,32 @@ internal fun Seq3ViewState.sourceHasUnappliedDraft(): Boolean =
 @Composable
 internal fun Seq3SourceHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     Seq3SourceDialectSelector(state, session, view)
-    if (LocalTileHeaderWidthDp.current >= 700f) {
+    if (LocalTileHeaderWidthDp.current >= SEQ3_SOURCE_TOGGLES_MIN_HEADER_DP) {
         SourceModeToggle("Live preview", view.sourceLiveEnabled, "seq3-source-live-toggle") {
             view.sourceLiveEnabled = !view.sourceLiveEnabled
             view.sourceFocusRequestGeneration++
         }
-        SourceModeToggle("Autocomplete", view.sourceAutocompleteEnabled, "seq3-source-autocomplete-toggle") {
-            view.sourceAutocompleteEnabled = !view.sourceAutocompleteEnabled
+        SourceModeToggle("Autocomplete", state.settings.diagramSourceAutocomplete, "seq3-source-autocomplete-toggle") {
+            toggleSeq3SourceAutocomplete(state)
             view.sourceFocusRequestGeneration++
         }
-    } else Seq3SourceSettingsMenu(view)
+        SourceModeToggle("Auto-indent", state.settings.diagramSourceAutoIndent, "seq3-source-auto-indent-toggle") {
+            toggleSeq3SourceAutoIndent(state)
+            view.sourceFocusRequestGeneration++
+        }
+    } else Seq3SourceSettingsMenu(state, view)
+}
+
+/** The Source tile header shows its three toggles inline from this width; narrower, they fold into one Settings menu. */
+private const val SEQ3_SOURCE_TOGGLES_MIN_HEADER_DP = 700f
+
+/** Autocomplete and Auto-indent are app-wide settings (JSON settings), not per diagram or view. */
+internal fun toggleSeq3SourceAutocomplete(state: AppState) {
+    state.updateSettings { it.copy(diagramSourceAutocomplete = !it.diagramSourceAutocomplete) }
+}
+
+internal fun toggleSeq3SourceAutoIndent(state: AppState) {
+    state.seq3Sessions.setSourceAutoIndent(!state.settings.diagramSourceAutoIndent)
 }
 
 @Composable
@@ -264,10 +281,13 @@ internal fun Seq3SourceEditorPane(
                 editorState.edit { selection = TextRange(shownCaret) }
                 return@collect
             }
-            // Typing `end` or a block divider moves its line to the opener's level. The correction
+            // Typing `end`, a block divider or `deactivate` moves its line to the opener's level (Auto-indent on). The correction
             // joins the keystroke's undo step: the history below records the text before it once.
             val outdent = if (typed.text != lastValue.text) {
-                seq3SourceTypedOutdent(lastValue.text, typed.text, typed.selection.start, typed.selection.collapsed, view.sourceEditorDialect)
+                seq3SourceTypedOutdent(
+                    lastValue.text, typed.text, typed.selection.start, typed.selection.collapsed, view.sourceEditorDialect,
+                    autoIndent = state.settings.diagramSourceAutoIndent,
+                )
             } else null
             val next = if (outdent == null) typed else {
                 val fixed = TextFieldValue(outdent.text, TextRange(outdent.selectionStart, outdent.selectionEnd))
@@ -374,7 +394,10 @@ internal fun Seq3SourceEditorPane(
     }
 
     fun insertSnippet(snippet: String, fields: List<SourceSnippetField>, header: Boolean) {
-        val inserted = insertSeq3SourceSnippet(editorState.text.toString(), editorState.selection, snippet, view.sourceEditorDialect, header)
+        val inserted = insertSeq3SourceSnippet(
+            editorState.text.toString(), editorState.selection, snippet, view.sourceEditorDialect, header,
+            autoIndent = state.settings.diagramSourceAutoIndent,
+        )
         val next = inserted.value
         snippetFields = fields.map {
             it.copy(start = inserted.mapSnippetOffset(it.start), end = inserted.mapSnippetOffset(it.end))
@@ -553,7 +576,7 @@ internal fun Seq3SourceEditorPane(
         ?: sourceEndpointAt(sourceText, selection, view.sourceEditorDialect)
     val endpointQuery = endpointField?.let { sourceText.substring(it.start.coerceAtMost(sourceText.length), it.end.coerceAtMost(sourceText.length)) }.orEmpty()
     val participantChoices = sourceParticipants(sourceText, view.sourceEditorDialect)
-    val identifierChoices = if (view.sourceAutocompleteEnabled && endpointField != null && selection.collapsed && endpointQuery.isNotBlank()) {
+    val identifierChoices = if (state.settings.diagramSourceAutocomplete && endpointField != null && selection.collapsed && endpointQuery.isNotBlank()) {
         participantChoices.filter { it.alias.startsWith(endpointQuery, true) || it.name.startsWith(endpointQuery, true) }
             .filterNot { it.alias == endpointQuery }
     } else emptyList()
@@ -567,14 +590,14 @@ internal fun Seq3SourceEditorPane(
         runCatching { requester.requestFocus() }
     }
 
-    val suggestionTrigger = if (view.sourceAutocompleteEnabled && endpointField == null) {
-        seq3SourceSuggestionTrigger(sourceText, editorState.selection)
+    val suggestionTrigger = if (state.settings.diagramSourceAutocomplete && endpointField == null) {
+        seq3SourceSuggestionTrigger(sourceText, editorState.selection, view.sourceEditorDialect)
     } else null
     if (suggestionTrigger == null || suggestionTrigger.start != dismissedSuggestionStart) {
         dismissedSuggestionStart = null
     }
     val sourceSuggestions = suggestionTrigger?.let {
-        seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias })
+        seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias }, participantChoices)
     }.orEmpty()
     LaunchedEffect(suggestionTrigger?.query, view.sourceEditorDialect) {
         selectedSuggestionIndex = 0
@@ -608,7 +631,9 @@ internal fun Seq3SourceEditorPane(
     fun insertSuggestion(index: Int) {
         val trigger = suggestionTrigger ?: return
         val suggestion = sourceSuggestions.getOrNull(index) ?: return
-        val (inserted, fields) = insertSeq3SourceSuggestionWithFields(sourceText, trigger, suggestion, view.sourceEditorDialect)
+        val (inserted, fields) = insertSeq3SourceSuggestionWithFields(
+            sourceText, trigger, suggestion, view.sourceEditorDialect, state.settings.diagramSourceAutoIndent,
+        )
         snippetFields = fields
         endpointMenu = null
         setEditorValue(inserted, true)
@@ -786,7 +811,10 @@ internal fun Seq3SourceEditorPane(
                             !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)
                         ) {
                             val range = editorState.selection
-                            val edit = seq3SourceEnter(editorState.text.toString(), range.start, range.end, view.sourceEditorDialect)
+                            val edit = seq3SourceEnter(
+                                editorState.text.toString(), range.start, range.end, view.sourceEditorDialect,
+                                autoIndent = state.settings.diagramSourceAutoIndent,
+                            )
                             if (edit != null) {
                                 applySourceEdit(edit)
                                 return@onPreviewKeyEvent true
@@ -897,7 +925,15 @@ internal fun Seq3SourceEditorPane(
                                 Rect(it.getCursorRect(visible).left, it.getLineTop(line), 0f, it.getLineBottom(line))
                             }
                             Box(Modifier.matchParentSize()) {
-                                Column(
+                                val listScroll = rememberScrollState()
+                                // The list is cut to its room (see anchoredAtCaret) and scrolls; the bar
+                                // shows only then. It sits in a lane of its own at the right, reserved
+                                // whether or not the bar shows (so the layout never depends on the scroll
+                                // state it produces), and never covers a pictogram or a label. The
+                                // derived state keeps the layout's own writes to maxValue (anchoredAtCaret
+                                // measures twice) from recomposing the list on every frame.
+                                val overflowing by remember { derivedStateOf { listScroll.maxValue > 0 } }
+                                Box(
                                     Modifier.anchoredAtCaret(
                                         left = anchor?.left ?: 0f,
                                         top = (anchor?.top ?: 0f) - scroll.value,
@@ -907,16 +943,30 @@ internal fun Seq3SourceEditorPane(
                                         .widthIn(min = 210.dp, max = 320.dp).width(IntrinsicSize.Max).heightIn(max = 208.dp)
                                         .shadow(8.dp, RoundedCornerShape(8.dp))
                                         .background(tc.p, RoundedCornerShape(8.dp))
-                                        .border(1.dp, tc.br, RoundedCornerShape(8.dp)).verticalScroll(rememberScrollState()).padding(4.dp)
+                                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
                                         .testTag("seq3-source-suggestions"),
                                 ) {
-                                    sourceSuggestions.forEachIndexed { index, suggestion ->
-                                        Seq3SourceSuggestionRow(
-                                            suggestion = suggestion,
-                                            prefix = suggestionTrigger.prefix,
-                                            active = index == selectedSuggestionIndex,
-                                            onClick = { insertSuggestion(index) },
-                                        )
+                                    Column(
+                                        Modifier.verticalScroll(listScroll).padding(
+                                            start = 4.dp, top = 4.dp, bottom = 4.dp, end = SEQ3_SOURCE_LIST_SCROLLBAR_LANE,
+                                        ),
+                                    ) {
+                                        sourceSuggestions.forEachIndexed { index, suggestion ->
+                                            Seq3SourceSuggestionRow(
+                                                suggestion = suggestion,
+                                                prefix = suggestionTrigger.prefix,
+                                                active = index == selectedSuggestionIndex,
+                                                onClick = { insertSuggestion(index) },
+                                            )
+                                        }
+                                    }
+                                    if (overflowing) {
+                                        Box(Modifier.matchParentSize().padding(vertical = 5.dp, horizontal = 3.dp)) {
+                                            ThinVerticalScrollbar(
+                                                listScroll,
+                                                Modifier.align(Alignment.CenterEnd).fillMaxHeight().testTag("seq3-source-suggestions-scrollbar"),
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1382,9 +1432,13 @@ internal data class Seq3SourceSuggestion(
     val fields: List<SourceSnippetField> = emptyList(),
     /** The picture in front of the row. */
     val glyph: Seq3SourceGlyph,
+    /** A declared participant or actor name: [keyword] is its alias (what is inserted), [syntax] its
+     *  display name when that differs. */
+    val name: Boolean = false,
 ) {
     /** True when accepting this entry would only add blanks to the word [query] that was typed in full. */
-    fun isTypedInFull(query: String): Boolean = keyword.equals(query, ignoreCase = true) && insertion.trim().equals(keyword, ignoreCase = true)
+    fun isTypedInFull(query: String): Boolean =
+        !name && keyword.equals(query, ignoreCase = true) && insertion.trim().equals(keyword, ignoreCase = true)
 }
 
 internal data class Seq3SourceSuggestionTrigger(
@@ -1392,11 +1446,28 @@ internal data class Seq3SourceSuggestionTrigger(
     val end: Int,
     val query: String,
     val prefix: String = "/",
+    /** Declared participant and actor names belong at this position. */
+    val names: Boolean = false,
+    /** Keywords (`loop`, `note`, ...) belong at this position; false where only a name can follow
+     *  (after an arrow, `note over`, `activate`, ...). */
+    val keywords: Boolean = true,
 )
 
 private const val SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH = 2
 
-internal fun seq3SourceSuggestionTrigger(source: String, selection: TextRange): Seq3SourceSuggestionTrigger? {
+/**
+ * What the word at the caret can complete to. A slash word is always a keyword. A bare word at the
+ * start of a line is a keyword or a declared name (an arrow's source, or `Al` for `Alice`) and
+ * needs two letters. A bare word where only a name can stand (after an arrow, `note over` / `left
+ * of` / `right of` and after a comma in the list, `activate`, `deactivate`, `destroy` and, in
+ * PlantUML, `create`) is a name and needs one letter. Names are the letters, digits and underscores
+ * the word scan takes, so an alias with other characters is completed up to its first such character.
+ */
+internal fun seq3SourceSuggestionTrigger(
+    source: String,
+    selection: TextRange,
+    dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
+): Seq3SourceSuggestionTrigger? {
     if (selection.start != selection.end) return null
     val caret = selection.start.coerceIn(0, source.length)
     var queryStart = caret
@@ -1409,12 +1480,57 @@ internal fun seq3SourceSuggestionTrigger(source: String, selection: TextRange): 
         if (slash > 0 && source[slash - 1].isLetterOrDigitOrUnderscore()) return null
         return Seq3SourceSuggestionTrigger(slash, end, query, "/")
     }
-    // A bare word needs two letters: a single `a` is far more likely the start of a name or a message.
-    if (query.length < SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH) return null
     val lineStart = source.lastIndexOf('\n', (queryStart - 1).coerceAtLeast(0)).let { it + 1 }
     val beforeToken = source.substring(lineStart, queryStart)
-    if (beforeToken.any { !it.isWhitespace() }) return null
-    return Seq3SourceSuggestionTrigger(queryStart, end, query, "")
+    if (beforeToken.all { it.isWhitespace() }) {
+        // A bare word needs two letters: a single `a` is far more likely the start of a name or a message.
+        if (query.length < SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH) return null
+        return Seq3SourceSuggestionTrigger(queryStart, end, query, "", names = true)
+    }
+    if (query.isEmpty() || !seq3SourceNameFollows(beforeToken.trimStart(), dialect)) return null
+    return Seq3SourceSuggestionTrigger(queryStart, end, query, "", names = true, keywords = false)
+}
+
+private val SEQ3_SOURCE_PLANTUML_ARROW_BEFORE = Regex("^\\S+?\\s*(?:-->|->>|->)\\s*$")
+private val SEQ3_SOURCE_MERMAID_ARROW_BEFORE = Regex("^\\S+?\\s*(?:-->>|->>|-\\))\\s*[+-]?$")
+private val SEQ3_SOURCE_NOTE_TARGET_BEFORE = Regex("^(?i:note)\\s+(?:over|(?:left|right)\\s+of)\\s+(?:[^:,]+,\\s*)*$")
+private val SEQ3_SOURCE_PLANTUML_NAME_KEYWORD_BEFORE = Regex("^(?:activate|deactivate|destroy|create)\\s+$")
+
+// Mermaid writes `create participant X as Y`: what follows `create` is a keyword and a new name.
+private val SEQ3_SOURCE_MERMAID_NAME_KEYWORD_BEFORE = Regex("^(?:activate|deactivate|destroy)\\s+$")
+
+/** Whether a declared name can stand right after [before], the trimmed text of the line before the word. */
+private fun seq3SourceNameFollows(before: String, dialect: Seq3Dialect): Boolean {
+    val comment = if (dialect == Seq3Dialect.MERMAID) "%%" else "'"
+    if (before.startsWith(comment)) return false
+    return if (dialect == Seq3Dialect.MERMAID) {
+        SEQ3_SOURCE_MERMAID_ARROW_BEFORE.matches(before) || SEQ3_SOURCE_NOTE_TARGET_BEFORE.matches(before) ||
+            SEQ3_SOURCE_MERMAID_NAME_KEYWORD_BEFORE.matches(before)
+    } else {
+        SEQ3_SOURCE_PLANTUML_ARROW_BEFORE.matches(before) || SEQ3_SOURCE_NOTE_TARGET_BEFORE.matches(before) ||
+            SEQ3_SOURCE_PLANTUML_NAME_KEYWORD_BEFORE.matches(before)
+    }
+}
+
+/**
+ * The declared participants and actors that [query] starts (their alias first, then those whose
+ * display name starts with it), one entry each: the alias is what is inserted, the display name is
+ * shown beside it when it differs. A name typed in full as the alias is left out, so a list with
+ * nothing more to complete is empty.
+ */
+internal fun seq3SourceNameSuggestions(query: String, participants: List<Seq3SourceParticipant>): List<Seq3SourceSuggestion> {
+    if (query.isEmpty()) return emptyList()
+    val byAlias = participants.filter { it.alias.startsWith(query, ignoreCase = true) }
+    val byName = participants.filter { !it.alias.startsWith(query, ignoreCase = true) && it.name.startsWith(query, ignoreCase = true) }
+    return (byAlias + byName).filterNot { it.alias == query }.map {
+        Seq3SourceSuggestion(
+            keyword = it.alias,
+            syntax = if (it.name != it.alias) it.name else "",
+            insertion = it.alias,
+            glyph = if (it.actor) Seq3SourceGlyph.ACTOR else Seq3SourceGlyph.PARTICIPANT,
+            name = true,
+        )
+    }
 }
 
 /** [enclosingBlock] is the innermost open block (`alt`, `par`, ...) at the typing position: the
@@ -1431,16 +1547,21 @@ internal fun seq3SourceSuggestions(
 /**
  * The suggestions to show for [trigger] in [source]. A word typed in full that has nothing to expand
  * (`end`, `else`) shows no list, so Enter after it is an ordinary newline. The blocks come from the
- * lines before the trigger, with the rules the editor's indentation and the import both use.
+ * lines before the trigger, with the rules the editor's indentation and the import both use. Where
+ * the trigger takes names, the declared [participants] that match come before the keywords.
  */
 internal fun seq3SourceActiveSuggestions(
     source: String,
     trigger: Seq3SourceSuggestionTrigger,
     dialect: Seq3Dialect,
     participantAliases: List<String>,
+    participants: List<Seq3SourceParticipant> = emptyList(),
 ): List<Seq3SourceSuggestion> {
     val block = seq3SourceIndentStateAfter(source.substring(0, trigger.start.coerceIn(0, source.length)), dialect).innermostBlock
-    val matches = seq3SourceSuggestions(dialect, trigger.query, participantAliases, block)
+    // Names first: at a line start a name that matches is likelier than the keyword that also does.
+    val names = if (trigger.names) seq3SourceNameSuggestions(trigger.query, participants) else emptyList()
+    val keywords = if (trigger.keywords) seq3SourceSuggestions(dialect, trigger.query, participantAliases, block) else emptyList()
+    val matches = names + keywords
     if (trigger.prefix.isEmpty() && matches.all { it.isTypedInFull(trigger.query) }) return emptyList()
     return matches
 }
@@ -1464,6 +1585,9 @@ internal fun seq3SourceVisibleOffset(raw: Int, hidden: List<Seq3SourceRange>): I
     }
     return raw - removed
 }
+
+/** The right-hand padding of a suggestion list: the lane of its thin scrollbar and a margin on each side of it. */
+private val SEQ3_SOURCE_LIST_SCROLLBAR_LANE = (THIN_SCROLLBAR_DP + 3f + 3f).dp
 
 /** Which side of the caret line a suggestion list takes, and how tall it may be there. */
 internal data class Seq3SourceListSlot(val below: Boolean, val room: Float)
@@ -1494,14 +1618,18 @@ internal fun seq3SourceSuggestionSlot(
 internal fun seq3SourceSuggestionTop(slot: Seq3SourceListSlot, caretTop: Float, caretBottom: Float, listHeight: Float, gap: Float): Float =
     if (slot.below) caretBottom + gap else (caretTop - gap - listHeight).coerceAtLeast(0f)
 
-/** Places its child at [left] (kept inside the parent) and under the caret line, or above it. */
+/** Places its child at [left] (kept inside the parent) and under the caret line, or above it.
+ *  The child is measured once, at the room of the roomier side: a list that fits on neither side is
+ *  cut to that room (and scrolls), and the side is then picked as [seq3SourceSuggestionSlot] does.
+ *  Measuring it twice (natural height, then cut) makes a scrolling child write its scroll state
+ *  twice per pass, which a scrollbar reading that state turns into a layout that never settles. */
 private fun Modifier.anchoredAtCaret(left: Float, top: Float, bottom: Float, gap: Float): Modifier =
     layout { measurable, constraints ->
         val loose = constraints.copy(minWidth = 0, minHeight = 0)
-        val natural = measurable.measure(loose)
-        val slot = seq3SourceSuggestionSlot(top, bottom, natural.height.toFloat(), constraints.maxHeight.toFloat(), gap)
-        // A list taller than its side is cut there and scrolls.
-        val placeable = if (natural.height <= slot.room) natural else measurable.measure(loose.copy(maxHeight = slot.room.toInt()))
+        val roomBelow = (constraints.maxHeight - bottom - gap).coerceAtLeast(0f)
+        val roomAbove = (top - gap).coerceAtLeast(0f)
+        val placeable = measurable.measure(loose.copy(maxHeight = minOf(maxOf(roomBelow, roomAbove).toInt(), constraints.maxHeight)))
+        val slot = seq3SourceSuggestionSlot(top, bottom, placeable.height.toFloat(), constraints.maxHeight.toFloat(), gap)
         val x = left.coerceIn(0f, (constraints.maxWidth - placeable.width).coerceAtLeast(0).toFloat())
         val y = seq3SourceSuggestionTop(slot, top, bottom, placeable.height.toFloat(), gap)
         layout(constraints.maxWidth, constraints.maxHeight) { placeable.place(x.roundToInt(), y.roundToInt()) }
@@ -1520,6 +1648,10 @@ internal fun seq3SourceBlockSnippet(
     val snippet = "$keyword condition\n    ${sourceMessageLine(from, to, "Call", dialect, label)}\nend"
     return snippet to sourceSnippetFields(snippet, "condition" to false, from to true, to to true, label to false)
 }
+
+/** The pictogram of a keyword's suggestion row, so the toolbar buttons and menu items show the same one. */
+internal fun seq3SourceKeywordGlyph(keyword: String): Seq3SourceGlyph =
+    sourceSuggestionEntries(Seq3Dialect.PLANTUML, emptyList(), "alt").first { it.keyword == keyword }.glyph
 
 private fun sourceSuggestionEntries(
     dialect: Seq3Dialect,
@@ -1591,7 +1723,8 @@ internal fun insertSeq3SourceSuggestion(
     trigger: Seq3SourceSuggestionTrigger,
     suggestion: Seq3SourceSuggestion,
     dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
-): TextFieldValue = insertSeq3SourceSuggestionWithFields(source, trigger, suggestion, dialect).first
+    autoIndent: Boolean = true,
+): TextFieldValue = insertSeq3SourceSuggestionWithFields(source, trigger, suggestion, dialect, autoIndent).first
 
 /** The inserted value (first field selected) and the suggestion's fields mapped into the new text. */
 internal fun insertSeq3SourceSuggestionWithFields(
@@ -1599,9 +1732,15 @@ internal fun insertSeq3SourceSuggestionWithFields(
     trigger: Seq3SourceSuggestionTrigger,
     suggestion: Seq3SourceSuggestion,
     dialect: Seq3Dialect = Seq3Dialect.PLANTUML,
+    autoIndent: Boolean = true,
 ): Pair<TextFieldValue, List<SourceSnippetField>> {
     val start = trigger.start.coerceIn(0, source.length)
     val end = trigger.end.coerceIn(start, source.length)
+    if (suggestion.name) {
+        // A name replaces the word typed for it where it stands: no new line, no re-indenting.
+        val alias = suggestion.insertion
+        return TextFieldValue(source.replaceRange(start, end, alias), TextRange(start + alias.length)) to emptyList()
+    }
     val isTitle = suggestion.keyword.equals("title", ignoreCase = true)
     val isParticipant = suggestion.keyword.equals("participant", ignoreCase = true) ||
         suggestion.keyword.equals("actor", ignoreCase = true)
@@ -1611,10 +1750,10 @@ internal fun insertSeq3SourceSuggestionWithFields(
         val removalStart = if (source.substring(lineStart, start).isBlank()) lineStart else start
         val withoutTrigger = source.removeRange(removalStart, end)
         val insertionAt = seq3SourceHeaderInsertionOffset(withoutTrigger, dialect, titleOnly = isTitle)
-        insertSeq3SourceAtMapped(withoutTrigger, insertionAt, insertionAt, suggestion.insertion, dialect, suggestion.cursorOffset)
+        insertSeq3SourceAtMapped(withoutTrigger, insertionAt, insertionAt, suggestion.insertion, dialect, suggestion.cursorOffset, autoIndent)
             .value to emptyList()
     } else {
-        val inserted = insertSeq3SourceAtMapped(source, start, end, suggestion.insertion, dialect, suggestion.cursorOffset)
+        val inserted = insertSeq3SourceAtMapped(source, start, end, suggestion.insertion, dialect, suggestion.cursorOffset, autoIndent)
         val fields = suggestion.fields.map {
             it.copy(start = inserted.mapSnippetOffset(it.start), end = inserted.mapSnippetOffset(it.end))
         }
@@ -1637,19 +1776,24 @@ private fun Seq3SourceSuggestionRow(
     val inView = remember { BringIntoViewRequester() }
     LaunchedEffect(active) { if (active) runCatching { inView.bringIntoView() } }
     Row(
-        Modifier.fillMaxWidth().bringIntoViewRequester(inView)
+        Modifier.fillMaxWidth().bringIntoViewRequester(inView).testTag("seq3-source-suggestion-row-${if (suggestion.name) "name-" else ""}${suggestion.keyword}")
             .background(if (active) tc.abg else Color.Transparent, RoundedCornerShape(5.dp))
             .clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Seq3SourceGlyphIcon(suggestion.glyph, if (active) tc.ac else tc.ts, Modifier.testTag("seq3-source-suggestion-glyph-${suggestion.keyword}"))
-        AppText("$prefix${suggestion.keyword}", color = if (active) tc.ac else tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        // A name is told from a keyword of the same spelling by its tag; it has no slash.
+        val tagId = if (suggestion.name) "name-${suggestion.keyword}" else suggestion.keyword
+        Seq3SourceGlyphIcon(suggestion.glyph, if (active) tc.ac else tc.ts, Modifier.testTag("seq3-source-suggestion-glyph-$tagId"))
+        AppText(
+            if (suggestion.name) suggestion.keyword else "$prefix${suggestion.keyword}",
+            color = if (active) tc.ac else tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+        )
         AppText(suggestion.syntax, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
-private data class Seq3SourceParticipant(val alias: String, val name: String, val actor: Boolean)
+internal data class Seq3SourceParticipant(val alias: String, val name: String, val actor: Boolean)
 
 private fun sourceDialectName(dialect: Seq3Dialect): String = when (dialect) {
     Seq3Dialect.PLANTUML -> "PlantUML"
@@ -1723,15 +1867,19 @@ private fun SourceModeToggle(label: String, enabled: Boolean, tag: String, onCli
 }
 
 @Composable
-private fun Seq3SourceSettingsMenu(view: Seq3ViewState) {
+private fun Seq3SourceSettingsMenu(state: AppState, view: Seq3ViewState) {
     SourceCompactMenu("Settings ▾", "seq3-source-settings", listOf(
         "Live preview: ${if (view.sourceLiveEnabled) "On" else "Off"}",
-        "Autocomplete: ${if (view.sourceAutocompleteEnabled) "On" else "Off"}",
+        "Autocomplete: ${if (state.settings.diagramSourceAutocomplete) "On" else "Off"}",
+        "Auto-indent: ${if (state.settings.diagramSourceAutoIndent) "On" else "Off"}",
     ), onSelect = { index ->
-        if (index == 0) view.sourceLiveEnabled = !view.sourceLiveEnabled
-        else view.sourceAutocompleteEnabled = !view.sourceAutocompleteEnabled
+        when (index) {
+            0 -> view.sourceLiveEnabled = !view.sourceLiveEnabled
+            1 -> toggleSeq3SourceAutocomplete(state)
+            else -> toggleSeq3SourceAutoIndent(state)
+        }
         view.sourceFocusRequestGeneration++
-    }, tags = listOf("seq3-source-live-toggle", "seq3-source-autocomplete-toggle"))
+    }, tags = listOf("seq3-source-live-toggle", "seq3-source-autocomplete-toggle", "seq3-source-auto-indent-toggle"))
 }
 
 /** Focusable popups consume the outside press that dismisses them, including an opener press. */
@@ -1745,6 +1893,10 @@ private fun SourceCompactMenu(
     onClose: () -> Unit = {},
     variant: ButtonVariant = ButtonVariant.Secondary,
     horizontalPadding: androidx.compose.ui.unit.Dp = 7.dp,
+    /** The picture on the button itself (tag `<tag>-glyph`). */
+    buttonGlyph: Seq3SourceGlyph? = null,
+    /** The picture in front of each option, by index (tag `<tag>-glyph-<index>`); null for none. */
+    optionGlyphs: List<Seq3SourceGlyph?> = emptyList(),
 ) {
     val density = LocalDensity.current
     var open by remember { mutableStateOf(false) }
@@ -1763,7 +1915,8 @@ private fun SourceCompactMenu(
         AppButton(label, onClick = {
             open = !open
         }, variant = variant, textColor = if (variant == ButtonVariant.Ghost) tc().tx else null,
-            horizontalPadding = horizontalPadding, modifier = Modifier.testTag(tag))
+            horizontalPadding = horizontalPadding, modifier = Modifier.testTag(tag),
+            leadingContent = buttonGlyph?.let { glyph -> { color -> Seq3SourceGlyphIcon(glyph, color, Modifier.testTag("$tag-glyph")) } })
         if (open) Popup(
             alignment = Alignment.TopStart,
             offset = with(density) { IntOffset(0, 32.dp.roundToPx()) },
@@ -1777,8 +1930,12 @@ private fun SourceCompactMenu(
                     .verticalScroll(rememberScrollState()).padding(4.dp).testTag("$tag-options"),
             ) {
                 options.forEachIndexed { index, option ->
+                    val glyph = optionGlyphs.getOrNull(index)
                     Box(if (index < tags.size) Modifier.testTag(tags[index]) else Modifier) {
-                        Seq3DropdownMenuItem(option, active = false) { open = false; onSelect(index) }
+                        Seq3DropdownMenuItem(
+                            option, active = false,
+                            leading = glyph?.let { { color -> Seq3SourceGlyphIcon(glyph, color, Modifier.testTag("$tag-glyph-$index")) } },
+                        ) { open = false; onSelect(index) }
                     }
                 }
             }
@@ -1829,28 +1986,37 @@ private fun Seq3SourceActionForms(
             .testTag("seq3-source-insert-group"),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp),
             itemVerticalAlignment = Alignment.CenterVertically) {
+            // The same pictograms as the suggestion rows of these keywords.
             AppButton("+ Participant", onClick = { addParticipant(false) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
-                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-participant"))
+                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-participant"),
+                leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("participant"), color, Modifier.testTag("seq3-source-insert-participant-glyph")) })
             AppButton("+ Actor", onClick = { addParticipant(true) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
-                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-actor"))
+                horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-actor"),
+                leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("actor"), color, Modifier.testTag("seq3-source-insert-actor-glyph")) })
             SourceCompactMenu("+ Message ▾", "seq3-source-message-menu", listOf("Call", "Return", "Async"),
-                onSelect = { addMessage(listOf("Call", "Return", "Async")[it]) }, onClose = reclaimFocus, variant = ButtonVariant.Ghost)
+                onSelect = { addMessage(listOf("Call", "Return", "Async")[it]) }, onClose = reclaimFocus, variant = ButtonVariant.Ghost,
+                buttonGlyph = seq3SourceKeywordGlyph("call"),
+                optionGlyphs = listOf("call", "return", "async").map(::seq3SourceKeywordGlyph))
             AppButton("+ Note", onClick = {
                 val scope = seq3SourceNoteScope(editorState.text.toString(), editorState.selection.start, dialect,
                     sourceParticipants(editorState.text.toString(), dialect).map { it.alias }) ?: "Participant"
                 val snippet = "${if (dialect == Seq3Dialect.MERMAID) "Note" else "note"} over $scope: note text"
                 insertSnippet(snippet, sourceSnippetFields(snippet, "note text" to false), false)
-            }, variant = ButtonVariant.Ghost, textColor = tcNow.tx, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"))
+            }, variant = ButtonVariant.Ghost, textColor = tcNow.tx, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"),
+                leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("note"), color, Modifier.testTag("seq3-source-insert-note-glyph")) })
             val blocks = listOf("loop", "alt", "opt", "par", "critical", "break", "group")
             SourceCompactMenu("+ Block ▾", "seq3-source-fragment-menu", blocks, onSelect = {
                 val aliases = sourceParticipants(editorState.text.toString(), dialect).map { participant -> participant.alias }
                 val (snippet, fields) = seq3SourceBlockSnippet(blocks[it], dialect, aliases)
                 insertSnippet(snippet, fields, false)
-            }, onClose = reclaimFocus, variant = ButtonVariant.Ghost)
+            }, onClose = reclaimFocus, variant = ButtonVariant.Ghost,
+                buttonGlyph = seq3SourceKeywordGlyph("loop"), optionGlyphs = blocks.map(::seq3SourceKeywordGlyph))
             SourceCompactMenu("+ Activation ▾", "seq3-source-activation-menu", listOf("Activate", "Deactivate"), onSelect = {
                 val snippet = "${if (it == 0) "activate" else "deactivate"} Participant"
                 insertSnippet(snippet, sourceSnippetFields(snippet, "Participant" to true), false)
-            }, onClose = reclaimFocus, variant = ButtonVariant.Ghost)
+            }, onClose = reclaimFocus, variant = ButtonVariant.Ghost,
+                buttonGlyph = seq3SourceKeywordGlyph("activate"),
+                optionGlyphs = listOf("activate", "deactivate").map(::seq3SourceKeywordGlyph))
         }
         val moreItems = buildList {
             add("New diagram")
@@ -1960,7 +2126,7 @@ private fun seq3DocumentHasUserContent(document: com.indagium.diagram3.Seq3Docum
 private fun isDefaultSeq3Title(title: String): Boolean =
     title == "Untitled diagram" || title.matches(Regex("Untitled diagram \\d+"))
 
-private fun sourceParticipants(source: String, dialect: Seq3Dialect): List<Seq3SourceParticipant> {
+internal fun sourceParticipants(source: String, dialect: Seq3Dialect): List<Seq3SourceParticipant> {
     val result = linkedMapOf<String, Seq3SourceParticipant>()
     source.lineSequence().forEach { raw ->
         parseSeq3SourceParticipant(raw, dialect)?.let { (alias, name, kind) ->
@@ -2038,6 +2204,7 @@ private fun insertSeq3SourceSnippet(
     dialect: Seq3Dialect,
     header: Boolean = false,
     titleHeader: Boolean = false,
+    autoIndent: Boolean = true,
 ): Seq3SourceInsertion {
     val start = if (header) {
         seq3SourceHeaderInsertionOffset(source, dialect, titleOnly = titleHeader)
@@ -2046,7 +2213,7 @@ private fun insertSeq3SourceSnippet(
         source.indexOf('\n', caret).let { if (it < 0) source.length else it }
     }
     val end = start
-    return insertSeq3SourceAtMapped(source, start, end, snippet, dialect)
+    return insertSeq3SourceAtMapped(source, start, end, snippet, dialect, autoIndent = autoIndent)
 }
 
 private fun insertSeq3SourceAt(
@@ -2059,7 +2226,8 @@ private fun insertSeq3SourceAt(
 ): TextFieldValue = insertSeq3SourceAtMapped(source, start, end, snippet, dialect, cursorOffset).value
 
 /** Inserts [snippet] over [start, end) with every line indented to the level of the insertion
- *  point. A whitespace-only stretch before the insertion on its line is replaced, not kept. */
+ *  point (with [autoIndent] off, to the blanks of the line it follows). A whitespace-only stretch
+ *  before the insertion on its line is replaced, not kept. */
 private fun insertSeq3SourceAtMapped(
     source: String,
     start: Int,
@@ -2067,6 +2235,7 @@ private fun insertSeq3SourceAtMapped(
     snippet: String,
     dialect: Seq3Dialect,
     cursorOffset: Int = snippet.length,
+    autoIndent: Boolean = true,
 ): Seq3SourceInsertion {
     val clampedStart = start.coerceIn(0, source.length)
     val clampedEnd = end.coerceIn(clampedStart, source.length)
@@ -2076,11 +2245,14 @@ private fun insertSeq3SourceAtMapped(
     val replacedEnd = minOf(clampedEnd, terminatorAt).coerceAtLeast(insertionAt)
     var before = source.substring(0, insertionAt)
     val lastLineStart = before.lastIndexOf('\n') + 1
+    // Auto-indent off: the snippet sits at the blanks the line it follows (or replaces) starts with.
+    val lineIndent = before.substring(lastLineStart).let { it.substring(0, it.length - it.trimStart(' ', '\t').length) }
     if (lastLineStart < before.length && before.substring(lastLineStart).isBlank()) before = before.substring(0, lastLineStart)
     val after = source.substring(replacedEnd)
     val content = snippet.trim('\n', '\r')
     val leadingTrim = snippet.length - snippet.trimStart('\n', '\r').length
-    val reindented = seq3SourceReindentSnippet(content, seq3SourceIndentStateAfter(before, dialect))
+    val reindented = if (autoIndent) seq3SourceReindentSnippet(content, seq3SourceIndentStateAfter(before, dialect))
+        else seq3SourceFlatSnippet(content, lineIndent)
     val prefix = if (before.isNotEmpty() && !before.endsWith('\n')) "\n" else ""
     val suffix = if (after.isNotEmpty() && !after.startsWith('\n')) "\n" else ""
     val next = before + prefix + reindented.text + suffix + after

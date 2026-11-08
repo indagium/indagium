@@ -1589,6 +1589,8 @@ fun AppButton(
     tooltipMaxLines: Int = 2,
     labelOverflow: TextOverflow = TextOverflow.Clip,
     multicolorIcon: Boolean = false,
+    // A drawn picture before the label (the Seq3 source toolbar's glyphs), given the label colour.
+    leadingContent: (@Composable (Color) -> Unit)? = null,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -1636,6 +1638,7 @@ fun AppButton(
                     },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    leadingContent?.invoke(resolvedTextColor)
                     leadingIcon?.let {
                         Icon(
                             it,

@@ -1264,7 +1264,6 @@ internal class Seq3ViewState {
     var sourceLiveLastAppliedText by mutableStateOf("")
     var sourceEditorDialect by mutableStateOf(Seq3Dialect.PLANTUML)
     var sourceLiveEnabled by mutableStateOf(true)
-    var sourceAutocompleteEnabled by mutableStateOf(true)
     var sourceDraftDirty by mutableStateOf(false)
     var sourceDraftStale by mutableStateOf(false)
     var sourceDiagnostics by mutableStateOf<List<com.indagium.diagram3.Seq3SourceDiagnostic>>(emptyList())
@@ -2062,25 +2061,49 @@ internal fun Seq3DropdownButton(
  *  so every pre-existing call site (Seq3RegenScopeControls' own "Whole view"/"Selection") is
  *  unaffected. */
 @Composable
-internal fun Seq3DropdownMenuItem(label: String, active: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun Seq3DropdownMenuItem(
+    label: String,
+    active: Boolean = false,
+    enabled: Boolean = true,
+    /** A picture in front of the label, given the label's colour; the label keeps its own padding. */
+    leading: (@Composable (Color) -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val tc = tc()
+    val color = when {
+        !enabled -> tc.td
+        active -> tc.ac
+        else -> tc.tx
+    }
     HoverBox(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
         baseBg = if (active) tc.abg else Color.Transparent,
         onClick = if (enabled) onClick else null,
     ) {
         DisableSelection {
-            AppText(
-                label,
-                color = when {
-                    !enabled -> tc.td
-                    active -> tc.ac
-                    else -> tc.tx
-                },
-                fontSize = 11.sp,
-                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            )
+            if (leading == null) {
+                AppText(
+                    label,
+                    color = color,
+                    fontSize = 11.sp,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+            } else {
+                Row(
+                    Modifier.padding(start = 8.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    leading(color)
+                    AppText(
+                        label,
+                        color = color,
+                        fontSize = 11.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                }
+            }
         }
     }
 }

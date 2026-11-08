@@ -1489,6 +1489,12 @@ data class AppSettings(
     // Applied only as a diagram note is created. Each note carries its own export metadata, so
     // changing this never rewrites or changes the representation of an existing diagram.
     val diagramDefaultExportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+    // The diagram source editor's two toggles, app-wide so they survive a restart and a new
+    // diagram: name/keyword suggestions, and indentation by the block and activation rules (Enter,
+    // typed `end`/`deactivate`, generated text). Both on by default. JSON form ONLY, same rule as
+    // the settings below — the frozen legacy positional settingsFromToken decoder never gains a field.
+    val diagramSourceAutocomplete: Boolean = true,
+    val diagramSourceAutoIndent: Boolean = true,
     // Wave 2.2: suppresses AppState's tag-prefix/specific-class conflict dialog (adding a package
     // prefix while a child tag under it is already selected, or vice versa) once the user has seen
     // it and picked "don't ask again". False by default so the prompt fires the first time a real

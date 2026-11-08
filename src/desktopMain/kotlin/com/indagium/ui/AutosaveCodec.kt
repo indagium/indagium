@@ -677,6 +677,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("autoScrollWhileTailing", autoScrollWhileTailing)
     put("diagramLinkedNotePrimary", diagramLinkedNotePrimary)
     put("diagramDefaultExportMode", diagramDefaultExportMode.name)
+    put("diagramSourceAutocomplete", diagramSourceAutocomplete)
+    put("diagramSourceAutoIndent", diagramSourceAutoIndent)
     put("suppressTagPrefixConflictPrompt", suppressTagPrefixConflictPrompt)
     put("lastSupportPromptAt", lastSupportPromptAt)
     put("suppressSupportPrompt", suppressSupportPrompt)
@@ -1042,6 +1044,9 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         diagramDefaultExportMode = o.stringOrNull("diagramDefaultExportMode")
             ?.let { raw -> runCatching { com.indagium.diagram3.DiagramExportMode.valueOf(raw) }.getOrNull() }
             ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
+        // Default-on: a blob without the keys behaves like a fresh AppSettings().
+        diagramSourceAutocomplete = o.boolOrDefault("diagramSourceAutocomplete", true),
+        diagramSourceAutoIndent = o.boolOrDefault("diagramSourceAutoIndent", true),
         suppressTagPrefixConflictPrompt = o.boolOrDefault("suppressTagPrefixConflictPrompt", false),
         lastSupportPromptAt = o.longOrDefault("lastSupportPromptAt", 0L),
         suppressSupportPrompt = o.boolOrDefault("suppressSupportPrompt", false),
