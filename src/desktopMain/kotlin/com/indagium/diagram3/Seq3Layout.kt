@@ -552,6 +552,7 @@ internal const val SEQ3_DELAY_EDITOR_MIN_WIDTH_DP = 132.0
 // fragmentBoxFrom's own doc. buildRows widens the header-to-rows gap by at least this much whenever
 // the document has any fragment, so a fragment spanning the FIRST message can never claim space
 // that belongs to the header band (item 5's regression — see this file's header/the plan doc).
+// Fragments nested into the first row add one more FRAGMENT_LABEL_H each (RowBuildSpacing.firstRowHeaderLevels).
 private const val FRAGMENT_TOP_RESERVE = ROW_H / 2 + FRAGMENT_LABEL_H + 6.0
 
 // WP2: UML activation-bar geometry. ACTIVATION_W is the bar's own width, centered on its
@@ -694,14 +695,9 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
             ?: candidateIndices.last()
         delaysByRowIndex.getOrPut(targetIndex) { mutableListOf() } += delay
     }
-    val siblingBoundaryPadding = fragmentSiblingBoundaryPadding(
-        doc.fragments,
-        emissions,
-        requirements,
-        delaysByRowIndex,
-        doc.messages.associateBy { it.id },
-    )
-    val fragmentNotePadding = fragmentNoteTailPadding(doc, emissions, tm)
+    val fragmentOpeners = fragmentOpenerCounts(doc.fragments, emissions, doc.messages.associateBy { it.id })
+    val siblingBoundaryPadding = fragmentOpeningPadding(fragmentOpeners, emissions, requirements, delaysByRowIndex)
+    val fragmentNotePadding = fragmentNoteTailPadding(doc, emissions, tm, fragmentOpeners)
     val bandLeft = lefts.firstOrNull() ?: MARGIN
     val rowBuild = buildRows(
         emissions,
@@ -710,7 +706,14 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         centers,
         headerHeight,
         doc.fragments.any { it.visibility == Seq3Visibility.VISIBLE },
-        RowBuildSpacing(delaysByRowIndex, bandLeft, contentRight, siblingBoundaryPadding, fragmentNotePadding),
+        RowBuildSpacing(
+            delaysByRowIndex,
+            bandLeft,
+            contentRight,
+            siblingBoundaryPadding,
+            fragmentNotePadding,
+            fragmentOpeners,
+        ),
         tm,
     )
 
@@ -1915,7 +1918,13 @@ private class RowBuildSpacing(
     // Extra pitch directly below a row whose note must stay inside the fragment that closes on it —
     // see fragmentNoteTailPadding. Applied before any delay band so the band starts below the note.
     val fragmentNotePadding: Map<Int, Double> = emptyMap(),
-)
+    // How many fragments open on each emission index. The first row's count is how many label
+    // strips stack above it (nested ones one strip above the next); the gap below the diagram
+    // header holds all of them.
+    val fragmentOpeners: Map<Int, Int> = emptyMap(),
+) {
+    val firstRowHeaderLevels: Int get() = fragmentOpeners[0] ?: 1
+}
 
 private fun buildRows(
     emissions: List<Emission>,
@@ -1943,7 +1952,11 @@ private fun buildRows(
     val last = HashMap<String, Int>()
     val rowYByIndex = HashMap<Int, Pair<Double, Double>>()
     var minimumNextRowVisualTop: Double? = null
-    val topGap = if (fragmentsPresent) max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE) else HEADER_TO_ROWS_GAP
+    val topGap = if (fragmentsPresent) {
+        max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE + (spacing.firstRowHeaderLevels - 1).coerceAtLeast(0) * FRAGMENT_LABEL_H)
+    } else {
+        HEADER_TO_ROWS_GAP
+    }
     var y = MARGIN + headerHeight + topGap
     var rightExtra = 0.0
     emissions.forEachIndexed { i, emission ->
@@ -2003,31 +2016,38 @@ private fun delayBandHeight(tm: Seq3TextMetrics): Double {
     return max(DELAY_BAND_H, visibleControlHeight + 2 * DELAY_CONTROL_PAD_V)
 }
 
-/** Extra pitch before the next emission where one sibling fragment closes and another opens.
- * The bracket's closing edge, the next fragment's actual 28-unit edit control, and any delay band
- * anchored after the closing row are treated as real geometry. Nested groups only add spacing
- * between sibling groups at the same depth; a delay between rows inside a still-open group remains
- * inside that group and receives no boundary padding. */
-private fun fragmentSiblingBoundaryPadding(
-    fragments: List<Seq3Fragment>,
+/** Extra pitch before an emission that opens one or more fragments. A fragment's box reaches
+ * ROW_H / 2 plus one label strip (the actual 28-unit edit control) above its first row, and every
+ * fragment nested into the same row stacks one more strip above that, so the row before must leave
+ * that much room below its own bottom edge plus [GROUP_GAP_CLEARANCE]. This covers a fragment that
+ * opens right after a closing one, and one that opens right after an ordinary row, with or without
+ * an activation directive between them. A delay band anchored after the previous row is real
+ * geometry too: it is passed first and the strips need their own reserve below it. Space the plain
+ * row pitch already leaves is not added again, so a row that was far enough away stays where it was. */
+private fun fragmentOpeningPadding(
+    openers: Map<Int, Int>,
     emissions: List<Emission>,
     requirements: List<RowRequirement>,
     delaysByRowIndex: Map<Int, List<Seq3Delay>>,
-    messagesById: Map<String, Seq3Message>,
 ): Map<Int, Double> {
-    if (fragments.isEmpty() || emissions.isEmpty()) return emptyMap()
-    val spans = fragmentEmissionSpans(fragments, emissions, messagesById)
-    val nested = nestFragmentEmissionSpans(spans)
-    return nested.mapNotNull { closing ->
-        val isSiblingBoundary = nested.any { next -> next.depth == closing.depth && next.start == closing.end + 1 }
-        if (!isSiblingBoundary) return@mapNotNull null
-        val index = closing.end
+    if (openers.isEmpty() || emissions.isEmpty()) return emptyMap()
+    return openers.mapNotNull { (start, count) ->
+        val index = start - 1
         val row = emissions.getOrNull(index) ?: return@mapNotNull null
         val requirement = requirements.getOrNull(index) ?: return@mapNotNull null
-        val padding = fragmentBoundaryPadding(row, requirement, delaysByRowIndex[index].orEmpty().isNotEmpty())
+        val padding = fragmentBoundaryPadding(row, requirement, delaysByRowIndex[index].orEmpty().isNotEmpty(), count)
         if (padding <= 0.0) null else index to padding
-    }.groupBy({ it.first }, { it.second })
-        .mapValues { (_, values) -> values.maxOrNull() ?: 0.0 }
+    }.toMap()
+}
+
+/** How many visible fragments open on each emission index, keyed by that index. */
+private fun fragmentOpenerCounts(
+    fragments: List<Seq3Fragment>,
+    emissions: List<Emission>,
+    messagesById: Map<String, Seq3Message>,
+): Map<Int, Int> {
+    if (fragments.isEmpty() || emissions.isEmpty()) return emptyMap()
+    return fragmentEmissionSpans(fragments, emissions, messagesById).groupingBy { it.first }.eachCount()
 }
 
 private data class FragmentEmissionSpan(val start: Int, val end: Int, val depth: Int)
@@ -2071,7 +2091,8 @@ private fun nestFragmentEmissionSpans(spans: List<IntRange>): List<FragmentEmiss
     return nested
 }
 
-private fun fragmentBoundaryPadding(row: Emission, req: RowRequirement, hasDelay: Boolean): Double {
+private fun fragmentBoundaryPadding(row: Emission, req: RowRequirement, hasDelay: Boolean, openers: Int): Double {
+    val headerReserve = ROW_H / 2 + openers * FRAGMENT_LABEL_H
     val (pitch, bottomOffset) = when (row) {
         is Emission.Note -> max(ROW_H, req.lines.size * req.lineHeight + 2 * NOTE_PAD + NOTE_ROW_GAP) to
             max(ROW_H / 2, -ROW_H / 2 + req.lines.size * req.lineHeight + 2 * NOTE_PAD)
@@ -2080,12 +2101,12 @@ private fun fragmentBoundaryPadding(row: Emission, req: RowRequirement, hasDelay
         is Emission.Elision -> (ROW_H / 2) to ROW_H / 4
         is Emission.Arrow -> ROW_H to ROW_H / 2
     }
-    // With a delay, the band occupies the space after the closing row. The next fragment's opening
+    // With a delay, the band occupies the space after the previous row. The next fragment's opening
     // control needs its own reserve after that band; the delay cannot stand in for the header gap.
     return if (hasDelay) {
-        GROUP_GAP_CLEARANCE + ROW_H / 2 + FRAGMENT_LABEL_H
+        GROUP_GAP_CLEARANCE + headerReserve
     } else {
-        (bottomOffset + GROUP_GAP_CLEARANCE + ROW_H / 2 + FRAGMENT_LABEL_H - pitch).coerceAtLeast(0.0)
+        (bottomOffset + GROUP_GAP_CLEARANCE + headerReserve - pitch).coerceAtLeast(0.0)
     }
 }
 
@@ -2310,6 +2331,9 @@ private fun layoutFragments(
     }
     if (withBounds.isEmpty()) return emptyList()
     val sorted = withBounds.sortedWith(compareBy({ it.range.first }, { -it.range.last }))
+    // Fragments that open on the same row stack their label strips: the outermost one's strip is the
+    // highest and each nested one sits one strip lower, so no two strips share a height.
+    val openersAt = sorted.groupingBy { it.range.first }.eachCount()
     // (bounds, depth, result index) with the CLAMPED end already applied
     val stack = ArrayDeque<Triple<Bounds, Int, Int>>()
     val extents = mutableListOf<FragmentExtent>()
@@ -2319,10 +2343,11 @@ private fun layoutFragments(
         val parent = stack.lastOrNull()
         val clampedEnd = parent?.let { min(bounds.range.last, it.first.range.last) } ?: bounds.range.last
         val depth = stack.size
+        val stripsAbove = openersAt.getValue(bounds.range.first) - stack.count { it.first.range.first == bounds.range.first }
         val clamped = Bounds(bounds.fragment, bounds.range.first..clampedEnd)
         stack.addLast(Triple(clamped, depth, extents.size))
         parents += parent?.third ?: -1
-        extents += fragmentExtentFrom(clamped.range, depth, rows, notes, bars, minTop)
+        extents += fragmentExtentFrom(clamped.range, depth, stripsAbove, rows, notes, bars, minTop)
     }
     enclosingFragmentsReachOutward(extents, parents)
     return sorted.indices.map { i ->
@@ -2358,8 +2383,15 @@ private fun Seq3Note.hasExplicitGeometry(): Boolean = x != null && y != null && 
  *  drawn directly under its anchor row, and the box that encloses it grows by the note's height, so
  *  the rows after the box must move down by the same amount to keep their distance from its border.
  *  A note anchored earlier in the fragment is followed by more rows of the same fragment and needs
- *  no reservation here (it floats over them, as every note does). */
-private fun fragmentNoteTailPadding(doc: Seq3Document, emissions: List<Emission>, tm: Seq3TextMetrics): Map<Int, Double> {
+ *  no reservation here (it floats over them, as every note does). A note under the row just before
+ *  a fragment opens would hang into that fragment's label strip, so it reserves its height too; the
+ *  opening reserve already carries the clearance, so only the note's own height is added there. */
+private fun fragmentNoteTailPadding(
+    doc: Seq3Document,
+    emissions: List<Emission>,
+    tm: Seq3TextMetrics,
+    openers: Map<Int, Int>,
+): Map<Int, Double> {
     if (doc.fragments.isEmpty() || doc.notes.isEmpty() || emissions.isEmpty()) return emptyMap()
     val lastIndexByMessage = HashMap<String, Int>()
     emissions.forEachIndexed { index, emission -> lastIndexByMessage[emission.messageId] = index }
@@ -2369,9 +2401,13 @@ private fun fragmentNoteTailPadding(doc: Seq3Document, emissions: List<Emission>
     val padding = HashMap<Int, Double>()
     doc.notes.filter { it.visibility == Seq3Visibility.VISIBLE && !it.hasExplicitGeometry() }.forEach { note ->
         val anchor = note.messageIds.mapNotNull { lastIndexByMessage[it] }.maxOrNull() ?: return@forEach
-        if (anchor !in closingRows) return@forEach
+        val clearance = when {
+            anchor in closingRows -> GROUP_GAP_CLEARANCE
+            (anchor + 1) in openers -> 0.0
+            else -> return@forEach
+        }
         val height = autoNoteLines(note, tm).first.size * tm.lineHeight(Seq3FontRole.NOTE) + 2 * NOTE_PAD
-        padding[anchor] = max(padding[anchor] ?: 0.0, height + GROUP_GAP_CLEARANCE)
+        padding[anchor] = max(padding[anchor] ?: 0.0, height + clearance)
     }
     return padding
 }
@@ -2387,10 +2423,13 @@ private class FragmentExtent(
 )
 
 /** Computes one fragment's extent: the rows it spans and the notes anchored to them set its size,
- *  then its left and right borders are moved out until they clear the activation bars they meet. */
+ *  then its left and right borders are moved out until they clear the activation bars they meet.
+ *  [stripsAbove] is how many label strips this box's top leaves above its first row: 1 for the
+ *  innermost fragment opening there, one more for each enclosing one that opens on the same row. */
 private fun fragmentExtentFrom(
     range: IntRange,
     depth: Int,
+    stripsAbove: Int,
     rows: List<Seq3RowGeometry>,
     notes: List<FragmentNoteAnchor>,
     bars: List<Seq3ActivationBar>,
@@ -2402,7 +2441,7 @@ private fun fragmentExtentFrom(
     val inset = depth * FRAGMENT_INSET_PER_DEPTH
     var left = (xs.minOrNull() ?: 0.0) - FRAGMENT_PAD + inset
     var right = (xs.maxOrNull() ?: 0.0) + FRAGMENT_PAD - inset
-    val rawTop = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - FRAGMENT_LABEL_H
+    val rawTop = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - stripsAbove * FRAGMENT_LABEL_H
     val top = max(rawTop, minTop)
     val rowsBottom = spanned.lastOrNull()?.let(::fragmentRowBottom) ?: 0.0
     val bottom = max(rowsBottom, inside.maxOfOrNull { it.box.y + it.box.height + GROUP_GAP_CLEARANCE } ?: rowsBottom)
