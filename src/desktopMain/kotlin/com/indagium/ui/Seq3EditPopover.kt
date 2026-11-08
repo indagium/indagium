@@ -54,8 +54,6 @@ import kotlin.math.roundToInt
 internal val SEQ3_EDIT_POPOVER_MIN_WIDTH = 280.dp
 private val SEQ3_EDIT_POPOVER_GAP = 4.dp
 private val SEQ3_EDIT_POPOVER_MARGIN = 6.dp
-private const val FRAGMENT_HEADER_MAX_HEIGHT = 28.0
-private const val FRAGMENT_HEADER_MIN_HEIGHT = 20.0
 
 /** What the popover edits: the target, the element's box in diagram units, the field's seed text,
  *  and, for a message label, how many arrows share the edited template. */
@@ -75,8 +73,7 @@ internal fun seq3EditSpec(document: Seq3Document, layout: Seq3Layout, target: Se
     when (target.kind) {
         Seq3CanvasEditorKind.MESSAGE_LABEL -> messageEditSpec(document, layout, target)
         Seq3CanvasEditorKind.FRAGMENT_LABEL -> layout.fragments.firstOrNull { it.fragmentId == target.id }?.let { fragment ->
-            val headerHeight = fragment.box.height.coerceAtMost(FRAGMENT_HEADER_MAX_HEIGHT).coerceAtLeast(FRAGMENT_HEADER_MIN_HEIGHT)
-            Seq3EditSpec(target, fragment.box.copy(height = headerHeight), fragment.label)
+            Seq3EditSpec(target, fragment.headerBox, fragment.label)
         }
         Seq3CanvasEditorKind.DELAY_LABEL ->
             layout.delays.firstOrNull { it.delayId == target.id }?.let { Seq3EditSpec(target, it.hitBox, it.label) }

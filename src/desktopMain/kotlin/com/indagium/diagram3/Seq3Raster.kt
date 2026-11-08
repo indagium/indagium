@@ -218,6 +218,9 @@ private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme,
     // rather than the bar over-painting the arrow it belongs to. That ordering is exactly why this
     // line is here: after paintLifelines, before the row loop below.
     layout.activations.forEach { paintActivationBar(g, it, theme) }
+    // A fragment's label and operand guards go on top of the bars, so a bar crossing a fragment's
+    // border never hides its text (Seq3Layout keeps them clear of the bars where it can).
+    layout.fragments.forEach { paintFragmentText(g, it, theme) }
     layout.lifelines.forEach { paintHeader(g, it, theme) }
     layout.rows.forEach { paintRow(g, it, theme) }
     layout.notes.forEach { paintNoteBox(g, it, theme) }
@@ -562,20 +565,44 @@ private fun paintFragment(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3R
     g.color = Color(border, true)
     g.stroke = BasicStroke(STROKE_THIN)
     g.drawRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), arc, arc)
+    paintFragmentDividers(g, fragment, border)
+}
+
+/** The fragment's label and operand guards, painted after the activation bars. The label sits in
+ *  [Seq3FragmentBox.headerBox] (moved clear of bars by the layout); when a bar still runs under it
+ *  ([Seq3FragmentBox.headerOverBar]) the label gets an opaque backing in the diagram background. */
+private fun paintFragmentText(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3RasterTheme) {
+    val header = fragment.headerBox
+    val text = fragment.style?.textArgb ?: theme.fragmentBorder
     g.font = fontFor(Seq3FontRole.FRAGMENT)
     val fm = g.fontMetrics
+    if (fragment.headerOverBar) {
+        val textWidth = fm.stringWidth(fragment.label)
+        g.color = Color(theme.background, true)
+        g.fillRect(
+            (header.x + 3).roundToInt(),
+            (header.y + 1).roundToInt(),
+            (textWidth + 6.0).coerceAtMost(header.width - 3).roundToInt().coerceAtLeast(1),
+            (fm.height + 2).toInt(),
+        )
+    }
     g.color = Color(text, true)
-    g.drawString(fragment.label, (box.x + 6).roundToInt(), (box.y + fm.ascent + 2).roundToInt())
-    paintFragmentDividers(g, fragment, border, text)
+    g.drawString(fragment.label, (header.x + 6).roundToInt(), (header.y + fm.ascent + 2).roundToInt())
+    fragment.dividers.forEach { divider ->
+        if (divider.guard.isNotBlank()) {
+            val guardX = divider.guardX ?: (fragment.box.x + 3)
+            g.color = Color(text, true)
+            g.drawString(divider.guard, (guardX + 3).roundToInt(), (divider.y - 3).roundToInt())
+        }
+    }
 }
 
 /**
  * WP6: UML operand dividers — this function only PAINTS what [layoutSeq3] already resolved
  * ([Seq3FragmentDivider]'s own doc), same "geometry decisions live in Seq3Layout, painting
  * decisions don't" split every other shape in this file follows. A dashed rule across the
- * fragment box's own width, its guard drawn just above it — SAME font role/color as the
- * fragment's own label two lines up in [paintFragment] ([Seq3FontRole.FRAGMENT],
- * [Seq3RasterTheme.fragmentBorder]) and the SAME dash pattern [paintLifelines] already uses
+ * fragment box's own width (its guard text is drawn by [paintFragmentText], after the activation
+ * bars, in the SAME font role/color as the fragment's own label) and the SAME dash pattern [paintLifelines] already uses
  * ([DASH_LIFELINE], 4/4) for its own dashed guide line — reused rather than invented, so a
  * divider doesn't introduce a third dash meaning alongside DASH_LIFELINE/DASH_WARN/DASH_DOTTED.
  * No new [Seq3RasterTheme] field, per this deliverable's own brief: everything painted here is
@@ -585,20 +612,13 @@ private fun paintFragmentDividers(
     g: Graphics2D,
     fragment: Seq3FragmentBox,
     borderArgb: Int,
-    textArgb: Int,
 ) {
     if (fragment.dividers.isEmpty()) return
     val box = fragment.box
     g.color = Color(borderArgb, true)
-    g.font = fontFor(Seq3FontRole.FRAGMENT)
     g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_LIFELINE, 0f)
     fragment.dividers.forEach { divider ->
         g.draw(java.awt.geom.Line2D.Double(box.x, divider.y, box.x + box.width, divider.y))
-        if (divider.guard.isNotBlank()) {
-            g.color = Color(textArgb, true)
-            g.drawString(divider.guard, (box.x + 6).roundToInt(), (divider.y - 3).roundToInt())
-            g.color = Color(borderArgb, true)
-        }
     }
 }
 

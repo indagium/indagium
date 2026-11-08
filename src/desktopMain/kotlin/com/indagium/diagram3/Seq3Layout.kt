@@ -252,7 +252,15 @@ data class Seq3ElisionRow(
  *  [Seq3ActivationBar], it adds no pitch of its own and lives entirely inside a fragment box's
  *  already-computed geometry (see that type's own doc for the identical "why not a row" framing).
  */
-data class Seq3FragmentDivider(val guard: String, val y: Double)
+data class Seq3FragmentDivider(
+    val guard: String,
+    val y: Double,
+    /** Left edge of the guard text, or null for the default [Seq3FragmentBox.box] left plus a small
+     *  inset. Set only when an activation bar crosses the strip the guard is drawn in, so the text
+     *  is moved right of it instead of being painted over it. Appended LAST — this file's own
+     *  versioning rule. */
+    val guardX: Double? = null,
+)
 
 data class Seq3FragmentBox(
     val fragmentId: String,
@@ -278,7 +286,23 @@ data class Seq3FragmentBox(
     val dividers: List<Seq3FragmentDivider> = emptyList(),
     /** Nullable artifact colors are resolved against the active document theme by each renderer. */
     val style: Seq3ArtifactStyle? = null,
-)
+    /** The strip the label and the edit/colour/delete controls are drawn in, or null for the
+     *  default: the box's own top strip ([headerBox]). Set when an activation bar that crosses the
+     *  box's top border would otherwise run through that strip: the strip then starts right of the
+     *  bar (or ends left of it), so no bar is ever under the label or the controls. Appended LAST —
+     *  this file's own versioning rule. */
+    val header: Seq3Box? = null,
+    /** True only when no bar-free stretch of the top strip is wide enough for the label and its
+     *  controls, so [headerBox] is the full strip and a bar still runs under it. A renderer then
+     *  paints the header over the bars on an opaque backing so the label stays readable. */
+    val headerOverBar: Boolean = false,
+) {
+    /** The resolved header strip every renderer and hit test uses. Its height is the box's own
+     *  height clamped to the 20..28 control height, so a very short fragment still has a usable
+     *  strip. */
+    val headerBox: Seq3Box
+        get() = header ?: Seq3Box(box.x, box.y, box.width, box.height.coerceIn(FRAGMENT_HEADER_MIN_H, FRAGMENT_LABEL_H))
+}
 
 data class Seq3NoteBox(
     val noteId: String,
@@ -485,8 +509,24 @@ private const val FRAGMENT_PAD = 10.0
 // The canvas label control (label plus edit/delete actions) is up to 28 logical units tall. Use
 // that actual extent for brackets and shared row spacing, not just the text baseline height.
 private const val FRAGMENT_LABEL_H = 28.0
+private const val FRAGMENT_HEADER_MIN_H = 20.0
 private const val GROUP_GAP_CLEARANCE = 6.0
 private const val FRAGMENT_INSET_PER_DEPTH = 10.0
+
+// A fragment's left/right border keeps this much clear space beyond the outer side of any activation
+// bar that reaches it. It is FRAGMENT_PAD on purpose: the border sits the same distance from a bar's
+// outer side as it does from a lifeline with no bar, so one padding rule serves both.
+private const val FRAGMENT_BAR_PAD = FRAGMENT_PAD
+
+// The label and controls strip needs room for the (truncating) label plus the colour, edit and
+// delete buttons; a bar-free stretch narrower than this is not worth moving the strip into.
+private const val FRAGMENT_HEADER_MIN_W = 96.0
+private const val FRAGMENT_HEADER_BAR_GAP = 4.0
+
+// An operand guard is drawn FRAGMENT_GUARD_LEFT right of the box's left border, in the band
+// FRAGMENT_GUARD_H tall just above its divider line (the canvas overlay's own offsets).
+private const val FRAGMENT_GUARD_LEFT = 3.0
+private const val FRAGMENT_GUARD_H = 13.0
 
 // WP11: the vertical band a time-gap marker reserves between the row it follows and whatever
 // comes next — tall enough for one centered label line plus a little breathing room above/below,
@@ -661,6 +701,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         delaysByRowIndex,
         doc.messages.associateBy { it.id },
     )
+    val fragmentNotePadding = fragmentNoteTailPadding(doc, emissions, tm)
     val bandLeft = lefts.firstOrNull() ?: MARGIN
     val rowBuild = buildRows(
         emissions,
@@ -674,6 +715,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         contentRight,
         siblingBoundaryPadding,
         tm,
+        fragmentNotePadding,
     )
 
     // WP10: which row, if any, creates/destroys each lifeline — see resolveSeq3Lifecycle's own
@@ -695,7 +737,8 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // derived from row x-extents — an unrewritten `toX` would size those against the wrong edge.
     val rowsWithCreateStop = applyCreateArrowStops(rowBuild.rows, lifelineIndex, centers, headerWidths)
 
-    val fragments = layoutFragments(doc, rowBuild.firstRowIndex, rowsWithCreateStop, headerHeight)
+    // Notes and activation bars are placed BEFORE the fragments: a fragment's box encloses the notes
+    // anchored to its rows and clears the bars at its borders, so it needs both finished.
     val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowsWithCreateStop, centers, tm)
 
     // WP2: UML activation bars — see buildActivationBars' own doc. Pulled into its own function
@@ -707,6 +750,11 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val activationBars = buildActivationBars(
         doc, emissions, rowBuild.rowYByIndex, lifelineIndex, centers, lifecycle, minLifelineTop, rowBuild.bottomY,
     )
+    val fragments = layoutFragments(
+        doc, rowBuild.firstRowIndex, rowsWithCreateStop, headerHeight,
+        fragmentNoteAnchors(doc.notes, notes, rowBuild.lastRowIndex), activationBars, tm,
+    )
+
     // WP18: promoted-capture StateInvariant markers — a pure post-pass over the already-placed rows,
     // like buildActivationBars just above; see buildStateInvariantBoxes' own doc for why it needs
     // nothing rowsWithCreateStop itself doesn't already hand back.
@@ -717,7 +765,13 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // already apply to a self-loop/note/stub on that same column.
     val activationRightExtra = activationBars.maxOfOrNull { it.box.x + it.box.width } ?: 0.0
 
-    val rightEdge = maxOf(contentRight, gapSolve.rightExtra + (centers.lastOrNull() ?: 0.0), rowBuild.rightExtra, activationRightExtra)
+    // A fragment's right border may sit past the last bar it clears (see layoutFragments); budget the
+    // usual FRAGMENT_PAD of it inside the margin and widen the diagram only for what exceeds that.
+    val fragmentRightExtra = fragments.maxOfOrNull { it.box.x + it.box.width - FRAGMENT_PAD } ?: 0.0
+    val rightEdge = maxOf(
+        contentRight, gapSolve.rightExtra + (centers.lastOrNull() ?: 0.0), rowBuild.rightExtra, activationRightExtra,
+        fragmentRightExtra,
+    )
     val noteRight = notes.maxOfOrNull { it.box.x + it.box.width } ?: 0.0
     val noteBottom = notes.maxOfOrNull { it.box.y + it.box.height } ?: 0.0
     val width = maxOf(rightEdge, noteRight) + MARGIN
@@ -1873,6 +1927,9 @@ private fun buildRows(
     bandRight: Double = MARGIN,
     siblingBoundaryPadding: Map<Int, Double> = emptyMap(),
     textMetrics: Seq3TextMetrics,
+    // Extra pitch directly below a row whose note must stay inside the fragment that closes on it —
+    // see fragmentNoteTailPadding. Applied before any delay band so the band starts below the note.
+    fragmentNotePadding: Map<Int, Double> = emptyMap(),
 ): RowBuildResult {
     val rows = mutableListOf<Seq3RowGeometry>()
     val delayBoxes = mutableListOf<Seq3DelayBox>()
@@ -1901,7 +1958,7 @@ private fun buildRows(
         rows += built.geometry
         last[emission.messageId] = rows.lastIndex
         rowYByIndex[i] = rowVerticalExtent(built.geometry)
-        y += built.pitch
+        y += built.pitch + (fragmentNotePadding[i] ?: 0.0)
         rightExtra = max(rightExtra, built.rightEdge)
         val rowDelays = delaysByRowIndex[i].orEmpty()
         rowDelays.forEach { delay ->
@@ -2223,6 +2280,13 @@ private fun layoutFragments(
     // no extra vertical inset per depth, so the outermost's own reserve doesn't automatically cover
     // every nested box without this second, direct clamp).
     headerHeight: Double,
+    // The notes anchored to a drawn row: a fragment's box encloses every one anchored inside its
+    // row range, so a note written inside `opt … end` is drawn inside the box.
+    notes: List<FragmentNoteAnchor>,
+    // The activation bars: a fragment's left and right borders clear the bars that reach them, and
+    // its label strip is kept out from under the ones that cross its top border.
+    bars: List<Seq3ActivationBar>,
+    tm: Seq3TextMetrics,
 ): List<Seq3FragmentBox> {
     // Item 5 (hidden fragments): skip a HIDDEN fragment's bracket entirely — same "drop the box,
     // keep the row" contract Seq3Fragment.visibility documents, and the same filter hidden
@@ -2240,18 +2304,136 @@ private fun layoutFragments(
     }
     if (withBounds.isEmpty()) return emptyList()
     val sorted = withBounds.sortedWith(compareBy({ it.range.first }, { -it.range.last }))
-    val stack = ArrayDeque<Pair<Bounds, Int>>() // (bounds, depth) with the CLAMPED end already applied
-    val result = mutableListOf<Seq3FragmentBox>()
+    // (bounds, depth, result index) with the CLAMPED end already applied
+    val stack = ArrayDeque<Triple<Bounds, Int, Int>>()
+    val extents = mutableListOf<FragmentExtent>()
+    val parents = mutableListOf<Int>() // index of each extent's enclosing fragment, or -1
     sorted.forEach { bounds ->
         while (stack.isNotEmpty() && stack.last().first.range.last < bounds.range.first) stack.removeLast()
         val parent = stack.lastOrNull()
         val clampedEnd = parent?.let { min(bounds.range.last, it.first.range.last) } ?: bounds.range.last
         val depth = stack.size
         val clamped = Bounds(bounds.fragment, bounds.range.first..clampedEnd)
-        stack.addLast(clamped to depth)
-        result += fragmentBoxFrom(clamped.fragment, clamped.range, depth, rows, minTop, firstRowIndex)
+        stack.addLast(Triple(clamped, depth, extents.size))
+        parents += parent?.third ?: -1
+        extents += fragmentExtentFrom(clamped.range, depth, rows, notes, bars, minTop)
     }
-    return result
+    enclosingFragmentsReachOutward(extents, parents)
+    return sorted.indices.map { i ->
+        fragmentBoxFrom(sorted[i].fragment, extents[i], rows, firstRowIndex, bars, tm)
+    }
+}
+
+// ── Fragment note and bar membership ──────────────────────────────────────────────────────────
+
+/** A note's drawn [box] and the drawn row index (into the layout's rows) it is anchored to. */
+private class FragmentNoteAnchor(val rowIndex: Int, val box: Seq3Box)
+
+/** The notes that follow a message (no explicit canvas placement of their own), with the row they
+ *  anchor to: the same last-drawn-row rule [layoutNotes] places them by. A free-floating note has no
+ *  message to belong to and is never part of a fragment. */
+private fun fragmentNoteAnchors(
+    notes: List<Seq3Note>,
+    boxes: List<Seq3NoteBox>,
+    lastRowIndex: Map<String, Int>,
+): List<FragmentNoteAnchor> {
+    val boxById = boxes.associateBy { it.noteId }
+    return notes.mapNotNull { note ->
+        if (note.hasExplicitGeometry()) return@mapNotNull null
+        val box = boxById[note.id] ?: return@mapNotNull null
+        val rowIndex = note.messageIds.mapNotNull { lastRowIndex[it] }.maxOrNull() ?: return@mapNotNull null
+        FragmentNoteAnchor(rowIndex, box.box)
+    }
+}
+
+private fun Seq3Note.hasExplicitGeometry(): Boolean = x != null && y != null && width != null && height != null
+
+/** Extra pitch below the row a fragment closes on when a note is anchored to that row. The note is
+ *  drawn directly under its anchor row, and the box that encloses it grows by the note's height, so
+ *  the rows after the box must move down by the same amount to keep their distance from its border.
+ *  A note anchored earlier in the fragment is followed by more rows of the same fragment and needs
+ *  no reservation here (it floats over them, as every note does). */
+private fun fragmentNoteTailPadding(doc: Seq3Document, emissions: List<Emission>, tm: Seq3TextMetrics): Map<Int, Double> {
+    if (doc.fragments.isEmpty() || doc.notes.isEmpty() || emissions.isEmpty()) return emptyMap()
+    val lastIndexByMessage = HashMap<String, Int>()
+    emissions.forEachIndexed { index, emission -> lastIndexByMessage[emission.messageId] = index }
+    val closingRows = nestFragmentEmissionSpans(
+        fragmentEmissionSpans(doc.fragments, emissions, doc.messages.associateBy { it.id }),
+    ).map { it.end }.toSet()
+    val padding = HashMap<Int, Double>()
+    doc.notes.filter { it.visibility == Seq3Visibility.VISIBLE && !it.hasExplicitGeometry() }.forEach { note ->
+        val anchor = note.messageIds.mapNotNull { lastIndexByMessage[it] }.maxOrNull() ?: return@forEach
+        if (anchor !in closingRows) return@forEach
+        val height = autoNoteLines(note, tm).first.size * tm.lineHeight(Seq3FontRole.NOTE) + 2 * NOTE_PAD
+        padding[anchor] = max(padding[anchor] ?: 0.0, height + GROUP_GAP_CLEARANCE)
+    }
+    return padding
+}
+
+/** A fragment's box edges before its enclosing fragments are made to reach outward. */
+private class FragmentExtent(
+    val range: IntRange,
+    val depth: Int,
+    var left: Double,
+    var right: Double,
+    val top: Double,
+    val bottom: Double,
+)
+
+/** Computes one fragment's extent: the rows it spans and the notes anchored to them set its size,
+ *  then its left and right borders are moved out until they clear the activation bars they meet. */
+private fun fragmentExtentFrom(
+    range: IntRange,
+    depth: Int,
+    rows: List<Seq3RowGeometry>,
+    notes: List<FragmentNoteAnchor>,
+    bars: List<Seq3ActivationBar>,
+    minTop: Double,
+): FragmentExtent {
+    val spanned = range.mapNotNull { rows.getOrNull(it) }
+    val inside = notes.filter { it.rowIndex in range }
+    val xs = spanned.flatMap { rowXExtent(it) } + inside.flatMap { listOf(it.box.x, it.box.x + it.box.width) }
+    val inset = depth * FRAGMENT_INSET_PER_DEPTH
+    var left = (xs.minOrNull() ?: 0.0) - FRAGMENT_PAD + inset
+    var right = (xs.maxOrNull() ?: 0.0) + FRAGMENT_PAD - inset
+    val rawTop = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - FRAGMENT_LABEL_H
+    val top = max(rawTop, minTop)
+    val rowsBottom = spanned.lastOrNull()?.let(::fragmentRowBottom) ?: 0.0
+    val bottom = max(rowsBottom, inside.maxOfOrNull { it.box.y + it.box.height + GROUP_GAP_CLEARANCE } ?: rowsBottom)
+    val reaching = bars.filter { it.box.y < bottom && it.box.y + it.box.height > top }
+    // Moving a border out can bring the next stair-stepped (nested) bar into reach, so repeat until
+    // nothing moves; each pass only moves outward and there are finitely many bars.
+    var moved = true
+    while (moved) {
+        moved = false
+        reaching.forEach { bar ->
+            val barLeft = bar.box.x
+            val barRight = bar.box.x + bar.box.width
+            if (left > barLeft - FRAGMENT_BAR_PAD && left < barRight + FRAGMENT_BAR_PAD) {
+                left = barLeft - FRAGMENT_BAR_PAD
+                moved = true
+            }
+            if (right < barRight + FRAGMENT_BAR_PAD && right > barLeft - FRAGMENT_BAR_PAD) {
+                right = barRight + FRAGMENT_BAR_PAD
+                moved = true
+            }
+        }
+    }
+    return FragmentExtent(range, depth, left, right, top, bottom)
+}
+
+/** A fragment must reach at least [FRAGMENT_INSET_PER_DEPTH] beyond each fragment nested in it. With
+ *  no bars that already holds (an enclosing fragment's rows include its children's, so its borders
+ *  are at least that far out); a child pushed out by a bar is what makes this move anything. Children
+ *  come after their parent in [extents], so walking backwards lets a grandchild's push reach the
+ *  outermost box through the child. */
+private fun enclosingFragmentsReachOutward(extents: List<FragmentExtent>, parents: List<Int>) {
+    for (i in extents.indices.reversed()) {
+        val parent = parents[i]
+        if (parent < 0) continue
+        extents[parent].left = min(extents[parent].left, extents[i].left - FRAGMENT_INSET_PER_DEPTH)
+        extents[parent].right = max(extents[parent].right, extents[i].right + FRAGMENT_INSET_PER_DEPTH)
+    }
 }
 
 // ── WP6: fragment operand dividers ──────────────────────────────────────────────────────────
@@ -2366,34 +2548,96 @@ private fun fragmentRowIndices(
 // exact top formula with NO per-depth vertical inset (unlike left/right, which DO inset by
 // `depth * FRAGMENT_INSET_PER_DEPTH`) — so a defensive clamp here is the only thing that also
 // covers a nested box, and stays correct even if a future caller ever invokes this without having
-// gone through buildRows' own reserve.
+// gone through buildRows' own reserve. (The clamp itself lives in [fragmentExtentFrom].)
 private fun fragmentBoxFrom(
     fragment: Seq3Fragment,
-    range: IntRange,
-    depth: Int,
+    extent: FragmentExtent,
     rows: List<Seq3RowGeometry>,
-    minTop: Double,
     firstRowIndex: Map<String, Int>,
+    bars: List<Seq3ActivationBar>,
+    tm: Seq3TextMetrics,
 ): Seq3FragmentBox {
-    val spanned = range.mapNotNull { rows.getOrNull(it) }
-    val xs = spanned.flatMap { rowXExtent(it) }
-    val inset = depth * FRAGMENT_INSET_PER_DEPTH
-    val left = (xs.minOrNull() ?: 0.0) - FRAGMENT_PAD + inset
-    val right = (xs.maxOrNull() ?: 0.0) + FRAGMENT_PAD - inset
-    val rawTop = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - FRAGMENT_LABEL_H
-    val top = max(rawTop, minTop)
-    val bottom = spanned.lastOrNull()?.let(::fragmentRowBottom) ?: 0.0
     val label = fragment.label.ifBlank { fragment.kind.name.lowercase() }
+    val box = Seq3Box(
+        extent.left,
+        extent.top,
+        max(1.0, extent.right - extent.left),
+        max(1.0, extent.bottom - extent.top),
+    )
+    val (header, headerOverBar) = fragmentHeaderClearOfBars(box, bars)
+    val dividers = fragmentDividers(fragment, extent.range, firstRowIndex, rows).map { divider ->
+        divider.copy(guardX = guardLeftClearOfBars(divider, box, bars, tm))
+    }
     return Seq3FragmentBox(
         fragment.id,
         fragment.kind,
         label,
-        Seq3Box(left, top, max(1.0, right - left), max(1.0, bottom - top)),
-        depth,
+        box,
+        extent.depth,
         fragment.hideKindLabel,
-        fragmentDividers(fragment, range, firstRowIndex, rows),
+        dividers,
         fragment.style,
+        header,
+        headerOverBar,
     )
+}
+
+/**
+ * The strip the label and controls are drawn in. A bar that crosses the box's top border runs
+ * through the default strip (the whole top of the box), so the strip is moved into the first
+ * bar-free stretch wide enough for it ([FRAGMENT_HEADER_MIN_W]); a bar that merely ends or begins
+ * further down never touches it. Returns null for "the default strip" when no bar reaches it. If no
+ * stretch is wide enough the default strip is kept and the second value tells the renderer to back
+ * it so the label stays readable over the bar.
+ */
+private fun fragmentHeaderClearOfBars(box: Seq3Box, bars: List<Seq3ActivationBar>): Pair<Seq3Box?, Boolean> {
+    val height = box.height.coerceIn(FRAGMENT_HEADER_MIN_H, FRAGMENT_LABEL_H)
+    val boxRight = box.x + box.width
+    val blocked = bars.filter { bar ->
+        bar.box.y < box.y + height && bar.box.y + bar.box.height > box.y &&
+            bar.box.x < boxRight && bar.box.x + bar.box.width > box.x
+    }.map { bar ->
+        (bar.box.x - FRAGMENT_HEADER_BAR_GAP).coerceAtLeast(box.x) to
+            (bar.box.x + bar.box.width + FRAGMENT_HEADER_BAR_GAP).coerceAtMost(boxRight)
+    }.sortedBy { it.first }
+    if (blocked.isEmpty()) return null to false
+    val free = mutableListOf<Pair<Double, Double>>()
+    var cursor = box.x
+    blocked.forEach { (start, end) ->
+        if (start > cursor) free += cursor to start
+        cursor = max(cursor, end)
+    }
+    if (cursor < boxRight) free += cursor to boxRight
+    val stretch = free.firstOrNull { it.second - it.first >= FRAGMENT_HEADER_MIN_W } ?: return null to true
+    return Seq3Box(stretch.first, box.y, stretch.second - stretch.first, height) to false
+}
+
+/** Where an operand's guard text starts so no bar runs through it: null (the default, just inside
+ *  the box's left border) unless a bar crosses the band the guard is drawn in, in which case the
+ *  text moves right of that bar. If the moved text would not fit inside the box the default stays. */
+private fun guardLeftClearOfBars(
+    divider: Seq3FragmentDivider,
+    box: Seq3Box,
+    bars: List<Seq3ActivationBar>,
+    tm: Seq3TextMetrics,
+): Double? {
+    if (divider.guard.isBlank()) return null
+    val bandTop = divider.y - FRAGMENT_GUARD_H
+    val textWidth = withMeasurementSlack(tm.width(Seq3FontRole.FRAGMENT, divider.guard))
+    val inBand = bars.filter { it.box.y < divider.y && it.box.y + it.box.height > bandTop }
+    var x = box.x + FRAGMENT_GUARD_LEFT
+    var moved = true
+    while (moved) {
+        moved = false
+        inBand.forEach { bar ->
+            val barRight = bar.box.x + bar.box.width
+            if (bar.box.x < x + textWidth + FRAGMENT_HEADER_BAR_GAP && barRight + FRAGMENT_HEADER_BAR_GAP > x) {
+                x = barRight + FRAGMENT_HEADER_BAR_GAP
+                moved = true
+            }
+        }
+    }
+    return x.takeIf { it > box.x + FRAGMENT_GUARD_LEFT && it + textWidth <= box.x + box.width }
 }
 
 /** Full lower edge of a row's visible geometry, used so a fragment's closing border does not cut
@@ -2414,6 +2658,19 @@ private fun rowXExtent(row: Seq3RowGeometry): List<Double> = when (row) {
     is Seq3ElisionRow -> listOf(row.box.x, row.box.x + row.box.width)
 }
 
+/** The width a message-anchored note takes from its own text (before any user sizing). */
+private fun autoNoteWidth(note: Seq3Note, tm: Seq3TextMetrics): Double =
+    note.text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+        .maxOfOrNull { tm.width(Seq3FontRole.NOTE, it) }?.plus(2 * NOTE_PAD)
+        ?.coerceIn(NOTE_ROW_W, NOTE_BOX_MAX_W) ?: NOTE_ROW_W
+
+/** A message-anchored note's wrapped lines and width — the one place that sizes it, shared by the
+ *  note's own layout and by the row spacing that makes room for it inside a closing fragment. */
+private fun autoNoteLines(note: Seq3Note, tm: Seq3TextMetrics): Pair<List<String>, Double> {
+    val width = autoNoteWidth(note, tm)
+    return wrapFixedText(note.text, tm, Seq3FontRole.NOTE, width - 2 * NOTE_PAD) to width
+}
+
 // ── Notes (design spec §06 "Note" verb — spans a selection of messages) ────────────────────────
 
 private fun layoutNotes(
@@ -2429,9 +2686,7 @@ private fun layoutNotes(
     if (visibleNotes.isEmpty()) return emptyList()
     return visibleNotes.mapNotNull { note ->
         val noteLineHeight = tm.lineHeight(Seq3FontRole.NOTE)
-        val naturalWidth = note.text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
-            .maxOfOrNull { tm.width(Seq3FontRole.NOTE, it) }?.plus(2 * NOTE_PAD)
-            ?.coerceIn(NOTE_ROW_W, NOTE_BOX_MAX_W) ?: NOTE_ROW_W
+        val naturalWidth = autoNoteWidth(note, tm)
         // WP7 item 3: a free-floating note (the empty-canvas "Add note here" context menu) carries
         // its own explicit geometry and an EMPTY messageIds — it has nothing to anchor to on
         // purpose. Resolve its box from that geometry FIRST, before ever touching messageIds/
@@ -2453,7 +2708,7 @@ private fun layoutNotes(
         val anchorRow = rows.getOrNull(anchorIdx) ?: return@mapNotNull null
         val touchedX = note.messageIds.mapNotNull { lastRowIndex[it] }.flatMap { rowXExtent(rows[it]) }
         val cx = touchedX.average().takeIf { !it.isNaN() } ?: centers.firstOrNull() ?: 0.0
-        val lines = wrapFixedText(note.text, tm, Seq3FontRole.NOTE, naturalWidth - 2 * NOTE_PAD)
+        val lines = autoNoteLines(note, tm).first
         val box = Seq3Box(
             max(MARGIN, cx - naturalWidth / 2),
             anchorRow.y + ROW_H / 2,

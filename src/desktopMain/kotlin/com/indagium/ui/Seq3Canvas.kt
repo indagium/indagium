@@ -2609,7 +2609,9 @@ private fun Seq3FragmentLabelOverlay(
     docTheme: ThemeColors,
 ) {
     val editorTarget = Seq3CanvasEditorTarget(Seq3CanvasEditorKind.FRAGMENT_LABEL, fragment.fragmentId)
-    val headerHeight = fragment.box.height.coerceAtMost(28.0).coerceAtLeast(20.0).dp
+    // The layout moves this strip clear of any activation bar crossing the box's top border; in
+    // the rare case no bar-free stretch is wide enough it stays full width and is backed instead.
+    val header = fragment.headerBox
     val kindLabel = fragment.kind.name.lowercase()
     // WP12: `hideKindLabel` lets a fragment show just its own label, with no "$kind: " prefix — a
     // per-fragment presentation flag (Seq3Fragment.hideKindLabel's own doc explains why per-
@@ -2637,9 +2639,9 @@ private fun Seq3FragmentLabelOverlay(
     val refLabel = if (refMissing) "$displayedLabel ⚠" else displayedLabel
 
     Box(
-        Modifier.offset(fragment.box.x.dp, fragment.box.y.dp)
-            .width(fragment.box.width.dp)
-            .height(headerHeight)
+        Modifier.offset(header.x.dp, header.y.dp)
+            .width(header.width.dp)
+            .height(header.height.dp)
             .testTag("seq3-fragment-label-${fragment.fragmentId}")
             .pointerInput(session.id, fragment.fragmentId, refDiagramId) {
                 detectTapGestures(
@@ -2663,7 +2665,9 @@ private fun Seq3FragmentLabelOverlay(
             },
     ) {
         Row(
-            Modifier.fillMaxSize().padding(start = 3.dp, end = 3.dp),
+            Modifier.fillMaxSize()
+                .then(if (fragment.headerOverBar) Modifier.background(docTheme.p, RoundedCornerShape(4.dp)) else Modifier)
+                .padding(start = 3.dp, end = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -2720,7 +2724,7 @@ private fun Seq3FragmentLabelOverlay(
                 fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
-                modifier = Modifier.offset(fragment.box.x.dp + 3.dp, divider.y.dp - 13.dp),
+                modifier = Modifier.offset((divider.guardX ?: (fragment.box.x + 3.0)).dp, divider.y.dp - 13.dp),
             )
         }
     }
@@ -3582,8 +3586,7 @@ internal fun seq3PointInBox(box: Seq3Box, x: Double, y: Double): Boolean =
  *  fragments. The last painted header wins when nested headers overlap. */
 internal fun seq3FragmentHeaderAt(layout: Seq3Layout, x: Double, y: Double): Seq3FragmentBox? =
     layout.fragments.asReversed().firstOrNull { fragment ->
-        val headerHeight = fragment.box.height.coerceAtMost(28.0).coerceAtLeast(20.0)
-        seq3PointInBox(Seq3Box(fragment.box.x, fragment.box.y, fragment.box.width, headerHeight), x, y)
+        seq3PointInBox(fragment.headerBox, x, y)
     }
 
 /** Nearest row on [layout] whose own y sits within [yTolerance] of ([x], [y]) — the hit test behind
