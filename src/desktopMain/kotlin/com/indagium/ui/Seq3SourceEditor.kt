@@ -232,7 +232,8 @@ internal fun Seq3SourceEditorPane(
     val horizontalScroll = rememberScrollState()
     val gutterListState = rememberLazyListState()
     var showSourceMarkers by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
-    var dismissedSuggestionStart by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Int?>(null) }
+    // The word whose suggestion list was closed (Escape, or accepting a suggestion), until a character is typed into it.
+    var dismissedSuggestion by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Seq3SourceSuggestionDismissal?>(null) }
     var selectedSuggestionIndex by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(0) }
     var snippetFields by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<List<SourceSnippetField>>(emptyList()) }
     var snippetText by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(view.sourceDraft) }
@@ -593,17 +594,15 @@ internal fun Seq3SourceEditorPane(
     val suggestionTrigger = if (state.settings.diagramSourceAutocomplete && endpointField == null) {
         seq3SourceSuggestionTrigger(sourceText, editorState.selection, view.sourceEditorDialect)
     } else null
-    if (suggestionTrigger == null || suggestionTrigger.start != dismissedSuggestionStart) {
-        dismissedSuggestionStart = null
-    }
+    val activeDismissal = seq3SourceDismissalAfterEdit(dismissedSuggestion, suggestionTrigger)
+    if (activeDismissal != dismissedSuggestion) dismissedSuggestion = activeDismissal
     val sourceSuggestions = suggestionTrigger?.let {
         seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias }, participantChoices)
     }.orEmpty()
     LaunchedEffect(suggestionTrigger?.query, view.sourceEditorDialect) {
         selectedSuggestionIndex = 0
     }
-    val suggestionsVisible = suggestionTrigger != null && sourceSuggestions.isNotEmpty() &&
-        suggestionTrigger.start != dismissedSuggestionStart
+    val suggestionsVisible = suggestionTrigger != null && sourceSuggestions.isNotEmpty() && activeDismissal == null
     if (selectedSuggestionIndex !in sourceSuggestions.indices) selectedSuggestionIndex = 0
 
     // The preview keeps following the draft while the suggestion list is open; the half-typed word
@@ -637,7 +636,8 @@ internal fun Seq3SourceEditorPane(
         snippetFields = fields
         endpointMenu = null
         setEditorValue(inserted, true)
-        dismissedSuggestionStart = null
+        // The accepted word stays closed: `Alias` is a prefix of `Alias_2`, which must not reopen the list.
+        dismissedSuggestion = seq3SourceDismissalAfterAccept(inserted, view.sourceEditorDialect)
         selectedSuggestionIndex = 0
         runCatching { requester.requestFocus() }
     }
@@ -795,7 +795,7 @@ internal fun Seq3SourceEditorPane(
                                     return@onPreviewKeyEvent true
                                 }
                                 Key.Escape -> {
-                                    dismissedSuggestionStart = suggestionTrigger.start
+                                    dismissedSuggestion = seq3SourceDismissalOf(suggestionTrigger)
                                     runCatching { requester.requestFocus() }
                                     view.textFieldFocused = true
                                     return@onPreviewKeyEvent true
@@ -1453,6 +1453,37 @@ internal data class Seq3SourceSuggestionTrigger(
     val keywords: Boolean = true,
 )
 
+/**
+ * A suggestion list closed for one word: where the word starts and what it held when it was closed.
+ * It lasts while the word is unchanged or only shortened (Backspace), and ends with the first
+ * character typed into it, or when the caret leaves the word.
+ */
+internal data class Seq3SourceSuggestionDismissal(val start: Int, val query: String)
+
+internal fun seq3SourceDismissalOf(trigger: Seq3SourceSuggestionTrigger): Seq3SourceSuggestionDismissal =
+    Seq3SourceSuggestionDismissal(trigger.start, trigger.query)
+
+/** The dismissal after accepting a suggestion: the word now at the caret, which stays closed. */
+internal fun seq3SourceDismissalAfterAccept(value: TextFieldValue, dialect: Seq3Dialect): Seq3SourceSuggestionDismissal? =
+    seq3SourceSuggestionTrigger(value.text, value.selection, dialect)?.let(::seq3SourceDismissalOf)
+
+/**
+ * [dismissal] after the editor moved on to [trigger] (null: no word at the caret). A longer word, a
+ * changed one or another start ends it, so typing into a word opens its list again, also after
+ * characters were deleted from it; a shorter word keeps it, remembered at the new length.
+ */
+internal fun seq3SourceDismissalAfterEdit(
+    dismissal: Seq3SourceSuggestionDismissal?,
+    trigger: Seq3SourceSuggestionTrigger?,
+): Seq3SourceSuggestionDismissal? {
+    if (dismissal == null || trigger == null || trigger.start != dismissal.start) return null
+    return when {
+        trigger.query == dismissal.query -> dismissal
+        trigger.query.length < dismissal.query.length -> seq3SourceDismissalOf(trigger)
+        else -> null
+    }
+}
+
 private const val SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH = 2
 
 /**
@@ -1893,8 +1924,6 @@ private fun SourceCompactMenu(
     onClose: () -> Unit = {},
     variant: ButtonVariant = ButtonVariant.Secondary,
     horizontalPadding: androidx.compose.ui.unit.Dp = 7.dp,
-    /** The picture on the button itself (tag `<tag>-glyph`). */
-    buttonGlyph: Seq3SourceGlyph? = null,
     /** The picture in front of each option, by index (tag `<tag>-glyph-<index>`); null for none. */
     optionGlyphs: List<Seq3SourceGlyph?> = emptyList(),
 ) {
@@ -1915,8 +1944,7 @@ private fun SourceCompactMenu(
         AppButton(label, onClick = {
             open = !open
         }, variant = variant, textColor = if (variant == ButtonVariant.Ghost) tc().tx else null,
-            horizontalPadding = horizontalPadding, modifier = Modifier.testTag(tag),
-            leadingContent = buttonGlyph?.let { glyph -> { color -> Seq3SourceGlyphIcon(glyph, color, Modifier.testTag("$tag-glyph")) } })
+            horizontalPadding = horizontalPadding, modifier = Modifier.testTag(tag))
         if (open) Popup(
             alignment = Alignment.TopStart,
             offset = with(density) { IntOffset(0, 32.dp.roundToPx()) },
@@ -1986,7 +2014,7 @@ private fun Seq3SourceActionForms(
             .testTag("seq3-source-insert-group"),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalArrangement = Arrangement.spacedBy(2.dp),
             itemVerticalAlignment = Alignment.CenterVertically) {
-            // The same pictograms as the suggestion rows of these keywords.
+            // The same pictograms as the suggestion rows of these keywords; the other buttons carry them in their menus.
             AppButton("+ Participant", onClick = { addParticipant(false) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
                 horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-participant"),
                 leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("participant"), color, Modifier.testTag("seq3-source-insert-participant-glyph")) })
@@ -1995,27 +2023,24 @@ private fun Seq3SourceActionForms(
                 leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("actor"), color, Modifier.testTag("seq3-source-insert-actor-glyph")) })
             SourceCompactMenu("+ Message ▾", "seq3-source-message-menu", listOf("Call", "Return", "Async"),
                 onSelect = { addMessage(listOf("Call", "Return", "Async")[it]) }, onClose = reclaimFocus, variant = ButtonVariant.Ghost,
-                buttonGlyph = seq3SourceKeywordGlyph("call"),
                 optionGlyphs = listOf("call", "return", "async").map(::seq3SourceKeywordGlyph))
             AppButton("+ Note", onClick = {
                 val scope = seq3SourceNoteScope(editorState.text.toString(), editorState.selection.start, dialect,
                     sourceParticipants(editorState.text.toString(), dialect).map { it.alias }) ?: "Participant"
                 val snippet = "${if (dialect == Seq3Dialect.MERMAID) "Note" else "note"} over $scope: note text"
                 insertSnippet(snippet, sourceSnippetFields(snippet, "note text" to false), false)
-            }, variant = ButtonVariant.Ghost, textColor = tcNow.tx, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"),
-                leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("note"), color, Modifier.testTag("seq3-source-insert-note-glyph")) })
+            }, variant = ButtonVariant.Ghost, textColor = tcNow.tx, horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-note"))
             val blocks = listOf("loop", "alt", "opt", "par", "critical", "break", "group")
             SourceCompactMenu("+ Block ▾", "seq3-source-fragment-menu", blocks, onSelect = {
                 val aliases = sourceParticipants(editorState.text.toString(), dialect).map { participant -> participant.alias }
                 val (snippet, fields) = seq3SourceBlockSnippet(blocks[it], dialect, aliases)
                 insertSnippet(snippet, fields, false)
             }, onClose = reclaimFocus, variant = ButtonVariant.Ghost,
-                buttonGlyph = seq3SourceKeywordGlyph("loop"), optionGlyphs = blocks.map(::seq3SourceKeywordGlyph))
+                optionGlyphs = blocks.map(::seq3SourceKeywordGlyph))
             SourceCompactMenu("+ Activation ▾", "seq3-source-activation-menu", listOf("Activate", "Deactivate"), onSelect = {
                 val snippet = "${if (it == 0) "activate" else "deactivate"} Participant"
                 insertSnippet(snippet, sourceSnippetFields(snippet, "Participant" to true), false)
             }, onClose = reclaimFocus, variant = ButtonVariant.Ghost,
-                buttonGlyph = seq3SourceKeywordGlyph("activate"),
                 optionGlyphs = listOf("activate", "deactivate").map(::seq3SourceKeywordGlyph))
         }
         val moreItems = buildList {

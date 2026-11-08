@@ -203,4 +203,59 @@ class Seq3SourceNameSuggestionsTest {
             }
         }
     }
+
+    // ── A closed list reopens only when a character is typed ────────────────────────────────────
+
+    private fun dismissal(start: Int, query: String) = Seq3SourceSuggestionDismissal(start, query)
+
+    private fun at(source: String, caret: Int = source.length, dialect: Seq3Dialect = puml) =
+        seq3SourceSuggestionTrigger(source, TextRange(caret), dialect)
+
+    @Test
+    fun anAcceptedNameIsDismissedAtItsOwnLengthAndOnlyATypedCharacterEndsIt() {
+        val accepted = textValueOf(pumlHead + "A -> Alpha")
+        val closed = requireNotNull(seq3SourceDismissalAfterAccept(accepted, puml))
+        assertEquals(dismissal(pumlHead.length + 5, "Alpha"), closed)
+        // The same word, the caret moved inside it: still closed.
+        assertEquals(closed, seq3SourceDismissalAfterEdit(closed, at(pumlHead + "A -> Alpha", pumlHead.length + 7)))
+        // Another character typed into it, at the end or in the middle: open.
+        assertNull(seq3SourceDismissalAfterEdit(closed, at(pumlHead + "A -> Alpha_")))
+        assertNull(seq3SourceDismissalAfterEdit(closed, at(pumlHead + "A -> Alpxha", pumlHead.length + 9)))
+        // Another word, or no word at the caret: open.
+        assertNull(seq3SourceDismissalAfterEdit(closed, at(pumlHead + "A -> Alpha\nAl")))
+        assertNull(seq3SourceDismissalAfterEdit(closed, null))
+        assertNull(seq3SourceDismissalAfterEdit(null, at(pumlHead + "A -> Alpha")))
+    }
+
+    @Test
+    fun aDismissalSurvivesDeletionsAndEndsWithTheNextTypedCharacter() {
+        val closed = dismissal(pumlHead.length + 5, "Alpha")
+        // Backspace keeps it closed and is remembered at the shorter length ...
+        val shorter = requireNotNull(seq3SourceDismissalAfterEdit(closed, at(pumlHead + "A -> Alph")))
+        assertEquals(dismissal(pumlHead.length + 5, "Alph"), shorter)
+        val shortest = requireNotNull(seq3SourceDismissalAfterEdit(shorter, at(pumlHead + "A -> Al")))
+        assertEquals("Al", shortest.query)
+        // ... so the character typed afterwards ends it, whatever it is.
+        assertNull(seq3SourceDismissalAfterEdit(shorter, at(pumlHead + "A -> Alpa")))
+        assertNull(seq3SourceDismissalAfterEdit(shortest, at(pumlHead + "A -> Alp")))
+        // Deleting the first character of the word keeps it closed too.
+        assertEquals("lpha", seq3SourceDismissalAfterEdit(closed, at(pumlHead + "A -> lpha"))?.query)
+        // A deletion down to no word at all ends it (the caret has nothing to complete).
+        assertNull(seq3SourceDismissalAfterEdit(shortest, at(pumlHead + "A -> ")))
+    }
+
+    @Test
+    fun aKeywordWordIsDismissedByEscapeAndReopenedByATypedCharacter() {
+        for ((lead, dialect) in listOf("/" to puml, "" to puml, "" to mmd)) {
+            val base = head(dialect) + lead
+            val escape = seq3SourceDismissalOf(requireNotNull(at(base + "par", dialect = dialect)))
+            assertEquals("par", escape.query)
+            assertEquals(escape, seq3SourceDismissalAfterEdit(escape, at(base + "par", dialect = dialect)), "same word; $lead ${dialect.name}")
+            val shrunk = requireNotNull(seq3SourceDismissalAfterEdit(escape, at(base + "pa", dialect = dialect)))
+            assertNull(seq3SourceDismissalAfterEdit(shrunk, at(base + "par", dialect = dialect)), "typed again; $lead ${dialect.name}")
+        }
+    }
+
+    private fun textValueOf(text: String) =
+        androidx.compose.ui.text.input.TextFieldValue(text, TextRange(text.length))
 }

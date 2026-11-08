@@ -99,15 +99,19 @@ class Seq3SourceEditorFeedbackUiTest {
     // ── Pictograms on the toolbar ───────────────────────────────────────────────────────────────
 
     @Test
-    fun everyToolbarButtonAndMenuItemHasAPictogram() {
+    fun onlyParticipantAndActorButtonsAndEveryMenuItemHaveAPictogram() {
         val sessionId = startWorkspace("fb-toolbar-glyphs", Seq3Dialect.PLANTUML)
         showWorkspace(sessionId)
         rule.onNodeWithTag("seq3-source-edit").performClick()
         rule.waitForIdle()
 
-        listOf("seq3-source-insert-participant-glyph", "seq3-source-insert-actor-glyph", "seq3-source-insert-note-glyph",
-            "seq3-source-message-menu-glyph", "seq3-source-fragment-menu-glyph", "seq3-source-activation-menu-glyph").forEach {
+        // Only + Participant and + Actor carry a pictogram themselves; the other buttons show theirs in their menus.
+        listOf("seq3-source-insert-participant-glyph", "seq3-source-insert-actor-glyph").forEach {
             rule.onNodeWithTag(it, useUnmergedTree = true).assertIsDisplayed()
+        }
+        listOf("seq3-source-insert-note-glyph", "seq3-source-message-menu-glyph", "seq3-source-fragment-menu-glyph",
+            "seq3-source-activation-menu-glyph").forEach {
+            rule.onNodeWithTag(it, useUnmergedTree = true).assertDoesNotExist()
         }
         listOf("seq3-source-message-menu" to 3, "seq3-source-fragment-menu" to 7, "seq3-source-activation-menu" to 2).forEach { (menu, count) ->
             rule.onNodeWithTag(menu).performClick()

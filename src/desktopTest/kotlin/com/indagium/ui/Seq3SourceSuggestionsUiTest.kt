@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
@@ -259,6 +260,150 @@ class Seq3SourceSuggestionsUiTest {
         rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.any { it.name == "Stable" } }
         assertTrue(view.sourceDiagnostics.isEmpty())
         assertEquals(initialBounds, editor.getBoundsInRoot(), "valid source must keep the same editor bounds")
+    }
+
+    // ── Closing and reopening the list ──────────────────────────────────────────────────────────
+
+    private val twoAliases = "@startuml\nparticipant Alias\nparticipant Alias_2\nAlias -> "
+
+    private fun listShown() = rule.onAllNodesWithTag("seq3-source-suggestions", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+
+    private fun openNameList(tabId: String, suffix: String = "Ali"): Triple<String, Seq3ViewState, androidx.compose.ui.test.SemanticsNodeInteraction> {
+        val sessionId = startWorkspace(tabId)
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement(twoAliases + suffix)
+        rule.waitForIdle()
+        assertTrue(listShown(), "the typed `$suffix` offers Alias and Alias_2")
+        rule.onNodeWithTag("seq3-source-suggestion-row-name-Alias", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithTag("seq3-source-suggestion-row-name-Alias_2", useUnmergedTree = true).assertIsDisplayed()
+        return Triple(sessionId, view, editor)
+    }
+
+    private fun assertStaysClosedUntilAnotherCharacterIsTyped(view: Seq3ViewState, editor: androidx.compose.ui.test.SemanticsNodeInteraction) {
+        assertEquals(twoAliases + "Alias", view.sourceDraft)
+        assertFalse(listShown(), "the accepted word does not reopen the list for Alias_2")
+        // Moving the caret inside the same word does not reopen it either.
+        editor.performKeyInput { pressKey(Key.DirectionLeft) }
+        editor.performKeyInput { pressKey(Key.DirectionRight) }
+        rule.waitForIdle()
+        assertFalse(listShown(), "the caret moving within the accepted word keeps the list closed")
+        editor.performTextInput("_")
+        rule.waitForIdle()
+        assertTrue(listShown(), "another character typed into the word opens the list again")
+        rule.onNodeWithTag("seq3-source-suggestion-row-name-Alias_2", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun acceptingANameWithEnterKeepsTheListClosedUntilAnotherCharacterIsTyped() {
+        val (_, view, editor) = openNameList("source-suggestions-accept-enter")
+        editor.performKeyInput { pressKey(Key.Enter) }
+        rule.waitForIdle()
+        assertStaysClosedUntilAnotherCharacterIsTyped(view, editor)
+    }
+
+    @Test
+    fun acceptingANameWithTabKeepsTheListClosedUntilAnotherCharacterIsTyped() {
+        val (_, view, editor) = openNameList("source-suggestions-accept-tab")
+        editor.performKeyInput { pressKey(Key.Tab) }
+        rule.waitForIdle()
+        assertStaysClosedUntilAnotherCharacterIsTyped(view, editor)
+    }
+
+    @Test
+    fun acceptingANameWithAClickKeepsTheListClosedUntilAnotherCharacterIsTyped() {
+        val (_, view, editor) = openNameList("source-suggestions-accept-click")
+        rule.onNodeWithTag("seq3-source-suggestion-row-name-Alias", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertStaysClosedUntilAnotherCharacterIsTyped(view, editor)
+    }
+
+    @Test
+    fun anAcceptedNameStaysClosedForANewWordToo() {
+        val (_, view, editor) = openNameList("source-suggestions-accept-new-word")
+        editor.performKeyInput { pressKey(Key.Enter) }
+        rule.waitForIdle()
+        assertFalse(listShown())
+        // A new word on the next line opens its own list again.
+        editor.performTextInput("\nAli")
+        rule.waitForIdle()
+        assertTrue(listShown(), "a new word has its own list: ${view.sourceDraft}")
+    }
+
+    @Test
+    fun typingALetterAfterBackspaceOpensTheNameListAgain() {
+        val (_, view, editor) = openNameList("source-suggestions-backspace-name", "Alia")
+        editor.performKeyInput { pressKey(Key.Backspace) }
+        rule.waitForIdle()
+        assertEquals(twoAliases + "Ali", view.sourceDraft)
+        editor.performTextInput("a")
+        rule.waitForIdle()
+        assertTrue(listShown(), "typing after a deletion offers the names again")
+        rule.onNodeWithTag("seq3-source-suggestion-row-name-Alias", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun typingALetterAfterEscapeAndBackspaceOpensTheNameListAgain() {
+        val (_, view, editor) = openNameList("source-suggestions-escape-backspace-name", "Alia")
+        editor.performKeyInput { pressKey(Key.Escape) }
+        rule.waitForIdle()
+        assertFalse(listShown(), "Escape closes the list for the word")
+        editor.performKeyInput { pressKey(Key.Backspace) }
+        rule.waitForIdle()
+        assertFalse(listShown(), "deleting a character does not reopen what Escape closed")
+        editor.performTextInput("a")
+        rule.waitForIdle()
+        assertEquals(twoAliases + "Alia", view.sourceDraft)
+        assertTrue(listShown(), "the next typed character opens the list again, also after a deletion")
+    }
+
+    @Test
+    fun typingALetterAfterBackspaceOpensTheKeywordListAgain() {
+        val sessionId = startWorkspace("source-suggestions-backspace-keyword")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        for (lead in listOf("/", "")) {
+            editor.performTextReplacement("@startuml\n${lead}par")
+            rule.waitForIdle()
+            assertTrue(listShown(), "`${lead}par` offers keywords")
+            // Plain Backspace, then a letter.
+            editor.performKeyInput { pressKey(Key.Backspace) }
+            rule.waitForIdle()
+            editor.performTextInput("r")
+            rule.waitForIdle()
+            assertEquals("@startuml\n${lead}par", view.sourceDraft)
+            assertTrue(listShown(), "after a deletion the typed letter opens the list; lead=`$lead`")
+            // Escape, Backspace, a letter.
+            editor.performKeyInput { pressKey(Key.Escape) }
+            rule.waitForIdle()
+            assertFalse(listShown(), "Escape closes it; lead=`$lead`")
+            editor.performKeyInput { pressKey(Key.Backspace) }
+            rule.waitForIdle()
+            assertFalse(listShown(), "Backspace alone does not reopen it; lead=`$lead`")
+            editor.performTextInput("r")
+            rule.waitForIdle()
+            assertTrue(listShown(), "the typed letter reopens it after Escape and a deletion; lead=`$lead`")
+        }
+    }
+
+    @Test
+    fun escapeClosesTheListAndAnotherCharacterReopensIt() {
+        val sessionId = startWorkspace("source-suggestions-escape-retype")
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        val editor = rule.onNodeWithTag("seq3-source-editor")
+        editor.performTextReplacement("@startuml\n/pa")
+        rule.waitForIdle()
+        editor.performKeyInput { pressKey(Key.Escape) }
+        rule.waitForIdle()
+        assertFalse(listShown())
+        editor.performTextInput("r")
+        rule.waitForIdle()
+        assertTrue(listShown(), "Escape lasts only until the next typed character")
     }
 
     private fun startWorkspace(tabId: String): String {
