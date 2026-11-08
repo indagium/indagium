@@ -201,7 +201,8 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
 @Composable
 private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     val tc = tc()
-    val tabName = session.sourceTabId?.let(state::tab)?.filename?.substringAfterLast('/') ?: "log closed"
+    val tabName = session.sourceTabId?.let(state::tab)?.filename?.substringAfterLast('/')
+        ?: if (session.hasTicket) "log closed" else "no log"
     val scanned = state.seq3Sessions.scannedEntryCount(session.id)
     // Keep the title bar focused on identity and size. The exact timestamp range belongs to the
     // log view, not this diagram header, and made the title area noisy without changing the
@@ -836,7 +837,9 @@ private fun Seq3AttachmentAction(state: AppState, session: Seq3WorkspaceSession)
     val focusRequester = LocalSeq3FocusRequester.current
     var open by remember(session.id) { mutableStateOf(false) }
     val primary = if (state.settings.diagramLinkedNotePrimary) Seq3AttachmentMode.LINKED else Seq3AttachmentMode.SNAPSHOT
-    val hasContent = session.document.lifelines.isNotEmpty()
+    // Attaching writes a note into the source log's Notes, so it needs the log to be open.
+    val logReason = session.logUnavailableReason()
+    val hasContent = session.document.lifelines.isNotEmpty() && logReason == null
 
     fun closeAndReclaimFocus() {
         open = false
@@ -847,6 +850,7 @@ private fun Seq3AttachmentAction(state: AppState, session: Seq3WorkspaceSession)
         Row(verticalAlignment = Alignment.CenterVertically) {
             ToolbarBtn(
                 label = attachmentActionLabel(primary),
+                tooltip = logReason,
                 active = true,
                 enabled = hasContent,
                 modifier = Modifier.height(28.dp),
@@ -860,7 +864,7 @@ private fun Seq3AttachmentAction(state: AppState, session: Seq3WorkspaceSession)
             Box(Modifier.width(1.dp).height(28.dp).background(Color.White.copy(alpha = .28f)))
             ToolbarBtn(
                 label = "▾",
-                tooltip = "More attach options",
+                tooltip = logReason ?: "More attach options",
                 active = true,
                 enabled = hasContent,
                 modifier = Modifier.width(22.dp).height(28.dp),
@@ -2227,7 +2231,7 @@ private fun applySeq3KeyAction(
     val document = session.document
     return when (action) {
         is Seq3KeyAction.Escape -> applySeq3Escape(state, session, view)
-        is Seq3KeyAction.StartGuidedPass -> applySeq3StartGuidedPass(document, view)
+        is Seq3KeyAction.StartGuidedPass -> applySeq3StartGuidedPass(document, view, session)
         is Seq3KeyAction.SkipGuided -> { skipSeq3Guided(session, view); true }
         is Seq3KeyAction.ConfirmGuided -> false // the footer button owns the explicit apply
         is Seq3KeyAction.PrevMessage -> { view.focusedMessageId = seq3NeighbourMessageId(document, view.focusedMessageId, -1); true }
@@ -2358,7 +2362,9 @@ private fun applySeq3EscapeWorkspace(
     else -> false
 }
 
-private fun applySeq3StartGuidedPass(document: Seq3Document, view: Seq3ViewState): Boolean {
+private fun applySeq3StartGuidedPass(document: Seq3Document, view: Seq3ViewState, session: Seq3WorkspaceSession): Boolean {
+    // The pass picks targets from the log's surrounding lines; a diagram with no log has none.
+    if (session.logFree) return false
     val pass = startSeq3GuidedPass(document) ?: return false
     view.guidedPass = pass
     return true

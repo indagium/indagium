@@ -178,7 +178,28 @@ data class Seq3WorkspaceSession(
      * source, or reverts it) — no separate "clear" call needed.
      */
     val linkedNoteDrifted: Boolean = false,
-)
+    /**
+     * False for a diagram that has no ticket: it was made without a source log
+     * ([Seq3Session.beginStandalone]) or opened from a library item that has none. Together with
+     * [sourceTabId] this tells the two "no log" states apart: `sourceTabId == null && hasTicket` is a
+     * ticket diagram whose log is closed or missing (it can be relinked, see [Seq3Session.relink]);
+     * `sourceTabId == null && !hasTicket` is a diagram that never had a log. Every action that scans
+     * log rows asks [logUnavailableReason] instead of testing either field.
+     */
+    val hasTicket: Boolean = true,
+) {
+    /** Null while a live source log is linked; otherwise the short reason an action that needs the
+     *  log (regenerate, evidence, scroll to log, From notes, attach to notes) is unavailable. */
+    /** True for a diagram that never had a log: nothing log-backed (regenerate, evidence, row
+     *  insertion from the log, the guided pass) is offered at all, rather than offered and disabled. */
+    val logFree: Boolean get() = sourceTabId == null && !hasTicket
+
+    fun logUnavailableReason(): String? = when {
+        sourceTabId != null -> null
+        hasTicket -> "The source log is not open"
+        else -> "This diagram has no log"
+    }
+}
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
 
@@ -401,6 +422,36 @@ class Seq3Session(
         return id
     }
 
+    /** Creates a diagram with no log (no ticket) and opens it as its own Diagram tab, in no tab
+     *  group. It starts blank with a fresh default title that no other ticket-less diagram uses,
+     *  and its first library snapshot is written before returning, so closing the tab before the
+     *  first edit still leaves a reopenable draft. The session has no [Seq3WorkspaceSession.
+     *  sourceTabId]; log-needing actions are unavailable ([Seq3WorkspaceSession.
+     *  logUnavailableReason]) but a log can still be linked later with [relink]. Returns the
+     *  session id. */
+    fun beginStandalone(): String? = beginStandalone(origin = null)
+
+    internal fun beginStandalone(origin: TabRef?): String? {
+        val originGroupId = appState.tabGroupIdForOrigin(origin)
+        val title = defaultSeq3Title(libraryStore.forSource(DiagramSourceIdentity.NONE).map { it.title }.toSet())
+        val document = Seq3Document(title = title)
+        val id = "seq3-${UUID.randomUUID()}"
+        val session = Seq3WorkspaceSession(
+            id = id,
+            sourceTabId = null,
+            document = document,
+            range = document.range,
+            hasTicket = false,
+        )
+        publishSession(session, originGroupId, document)
+        val exportMode = appState.settings.diagramDefaultExportMode
+        val item = saveToLibrary(session, null, encodeSeq3Note(document, session.dialect, exportMode = exportMode))
+        if (item != null) {
+            replace(id) { it.copy(libraryItemId = item.id, exportMode = exportMode) }
+        }
+        return id
+    }
+
     /**
      * Opens a new workspace over exactly the log lines curated into [tabId]'s Notes document —
      * the Diagram library's "From notes" action ([AnnotationPanel]'s `+ diagram` menu). Range is
@@ -582,7 +633,7 @@ class Seq3Session(
     fun relink(id: String, tabId: String): Boolean {
         if (appState.tab(tabId) == null) return false
         if (session(id) == null) return false
-        replace(id) { it.copy(sourceTabId = tabId) }
+        replace(id) { it.copy(sourceTabId = tabId, hasTicket = true) }
         return true
     }
 
@@ -1333,8 +1384,7 @@ class Seq3Session(
     fun newSourceDiagramTitle(id: String): String {
         val current = session(id) ?: return BASE_UNTITLED_TITLE
         current.document.title.trim().takeIf { it.isNotEmpty() }?.let { return it }
-        val others = current.sourceTabId?.let(appState::tab)
-            ?.let { libraryStore.forSource(sourceIdentity(it)) }.orEmpty()
+        val others = sourceIdentityOf(current)?.let(libraryStore::forSource).orEmpty()
             .filter { it.id != current.libraryItemId }
             .map { it.title }
         return defaultSeq3Title(others.toSet())
@@ -1556,7 +1606,11 @@ class Seq3Session(
      * this function's write can't violate. */
     private fun autoSaveDraftToLibrary(id: String) {
         val current = session(id) ?: return
-        val tab = current.sourceTabId?.let(appState::tab) ?: return
+        val tab = current.sourceTabId?.let(appState::tab)
+        // A linked log that is not loaded yet (a restore in progress) must not be saved over. A
+        // session with no log at all still saves: a ticket-less one has no source to keep, and one
+        // whose log is closed keeps its existing record's source (see sourceIdentityOf).
+        if (tab == null && (current.sourceTabId != null || sourceIdentityOf(current) == null)) return
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val encoded = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
         val item = saveToLibrary(current, tab, encoded) ?: return
@@ -1678,14 +1732,17 @@ class Seq3Session(
      * [reportSaveRejection] and this returns null, same as the pre-existing "nothing to return"
      * contract every caller already handles with `?.`/`?:`.
      */
-    private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab, encodedNote: String): DiagramLibraryItem? {
+    private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab?, encodedNote: String): DiagramLibraryItem? {
         val title = current.document.title.ifBlank { "Untitled diagram" }
         val snapshot = DiagramLibrarySnapshot(encodedNote)
+        // With a live log the record takes that log's identity; without one it keeps the source it
+        // already has (a ticket diagram whose log is closed) or has none (a ticket-less diagram).
+        val source = tab?.let(::sourceIdentity) ?: sourceIdentityOf(current) ?: DiagramSourceIdentity.NONE
         val result = if (current.libraryItemId == null || libraryStore.get(current.libraryItemId) == null) {
-            libraryStore.tryCreate(title, "", sourceIdentity(tab), snapshot)
+            libraryStore.tryCreate(title, "", source, snapshot)
         } else {
             libraryStore.tryUpdate(current.libraryItemId) { item ->
-                item.copy(title = title, source = sourceIdentity(tab), snapshot = snapshot, updatedAt = clock())
+                item.copy(title = title, source = source, snapshot = snapshot, updatedAt = clock())
             }
         }
         val rejection = result.toDiagramSaveRejection()
@@ -1943,6 +2000,15 @@ class Seq3Session(
     private fun sourceIdentity(tab: LogTab): DiagramSourceIdentity =
         DiagramSourceIdentity(sourcePath = tab.sourcePath ?: tab.filename, contentFingerprint = computeLogFingerprint(tab.logData))
 
+    /** The source identity a library record of [current] has or should get: that of its live log,
+     *  else the one its record already carries, else none for a diagram that has no ticket. Null
+     *  for a ticket diagram whose log is gone and that has no record yet: its identity is unknown,
+     *  so nothing may be saved for it. */
+    private fun sourceIdentityOf(current: Seq3WorkspaceSession): DiagramSourceIdentity? =
+        current.sourceTabId?.let(appState::tab)?.let(::sourceIdentity)
+            ?: current.libraryItemId?.let(libraryStore::get)?.source
+            ?: DiagramSourceIdentity.NONE.takeIf { !current.hasTicket }
+
     /** Returns only diagrams created from this exact log identity — the v3 counterpart of
      *  [SeqDiagramCoordinator.libraryForTab]. The fingerprint makes this deliberately stricter than
      *  a filename/path check: two revisions of the same log path must not share a library section. */
@@ -1959,10 +2025,22 @@ class Seq3Session(
      *  offers — it had no production call site before this. `@Suppress("UNUSED_VARIABLE")` mirrors
      *  [libraryForTab]'s own `libraryRevision` read: this bridges the plain disk-backed store's
      *  mutations into Compose recomposition, same rationale as that function's own doc. */
-    fun searchLibrary(query: String = "", source: DiagramSourceIdentity? = null): List<DiagramLibrarySummary> {
+    fun searchLibrary(
+        query: String = "",
+        source: DiagramSourceIdentity? = null,
+        tickets: DiagramTicketFilter = DiagramTicketFilter.ALL,
+    ): List<DiagramLibrarySummary> {
         @Suppress("UNUSED_VARIABLE")
         val observedRevision = libraryRevision
-        return libraryStore.search(query, source)
+        return libraryStore.search(query, source, tickets)
+    }
+
+    /** The library as a "No ticket | Ticket | All" list, most recently updated first, optionally
+     *  narrowed by [query]. Recomposes on every library change like [searchLibrary]. */
+    fun listLibrary(tickets: DiagramTicketFilter = DiagramTicketFilter.ALL, query: String = ""): List<DiagramLibrarySummary> {
+        @Suppress("UNUSED_VARIABLE")
+        val observedRevision = libraryRevision
+        return libraryStore.list(tickets, query)
     }
 
     /** WP17: the picker's default (no query typed yet) listing — [DiagramLibraryStore.recent] had
@@ -1999,7 +2077,17 @@ class Seq3Session(
     internal fun openLibraryItem(id: String, origin: TabRef?): Boolean =
         openLibraryItem(id, tabId = null, origin = origin)
 
-    internal fun openLibraryItem(id: String, tabId: String?, origin: TabRef?): Boolean {
+    internal fun openLibraryItem(id: String, tabId: String?, origin: TabRef?): Boolean =
+        openLibraryItemSession(id, tabId, origin) != null
+
+    /** Opens the library item [id] as its own Diagram tab with no log, in no tab group, and
+     *  returns the session id (null for an unknown or unreadable item). This is how a ticket-less
+     *  diagram is opened, and the fallback for a ticket diagram whose log no longer exists: the
+     *  item's self-contained snapshot is shown and edited, and its record keeps its ticket. An
+     *  already open session of the item is activated instead of duplicated. */
+    fun openLibraryItemWithoutLog(id: String): String? = openLibraryItemSession(id, tabId = null, origin = null)
+
+    private fun openLibraryItemSession(id: String, tabId: String?, origin: TabRef?): String? {
         // Capture this before any store work or publication. `origin` is independent of tabId:
         // reference-diagram links pass their containing diagram here while leaving tabId null, so
         // the opened workspace remains offline-capable and does not inherit the referenced item's
@@ -2012,11 +2100,11 @@ class Seq3Session(
             libraryStore.markOpened(id)
             libraryRevision++
             activate(it.id)
-            return true
+            return it.id
         }
-        val item = libraryStore.markOpened(id) ?: return false
+        val item = libraryStore.markOpened(id) ?: return null
         libraryRevision++
-        val parsed = item.parsed ?: return false
+        val parsed = item.parsed ?: return null
         val openedDocument = normalizeSeq3FragmentSpans(parsed.document)
         val usableTabId = tabId?.takeIf { appState.tab(it) != null }
         val sessionId = "seq3-${UUID.randomUUID()}"
@@ -2032,13 +2120,15 @@ class Seq3Session(
             libraryItemId = item.id,
             exportMode = parsed.exportMode,
             dialect = parsed.dialect,
+            hasTicket = !item.source.isNone,
         )
-        synchronized(appState.stateLock) {
+        return synchronized(appState.stateLock) {
             val duplicate = sessions.firstOrNull { existing ->
                 existing.libraryItemId == id && (usableTabId == null || existing.sourceTabId == usableTabId)
             }
             if (duplicate != null) {
                 activateLocked(duplicate.id)
+                duplicate.id
             } else {
                 sessions = sessions + session
                 appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(sessionId))
@@ -2046,9 +2136,9 @@ class Seq3Session(
                 generatedBaselines[sessionId] = openedDocument
                 activeSessionId = sessionId
                 appState.activeSurface = ActiveSurface.Diagram3(sessionId)
+                sessionId
             }
         }
-        return true
     }
 
     /** Deletes a saved diagram, closing any open session it backs (matches

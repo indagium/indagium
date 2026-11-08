@@ -2914,7 +2914,7 @@ private fun Seq3CanvasContextMenu(
             // delay after this" filled for delays now filled here for the log-navigation path.
             CtxItem(
                 Icons.AutoMirrored.Outlined.Login,
-                "Go to log line",
+                if (session.logFree) "Go to log line (no log)" else "Go to log line",
                 enabled = jumpEntryId != null && session.sourceTabId != null,
             ) {
                 val tabId = session.sourceTabId

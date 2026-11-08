@@ -74,7 +74,8 @@ internal fun Seq3AddAfterMenuItems(
             seq3AddSelectedRowsAfter(state, session, view, after)
         }
     }
-    CtxItemWithSubmenu(
+    // Log-backed insertion needs a log; a diagram with no log only offers the custom message.
+    if (!session.logFree) CtxItemWithSubmenu(
         icon = Icons.Outlined.ListAlt,
         label = "From log",
         submenu = listOf(

@@ -355,7 +355,9 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
             AppText(hint, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
         }
         if (counts.needsTarget > 0) {
-            Seq3NeedsTargetBanner(counts.needsTarget) {
+            // The guided pass reads the log around each message, so a diagram with no log only
+            // reports the count and offers no pass.
+            Seq3NeedsTargetBanner(counts.needsTarget, offerPass = !session.logFree) {
                 view.guidedPass = startSeq3GuidedPass(document)
                 runCatching { view.focusRequester.requestFocus() }
             }
@@ -390,7 +392,8 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
         } else {
             Seq3TemplateList(state, session, view, Modifier.weight(1f).fillMaxWidth())
         }
-        Seq3QueueFooter(counts, sequenceRows.size) { view.regenerateSheetOpen = true }
+        // Regenerating rebuilds from the log's rows; a diagram with no log has nothing to rebuild from.
+        Seq3QueueFooter(counts, sequenceRows.size, canRegenerate = !session.logFree) { view.regenerateSheetOpen = true }
     }
 }
 
@@ -1964,6 +1967,7 @@ private fun Seq3QueueHeader(
                     properties = PopupProperties(focusable = false),
                 ) {
                     Seq3AddMessageChoiceMenu(
+                        fromLog = !session.logFree,
                         selectedCount = tab?.selected?.size ?: 0,
                         onSelectedRows = {
                             addMenuOpen = false
@@ -2055,6 +2059,7 @@ private fun Seq3MessageAddButton(compact: Boolean = false, onClick: () -> Unit) 
 
 @Composable
 private fun Seq3AddMessageChoiceMenu(
+    fromLog: Boolean,
     selectedCount: Int,
     onSelectedRows: () -> Unit,
     onRows: () -> Unit,
@@ -2069,28 +2074,31 @@ private fun Seq3AddMessageChoiceMenu(
             .padding(6.dp),
     ) {
         AppText("Add message from…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
-        AppButton(
-            "Selected log rows · $selectedCount",
-            onClick = onSelectedRows,
-            enabled = selectedCount > 0,
-            variant = ButtonVariant.Ghost,
-            modifier = Modifier.fillMaxWidth(),
-            horizontalPadding = 8.dp,
-        )
-        AppButton(
-            "Enter row numbers…",
-            onClick = onRows,
-            variant = ButtonVariant.Ghost,
-            modifier = Modifier.fillMaxWidth(),
-            horizontalPadding = 8.dp,
-        )
-        AppButton(
-            "Open log view to select rows",
-            onClick = onLogHandoff,
-            variant = ButtonVariant.Ghost,
-            modifier = Modifier.fillMaxWidth(),
-            horizontalPadding = 8.dp,
-        )
+        // The three log-backed entries need a log; a diagram with no log only offers a custom message.
+        if (fromLog) {
+            AppButton(
+                "Selected log rows · $selectedCount",
+                onClick = onSelectedRows,
+                enabled = selectedCount > 0,
+                variant = ButtonVariant.Ghost,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalPadding = 8.dp,
+            )
+            AppButton(
+                "Enter row numbers…",
+                onClick = onRows,
+                variant = ButtonVariant.Ghost,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalPadding = 8.dp,
+            )
+            AppButton(
+                "Open log view to select rows",
+                onClick = onLogHandoff,
+                variant = ButtonVariant.Ghost,
+                modifier = Modifier.fillMaxWidth(),
+                horizontalPadding = 8.dp,
+            )
+        }
         AppButton(
             "Custom message…",
             onClick = onCustom,
@@ -2374,7 +2382,7 @@ private fun Seq3CustomLifelinePicker(
 }
 
 @Composable
-private fun Seq3NeedsTargetBanner(count: Int, onFixThese: () -> Unit) {
+private fun Seq3NeedsTargetBanner(count: Int, offerPass: Boolean = true, onFixThese: () -> Unit) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().background(tc.warnBg)
@@ -2383,7 +2391,7 @@ private fun Seq3NeedsTargetBanner(count: Int, onFixThese: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText("$count message${if (count == 1) "" else "s"} need a target", color = tc.warn, fontSize = 11.sp)
-        AppButton(
+        if (offerPass) AppButton(
             "Fix these →",
             onClick = onFixThese,
             variant = ButtonVariant.Ghost,
@@ -2479,7 +2487,12 @@ private fun Seq3FilterTextAndSortRow(view: Seq3ViewState, showSort: Boolean = tr
 }
 
 @Composable
-private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, drawnRowCount: Int, onRegenerate: () -> Unit) {
+private fun Seq3QueueFooter(
+    counts: com.indagium.diagram3.Seq3FilterCounts,
+    drawnRowCount: Int,
+    canRegenerate: Boolean = true,
+    onRegenerate: () -> Unit,
+) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -2489,7 +2502,7 @@ private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, draw
         AppText(seq3QueueFooterText(counts.all, drawnRowCount, counts.needsTarget), color = tc.ts, fontSize = 11.sp)
         // Opens spec §08's review sheet — never a silent full rebuild, which is exactly what
         // "Regenerate is a reviewed proposal, never a wholesale replace" rules out.
-        AppButton(
+        if (canRegenerate) AppButton(
             "Regenerate…",
             onClick = onRegenerate,
             variant = ButtonVariant.Ghost,

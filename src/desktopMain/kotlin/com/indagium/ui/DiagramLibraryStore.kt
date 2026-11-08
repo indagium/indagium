@@ -17,12 +17,51 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /** A stable identity for the log a diagram was made from.  The path is retained even when the
- * file later moves; [contentFingerprint] is the authoritative content check for regeneration. */
+ * file later moves; [contentFingerprint] is the authoritative content check for regeneration.
+ *
+ * A diagram's "ticket" is its source log.  A diagram drawn without any log has no ticket and is
+ * stored with [NONE]: both fields empty.  The line format already writes an empty value as the
+ * "~" token and reads it back as "", so "no source" needs no new field or version, and every
+ * previously stored item (which always has a path) keeps loading as a ticket diagram. */
 data class DiagramSourceIdentity(
     val sourcePath: String,
     val contentFingerprint: String,
 ) {
     val key: String get() = "$sourcePath\u0000$contentFingerprint"
+
+    /** True when there is no source log: the diagram is ticket-less. */
+    val isNone: Boolean get() = sourcePath.isBlank()
+
+    companion object {
+        val NONE = DiagramSourceIdentity("", "")
+    }
+}
+
+/** Which diagrams a library listing covers: the ones without a source log, the ones with, or both. */
+enum class DiagramTicketFilter {
+    NO_TICKET,
+    TICKET,
+    ALL,
+    ;
+
+    fun accepts(source: DiagramSourceIdentity): Boolean = when (this) {
+        NO_TICKET -> source.isNone
+        TICKET -> !source.isNone
+        ALL -> true
+    }
+}
+
+/** A short, human label for a ticket: the log's file name, or `archive.zip › entry` for an entry
+ * inside a bug-report archive (source path `<absZipPath>!<entryPath>`, the same convention the
+ * analysis-note names use).  Empty when there is no ticket. */
+internal fun diagramTicketLabel(source: DiagramSourceIdentity): String {
+    if (source.isNone) return ""
+    val path = source.sourcePath
+    val bang = path.indexOf('!')
+    if (bang < 0) return path.substringAfterLast('/').substringAfterLast('\\').ifBlank { path }
+    val archive = path.substring(0, bang).substringAfterLast('/').substringAfterLast('\\')
+    val entry = path.substring(bang + 1).substringAfterLast('/').substringAfterLast('\\')
+    return if (archive.isBlank()) entry.ifBlank { path } else "$archive › $entry"
 }
 
 /**
@@ -98,6 +137,10 @@ data class DiagramLibrarySummary(
     val attachmentCount: Int,
     val participantLabels: List<String>,
     val rangeSummary: String,
+    /** True when the diagram has a source log (its ticket). */
+    val hasTicket: Boolean = !source.isNone,
+    /** The ticket's file name (or `archive › entry`); empty without a ticket. */
+    val ticketLabel: String = diagramTicketLabel(source),
 )
 
 private const val DIAGRAM_LIBRARY_MAGIC = "diagram-library-v1"
@@ -218,12 +261,18 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
 
     /** Search is intentionally global; optional source scoping is a UI filter, not a separate
      * library.  It covers title/description, provenance, aliases/tags and rule text in the codec
-     * source, without requiring the source log to still exist. */
-    fun search(query: String = "", source: DiagramSourceIdentity? = null): List<DiagramLibrarySummary> =
+     * source, without requiring the source log to still exist.  [tickets] limits it to diagrams
+     * without a source log, with one, or both (the default). */
+    fun search(
+        query: String = "",
+        source: DiagramSourceIdentity? = null,
+        tickets: DiagramTicketFilter = DiagramTicketFilter.ALL,
+    ): List<DiagramLibrarySummary> =
         synchronized(lock) {
             val needle = query.trim().lowercase()
             items.values.asSequence()
                 .filter { source == null || it.source == source }
+                .filter { tickets.accepts(it.source) }
                 .map { it to it.toSummary() }
                 .filter { (item, summary) ->
                     needle.isBlank() || listOf(
@@ -236,6 +285,15 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
                 .sortedWith(compareByDescending<DiagramLibrarySummary> { it.lastOpenedAt }.thenByDescending { it.updatedAt })
                 .toList()
         }
+
+    /** The library's diagrams for a "No ticket | Ticket | All" listing, most recently updated first
+     * (the order a library list wants; [search] instead puts recently opened ones first).  [query]
+     * narrows it the same way [search] does. */
+    fun list(
+        tickets: DiagramTicketFilter = DiagramTicketFilter.ALL,
+        query: String = "",
+    ): List<DiagramLibrarySummary> =
+        search(query, tickets = tickets).sortedByDescending { it.updatedAt }
 
     fun recent(limit: Int = 20): List<DiagramLibrarySummary> = synchronized(lock) {
         items.values.map { it.toSummary() }
