@@ -1323,6 +1323,9 @@ private fun String.issueCategorySelectionFromToken(): IssueCategorySelection? = 
 internal fun AppState.activeFilterMapToken(): String =
     activeSavedFilterIds.entries.joinToString(",") { tokenFields(it.key, it.value) }
 
+internal fun AppState.filterDraftOriginMapToken(): String =
+    filterDraftOriginIds.entries.joinToString(",") { tokenFields(it.key, it.value) }
+
 internal fun activeFilterMapFromToken(token: String): Map<String, String> =
     if (token.isBlank()) emptyMap()
     else token.split(",").mapNotNull { item ->

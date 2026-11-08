@@ -6525,6 +6525,11 @@ class AppState(
     var filterDraftsByTab by mutableStateOf<Map<String, SavedFilter>>(emptyMap())
     var activeFilterDraftTabIds by mutableStateOf<Set<String>>(emptySet())
 
+    // tabId -> id of the preset the tab's current draft was derived from. Editing a loaded preset
+    // demotes the tab to a draft and drops it from activeSavedFilterIds, so without this the
+    // "Update" button could not offer a one-click write-back to the source preset.
+    var filterDraftOriginIds by mutableStateOf<Map<String, String>>(emptyMap())
+
     // Regex search is deliberately transient: it keeps the current saved-filter marker visible,
     // without becoming a draft or blocking a later click on a saved preset.
     private var transientRegexSearchTabIds by mutableStateOf<Set<String>>(emptySet())
@@ -8707,6 +8712,10 @@ class AppState(
         if (!hasActiveNormal && !hasActiveDraft) return
         val draft = snapshotFilter(tabId, draftIdForTab(tabId), draftNameForTab(tabId)) ?: return
         filterDraftsByTab = filterDraftsByTab + (tabId to draft)
+        // Remember where the draft came from; an already-running draft keeps its origin.
+        if (hasActiveNormal) {
+            activeSavedFilterIds[tabId]?.let { filterDraftOriginIds = filterDraftOriginIds + (tabId to it) }
+        }
         activeSavedFilterIds = activeSavedFilterIds - tabId
         activeFilterDraftTabIds = activeFilterDraftTabIds + tabId
     }
@@ -8714,6 +8723,38 @@ class AppState(
     private fun clearDraftForTab(tabId: String) {
         filterDraftsByTab = filterDraftsByTab - tabId
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabId
+        filterDraftOriginIds = filterDraftOriginIds - tabId
+    }
+
+    /** The saved preset this tab's active draft was derived from, or null (no draft, or preset deleted). */
+    fun filterDraftOrigin(tabId: String): SavedFilter? {
+        if (tabId !in activeFilterDraftTabIds) return null
+        val originId = filterDraftOriginIds[tabId] ?: return null
+        return savedFilters.firstOrNull { it.id == originId }
+    }
+
+    /** True while the tab has an unsaved draft and at least one saved preset exists to overwrite. */
+    fun canUpdateSavedFilterFromDraft(tabId: String): Boolean =
+        tabId in activeFilterDraftTabIds && savedFilters.isNotEmpty()
+
+    /**
+     * Overwrites preset [presetId] with the tab's current filter (keeping its name, folder and
+     * favorite flag), marks it the tab's active preset and drops the tab's draft.
+     */
+    fun updateSavedFilterFromCurrent(tabId: String, presetId: String) {
+        applySavedFilterUpdate(tabId, presetId)
+    }
+
+    private fun applySavedFilterUpdate(tabId: String, presetId: String): Boolean {
+        val target = savedFilters.find { it.id == presetId } ?: return false
+        if (tab(tabId) == null) return false
+        val updated = snapshotFilter(tabId, presetId, target.name) ?: return false
+        savedFilters = savedFilters.map { if (it.id == presetId) updated else it }
+        activeSavedFilterIds = activeSavedFilterIds + (tabId to presetId)
+        clearDraftForTab(tabId)
+        transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
+        writeFilterBackup()
+        return true
     }
 
     private fun savedFilterNameExists(name: String, exceptId: String? = null): Boolean {
@@ -8799,12 +8840,8 @@ class AppState(
 
     fun confirmUpdateExisting(presetId: String) {
         val pending = pendingFilterLoad ?: return
-        val target = savedFilters.find { it.id == presetId } ?: return
-        val updated = snapshotFilter(pending.tabId, presetId, target.name) ?: return
-        savedFilters = savedFilters.map { if (it.id == presetId) updated else it }
-        clearDraftForTab(pending.tabId)
+        if (!applySavedFilterUpdate(pending.tabId, presetId)) return
         updateExistingPickerOpen = false
-        writeFilterBackup()
         loadPendingFilter(pending)
     }
 
@@ -8905,10 +8942,12 @@ class AppState(
         if (draftTabId != null) {
             filterDraftsByTab = filterDraftsByTab - draftTabId
             activeFilterDraftTabIds = activeFilterDraftTabIds - draftTabId
+            filterDraftOriginIds = filterDraftOriginIds - draftTabId
             return
         }
         savedFilters = savedFilters.filter { it.id != id }
         activeSavedFilterIds = activeSavedFilterIds.filterValues { it != id }
+        filterDraftOriginIds = filterDraftOriginIds.filterValues { it != id }
         writeFilterBackup()
     }
 
@@ -12300,6 +12339,7 @@ class AppState(
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds
+        filterDraftOriginIds = filterDraftOriginIds - tabIds
         transientRegexSearchTabIds = transientRegexSearchTabIds - tabIds
         // Closed tabs may have held the cache's last reference to one or more archive-video files.
         pruneArchiveVideoCache()
@@ -17111,6 +17151,7 @@ class AppState(
             "saved" -> importFilters(value.unb64())
             "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
             "drafts" -> restoreDraftsFromToken(value.unb64())
+            "draftOrigins" -> filterDraftOriginIds = activeFilterMapFromToken(value.unb64())
             "transientRegex" -> transientRegexSearchTabIds = value.pathTokenList().toSet()
             "recent" -> recentFiles = value.pathTokenList()
             "regexHistory" -> regexPatternHistory = value.pathTokenList()
@@ -17544,6 +17585,8 @@ class AppState(
         appendLine("saved\t${exportFilters().b64()}")
         appendLine("activeFilters\t${activeFilterMapToken().b64()}")
         appendLine("drafts\t${draftsToken().b64()}")
+        // Keyed line, additive (see the regexHistory note below): older caches have no such line.
+        appendLine("draftOrigins\t${filterDraftOriginMapToken().b64()}")
         appendLine("transientRegex\t${transientRegexSearchTabIds.joinToString(",") { it.b64() }.b64()}")
         appendLine("recent\t${recentFiles.joinToString(",") { it.b64() }.b64()}")
         // Keyed line, additive by construction (restoreAutosaveKey's `when` has no `else`) — a

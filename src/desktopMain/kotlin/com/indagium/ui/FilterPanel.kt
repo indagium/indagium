@@ -630,6 +630,12 @@ internal fun FilterPanel(
     onRenameSFFolder: (String, String) -> Unit,
     onDeleteSFFolder: (String) -> Unit,
     onOpenSFDialog: () -> Unit,
+    // The preset this tab's unsaved draft came from (null when unknown/deleted), whether the
+    // standalone "Update" button is offered (a draft exists and a preset can be overwritten), and
+    // the overwrite action itself; defaults keep other callers and tests compiling.
+    draftOrigin: SavedFilter? = null,
+    canUpdateSavedFilter: Boolean = false,
+    onUpdateSavedFilter: (String) -> Unit = {},
     onSetKwInTag: (String) -> Unit,
     onAddPkgPrefix: (String) -> Unit,
     onRemovePkgPrefix: (String) -> Unit,
@@ -2762,6 +2768,13 @@ internal fun FilterPanel(
                     onDeleteFolder = onDeleteSFFolder,
                 )
                 Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (canUpdateSavedFilter) {
+                        UpdateSavedFilterButton(
+                            presets = savedFilters.filterNot { it.id.startsWith("draft_") },
+                            origin = draftOrigin,
+                            onUpdate = onUpdateSavedFilter,
+                        )
+                    }
                     AppButton("+ Save current filter…", onClick = onOpenSFDialog, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
                     AppButton(
                         "+ New folder…",
@@ -3291,6 +3304,101 @@ private fun SavedFilterLibraryRow(
             } else {
                 SquareIconButton("✎", 11.sp, { onRename(filter.id) })
                 SquareIconButton("×", 13.sp, { onDelete(filter.id) })
+            }
+        }
+    }
+}
+
+/**
+ * Split button that writes the current (draft) filter back into a saved preset. The main half
+ * overwrites the preset the draft came from in one click (or opens the list when that preset is
+ * unknown); the ▾ half lists every preset, the source first.
+ */
+@Composable
+private fun UpdateSavedFilterButton(
+    presets: List<SavedFilter>,
+    origin: SavedFilter?,
+    onUpdate: (String) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current.density
+    val leftShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
+    val rightShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
+    var open by remember { mutableStateOf(false) }
+    val ordered = remember(presets, origin?.id) {
+        if (origin == null) presets else presets.filter { it.id == origin.id } + presets.filter { it.id != origin.id }
+    }
+    Box(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+            AppButton(
+                if (origin != null) "Update \"${origin.name}\"" else "Update existing…",
+                onClick = { if (origin != null) onUpdate(origin.id) else open = !open },
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier.weight(1f),
+                shape = leftShape,
+                labelOverflow = TextOverflow.Ellipsis,
+                tooltip = if (origin != null) "Overwrite this saved filter with the current changes"
+                else "Choose a saved filter to overwrite with the current changes",
+            )
+            AppButton(
+                "▾",
+                onClick = { open = !open },
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier.width(22.dp),
+                horizontalPadding = 0.dp,
+                shape = rightShape,
+                tooltip = "Update another saved filter",
+            )
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, (30 * density).roundToInt()),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(240.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    AppText(
+                        "Overwrite which saved filter?",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                    ScrollColumnWithBar(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
+                        ordered.forEach { preset ->
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                onClick = {
+                                    open = false
+                                    onUpdate(preset.id)
+                                },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    AppText(
+                                        preset.name,
+                                        color = tc.tx,
+                                        fontSize = 10.sp,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    if (preset.id == origin?.id) {
+                                        AppText("source", color = tc.td, fontSize = 9.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

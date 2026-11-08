@@ -17,6 +17,7 @@ import com.indagium.model.CtxMenuState
 import com.indagium.model.CustomIssueRule
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.indagium.model.Filter
+import com.indagium.model.SavedFilter
 import com.indagium.model.FilterMode
 import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
@@ -1139,6 +1140,164 @@ class AppStateBehaviorTest {
         assertEquals(setOf("com.one", "com.extra"), state.tabs.single().filter.pkgPrefixes)
         assertEquals(two.id, state.activeSavedFilterId(tabId))
         assertEquals(null, state.filterDraftForTab(tabId))
+    }
+
+    // ── Standalone "Update" of a saved filter from the tab's draft ────────────────────────────
+
+    private fun draftFixture(): Triple<AppState, SavedFilter, SavedFilter> {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t", "t.log", emptyList()), mkTab("other", "o.log", emptyList()))
+        state.activeTabId = "t"
+        state.addPkgPrefix("t", "com.a")
+        state.saveFilter("t", "A")
+        state.clearFilter("t")
+        state.addPkgPrefix("t", "com.b")
+        state.saveFilter("t", "B")
+        val a = state.savedFilters.first { it.name == "A" }
+        val b = state.savedFilters.first { it.name == "B" }
+        return Triple(state, a, b)
+    }
+
+    @Test
+    fun updateSavedFilterFromDraftOverwritesOriginAndKeepsLibraryMetadata() {
+        val (state, a, _) = draftFixture()
+        state.createSavedFilterFolder("Group")
+        val folderId = state.savedFilterFolders.single().id
+        state.moveSavedFilter(a.id, folderId)
+        state.toggleSavedFilterFavorite(a.id)
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        assertEquals(null, state.filterDraftOrigin("t"))
+        assertEquals(false, state.canUpdateSavedFilterFromDraft("t"))
+
+        state.addPkgPrefix("t", "com.extra")
+
+        assertEquals(a.id, state.filterDraftOrigin("t")?.id)
+        assertTrue(state.canUpdateSavedFilterFromDraft("t"))
+        state.updateSavedFilterFromCurrent("t", a.id)
+
+        val updated = state.savedFilters.first { it.id == a.id }
+        assertEquals(setOf("com.a", "com.extra"), updated.pkgPrefixes)
+        assertEquals("A", updated.name)
+        assertEquals(folderId, updated.folderId)
+        assertTrue(updated.favorite)
+        assertEquals(a.id, state.activeFilterItemId("t"))
+        assertEquals(null, state.filterDraftForTab("t"))
+        assertEquals(null, state.filterDraftOrigin("t"))
+        assertEquals(false, state.canUpdateSavedFilterFromDraft("t"))
+        assertTrue(state.filterDraftOriginIds.isEmpty())
+    }
+
+    @Test
+    fun updateSavedFilterFromDraftCanTargetADifferentPreset() {
+        val (state, a, b) = draftFixture()
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("t", "com.extra")
+
+        state.updateSavedFilterFromCurrent("t", b.id)
+
+        val updatedB = state.savedFilters.first { it.id == b.id }
+        assertEquals(setOf("com.a", "com.extra"), updatedB.pkgPrefixes)
+        assertEquals("B", updatedB.name)
+        assertEquals(setOf("com.a"), state.savedFilters.first { it.id == a.id }.pkgPrefixes)
+        assertEquals(b.id, state.activeFilterItemId("t"))
+        assertEquals(null, state.filterDraftForTab("t"))
+    }
+
+    @Test
+    fun updateSavedFilterFromCurrentIgnoresUnknownPresetAndKeepsDraft() {
+        val (state, a, _) = draftFixture()
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("t", "com.extra")
+
+        state.updateSavedFilterFromCurrent("t", "nope")
+
+        assertEquals(a.id, state.filterDraftOrigin("t")?.id)
+        assertEquals(setOf("com.a"), state.savedFilters.first { it.id == a.id }.pkgPrefixes)
+    }
+
+    @Test
+    fun secondEditWhileDraftKeepsTheOriginPreset() {
+        val (state, a, _) = draftFixture()
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("t", "com.extra")
+        state.addPkgPrefix("t", "com.more")
+
+        assertEquals(a.id, state.filterDraftOrigin("t")?.id)
+        assertEquals(setOf("com.a", "com.extra", "com.more"), state.filterDraftForTab("t")?.pkgPrefixes)
+    }
+
+    @Test
+    fun deletingTheOriginPresetLeavesNoOriginButStillAllowsUpdatingAnother() {
+        val (state, a, b) = draftFixture()
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("t", "com.extra")
+
+        state.requestDeleteSF(a.id)
+        state.confirmDeleteSF()
+
+        assertEquals(null, state.filterDraftOrigin("t"))
+        assertTrue(state.canUpdateSavedFilterFromDraft("t"))
+        state.updateSavedFilterFromCurrent("t", b.id)
+        assertEquals(b.id, state.activeFilterItemId("t"))
+    }
+
+    @Test
+    fun loadingAnotherPresetOrClosingTheTabClearsTheDraftOrigin() {
+        val (state, a, b) = draftFixture()
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("t", "com.extra")
+        assertEquals(a.id, state.filterDraftOrigin("t")?.id)
+
+        state.loadFilter("t", state.savedFilters.first { it.id == b.id })
+        assertEquals(null, state.filterDraftOrigin("t"))
+        assertTrue(state.filterDraftOriginIds.isEmpty())
+
+        state.loadFilter("other", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("other", "com.extra")
+        assertEquals(a.id, state.filterDraftOrigin("other")?.id)
+        state.closeTab("other")
+        assertTrue(state.filterDraftOriginIds.isEmpty())
+    }
+
+    @Test
+    fun promotingTheDraftToANewPresetClearsTheDraftOrigin() {
+        val (state, a, _) = draftFixture()
+        state.loadFilter("t", state.savedFilters.first { it.id == a.id })
+        state.addPkgPrefix("t", "com.extra")
+        val draft = state.filterDraftForTab("t")!!
+
+        state.beginRenameFilter(draft.id)
+        state.confirmRenameFilter("Promoted")
+
+        assertEquals(null, state.filterDraftForTab("t"))
+        assertTrue(state.filterDraftOriginIds.isEmpty())
+    }
+
+    @Test
+    fun autosaveRoundTripKeepsTheDraftOrigin() {
+        val dir = createTempDirectory("openlog-cache").toFile()
+        val logFile = File(dir, "test.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = logFile.absolutePath)
+        state.tabs = listOf(tab)
+        state.activeTabId = "log"
+        state.addPkgPrefix("log", "com.base")
+        state.saveFilter("log", "base")
+        val base = state.savedFilters.single()
+        state.addPkgPrefix("log", "1234")
+        assertEquals(base.id, state.filterDraftOrigin("log")?.id)
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(base.id, restored.filterDraftOrigin("log")?.id)
+        restored.updateSavedFilterFromCurrent("log", base.id)
+        assertEquals(setOf("com.base", "1234"), restored.savedFilters.single().pkgPrefixes)
+        assertEquals(null, restored.filterDraftOrigin("log"))
     }
 
     @Test

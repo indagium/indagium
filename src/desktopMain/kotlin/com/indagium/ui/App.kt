@@ -326,6 +326,7 @@ fun App(
             state.savedFilterFolders,
             state.settings,
             state.activeSavedFilterIds,
+            state.filterDraftOriginIds,
             state.recentFiles,
             state.recentNotes,
             // User-observed correction: dragging a diagram tab to a new position in the strip
