@@ -12,11 +12,18 @@ import com.indagium.diagram3.Seq3Dialect
  *
  * Activations nest the same way. `activate X` opens a level, so the lines up to the matching
  * `deactivate X` are one level deeper, and `deactivate X` sits at the level its `activate X` has.
- * Blocks and activations share one stack of open levels, and the indent of a plain line is the
- * number of levels open (plus Mermaid's body level):
+ * Blocks and activations share one stack of open levels, and every opener records the indent it
+ * actually got. That, not the number of levels open, is what the other lines are placed by:
+ * - a closer (`end`, `deactivate X`) sits exactly at its own opener's recorded indent, and `else`,
+ *   `and` and `option` at their block's recorded indent;
+ * - a plain line sits one level deeper than the innermost still-open opener's recorded indent, and
+ *   at the base (0 for PlantUML, Mermaid's body level after `sequenceDiagram`) with nothing open.
+ *   So an activation opened before a block and closed inside it leaves the block where it is:
+ *   closers still line up with their openers, whatever order they close in;
  * - `deactivate X` closes the innermost open `activate X` wherever it sits in the stack, so
  *   interleaved activations (`activate A`, `activate B`, `deactivate A`) are fine: A's level is
- *   removed, B's stays open and the lines after the `deactivate A` are still one level deep;
+ *   removed, B stays open at its own indent and the lines after the `deactivate A` are still
+ *   one level deeper than B;
  * - a bare `deactivate`, or one whose name matches no open activation (a name still being typed),
  *   closes the innermost open activation; with none open it is an ordinary line;
  * - `end` closes the innermost open block and `else` / `and` / `option` belong to it; activations
@@ -26,21 +33,36 @@ import com.indagium.diagram3.Seq3Dialect
  *   have to be both a body line and an opener or closer, the shorthand is often left unbalanced, and
  *   the generated source never uses it (it writes explicit `activate` / `deactivate` lines), so such
  *   lines keep the level of their surroundings. PlantUML's `++` / `--` suffix is treated alike.
+ *
+ * The same walk tells which opener a closer or divider belongs to ([Seq3SourceLineLevel.partner]),
+ * which the editor's opener/closer highlighting (Seq3SourceMatch.kt) reads, so the pairs it shows
+ * always agree with the indentation.
  */
 
 internal const val SEQ3_SOURCE_INDENT_WIDTH = 4
 
 internal enum class Seq3SourceLineKind { BLANK, COMMENT, HEADER, OPENER, MIDDLE, CLOSER, TEXT }
 
-internal data class Seq3SourceLineLevel(val kind: Seq3SourceLineKind, val level: Int)
+/**
+ * [partner] is the tag (see [Seq3SourceIndentState.feed]) of the opener a closer or divider belongs
+ * to, -1 when it has none. [orphan] marks a closer that matched nothing: an `end` outside every
+ * block (a CLOSER with no partner) or a `deactivate` with no activation open (which stays a TEXT line).
+ */
+internal data class Seq3SourceLineLevel(
+    val kind: Seq3SourceLineKind,
+    val level: Int,
+    val partner: Int = -1,
+    val orphan: Boolean = false,
+)
 
 /** The text of one edit plus where the selection ends up. */
 internal data class Seq3SourceEdit(val text: String, val selectionStart: Int, val selectionEnd: Int)
 
 private val SEQ3_BLOCK_OPENERS = setOf("loop", "alt", "opt", "par", "critical", "break", "group")
 
-/** One open level: a block (`word` is `loop`, `alt`, ...) or an activation (`word` is the name). */
-private class Seq3IndentFrame(val word: String, val activation: Boolean)
+/** One open level: a block (`word` is `loop`, `alt`, ...) or an activation (`word` is the name).
+ *  [indent] is the level its opener actually got; [tag] names the opener line for the caller. */
+private class Seq3IndentFrame(val word: String, val activation: Boolean, val indent: Int, val tag: Int)
 
 internal fun seq3SourceIndentString(level: Int): String = " ".repeat(level.coerceAtLeast(0) * SEQ3_SOURCE_INDENT_WIDTH)
 
@@ -51,8 +73,9 @@ internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
 
     private val base: Int get() = if (dialect == Seq3Dialect.MERMAID && bodyStarted) 1 else 0
 
-    /** The level a plain statement would get on the next line. */
-    val currentLevel: Int get() = base + frames.size
+    /** The level a plain statement would get on the next line: one deeper than the innermost open
+     *  opener's own indent, or the base with none open. */
+    val currentLevel: Int get() = frames.lastOrNull()?.let { it.indent + 1 } ?: base
 
     /** The block (`loop`, `alt`, ...) the next line would sit in, or null outside every block. */
     val innermostBlock: String? get() = frames.lastOrNull { !it.activation }?.word
@@ -63,8 +86,9 @@ internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
     }
 
     /** Feeds one already trimmed line. Blank and comment lines are returned with level -1: their
-     *  level depends on the line that follows. */
-    fun feed(text: String): Seq3SourceLineLevel {
+     *  level depends on the line that follows. [tag] names the line to the caller: a closer or
+     *  divider reports the tag of the opener it belongs to. */
+    fun feed(text: String, tag: Int = -1): Seq3SourceLineLevel {
         if (text.isEmpty()) return Seq3SourceLineLevel(Seq3SourceLineKind.BLANK, -1)
         if (isComment(text)) return Seq3SourceLineLevel(Seq3SourceLineKind.COMMENT, -1)
         if (isHeader(text)) {
@@ -73,40 +97,40 @@ internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
         }
         if (text.equals("end", ignoreCase = true)) {
             val index = frames.indexOfLast { !it.activation }
-            if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base)
-            frames.removeAt(index)
-            return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base + index)
+            if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base, orphan = true)
+            val closed = frames.removeAt(index)
+            return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, closed.indent, partner = closed.tag)
         }
         val word = text.takeWhile { !it.isWhitespace() }.lowercase()
         if (word in SEQ3_BLOCK_OPENERS || (word == "rect" && dialect == Seq3Dialect.MERMAID)) {
             val level = currentLevel
-            frames += Seq3IndentFrame(word, activation = false)
+            frames += Seq3IndentFrame(word, activation = false, indent = level, tag = tag)
             return Seq3SourceLineLevel(Seq3SourceLineKind.OPENER, level)
         }
         // The import reads these two keywords in lower case only.
         val rawWord = text.takeWhile { !it.isWhitespace() }
-        if (rawWord == "activate" || rawWord == "deactivate") return feedActivation(text, rawWord == "activate")
+        if (rawWord == "activate" || rawWord == "deactivate") return feedActivation(text, rawWord == "activate", tag)
         val ownerIndex = frames.indexOfLast { !it.activation }
         if (ownerIndex >= 0 && ownsMiddleWord(frames[ownerIndex].word, word)) {
-            return Seq3SourceLineLevel(Seq3SourceLineKind.MIDDLE, base + ownerIndex)
+            return Seq3SourceLineLevel(Seq3SourceLineKind.MIDDLE, frames[ownerIndex].indent, partner = frames[ownerIndex].tag)
         }
         return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel)
     }
 
     /** `activate X` opens a level, `deactivate X` closes X's (see the rules at the top of the file). */
-    private fun feedActivation(text: String, activate: Boolean): Seq3SourceLineLevel {
+    private fun feedActivation(text: String, activate: Boolean, tag: Int): Seq3SourceLineLevel {
         val name = text.split(Regex("\\s+")).getOrNull(1).orEmpty()
         if (activate) {
             if (name.isEmpty()) return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel)
             val level = currentLevel
-            frames += Seq3IndentFrame(name, activation = true)
+            frames += Seq3IndentFrame(name, activation = true, indent = level, tag = tag)
             return Seq3SourceLineLevel(Seq3SourceLineKind.OPENER, level)
         }
         val index = frames.indexOfLast { it.activation && it.word == name }
             .takeIf { it >= 0 } ?: frames.indexOfLast { it.activation }
-        if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel)
-        frames.removeAt(index)
-        return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base + index)
+        if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.TEXT, currentLevel, orphan = true)
+        val closed = frames.removeAt(index)
+        return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, closed.indent, partner = closed.tag)
     }
 
     private fun isComment(text: String): Boolean =

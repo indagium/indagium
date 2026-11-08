@@ -572,6 +572,12 @@ internal fun Seq3SourceEditorPane(
     }
 
     val selection = editorState.selection
+    // The keyword under the caret and its partners (an opener, its dividers and `end`; `activate` and
+    // `deactivate`), drawn behind the text; none while text is selected.
+    val constructMarks = remember(sourceText, selection.start, selection.end, view.sourceEditorDialect) {
+        seq3SourceConstructMarks(sourceText, selection.start, selection.end, view.sourceEditorDialect)
+    }
+    val constructColors = remember(tc) { Seq3ConstructColors.of(tc) }
     val endpointIndex = snippetFields.indexOfFirst { it.endpoint && selection.start >= it.start && selection.end <= it.end }
     val participantChoices = sourceParticipants(sourceText, view.sourceEditorDialect)
     val autocomplete = state.settings.diagramSourceAutocomplete
@@ -871,9 +877,15 @@ internal fun Seq3SourceEditorPane(
                     // At least the viewport wide, so the suggestion list never sits outside the box.
                     Box(Modifier.widthIn(min = with(density) { horizontalScroll.viewportSize.toDp() })) {
                         // Behind the text: the linked message's line, and the find matches (the current one stronger).
-                        if (linkedRawLine != null || findMatches.isNotEmpty()) {
+                        if (linkedRawLine != null || findMatches.isNotEmpty() || constructMarks.isNotEmpty()) {
                             Box(
-                                Modifier.matchParentSize().drawBehind {
+                                Modifier.matchParentSize().then(
+                                    if (constructMarks.isEmpty()) Modifier else Modifier.testTag("seq3-source-construct-marks").semantics {
+                                        stateDescription = constructMarks.joinToString(";") {
+                                            "${it.range.start}-${it.range.endExclusive}" + if (it.unbalanced) ":unbalanced" else ""
+                                        }
+                                    },
+                                ).drawBehind {
                                     textLayout?.let { layout ->
                                         drawSeq3SourceHighlights(
                                             layout = layout,
@@ -885,6 +897,8 @@ internal fun Seq3SourceEditorPane(
                                             hidden = hiddenRanges,
                                             matchColor = tc.searchMatchBg,
                                             currentColor = tc.searchCurrentBg,
+                                            constructs = constructMarks,
+                                            constructColors = constructColors,
                                         )
                                     }
                                 },
@@ -1216,6 +1230,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSeq3SourceHighl
     hidden: List<Seq3SourceRange>,
     matchColor: Color,
     currentColor: Color,
+    constructs: List<Seq3ConstructMark>,
+    constructColors: Seq3ConstructColors,
 ) {
     val lineCount = layout.lineCount
     if (linkedLine != null && linkedLine in 0 until lineCount) {
@@ -1225,8 +1241,22 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSeq3SourceHighl
             drawRect(linkedColor, androidx.compose.ui.geometry.Offset(0f, top), androidx.compose.ui.geometry.Size(size.width, bottom - top))
         }
     }
-    if (matches.isEmpty() || lineCount == 0) return
+    if (lineCount == 0) return
     val textLength = layout.layoutInput.text.length
+    constructs.forEach { mark ->
+        val start = seq3SourceVisibleOffset(mark.range.start, hidden).coerceIn(0, textLength)
+        val end = seq3SourceVisibleOffset(mark.range.endExclusive, hidden).coerceIn(start, textLength)
+        if (end <= start) return@forEach
+        val line = layout.getLineForOffset(start)
+        if (layout.getLineTop(line) - scrollY > size.height || layout.getLineBottom(line) - scrollY < 0f) return@forEach
+        val box = layout.getPathForRange(start, end).getBounds().translate(androidx.compose.ui.geometry.Offset(0f, -scrollY))
+        val corner = androidx.compose.ui.geometry.CornerRadius(SEQ3_CONSTRUCT_MARK_RADIUS_PX)
+        val fill = if (mark.unbalanced) constructColors.warnFill else constructColors.matchFill
+        val border = if (mark.unbalanced) constructColors.warnBorder else constructColors.matchBorder
+        drawRoundRect(fill, box.topLeft, box.size, corner)
+        drawRoundRect(border, box.topLeft, box.size, corner, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1f))
+    }
+    if (matches.isEmpty()) return
     matches.forEachIndexed { index, match ->
         val start = seq3SourceVisibleOffset(match.start, hidden).coerceIn(0, textLength)
         val end = seq3SourceVisibleOffset(match.endExclusive, hidden).coerceIn(start, textLength)
@@ -1236,6 +1266,26 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSeq3SourceHighl
         translate(top = -scrollY) {
             drawPath(layout.getPathForRange(start, end), if (index == current) currentColor else matchColor)
         }
+    }
+}
+
+/** The corner of a matched keyword's box. */
+private const val SEQ3_CONSTRUCT_MARK_RADIUS_PX = 3f
+
+// The matched-keyword wash is the theme's accent, the unbalanced one its warning colour, each with a
+// stronger border of the same hue so the pair reads on light and dark themes alike.
+private const val SEQ3_CONSTRUCT_FILL_ALPHA = 0.30f
+private const val SEQ3_CONSTRUCT_BORDER_ALPHA = 0.85f
+
+/** The four colours of the opener / closer highlight, taken from the theme. */
+internal data class Seq3ConstructColors(val matchFill: Color, val matchBorder: Color, val warnFill: Color, val warnBorder: Color) {
+    companion object {
+        fun of(tc: ThemeColors) = Seq3ConstructColors(
+            matchFill = tc.ac.copy(alpha = SEQ3_CONSTRUCT_FILL_ALPHA),
+            matchBorder = tc.ac.copy(alpha = SEQ3_CONSTRUCT_BORDER_ALPHA),
+            warnFill = tc.warnBg,
+            warnBorder = tc.warn,
+        )
     }
 }
 

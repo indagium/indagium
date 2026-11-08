@@ -51,11 +51,12 @@ class Seq3SourceActivationIndentTest {
         )
         assertEquals(
             lines(
-                "@startuml", "activate A", "    activate B", "        A -> B: x", "deactivate A", "    B -> A: y", "deactivate B",
+                "@startuml", "activate A", "    activate B", "        A -> B: x", "deactivate A", "        B -> A: y", "    deactivate B",
                 "A -> B: z", "@enduml",
             ),
             seq3IndentSource(flat, puml),
-            "A's level is removed by `deactivate A`; B stays open, so the lines after it are still one level in",
+            "`deactivate A` sits at A's indent and B stays open at its own: the lines after it are one level deeper than B, " +
+                "and `deactivate B` sits at B's indent (it used to follow the count of open levels)",
         )
         val kinds = seq3SourceLineLevels(flat, puml).map { it.kind to it.level }
         assertEquals(Seq3SourceLineKind.CLOSER to 0, kinds[4])
@@ -97,7 +98,7 @@ class Seq3SourceActivationIndentTest {
     fun anEndLeavesActivationsOpenedInsideItsBlockOpen() {
         val flat = lines("@startuml", "alt ok", "activate B", "A -> B: x", "end", "A -> B: y", "deactivate B", "A -> B: z", "@enduml")
         assertEquals(
-            lines("@startuml", "alt ok", "    activate B", "        A -> B: x", "end", "    A -> B: y", "deactivate B", "A -> B: z", "@enduml"),
+            lines("@startuml", "alt ok", "    activate B", "        A -> B: x", "end", "        A -> B: y", "    deactivate B", "A -> B: z", "@enduml"),
             seq3IndentSource(flat, puml),
         )
     }
@@ -155,9 +156,9 @@ class Seq3SourceActivationIndentTest {
         )
         val nested = lines("@startuml", "activate A", "    activate B", "        A -> B: x", "deactivate A")
         assertEquals(
-            "$nested\n    ",
+            "$nested\n        ",
             requireNotNull(seq3SourceEnter(nested, nested.length, nested.length, puml)).text,
-            "B is still open after `deactivate A`, so the next line is one level in",
+            "B is still open at its own indent after `deactivate A`, so the next line is one level deeper than B",
         )
     }
 
