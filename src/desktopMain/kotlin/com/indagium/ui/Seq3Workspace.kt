@@ -1112,7 +1112,9 @@ internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryI
  * (regenerated every reopen — see [activeDiagramToken] for the identical substitution). See
  * `seq3ViewToken()`/`restoreSeq3ViewToken()` in DiagramWorkspaceViewCodec.kt. Maximize remains transient.
  * Nothing else here changes: selection/hover/zoom/filter/sort still reset to defaults on reopen,
- * same as before.
+ * same as before. The layout preferences also outlive the tab: [Seq3Session] remembers a closed item's
+ * layout and a new view starts from it, or from the layout the user last set on any diagram
+ * ([DiagramLayoutMemory]).
  */
 internal enum class Seq3CanvasEditorKind { MESSAGE_LABEL, FRAGMENT_LABEL, DELAY_LABEL, NOTE_TEXT, LIFELINE_NAME }
 
@@ -1361,6 +1363,11 @@ internal class Seq3ViewState {
 
     /** Last selected preset for the Layout menu's Reset action. */
     var diagramLastPreset by mutableStateOf(DiagramWorkspacePreset.STANDARD)
+
+    /** The layout this view started with (the item's remembered one, the last one the user set, or the default),
+     *  or null for a view [Seq3Session] did not create. On close a layout that differs from it is remembered for
+     *  the item; one that does not is not, so an item the user never arranged keeps following the last layout set. */
+    var diagramLayoutBaseline: DiagramSavedLayout? = null
 
     /** Maximize is transient; Escape restores the saved tiled arrangement. */
     var maximizedDiagramTile by mutableStateOf<DiagramWorkspaceSectionId?>(null)

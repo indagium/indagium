@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -485,7 +486,7 @@ private fun DiagramLayoutMenuPopup(
                 DiagramWorkspacePreset.entries.forEach { preset ->
                     DiagramPresetThumb(preset, active = diagramWorkspacePresetActive(view, preset)) {
                         applyDiagramWorkspacePreset(view, preset)
-                        state.autosaveInBackground()
+                        state.diagramLayoutEdited(view)
                         onReclaimFocus()
                     }
                 }
@@ -498,7 +499,7 @@ private fun DiagramLayoutMenuPopup(
                     CheckRow(
                         checked = isVisible,
                         onToggle = {
-                            if (setDiagramWorkspaceTileVisible(view, id, !isVisible)) state.autosaveInBackground()
+                            if (setDiagramWorkspaceTileVisible(view, id, !isVisible)) state.diagramLayoutEdited(view)
                             onReclaimFocus()
                         },
                         enabled = !isVisible || visible.size > 1,
@@ -509,7 +510,7 @@ private fun DiagramLayoutMenuPopup(
             Box(Modifier.testTag("diagram-layout-menu-lock")) {
                 CheckRow(view.diagramTilesLocked, {
                     view.diagramTilesLocked = !view.diagramTilesLocked
-                    state.autosaveInBackground()
+                    state.diagramLayoutEdited(view)
                     onReclaimFocus()
                 }) { AppText("Lock tiles", color = tc.tx, fontSize = 12.sp) }
             }
@@ -518,7 +519,7 @@ private fun DiagramLayoutMenuPopup(
                 Modifier.fillMaxWidth()
                     .clickable(role = Role.Button) {
                         applyDiagramWorkspacePreset(view, resetTo)
-                        state.autosaveInBackground()
+                        state.diagramLayoutEdited(view)
                         onReclaimFocus()
                     }
                     .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -533,8 +534,10 @@ private fun DiagramPresetThumb(preset: DiagramWorkspacePreset, active: Boolean, 
     val tc = tc()
     val fill = if (active) tc.ac else tc.td
     val geometry = remember(preset) {
+        // Only the tiles the preset shows: a hidden one keeps its place in the tree but is not on the canvas.
+        val shown = projectTileLayout(preset.layout) { it !in preset.hidden }?.root ?: preset.layout
         tileGeometry(
-            preset.layout,
+            shown,
             THUMB_VIRTUAL_WIDTH,
             THUMB_VIRTUAL_HEIGHT,
             DIAGRAM_WORKSPACE_CHROME_SPEC.geometrySpec(),
@@ -571,7 +574,15 @@ private fun DiagramPresetThumb(preset: DiagramWorkspacePreset, active: Boolean, 
             }
         }
         Box(Modifier.width(THUMB_WIDTH_DP.dp), contentAlignment = Alignment.Center) {
-            AppText(preset.label, color = if (active) tc.ac else tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // A label wider than the thumbnail ("Editor + diagram") spills evenly to both sides instead of ending in an ellipsis.
+            AppText(
+                preset.label,
+                color = if (active) tc.ac else tc.ts,
+                fontSize = 9.sp,
+                modifier = Modifier.wrapContentWidth(Alignment.CenterHorizontally, unbounded = true),
+                maxLines = 1,
+                overflow = TextOverflow.Clip,
+            )
         }
     }
 }

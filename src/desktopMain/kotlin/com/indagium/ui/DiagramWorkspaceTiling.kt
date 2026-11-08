@@ -67,7 +67,40 @@ internal enum class DiagramWorkspacePreset(
         collapsed = emptySet(),
         hidden = setOf(DiagramWorkspaceSectionId.SOURCE),
     ),
+    EDITOR_AND_DIAGRAM(
+        "Editor + diagram",
+        diagramWorkspaceEditorLayout(),
+        collapsed = emptySet(),
+        hidden = setOf(
+            DiagramWorkspaceSectionId.MESSAGES,
+            DiagramWorkspaceSectionId.LIFELINES,
+            DiagramWorkspaceSectionId.ARTIFACTS,
+        ),
+    ),
 }
+
+/**
+ * Source on the left, Preview on the right; the authoring tiles keep their column at the left (hidden by the preset), so
+ * showing one restores its place. Its shape differs from the default's, so Edit leaves it alone
+ * ([diagramWorkspaceSourceBesidePreview]), and a narrow window stacks Preview, then Source ([diagramWorkspaceNarrowLayout]).
+ */
+internal fun diagramWorkspaceEditorLayout(sourceWeight: Float = 1f, previewWeight: Float = 1.3f): DiagramWorkspaceLayout =
+    TileSplit(
+        TileAxis.ROW,
+        listOf(
+            TileSplit(
+                TileAxis.COLUMN,
+                listOf(
+                    TileLeaf(DiagramWorkspaceSectionId.MESSAGES, DIAGRAM_MESSAGES_TILE_WEIGHT),
+                    TileLeaf(DiagramWorkspaceSectionId.LIFELINES, 1f),
+                    TileLeaf(DiagramWorkspaceSectionId.ARTIFACTS, 1f),
+                ),
+                0.9f,
+            ),
+            TileLeaf(DiagramWorkspaceSectionId.SOURCE, sourceWeight),
+            TileLeaf(DiagramWorkspaceSectionId.PREVIEW, previewWeight),
+        ),
+    )
 
 internal fun diagramWorkspaceLayout(sideWeight: Float = 0.9f, previewWeight: Float = 2.2f): DiagramWorkspaceLayout =
     TileSplit(
@@ -308,18 +341,18 @@ internal fun DiagramWorkspaceTilingHost(
         onCommitLayout = { tree ->
             view.diagramTileLayout = sanitizeDiagramWorkspaceLayoutState(tree, view.diagramHiddenTiles, view.diagramCollapsedTiles).layout
             view.diagramLastPreset = DiagramWorkspacePreset.entries.firstOrNull { it.layout == tree } ?: view.diagramLastPreset
-            state.autosaveInBackground()
+            state.diagramLayoutEdited(view)
         },
         onHide = { id ->
             if (setDiagramWorkspaceTileVisible(view, id, false)) {
-                state.autosaveInBackground()
+                state.diagramLayoutEdited(view)
             }
         },
         onToggleCollapse = { id ->
             val collapsed = id !in view.diagramCollapsedTiles
             view.diagramCollapsedTiles = if (collapsed) view.diagramCollapsedTiles + id else view.diagramCollapsedTiles - id
             setLegacyDiagramTileExpanded(view, id, !collapsed)
-            state.autosaveInBackground()
+            state.diagramLayoutEdited(view)
         },
         onMaximize = { view.maximizedDiagramTile = it },
         onReclaimFocus = onReclaimFocus,

@@ -107,9 +107,11 @@ class Seq3WorkspaceUxTest {
 
     @Test
     fun resizingTheTilesIsNotArrangingThem() {
-        for (preset in DiagramWorkspacePreset.entries) {
+        // Editor + diagram already has Source beside Preview: Edit has nothing to move there.
+        for (preset in DiagramWorkspacePreset.entries.filter { it != DiagramWorkspacePreset.EDITOR_AND_DIAGRAM }) {
             assertNotNull(diagramWorkspaceSourceBesidePreview(preset.layout, 1400f), "${preset.label} keeps the default arrangement")
         }
+        assertNull(diagramWorkspaceSourceBesidePreview(DiagramWorkspacePreset.EDITOR_AND_DIAGRAM.layout, 1400f))
         val resized: TileNode<DiagramWorkspaceSectionId> = (diagramWorkspaceDefaultLayout() as TileSplit).let { root ->
             root.copy(children = root.children.map { it.withTileWeight(it.weight * 1.5f) })
         }

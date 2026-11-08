@@ -17048,16 +17048,18 @@ class AppState(
                 val activeDiagramToken = keyLines.firstOrNull { it.substringBefore('\t') == "activeDiagram" }
                     ?.substringAfter('\t', "")?.unb64().orEmpty()
                 restoreActiveDiagram(activeDiagramToken)
-                // Wave 2.5: queue-panel section/height/width preferences, keyed by the same
-                // libraryItemId restoreDiagramTabs just reopened sessions for — must run after it
-                // for that lookup to resolve, same ordering requirement as restoreActiveDiagram
-                // just above. Absent on a legacy cache (no "seq3View" key) or one written before
-                // this field existed; restoreSeq3ViewToken's own blank-token guard makes that a
-                // no-op, leaving every session's queue panel at its constructed default.
-                val seq3ViewToken = keyLines.firstOrNull { it.substringBefore('\t') == "seq3View" }
-                    ?.substringAfter('\t', "")?.unb64().orEmpty()
-                restoreSeq3ViewToken(seq3ViewToken)
             }
+            // Wave 2.5: queue-panel section/height/width preferences, keyed by the same
+            // libraryItemId restoreDiagramTabs just reopened sessions for — must run after it
+            // for that lookup to resolve, same ordering requirement as restoreActiveDiagram
+            // above. Absent on a legacy cache (no "seq3View" key) or one written before
+            // this field existed; restoreSeq3ViewToken's own blank-token guard makes that a
+            // no-op, leaving every session's queue panel at its constructed default. Outside the
+            // diagramTabs branch on purpose: the token also holds the layouts remembered for
+            // diagrams that are closed, which a restart with no diagram open must still restore.
+            val seq3ViewToken = keyLines.firstOrNull { it.substringBefore('\t') == "seq3View" }
+                ?.substringAfter('\t', "")?.unb64().orEmpty()
+            restoreSeq3ViewToken(seq3ViewToken)
             // Tab strip order (WP-diagram-restore follow-up): must also run after both tabs and
             // any diagram sessions above exist — see restoreTabOrder's own doc. Unconditional
             // (unlike the diagramTabs branch above): a log-tabs-only order still needs restoring

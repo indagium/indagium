@@ -237,6 +237,33 @@ class DiagramWorkspaceTilingUiTest {
         rule.onNodeWithTag("diagram-tile-card-source").assertExists()
     }
 
+    @Test
+    fun editorAndDiagramPresetShowsOnlySourceAndPreviewSideBySide() {
+        val tab = mkTab("diagram-editor-preset", "editor-preset.log", emptyList())
+        state.tabs = listOf(tab)
+        state.activateTab(tab.id)
+        val sessionId = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        setWorkspace(sessionId)
+        rule.waitForIdle()
+        rule.onNodeWithTag("diagram-tile-card-messages").assertExists()
+
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("diagram-layout-menu-preset-EDITOR_AND_DIAGRAM").performClick()
+        rule.waitForIdle()
+
+        assertTrue(diagramWorkspacePresetActive(view, DiagramWorkspacePreset.EDITOR_AND_DIAGRAM))
+        rule.onNodeWithTag("diagram-tile-card-messages").assertDoesNotExist()
+        rule.onNodeWithTag("diagram-tile-card-lifelines").assertDoesNotExist()
+        rule.onNodeWithTag("diagram-tile-card-artifacts").assertDoesNotExist()
+        val source = rule.onNodeWithTag("diagram-tile-card-source").getBoundsInRoot()
+        val preview = rule.onNodeWithTag("diagram-tile-card-preview").getBoundsInRoot()
+        assertTrue(source.right <= preview.left, "the editor sits left of the diagram: $source vs $preview")
+        assertTrue(preview.right - preview.left > 100.dp && source.right - source.left > 100.dp)
+        rule.onNodeWithTag("seq3-source-editor").assertIsDisplayed()
+        rule.onNodeWithTag("diagram-layout-menu-preset-EDITOR_AND_DIAGRAM").assertExists()
+    }
+
     private fun setWorkspace(sessionId: String) {
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {

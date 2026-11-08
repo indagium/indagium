@@ -280,7 +280,8 @@ class Seq3Session(
      * hidden/collapsed tiles, lock and last preset, alongside the legacy section flags and sizes —
      * which survive a full app restart via `seq3ViewToken()`/`restoreSeq3ViewToken()` (DiagramWorkspaceViewCodec.kt).
      * Those functions read/write the preferences into whichever [Seq3ViewState] this map hands out
-     * for a session's id; see the EXCEPTION note on [Seq3ViewState] itself.
+     * for a session's id; see the EXCEPTION note on [Seq3ViewState] itself. Closing a tab also remembers
+     * a layout the user changed in [layoutMemory], per library item, for the next time the item is opened.
      */
     private val workspaceViewStates = ConcurrentHashMap<String, Seq3ViewState>()
 
@@ -307,8 +308,23 @@ class Seq3Session(
     private val liveSourceBurstAtMs = HashMap<String, Long>()
 
     internal fun viewState(id: String): Seq3ViewState? {
-        if (session(id) == null) return null
-        return workspaceViewStates.computeIfAbsent(id) { Seq3ViewState() }
+        val session = session(id) ?: return null
+        return workspaceViewStates.computeIfAbsent(id) { newViewState(session.libraryItemId) }
+    }
+
+    /** What the diagram workspaces remember of their layouts across a closed tab and a restart; see [DiagramLayoutMemory]. */
+    internal val layoutMemory = DiagramLayoutMemory()
+
+    /** Forgets the remembered layouts of items the library no longer holds (a restored token may name one deleted since). */
+    internal fun dropLayoutsOfMissingItems() = layoutMemory.retainWhere { libraryStore.get(it) != null }
+
+    /** A new view for the item [libraryItemId] (null for a diagram with no library record): it starts from the layout the
+     *  item was left with, else from the last layout the user set on any diagram, else from the built-in default. */
+    private fun newViewState(libraryItemId: String?): Seq3ViewState {
+        val view = Seq3ViewState()
+        (libraryItemId?.let(layoutMemory::layoutFor) ?: layoutMemory.lastSet())?.let(view::applySavedLayout)
+        view.diagramLayoutBaseline = view.savedLayout()
+        return view
     }
 
     private fun session(id: String): Seq3WorkspaceSession? = sessions.firstOrNull { it.id == id }
@@ -572,7 +588,12 @@ class Seq3Session(
         draftSaveJobs.remove(id)?.cancel()
         draftSaveGenerations.remove(id)
         generations.remove(id)
-        workspaceViewStates.remove(id)
+        val libraryItemId = session(id)?.libraryItemId
+        workspaceViewStates.remove(id)?.let { view ->
+            // A layout the user changed outlives the tab: reopening the item shows it again.
+            val layout = view.savedLayout()
+            if (libraryItemId != null && layout != view.diagramLayoutBaseline) layoutMemory.remember(libraryItemId, layout)
+        }
         synchronized(appState.stateLock) { liveSourceBurstAtMs.remove(id) }
         generatedBaselines.remove(id)
         lastReportedRejectionKey.remove(id)
@@ -2149,6 +2170,8 @@ class Seq3Session(
      *  [SeqDiagramCoordinator.deleteLibraryItem]'s "the workspace can't outlive its own record"). */
     fun deleteLibraryItem(id: String): Boolean {
         synchronized(appState.stateLock) { sessions.filter { it.libraryItemId == id } }.forEach { close(it.id) }
+        // After the closes: closing the item's open tab remembers its layout.
+        layoutMemory.forget(id)
         return libraryStore.delete(id).also { deleted -> if (deleted) libraryRevision++ }
     }
 

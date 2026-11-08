@@ -9,43 +9,69 @@ private const val DIAGRAM_TILES_LOCKED_FIELD = 13
 private const val DIAGRAM_LAST_PRESET_FIELD = 14
 
 /**
- * The per-session diagram view token. Fields 0–9 retain the original queue section flags, heights,
- * and panel width; fields 10 onward store the tile tree, hidden/collapsed ids, lock, and last preset.
+ * The diagram view token: one entry per library item, joined by `,` (each [b64]). Fields 0–9 retain the original queue
+ * section flags, heights, and panel width; fields 10 onward store the tile tree, hidden/collapsed ids, lock, and last preset.
  * The original flags are written as a projection of the tile state and remain the migration input
  * for caches that predate the tiled workspace.
+ *
+ * Entries are written for the diagrams open now (their live layout), then for the layouts remembered for items whose tab is
+ * closed ([DiagramLayoutMemory.entries], at most [MAX_DIAGRAM_LIBRARY_ITEMS] entries in all), then, last, one entry with a
+ * blank item id holding the layout the user set most recently on any diagram. An older build skips an entry whose item is
+ * not open, and one with a blank id, so it reads the open diagrams' entries exactly as before.
  */
-internal fun AppState.seq3ViewToken(): String =
-    seq3Sessions.sessions
-        .mapNotNull { session ->
-            val libraryItemId = session.libraryItemId ?: return@mapNotNull null
-            val view = seq3Sessions.viewState(session.id) ?: return@mapNotNull null
-            val tileState = sanitizeDiagramWorkspaceLayoutState(view.diagramTileLayout, view.diagramHiddenTiles, view.diagramCollapsedTiles)
-            tokenFields(
-                libraryItemId,
-                (DiagramWorkspaceSectionId.MESSAGES !in tileState.hidden).toString(),
-                (DiagramWorkspaceSectionId.MESSAGES !in tileState.collapsed).toString(),
-                (DiagramWorkspaceSectionId.LIFELINES !in tileState.hidden).toString(),
-                (DiagramWorkspaceSectionId.LIFELINES !in tileState.collapsed).toString(),
-                (DiagramWorkspaceSectionId.ARTIFACTS !in tileState.hidden).toString(),
-                (DiagramWorkspaceSectionId.ARTIFACTS !in tileState.collapsed).toString(),
-                view.lifelinesSectionHeightDp.toString(),
-                view.artifactsSectionHeightDp.toString(),
-                view.panelWidthDp.toString(),
-                tileLayoutJson(tileState.layout) { it.key }.toString(),
-                tileState.hidden.joinToString(",") { it.key },
-                tileState.collapsed.joinToString(",") { it.key },
-                view.diagramTilesLocked.toString(),
-                view.diagramLastPreset.name,
-            )
-        }
+internal fun AppState.seq3ViewToken(): String {
+    val memory = seq3Sessions.layoutMemory
+    val open = seq3Sessions.sessions.mapNotNull { session ->
+        val libraryItemId = session.libraryItemId ?: return@mapNotNull null
+        val view = seq3Sessions.viewState(session.id) ?: return@mapNotNull null
+        libraryItemId to layoutTokenFields(
+            libraryItemId,
+            view.savedLayout(),
+            view.lifelinesSectionHeightDp,
+            view.artifactsSectionHeightDp,
+        )
+    }
+    val openIds = open.mapTo(HashSet()) { it.first }
+    val defaults = Seq3ViewState()
+    val remembered = memory.entries().filter { it.first !in openIds }.map { (id, layout) ->
+        id to layoutTokenFields(id, layout, defaults.lifelinesSectionHeightDp, defaults.artifactsSectionHeightDp)
+    }
+    val lastSet = memory.lastSet()?.let {
+        layoutTokenFields("", it, defaults.lifelinesSectionHeightDp, defaults.artifactsSectionHeightDp)
+    }
+    return ((remembered + open).takeLast(MAX_DIAGRAM_LIBRARY_ITEMS).map { it.second } + listOfNotNull(lastSet))
         .joinToString(",") { it.b64() }
+}
 
-/** Restores a view entry after [restoreDiagramTabs] has reopened its matching library sessions. */
+private fun layoutTokenFields(libraryItemId: String, saved: DiagramSavedLayout, lifelinesHeightDp: Float, artifactsHeightDp: Float): String =
+    tokenFields(
+        libraryItemId,
+        (DiagramWorkspaceSectionId.MESSAGES !in saved.hidden).toString(),
+        (DiagramWorkspaceSectionId.MESSAGES !in saved.collapsed).toString(),
+        (DiagramWorkspaceSectionId.LIFELINES !in saved.hidden).toString(),
+        (DiagramWorkspaceSectionId.LIFELINES !in saved.collapsed).toString(),
+        (DiagramWorkspaceSectionId.ARTIFACTS !in saved.hidden).toString(),
+        (DiagramWorkspaceSectionId.ARTIFACTS !in saved.collapsed).toString(),
+        lifelinesHeightDp.toString(),
+        artifactsHeightDp.toString(),
+        saved.panelWidthDp.toString(),
+        tileLayoutJson(saved.layout) { it.key }.toString(),
+        saved.hidden.joinToString(",") { it.key },
+        saved.collapsed.joinToString(",") { it.key },
+        saved.locked.toString(),
+        saved.lastPreset.name,
+    )
+
+/**
+ * Restores the token: the remembered layouts and the last-set layout first, then each diagram that is open now takes its own
+ * entry, after [restoreDiagramTabs] has reopened its matching library sessions.
+ */
 internal fun AppState.restoreSeq3ViewToken(token: String) {
     if (token.isBlank()) return
+    val entries = token.split(",").map { it.unb64().tokenFields() }
+    restoreDiagramLayoutMemory(entries)
     val sessionIdByLibraryItemId = seq3Sessions.sessions.mapNotNull { s -> s.libraryItemId?.let { id -> id to s.id } }.toMap()
-    token.split(",").forEach { entry ->
-        val fields = entry.unb64().tokenFields()
+    entries.forEach { fields ->
         val libraryItemId = fields.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@forEach
         val sessionId = sessionIdByLibraryItemId[libraryItemId] ?: return@forEach
         val view = seq3Sessions.viewState(sessionId) ?: return@forEach
@@ -60,6 +86,19 @@ internal fun AppState.restoreSeq3ViewToken(token: String) {
         fields.getOrNull(9)?.toFloatOrNull()?.let { view.panelWidthDp = it.coerceIn(PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP) }
         restoreDiagramWorkspaceViewState(view, fields)
     }
+}
+
+/** Fills [DiagramLayoutMemory] from the tiled [entries]: a blank item id is the last-set layout; entries of items the library no longer holds are dropped. */
+private fun AppState.restoreDiagramLayoutMemory(entries: List<List<String>>) {
+    val memory = seq3Sessions.layoutMemory
+    val base = Seq3ViewState().savedLayout()
+    entries.forEach { fields ->
+        if (fields.size <= DIAGRAM_TILE_LAYOUT_FIELD) return@forEach
+        val libraryItemId = fields.getOrNull(0).orEmpty()
+        val saved = decodeDiagramSavedLayout(fields, base)
+        if (libraryItemId.isBlank()) memory.setLast(saved) else memory.remember(libraryItemId, saved)
+    }
+    seq3Sessions.dropLayoutsOfMissingItems()
 }
 
 /** Fields 10 onward extend the queue token without changing the meaning of any older field. */
@@ -90,6 +129,13 @@ private fun restoreLegacyDiagramWorkspaceViewState(view: Seq3ViewState) {
 }
 
 private fun restoreTiledDiagramWorkspaceViewState(view: Seq3ViewState, fields: List<String>) {
+    view.applySavedLayout(decodeDiagramSavedLayout(fields, view.savedLayout()))
+}
+
+/**
+ * The layout a tiled entry holds; [base] supplies whatever the entry lacks (a field that is absent or unreadable).
+ */
+private fun decodeDiagramSavedLayout(fields: List<String>, base: DiagramSavedLayout): DiagramSavedLayout {
     val decodedLayout = fields.getOrNull(DIAGRAM_TILE_LAYOUT_FIELD)?.takeIf { it.isNotBlank() }?.let { raw ->
         runCatching {
             tileLayoutNodeFromJson(
@@ -112,15 +158,13 @@ private fun restoreTiledDiagramWorkspaceViewState(view: Seq3ViewState, fields: L
     val collapsed = fields.getOrNull(DIAGRAM_COLLAPSED_TILES_FIELD).orEmpty().split(',')
         .mapNotNull(DiagramWorkspaceSectionId::fromKey)
     val restored = sanitizeDiagramWorkspaceLayoutState(decodedLayout, hidden, collapsed)
-    view.diagramTileLayout = restored.layout
-    view.diagramHiddenTiles = restored.hidden
-    view.diagramCollapsedTiles = restored.collapsed
-    fields.getOrNull(DIAGRAM_TILES_LOCKED_FIELD)?.toBooleanStrictOrNull()?.let { view.diagramTilesLocked = it }
-    fields.getOrNull(DIAGRAM_LAST_PRESET_FIELD)?.let { name ->
-        view.diagramLastPreset = DiagramWorkspacePreset.entries.firstOrNull { it.name == name } ?: view.diagramLastPreset
-    }
-    DiagramWorkspaceSectionId.entries.forEach { id ->
-        setLegacyDiagramPaneOpen(view, id, id !in restored.hidden)
-        setLegacyDiagramTileExpanded(view, id, id !in restored.collapsed)
-    }
+    return DiagramSavedLayout(
+        layout = restored.layout,
+        hidden = restored.hidden,
+        collapsed = restored.collapsed,
+        locked = fields.getOrNull(DIAGRAM_TILES_LOCKED_FIELD)?.toBooleanStrictOrNull() ?: base.locked,
+        lastPreset = fields.getOrNull(DIAGRAM_LAST_PRESET_FIELD)
+            ?.let { name -> DiagramWorkspacePreset.entries.firstOrNull { it.name == name } } ?: base.lastPreset,
+        panelWidthDp = fields.getOrNull(9)?.toFloatOrNull()?.coerceIn(PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP) ?: base.panelWidthDp,
+    )
 }
