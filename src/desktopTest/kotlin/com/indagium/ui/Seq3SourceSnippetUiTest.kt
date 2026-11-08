@@ -77,11 +77,11 @@ class Seq3SourceSnippetUiTest {
         val box = layouts.single().getBoundingBox(view.sourceDraft.indexOf("From") + 1)
         editor.performMouseInput { click(Offset(200f, box.center.y)) }
         editor.performMouseInput { click(box.center) }
-        rule.onNodeWithTag("seq3-source-endpoint-choices", useUnmergedTree = true).assertIsDisplayed()
-        rule.onNodeWithText("Alpha", useUnmergedTree = true).performMouseInput { click() }
+        rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithTag("seq3-source-endpoint-choices", useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithTag("seq3-source-suggestion-row-name-A", useUnmergedTree = true).performMouseInput { click() }
         rule.waitForIdle()
         assertTrue(view.sourceDraft.contains("A -> To: message label"), view.sourceDraft)
-        rule.onNodeWithTag("seq3-source-endpoint-choices", useUnmergedTree = true).assertDoesNotExist()
         rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertDoesNotExist()
     }
 

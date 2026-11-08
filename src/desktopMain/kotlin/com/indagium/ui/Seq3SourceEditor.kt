@@ -237,7 +237,7 @@ internal fun Seq3SourceEditorPane(
     var selectedSuggestionIndex by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(0) }
     var snippetFields by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<List<SourceSnippetField>>(emptyList()) }
     var snippetText by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(view.sourceDraft) }
-    var endpointMenu by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Int?>(null) }
+    var endpointMenu by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Seq3SourceEndpointMenu?>(null) }
     var ignoreEndpointRelease by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
     var showEvidenceLossDialog by remember(session.id) { mutableStateOf(false) }
     // The in-tile issues list under the editor, opened from the status strip.
@@ -573,41 +573,35 @@ internal fun Seq3SourceEditorPane(
 
     val selection = editorState.selection
     val endpointIndex = snippetFields.indexOfFirst { it.endpoint && selection.start >= it.start && selection.end <= it.end }
-    val endpointField = snippetFields.getOrNull(endpointIndex)
-        ?: sourceEndpointAt(sourceText, selection, view.sourceEditorDialect)
-    val endpointQuery = endpointField?.let { sourceText.substring(it.start.coerceAtMost(sourceText.length), it.end.coerceAtMost(sourceText.length)) }.orEmpty()
     val participantChoices = sourceParticipants(sourceText, view.sourceEditorDialect)
-    val identifierChoices = if (state.settings.diagramSourceAutocomplete && endpointField != null && selection.collapsed && endpointQuery.isNotBlank()) {
-        participantChoices.filter { it.alias.startsWith(endpointQuery, true) || it.name.startsWith(endpointQuery, true) }
-            .filterNot { it.alias == endpointQuery }
-    } else emptyList()
-    fun chooseEndpoint(index: Int, alias: String) {
-        val old = currentEditorValue()
-        val field = snippetFields.getOrNull(index) ?: sourceEndpointAt(old.text, old.selection, view.sourceEditorDialect) ?: return
-        val nextText = old.text.replaceRange(field.start, field.end, alias)
-        snippetFields = rebaseSourceSnippetFields(snippetFields, old.text, nextText)
-        setEditorValue(TextFieldValue(nextText, TextRange(field.start, field.start + alias.length)), true)
-        endpointMenu = null
-        runCatching { requester.requestFocus() }
+    val autocomplete = state.settings.diagramSourceAutocomplete
+    // A click on an endpoint name opens every participant, until the text changes or the caret leaves the name.
+    val openMenu = endpointMenu?.takeIf {
+        autocomplete && it.text == sourceText && selection.start >= it.trigger.start && selection.end <= it.trigger.end
     }
-
-    val suggestionTrigger = if (state.settings.diagramSourceAutocomplete && endpointField == null) {
-        seq3SourceSuggestionTrigger(sourceText, editorState.selection, view.sourceEditorDialect)
+    if (openMenu == null && endpointMenu != null) endpointMenu = null
+    // Typing inside an endpoint completes the whole name; elsewhere the word at the caret.
+    val endpointTrigger = if (autocomplete) seq3SourceEndpointTrigger(sourceText, selection, view.sourceEditorDialect, snippetFields) else null
+    val suggestionTrigger = if (autocomplete) {
+        openMenu?.trigger ?: endpointTrigger ?: seq3SourceSuggestionTrigger(sourceText, selection, view.sourceEditorDialect)
     } else null
     val activeDismissal = seq3SourceDismissalAfterEdit(dismissedSuggestion, suggestionTrigger)
     if (activeDismissal != dismissedSuggestion) dismissedSuggestion = activeDismissal
-    val sourceSuggestions = suggestionTrigger?.let {
+    val sourceSuggestions = if (openMenu != null) {
+        seq3SourceEndpointMenuSuggestions(participantChoices)
+    } else suggestionTrigger?.let {
         seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias }, participantChoices)
     }.orEmpty()
-    LaunchedEffect(suggestionTrigger?.query, view.sourceEditorDialect) {
-        selectedSuggestionIndex = 0
+    val menuActiveIndex = openMenu?.let { seq3SourceEndpointMenuActiveIndex(it.trigger, participantChoices) } ?: 0
+    LaunchedEffect(suggestionTrigger?.query, openMenu?.trigger?.start, view.sourceEditorDialect) {
+        selectedSuggestionIndex = menuActiveIndex
     }
-    val suggestionsVisible = suggestionTrigger != null && sourceSuggestions.isNotEmpty() && activeDismissal == null
+    val suggestionsVisible = suggestionTrigger != null && sourceSuggestions.isNotEmpty() && (openMenu != null || activeDismissal == null)
     if (selectedSuggestionIndex !in sourceSuggestions.indices) selectedSuggestionIndex = 0
 
     // The preview keeps following the draft while the suggestion list is open; the half-typed word
     // the list belongs to is left out of what is imported, so it is not flagged while it is typed.
-    val previewText = if (suggestionsVisible && suggestionTrigger != null) {
+    val previewText = if (suggestionsVisible && suggestionTrigger != null && openMenu == null && endpointTrigger == null) {
         sourceText.removeRange(suggestionTrigger.start.coerceIn(0, sourceText.length), suggestionTrigger.end.coerceIn(0, sourceText.length))
     } else sourceText
     LaunchedEffect(
@@ -633,11 +627,12 @@ internal fun Seq3SourceEditorPane(
         val (inserted, fields) = insertSeq3SourceSuggestionWithFields(
             sourceText, trigger, suggestion, view.sourceEditorDialect, state.settings.diagramSourceAutoIndent,
         )
-        snippetFields = fields
+        // A name replaces just the endpoint or word: the snippet's other fields keep their place.
+        snippetFields = if (suggestion.name) rebaseSourceSnippetFields(snippetFields, sourceText, inserted.text) else fields
         endpointMenu = null
         setEditorValue(inserted, true)
         // The accepted word stays closed: `Alias` is a prefix of `Alias_2`, which must not reopen the list.
-        dismissedSuggestion = seq3SourceDismissalAfterAccept(inserted, view.sourceEditorDialect)
+        dismissedSuggestion = seq3SourceDismissalAfterAccept(inserted, view.sourceEditorDialect, snippetFields)
         selectedSuggestionIndex = 0
         runCatching { requester.requestFocus() }
     }
@@ -748,18 +743,25 @@ internal fun Seq3SourceEditorPane(
                         if (ignoreEndpointRelease) ignoreEndpointRelease = false
                         else {
                             val selected = editorState.selection
-                            endpointMenu = snippetFields.indexOfFirst { it.endpoint && selected.start >= it.start && selected.end <= it.end }
-                                .takeIf { it >= 0 } ?: sourceEndpointAt(editorState.text.toString(), selected, view.sourceEditorDialect)?.let { -1 }
+                            val text = editorState.text.toString()
+                            val trigger = if (state.settings.diagramSourceAutocomplete) {
+                                seq3SourceEndpointMenuTrigger(text, selected, view.sourceEditorDialect, snippetFields)
+                            } else null
+                            endpointMenu = trigger?.let { Seq3SourceEndpointMenu(it, text) }
+                            if (trigger != null) {
+                                dismissedSuggestion = null
+                                selectedSuggestionIndex = seq3SourceEndpointMenuActiveIndex(
+                                    trigger, sourceParticipants(text, view.sourceEditorDialect),
+                                )
+                            }
                         }
                     }
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                         lastEditorInputMs[0] = view.sourceClockMs()
-                        if (event.key == Key.Escape && endpointMenu != null) {
-                            endpointMenu = null
-                            return@onPreviewKeyEvent true
-                        }
                         if (event.key == Key.Tab && !(event.isCtrlPressed || event.isMetaPressed) && snippetFields.isNotEmpty()) {
+                            // In an endpoint field the chosen name goes in first, then Tab moves on.
+                            if (suggestionsVisible && endpointIndex >= 0 && !event.isShiftPressed) insertSuggestion(selectedSuggestionIndex)
                             val currentText = editorState.text.toString()
                             if (snippetText != currentText) {
                                 snippetFields = rebaseSourceSnippetFields(snippetFields, snippetText, currentText)
@@ -776,10 +778,6 @@ internal fun Seq3SourceEditorPane(
                             }
                             snippetFields = emptyList()
                         }
-                        if (identifierChoices.isNotEmpty() && event.key == Key.Enter) {
-                            chooseEndpoint(endpointIndex, identifierChoices.first().alias)
-                            return@onPreviewKeyEvent true
-                        }
                         if (suggestionsVisible && !(event.isCtrlPressed || event.isMetaPressed)) {
                             when (event.key) {
                                 Key.DirectionDown -> {
@@ -795,6 +793,7 @@ internal fun Seq3SourceEditorPane(
                                     return@onPreviewKeyEvent true
                                 }
                                 Key.Escape -> {
+                                    endpointMenu = null
                                     dismissedSuggestion = seq3SourceDismissalOf(suggestionTrigger)
                                     runCatching { requester.requestFocus() }
                                     view.textFieldFocused = true
@@ -895,22 +894,7 @@ internal fun Seq3SourceEditorPane(
                             AppText(sourceStartHint(view.sourceEditorDialect), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
                         }
                         inner()
-                        val choices = if (endpointMenu != null) participantChoices else identifierChoices
-                        if (choices.isNotEmpty() && (endpointMenu != null || identifierChoices.isNotEmpty())) {
-                            Column(
-                                Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 6.dp)
-                                    .widthIn(min = 150.dp, max = 260.dp).width(IntrinsicSize.Max).heightIn(max = 200.dp)
-                                    .background(tc.p, RoundedCornerShape(6.dp)).border(1.dp, tc.br, RoundedCornerShape(6.dp))
-                                    .verticalScroll(rememberScrollState()).padding(4.dp).testTag("seq3-source-endpoint-choices"),
-                            ) {
-                                choices.forEach { participant ->
-                                    Seq3DropdownMenuItem(sourceParticipantChoiceLabel(participant, participantChoices), active = false) {
-                                        ignoreEndpointRelease = true
-                                        chooseEndpoint(endpointMenu ?: endpointIndex, participant.alias)
-                                    }
-                                }
-                            }
-                        } else if (suggestionsVisible) {
+                        if (suggestionsVisible && suggestionTrigger != null) {
                             // The list opens under the line the suggestion belongs to, or above it
                             // when the viewport has no room below. The caret rectangle comes from
                             // the layout of the visible text, so the hidden marker lines are
@@ -956,7 +940,11 @@ internal fun Seq3SourceEditorPane(
                                                 suggestion = suggestion,
                                                 prefix = suggestionTrigger.prefix,
                                                 active = index == selectedSuggestionIndex,
-                                                onClick = { insertSuggestion(index) },
+                                                onClick = {
+                                                    // The click's release must not reopen an endpoint list on the new caret.
+                                                    ignoreEndpointRelease = true
+                                                    insertSuggestion(index)
+                                                },
                                             )
                                         }
                                     }
@@ -1464,8 +1452,12 @@ internal fun seq3SourceDismissalOf(trigger: Seq3SourceSuggestionTrigger): Seq3So
     Seq3SourceSuggestionDismissal(trigger.start, trigger.query)
 
 /** The dismissal after accepting a suggestion: the word now at the caret, which stays closed. */
-internal fun seq3SourceDismissalAfterAccept(value: TextFieldValue, dialect: Seq3Dialect): Seq3SourceSuggestionDismissal? =
-    seq3SourceSuggestionTrigger(value.text, value.selection, dialect)?.let(::seq3SourceDismissalOf)
+internal fun seq3SourceDismissalAfterAccept(
+    value: TextFieldValue,
+    dialect: Seq3Dialect,
+    fields: List<SourceSnippetField> = emptyList(),
+): Seq3SourceSuggestionDismissal? =
+    seq3SourceEditorTrigger(value.text, value.selection, dialect, fields)?.let(::seq3SourceDismissalOf)
 
 /**
  * [dismissal] after the editor moved on to [trigger] (null: no word at the caret). A longer word, a
@@ -1553,16 +1545,85 @@ internal fun seq3SourceNameSuggestions(query: String, participants: List<Seq3Sou
     if (query.isEmpty()) return emptyList()
     val byAlias = participants.filter { it.alias.startsWith(query, ignoreCase = true) }
     val byName = participants.filter { !it.alias.startsWith(query, ignoreCase = true) && it.name.startsWith(query, ignoreCase = true) }
-    return (byAlias + byName).filterNot { it.alias == query }.map {
-        Seq3SourceSuggestion(
-            keyword = it.alias,
-            syntax = if (it.name != it.alias) it.name else "",
-            insertion = it.alias,
-            glyph = if (it.actor) Seq3SourceGlyph.ACTOR else Seq3SourceGlyph.PARTICIPANT,
-            name = true,
-        )
-    }
+    return (byAlias + byName).filterNot { it.alias == query }.map(::seq3SourceNameSuggestion)
 }
+
+private fun seq3SourceNameSuggestion(participant: Seq3SourceParticipant): Seq3SourceSuggestion =
+    Seq3SourceSuggestion(
+        keyword = participant.alias,
+        syntax = if (participant.name != participant.alias) participant.name else "",
+        insertion = participant.alias,
+        glyph = if (participant.actor) Seq3SourceGlyph.ACTOR else Seq3SourceGlyph.PARTICIPANT,
+        name = true,
+    )
+
+/**
+ * The endpoint name (an arrow's sender or receiver, or a snippet's `From` / `To` field) that
+ * [selection] lies in, as the range to replace: the whole name, not only the typed part. A snippet
+ * [fields] endpoint is its field; in a complete message line it is the name as [sourceEndpointAt]
+ * finds it, without the activation mark (`+`, `-`) Mermaid writes in front of a receiver.
+ */
+internal fun seq3SourceEndpointToken(
+    source: String,
+    selection: TextRange,
+    dialect: Seq3Dialect,
+    fields: List<SourceSnippetField> = emptyList(),
+): SourceSnippetField? {
+    fields.firstOrNull { it.endpoint && selection.start >= it.start && selection.end <= it.end }?.let {
+        return it.copy(end = it.end.coerceAtMost(source.length), start = it.start.coerceAtMost(source.length))
+    }
+    val field = sourceEndpointAt(source, selection, dialect) ?: return null
+    var start = field.start
+    if (dialect == Seq3Dialect.MERMAID) while (start < field.end - 1 && source[start].let { it == '+' || it == '-' }) start++
+    if (selection.start < start) return null
+    return field.copy(start = start)
+}
+
+/** The list for typing inside an endpoint: names only, over the whole endpoint name. Null when the
+ *  caret is not collapsed inside one or the name is still empty. */
+internal fun seq3SourceEndpointTrigger(
+    source: String,
+    selection: TextRange,
+    dialect: Seq3Dialect,
+    fields: List<SourceSnippetField> = emptyList(),
+): Seq3SourceSuggestionTrigger? {
+    if (!selection.collapsed) return null
+    val token = seq3SourceEndpointToken(source, selection, dialect, fields) ?: return null
+    val query = source.substring(token.start, token.end)
+    if (query.isBlank()) return null
+    return Seq3SourceSuggestionTrigger(token.start, token.end, query, "", names = true, keywords = false)
+}
+
+/** What the editor completes at [selection]: the endpoint name when it is in one, else the word at the caret. */
+internal fun seq3SourceEditorTrigger(
+    source: String,
+    selection: TextRange,
+    dialect: Seq3Dialect,
+    fields: List<SourceSnippetField> = emptyList(),
+): Seq3SourceSuggestionTrigger? =
+    seq3SourceEndpointTrigger(source, selection, dialect, fields) ?: seq3SourceSuggestionTrigger(source, selection, dialect)
+
+/** The range an endpoint click replaces (the whole name, also with a selection inside it); its query is the current name. */
+internal fun seq3SourceEndpointMenuTrigger(
+    source: String,
+    selection: TextRange,
+    dialect: Seq3Dialect,
+    fields: List<SourceSnippetField> = emptyList(),
+): Seq3SourceSuggestionTrigger? {
+    val token = seq3SourceEndpointToken(source, selection, dialect, fields) ?: return null
+    return Seq3SourceSuggestionTrigger(token.start, token.end, source.substring(token.start, token.end), "", names = true, keywords = false)
+}
+
+/** Every declared participant, for the list an endpoint click opens. */
+internal fun seq3SourceEndpointMenuSuggestions(participants: List<Seq3SourceParticipant>): List<Seq3SourceSuggestion> =
+    participants.map(::seq3SourceNameSuggestion)
+
+/** The row of the endpoint's current name in the list an endpoint click opens (the first row when it is none). */
+internal fun seq3SourceEndpointMenuActiveIndex(trigger: Seq3SourceSuggestionTrigger, participants: List<Seq3SourceParticipant>): Int =
+    participants.indexOfFirst { it.alias == trigger.query }.coerceAtLeast(0)
+
+/** The list an endpoint click opened: its range and the text it was opened on (an edit closes it). */
+internal data class Seq3SourceEndpointMenu(val trigger: Seq3SourceSuggestionTrigger, val text: String)
 
 /** [enclosingBlock] is the innermost open block (`alt`, `par`, ...) at the typing position: the
  *  divider that block owns is offered only inside it. */
@@ -2163,14 +2224,6 @@ internal fun sourceParticipants(source: String, dialect: Seq3Dialect): List<Seq3
 
 private fun sourceParticipantDisplayName(alias: String, participants: List<Seq3SourceParticipant>): String =
     participants.firstOrNull { it.alias == alias }?.name ?: alias
-
-private fun sourceParticipantChoiceLabel(participant: Seq3SourceParticipant, participants: List<Seq3SourceParticipant>): String {
-    if (participant.alias == participant.name) return "${participant.name} (${participant.alias})"
-    val sameName = participants.count { it.name == participant.name } > 1
-    if (!sameName) return participant.name
-    val shortAlias = participant.alias.take(12).let { if (participant.alias.length > 12) "$it…" else it }
-    return "${participant.name} ($shortAlias)"
-}
 
 internal fun seq3SourceNoteScope(
     source: String,
