@@ -4,38 +4,37 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
-import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.getBoundsInRoot
-import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
-import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
-import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTextInputSelection
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.withKeyDown
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.graphics.toPixelMap
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.unit.dp
+import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
-import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
-import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3SourceImportResult
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -46,6 +45,15 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+
+/** The log entry id of the occurrence the evidence tests start from. */
+private const val ORIGINAL_ENTRY_ID = 41
+
+/** Its time in milliseconds, matching its "00:00:01.234" text. */
+private const val ORIGINAL_TIME_MS = 1_234L
+
+/** How long a wait for the UI may take. */
+private const val WAIT_TIMEOUT_MS = 5_000L
 
 class Seq3SourceGuidedActionsUiTest {
     @get:Rule
@@ -100,7 +108,7 @@ class Seq3SourceGuidedActionsUiTest {
         val editor = rule.onNodeWithTag("seq3-source-editor")
         val generation = view.sourceEditorGeneration
         editor.performTextReplacement(source)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(WAIT_TIMEOUT_MS) {
             currentSession(sessionId).document.title == "Live preview" &&
                 currentSession(sessionId).document.lifelines.size == 2 && currentSession(sessionId).document.messages.size == 1
         }
@@ -215,7 +223,7 @@ class Seq3SourceGuidedActionsUiTest {
     @Test
     fun evidenceRemovalWaitsForReviewInsteadOfOpeningAModalWhileTyping() {
         val sessionId = startWorkspace("source-evidence-removal-review")
-        val evidence = Seq3Occurrence(41, 1_234, "00:00:01.234", 7, 9, 'I', "call")
+        val evidence = Seq3Occurrence(ORIGINAL_ENTRY_ID, ORIGINAL_TIME_MS, "00:00:01.234", 7, 9, 'I', "call")
         val document = Seq3Document(
             title = "Evidence diagram",
             lifelines = listOf(
@@ -234,7 +242,7 @@ class Seq3SourceGuidedActionsUiTest {
         rule.onNodeWithTag("seq3-source-edit").performClick()
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
         rule.onNodeWithTag("seq3-source-editor").performTextReplacement("")
-        rule.waitUntil(5_000) { view.sourceEvidenceLossPending }
+        rule.waitUntil(WAIT_TIMEOUT_MS) { view.sourceEvidenceLossPending }
 
         rule.onNodeWithTag("seq3-source-evidence-review-status").assertIsDisplayed()
         rule.onNodeWithText("Remove log evidence?", useUnmergedTree = true).assertDoesNotExist()
@@ -331,7 +339,7 @@ class Seq3SourceGuidedActionsUiTest {
                 toLifelineId = "beta",
                 labelTemplate = "original call",
                 kind = Seq3Kind.CALL,
-                occurrences = listOf(Seq3Occurrence(41, 1_234, "00:00:01.234", 7, 9, 'I', "original call")),
+                occurrences = listOf(Seq3Occurrence(ORIGINAL_ENTRY_ID, ORIGINAL_TIME_MS, "00:00:01.234", 7, 9, 'I', "original call")),
             ),
         ),
     )
@@ -617,6 +625,7 @@ class Seq3SourceGuidedActionsUiTest {
             rule.onAllNodesWithText("Mermaid", useUnmergedTree = true)[1].performClick()
         }
         val editor = rule.onNodeWithTag("seq3-source-editor")
+
         fun participant(name: String, alias: String, actor: Boolean) {
             rule.onNodeWithTag(if (actor) "seq3-source-insert-actor" else "seq3-source-insert-participant").performClick()
             editor.performTextInput(name)
@@ -672,7 +681,7 @@ class Seq3SourceGuidedActionsUiTest {
         }
         val editor = rule.onNodeWithTag("seq3-source-editor")
         editor.performTextReplacement("")
-        rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.isEmpty() }
+        rule.waitUntil(WAIT_TIMEOUT_MS) { currentSession(sessionId).document.lifelines.isEmpty() }
         assertTrue(currentSession(sessionId).document.messages.isEmpty())
         assertFalse(view.sourceEvidenceLossPending)
 

@@ -20,13 +20,14 @@ import kotlin.system.exitProcess
  * the first to touch JavaCPP through a different production entry point, all released at the same
  * moment (plus a random delay of up to the second argument, in milliseconds), which is how a
  * capture preview, the video player, the mirror decoder and the heap trim can meet at startup. An
- * optional third argument limits the run to a comma-separated list of the touch names below. It exits 0 when every thread finishes, 2 when one is stuck (the JavaCPP
- * class-initialization deadlock), and never throws for a failed FFmpeg call: the inputs are junk
+ * optional third argument limits the run to a comma-separated list of the touch names below. It exits 0 when every thread finishes, 2 when
+ * one is stuck (the JavaCPP class-initialization deadlock), and never throws for a failed FFmpeg call: the inputs are junk
  * on purpose, only the first touch matters.
  */
 object JavaCppFirstTouchProbe {
     private const val STUCK_EXIT_CODE = 2
     private const val THREAD_JOIN_MS = 45_000L
+    private const val COVERAGE_END_MS = 1_000L
 
     @JvmStatic
     fun main(args: Array<String>) {
@@ -39,7 +40,7 @@ object JavaCppFirstTouchProbe {
         val touches: Map<String, () -> Unit> = mapOf(
             "video-scan" to { scanPackets(missing.path) },
             "video-factory" to { awaitFfmpegNatives() },
-            "export-coverage" to { FfmpegCaptureVideoExporter().coverageEndMs(junk, 0L, 1_000L) },
+            "export-coverage" to { FfmpegCaptureVideoExporter().coverageEndMs(junk, 0L, COVERAGE_END_MS) },
             "heap-trim" to { trimJavaCppMemory() },
             "opus-encoder" to { OpusPcmEncoder().close() },
             "opus-decoder" to { findOpusDecoder() },

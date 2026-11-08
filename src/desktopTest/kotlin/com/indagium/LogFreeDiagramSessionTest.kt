@@ -24,6 +24,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+/** The thread id of the test log entries. */
+private const val TEST_TID = 11
+
+/** Nanoseconds in a millisecond. */
+private const val NANOS_PER_MS = 1_000_000L
+
 /** Diagrams that have no log (no "ticket"): created standalone, edited, saved, reopened, restored, and
  *  kept apart from the log tabs that come and go around them. */
 class LogFreeDiagramSessionTest {
@@ -31,8 +37,8 @@ class LogFreeDiagramSessionTest {
     private val libraryFile = File(root, "library.cache")
 
     private fun entries(): List<LogEntry> = listOf(
-        LogEntry(1, "10:00:00.000", LogLevel.I, "Producer", "start op", 7, 11),
-        LogEntry(2, "10:00:00.050", LogLevel.I, "Consumer", "handle op", 7, 11),
+        LogEntry(1, "10:00:00.000", LogLevel.I, "Producer", "start op", 7, TEST_TID),
+        LogEntry(2, "10:00:00.050", LogLevel.I, "Consumer", "handle op", 7, TEST_TID),
     )
 
     private fun newState(cache: String = "state.cache", restoreOnCreate: Boolean = false): AppState =
@@ -50,7 +56,7 @@ class LogFreeDiagramSessionTest {
     }
 
     private fun await(timeoutMs: Long = 4_000, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        val deadline = System.nanoTime() + timeoutMs * NANOS_PER_MS
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(condition(), "condition did not become true within ${timeoutMs}ms")
     }

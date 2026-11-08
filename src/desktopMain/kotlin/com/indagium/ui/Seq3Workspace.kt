@@ -209,61 +209,61 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
     // diagram's scope. Scope changes still happen through the regenerate sheet.
     val subtitle = if (session.document.sourceFile.isNullOrBlank()) "Manual diagram" else "$tabName · $scanned rows"
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-    val headerWidthDp = maxWidth.value
-    val outputVariant = seq3HeaderOutputVariant(headerWidthDp)
-    Row(
-        Modifier.fillMaxWidth().background(tc.p)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        // Design variant 1a: no more fixed 240dp box. A fixed width either clipped an ordinary
-        // title early (forcing the ellipsis+tooltip path far more often than the name actually
-        // needed it) or wasted space next to a short one; the identity block now takes exactly the
-        // width seq3TitleWidth() computes for THIS title, capped generously — see that function.
-        // The cap still has to be enforced on the COLUMN, not just on the title field: the
-        // subtitle below it is a second, independently-sized child, and a long source filename
-        // ("bugreport-2026-08-21-113355-…​.log · 128400 rows") would otherwise stretch the whole
-        // identity block past the title's own cap and squeeze the right cluster.
-        // Capped to what the narrow header leaves it, so the right cluster keeps its room and the
-        // title ellipsizes instead of pushing the actions out.
-        Column(Modifier.widthIn(max = minOf(TITLE_FIELD_MAX_WIDTH, seq3HeaderIdentityMaxDp(headerWidthDp, outputVariant).dp))
-            .testTag("seq3-header-identity")) {
-            Seq3TitleField(state, session, view)
-            AppText(subtitle, color = tc.ts, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        val headerWidthDp = maxWidth.value
+        val outputVariant = seq3HeaderOutputVariant(headerWidthDp)
         Row(
-            Modifier.weight(1f),
+            Modifier.fillMaxWidth().background(tc.p)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val selectedIds = seq3SelectedMessageIds(session.document, view)
-            if (selectedIds.isNotEmpty()) {
-                Seq3ContextualSelectionActions(state, session, view, selectedIds)
+            // Design variant 1a: no more fixed 240dp box. A fixed width either clipped an ordinary
+            // title early (forcing the ellipsis+tooltip path far more often than the name actually
+            // needed it) or wasted space next to a short one; the identity block now takes exactly the
+            // width seq3TitleWidth() computes for THIS title, capped generously — see that function.
+            // The cap still has to be enforced on the COLUMN, not just on the title field: the
+            // subtitle below it is a second, independently-sized child, and a long source filename
+            // ("bugreport-2026-08-21-113355-…​.log · 128400 rows") would otherwise stretch the whole
+            // identity block past the title's own cap and squeeze the right cluster.
+            // Capped to what the narrow header leaves it, so the right cluster keeps its room and the
+            // title ellipsizes instead of pushing the actions out.
+            Column(Modifier.widthIn(max = minOf(TITLE_FIELD_MAX_WIDTH, seq3HeaderIdentityMaxDp(headerWidthDp, outputVariant).dp))
+                .testTag("seq3-header-identity")) {
+                Seq3TitleField(state, session, view)
+                AppText(subtitle, color = tc.ts, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Row(
+                Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                val selectedIds = seq3SelectedMessageIds(session.document, view)
+                if (selectedIds.isNotEmpty()) {
+                    Seq3ContextualSelectionActions(state, session, view, selectedIds)
+                }
+            }
+            // Design variant 1a's right cluster: three NAMED groups — panes, diagram presentation,
+            // output — each closed off by a hairline ([Seq3HeaderHairline]) instead of the old flat
+            // run of individually-tooltipped icon buttons. Grouping by function is the whole point: a
+            // control now reads as "this belongs with diagram presentation" or "this is an output
+            // action" before the user even reads its own label.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // Weighted without filling: the output actions are measured first, so a narrow header
+                // squeezes the presentation group and never pushes Edit/Copy/Attach (or "⋯") out.
+                Box(Modifier.weight(1f, fill = false).testTag("seq3-header-presentation")) {
+                    Seq3DiagramPresentationGroup(state, session, view)
+                }
+                // Placed right before the OUTPUT group's leading hairline (not the diagram-
+                // presentation group's) so it reads as "still generating — the actions on the right
+                // are about to have something to act on", not as a stray note mid-cluster.
+                if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
+                Seq3HeaderHairline()
+                Seq3OutputGroup(state, session, view, outputVariant)
             }
         }
-        // Design variant 1a's right cluster: three NAMED groups — panes, diagram presentation,
-        // output — each closed off by a hairline ([Seq3HeaderHairline]) instead of the old flat
-        // run of individually-tooltipped icon buttons. Grouping by function is the whole point: a
-        // control now reads as "this belongs with diagram presentation" or "this is an output
-        // action" before the user even reads its own label.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // Weighted without filling: the output actions are measured first, so a narrow header
-            // squeezes the presentation group and never pushes Edit/Copy/Attach (or "⋯") out.
-            Box(Modifier.weight(1f, fill = false).testTag("seq3-header-presentation")) {
-                Seq3DiagramPresentationGroup(state, session, view)
-            }
-            // Placed right before the OUTPUT group's leading hairline (not the diagram-
-            // presentation group's) so it reads as "still generating — the actions on the right
-            // are about to have something to act on", not as a stray note mid-cluster.
-            if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
-            Seq3HeaderHairline()
-            Seq3OutputGroup(state, session, view, outputVariant)
-        }
-    }
     }
 }
 
@@ -1264,6 +1264,7 @@ internal class Seq3ViewState {
     var sourceDraftInitialized by mutableStateOf(false)
     var sourceDraft by mutableStateOf("")
     var sourceDraftCanonical by mutableStateOf("")
+
     /** Exact raw source most recently accepted by live import. This is distinct from
      *  [sourceDraftCanonical], since canonical output inserts identity markers the editor may not
      *  be showing. */
@@ -1276,20 +1277,25 @@ internal class Seq3ViewState {
     var sourceEvidenceLossPending by mutableStateOf(false)
     var sourceDialectChangePending by mutableStateOf<Seq3Dialect?>(null)
     var sourceEditorGeneration by mutableStateOf(0)
+
     /** New source text from outside the editor (a canvas edit, Reload, Discard) for the mounted
      *  pane to apply as one undoable edit. The revision makes a repeat of the same text a new
      *  delivery; unlike [sourceEditorGeneration] it keeps the editor, its history and its caret. */
     var sourceExternalText by mutableStateOf<String?>(null)
     var sourceExternalRevision by mutableStateOf(0)
+
     /** The clock the editor's undo history measures typing pauses with; a test replaces it. */
     var sourceClockMs: () -> Long = System::currentTimeMillis
     var sourceFocusRequestGeneration by mutableStateOf(0)
+
     /** True while the source editor or its find bar holds focus: Cmd/Ctrl+F and Cmd/Ctrl+/ then
      *  belong to the editor, not to the window's global shortcuts (see [diagramSourceOwnsChord]). */
     var sourceEditorFocused by mutableStateOf(false)
+
     /** The editor's find bar is open. Escape then closes the bar only: it must not also restore a
      *  maximized tile or clear the selection (see [applySeq3Escape]). */
     var sourceFindOpen by mutableStateOf(false)
+
     /** A one-shot request, from the empty canvas, for the editor to insert a new participant: the
      *  mounted editor pane consumes it once the draft is ready. */
     var sourceInsertParticipantRequest by mutableStateOf(false)

@@ -16,6 +16,8 @@ class Seq3SourceCrossingIndentTest {
 
     private fun lines(vararg text: String) = text.joinToString("\n")
 
+    private fun lines(text: List<String>) = text.joinToString("\n")
+
     /** `level` levels of four spaces, then [text]. */
     private fun at(level: Int, text: String) = " ".repeat(level * 4) + text
 
@@ -89,6 +91,7 @@ class Seq3SourceCrossingIndentTest {
         val indented = seq3IndentSource(oldMermaid(), mmd)
         assertEquals(newMermaid(), indented)
         val rows = indented.split('\n')
+
         fun indentOf(text: String, occurrence: Int = 0) =
             rows.filter { it.trim() == text }[occurrence].let { it.length - it.trimStart().length }
         assertEquals(indentOf("activate Alias_2"), indentOf("deactivate Alias_2"), "the first activation and its deactivate")
@@ -169,7 +172,7 @@ class Seq3SourceCrossingIndentTest {
         )
         val typed = before + "2"
         val edit = requireNotNull(seq3SourceTypedOutdent(before, typed, typed.length, true, puml))
-        assertEquals(lines(*before.split('\n').dropLast(1).toTypedArray(), at(1, "deactivate Alias_2")), edit.text)
+        assertEquals(lines(before.split('\n').dropLast(1) + at(1, "deactivate Alias_2")), edit.text)
         assertEquals(edit.text.length, edit.selectionStart)
 
         // The `end` of that opt goes to the opt's own indent (2), not to the count of levels still open.
@@ -179,7 +182,7 @@ class Seq3SourceCrossingIndentTest {
         )
         val typedEnd = beforeEnd + "d"
         val endEdit = requireNotNull(seq3SourceTypedOutdent(beforeEnd, typedEnd, typedEnd.length, true, puml))
-        assertEquals(lines(*beforeEnd.split('\n').dropLast(1).toTypedArray(), at(2, "end")), endEdit.text)
+        assertEquals(lines(beforeEnd.split('\n').dropLast(1) + at(2, "end")), endEdit.text)
 
         // A closer already at its opener's indent is left alone.
         val settled = lines("@startuml", "activate A", at(1, "opt x"), at(2, "m"), "deactivate A", at(1, "end"))

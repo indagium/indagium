@@ -8,6 +8,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+/** The WCAG contrast ratio adds this to both relative luminances. */
+private const val CONTRAST_LUMINANCE_OFFSET = 0.05
+
 class Seq3SourceTokensTest {
     private val plant = Seq3Dialect.PLANTUML
     private val mermaid = Seq3Dialect.MERMAID
@@ -161,7 +164,7 @@ class Seq3SourceTokensTest {
     private fun contrast(a: Color, b: Color): Double {
         val la = a.luminance().toDouble()
         val lb = b.luminance().toDouble()
-        return (maxOf(la, lb) + 0.05) / (minOf(la, lb) + 0.05)
+        return (maxOf(la, lb) + CONTRAST_LUMINANCE_OFFSET) / (minOf(la, lb) + CONTRAST_LUMINANCE_OFFSET)
     }
 
     @Test

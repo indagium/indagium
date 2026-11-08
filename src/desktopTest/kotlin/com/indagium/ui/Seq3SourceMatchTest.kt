@@ -141,7 +141,10 @@ class Seq3SourceMatchTest {
             marks(source.replaceFirst("\nactivate Alias_2\ndeactivate", "\nact|ivate Alias_2\ndeactivate"), mmd),
         )
         assertEquals(listOf(Shown(6, "opt"), Shown(12, "end")), marks(source.replaceFirst("opt condition", "opt| condition"), mmd))
-        assertEquals(listOf(Shown(2, "activate Alias"), Shown(5, "deactivate Alias")), marks(source.replaceFirst("deactivate Alias\n", "deactivate Alias|\n"), mmd))
+        assertEquals(
+            listOf(Shown(2, "activate Alias"), Shown(5, "deactivate Alias")),
+            marks(source.replaceFirst("deactivate Alias\n", "deactivate Alias|\n"), mmd),
+        )
     }
 
     @Test
@@ -157,7 +160,10 @@ class Seq3SourceMatchTest {
         )
         // The same name activated twice: the inner one closes first.
         val twice = lines("@startuml", "activate B", "activate B", "deactivate B", "deactivate B")
-        assertEquals(listOf(Shown(2, "activate B"), Shown(3, "deactivate B")), marks(twice.replaceFirst("deactivate B\ndeactivate B", "|deactivate B\ndeactivate B")))
+        assertEquals(
+            listOf(Shown(2, "activate B"), Shown(3, "deactivate B")),
+            marks(twice.replaceFirst("deactivate B\ndeactivate B", "|deactivate B\ndeactivate B")),
+        )
         assertEquals(listOf(Shown(1, "activate B"), Shown(4, "deactivate B")), marks(twice.substring(0, twice.length - 1) + "|" + "B"))
     }
 
@@ -246,7 +252,10 @@ class Seq3SourceMatchTest {
         }
         // The caret on the closer finds the opener through the hidden lines too.
         val onEnd = source.indexOf("\nend") + 2
-        assertEquals(listOf("loop", "end"), seq3SourceConstructMarks(source, onEnd, onEnd, puml).map { source.substring(it.range.start, it.range.endExclusive) })
+        assertEquals(
+            listOf("loop", "end"),
+            seq3SourceConstructMarks(source, onEnd, onEnd, puml).map { source.substring(it.range.start, it.range.endExclusive) },
+        )
         // A marker comment is never a keyword.
         assertEquals(emptyList(), seq3SourceConstructMarks(source, source.indexOf("indagium") + 3, source.indexOf("indagium") + 3, puml))
     }

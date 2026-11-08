@@ -19,8 +19,8 @@ import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.SourceSnippetField
 import com.indagium.ui.mkTab
-import com.indagium.ui.seq3SourceBlockSnippet
 import com.indagium.ui.seq3IndentSource
+import com.indagium.ui.seq3SourceBlockSnippet
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -35,10 +35,15 @@ class Seq3SourceGrammarTest {
     private val mermaid = Seq3Dialect.MERMAID
     private val plant = Seq3Dialect.PLANTUML
 
-    private fun source(dialect: Seq3Dialect, vararg body: String): String = when (dialect) {
+    private fun sourceOf(dialect: Seq3Dialect, body: List<String>): String = when (dialect) {
         Seq3Dialect.MERMAID -> (listOf("sequenceDiagram") + body.map { "    $it" }).joinToString("\n")
         Seq3Dialect.PLANTUML -> (listOf("@startuml") + body + "@enduml").joinToString("\n")
     }
+
+    private fun source(dialect: Seq3Dialect, vararg body: String): String = sourceOf(dialect, body.asList())
+
+    /** A source that declares A and B, then [body]. */
+    private fun declared(dialect: Seq3Dialect, vararg body: String): String = sourceOf(dialect, declarations + body)
 
     private fun arrow(dialect: Seq3Dialect, from: String, to: String, label: String) =
         if (dialect == mermaid) "$from->>$to: $label" else "$from -> $to: $label"
@@ -57,7 +62,7 @@ class Seq3SourceGrammarTest {
         live: Boolean = false,
     ) = assertIs<Seq3SourceImportResult.Failure>(importSeq3Source(source, dialect, existing, live), source).diagnostics
 
-    private val declarations = arrayOf("participant A", "participant B")
+    private val declarations = listOf("participant A", "participant B")
 
     // -- Accepted forms ---------------------------------------------------------------------
 
@@ -122,7 +127,7 @@ class Seq3SourceGrammarTest {
         Seq3Dialect.entries.forEach { dialect ->
             listOf("Note over A, B : explain", "NOTE OVER A,B: explain", "note over A ,B:explain").forEach { note ->
                 val result = ok(
-                    source(dialect, *declarations, arrow(dialect, "A", "B", "ping"), note),
+                    declared(dialect, arrow(dialect, "A", "B", "ping"), note),
                     dialect,
                 )
                 assertEquals("explain", result.document.notes.single().text, "$dialect: $note")
@@ -133,13 +138,13 @@ class Seq3SourceGrammarTest {
     @Test fun autonumberTurnsOnMessageNumbering() {
         Seq3Dialect.entries.forEach { dialect ->
             val result = ok(
-                source(dialect, "autonumber", *declarations, arrow(dialect, "A", "B", "ping")),
+                sourceOf(dialect, listOf("autonumber") + declarations + arrow(dialect, "A", "B", "ping")),
                 dialect,
             )
             assertTrue(result.document.showSequenceNumbers, dialect.name)
-            val plain = ok(source(dialect, *declarations, arrow(dialect, "A", "B", "ping")), dialect)
+            val plain = ok(declared(dialect, arrow(dialect, "A", "B", "ping")), dialect)
             assertFalse(plain.document.showSequenceNumbers, dialect.name)
-            val args = rejected(source(dialect, "autonumber 10", *declarations), dialect)
+            val args = rejected(sourceOf(dialect, listOf("autonumber 10") + declarations), dialect)
             assertEquals(2, args.single().line, dialect.name)
             assertEquals("Not supported yet: autonumber 10", args.single().message, dialect.name)
         }
@@ -228,7 +233,7 @@ class Seq3SourceGrammarTest {
 
     @Test fun anEmptyBlockAsksForAMessageOnItsOpeningLine() {
         Seq3Dialect.entries.forEach { dialect ->
-            val diagnostics = rejected(source(dialect, *declarations, "critical lock", "end"), dialect)
+            val diagnostics = rejected(declared(dialect, "critical lock", "end"), dialect)
             assertEquals(listOf(4), diagnostics.map { it.line }, dialect.name)
             assertEquals("Add a message inside critical.", diagnostics.single().message, dialect.name)
         }
@@ -282,8 +287,8 @@ class Seq3SourceGrammarTest {
         Triple(plant, "critical" to Seq3FragmentKind.CRITICAL, "else"),
     )
 
-    private fun dividedSource(dialect: Seq3Dialect, keyword: String, divider: String) = source(
-        dialect, *declarations, "$keyword first", arrow(dialect, "A", "B", "one"),
+    private fun dividedSource(dialect: Seq3Dialect, keyword: String, divider: String) = declared(
+        dialect, "$keyword first", arrow(dialect, "A", "B", "one"),
         "$divider second", arrow(dialect, "A", "B", "two"), divider, arrow(dialect, "A", "B", "three"), "end",
     )
 
@@ -315,34 +320,34 @@ class Seq3SourceGrammarTest {
     @Test fun dividersThatTheEmittersCouldNotWriteAreDiagnosed() {
         // Wrong word for the kind and dialect.
         val mermaidElseInPar = rejected(
-            source(mermaid, *declarations, "par x", "A->>B: m", "else y", "A->>B: n", "end"), mermaid,
+            declared(mermaid, "par x", "A->>B: m", "else y", "A->>B: n", "end"), mermaid,
         ).single()
         assertEquals(6, mermaidElseInPar.line)
         assertEquals("Mermaid divides a par block with 'and', not 'else'.", mermaidElseInPar.message)
         val plantAnd = rejected(
-            source(plant, *declarations, "par x", "A -> B: m", "and y", "A -> B: n", "end"), plant,
+            declared(plant, "par x", "A -> B: m", "and y", "A -> B: n", "end"), plant,
         ).single()
         assertEquals("PlantUML divides a par block with 'else', not 'and'.", plantAnd.message)
         val inLoop = rejected(
-            source(plant, *declarations, "loop x", "A -> B: m", "else y", "A -> B: n", "end"), plant,
+            declared(plant, "loop x", "A -> B: m", "else y", "A -> B: n", "end"), plant,
         ).single()
         assertEquals(6, inLoop.line)
         assertTrue(inLoop.message.contains("loop"), inLoop.message)
         // No block to divide.
-        val outside = rejected(source(plant, *declarations, "else x", "A -> B: m"), plant).single()
+        val outside = rejected(declared(plant, "else x", "A -> B: m"), plant).single()
         assertEquals(4, outside.line)
         // A branch needs a row above it, a row below it, and no block opening in between.
         val first = rejected(
-            source(plant, *declarations, "alt x", "else y", "A -> B: m", "end"), plant,
+            declared(plant, "alt x", "else y", "A -> B: m", "end"), plant,
         ).single()
         assertEquals(5, first.line)
         val last = rejected(
-            source(plant, *declarations, "alt x", "A -> B: m", "else y", "end"), plant,
+            declared(plant, "alt x", "A -> B: m", "else y", "end"), plant,
         ).single()
         assertEquals(6, last.line)
         assertTrue(last.message.startsWith("Add a message below this 'else'"), last.message)
         val blockRight = rejected(
-            source(plant, *declarations, "alt x", "A -> B: m", "else y", "loop z", "A -> B: n", "end", "end"), plant,
+            declared(plant, "alt x", "A -> B: m", "else y", "loop z", "A -> B: n", "end", "end"), plant,
         ).single()
         assertEquals(6, blockRight.line)
         assertTrue(blockRight.message.startsWith("Not supported yet"), blockRight.message)
@@ -365,6 +370,7 @@ class Seq3SourceGrammarTest {
 
     private fun markedAltDocument(withOperand: Boolean): Seq3Document {
         fun occurrence(id: Int) = Seq3Occurrence(id, id.toLong(), "00:00:0$id", 1, 1, 'I', "row $id")
+
         fun message(id: String, n: Int, label: String) =
             Seq3Message(id, Seq3Match("A", label), "A", "B", label, occurrences = listOf(occurrence(n)))
         return Seq3Document(
@@ -420,10 +426,11 @@ class Seq3SourceGrammarTest {
                     val from = aliases.getOrNull(0) ?: "From"
                     val to = aliases.getOrNull(1) ?: "To"
                     val label = "$dialect $keyword $aliases"
+
                     fun word(field: SourceSnippetField) = snippet.substring(field.start, field.end)
                     assertEquals(listOf("condition", from, to, "message label"), fields.map(::word), label)
                     assertEquals(listOf(false, true, true, false), fields.map { it.endpoint }, label)
-                    val result = ok(source(dialect, "participant $from", "participant $to", *snippet.lines().toTypedArray()), dialect)
+                    val result = ok(sourceOf(dialect, listOf("participant $from", "participant $to") + snippet.lines()), dialect)
                     assertEquals(1, result.document.fragments.single().messageIds.size, label)
                     assertEquals("message label", result.document.messages.single().labelTemplate, label)
                 }
@@ -470,9 +477,10 @@ class Seq3SourceGrammarTest {
             val id = requireNotNull(state.seq3Sessions.beginEmpty("log"))
             assertTrue(state.seq3Sessions.prepareSourceDraft(id))
             assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
+
             fun apply(guard: String, label: String): Seq3Fragment {
-                val text = source(
-                    dialect, *declarations, "alt first", arrow(dialect, "A", "B", "one"),
+                val text = declared(
+                    dialect, "alt first", arrow(dialect, "A", "B", "one"),
                     "else $guard", arrow(dialect, "A", "B", label), "end",
                 )
                 state.seq3Sessions.updateSourceDraftText(id, text)

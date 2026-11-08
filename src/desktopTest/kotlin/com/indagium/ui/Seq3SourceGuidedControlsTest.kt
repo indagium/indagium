@@ -1,11 +1,11 @@
 package com.indagium.ui
 
-import com.indagium.diagram3.Seq3Dialect
 import androidx.compose.ui.text.TextRange
+import com.indagium.diagram3.Seq3Dialect
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class Seq3SourceGuidedControlsTest {
@@ -21,7 +21,8 @@ class Seq3SourceGuidedControlsTest {
 
     @Test
     fun participantInsertionFollowsTitleAndExistingParticipantsButPrecedesBody() {
-        val plantUml = "@startuml\ntitle Existing\n' indagium-seq3:v1 eyJ0IjoiY2FsbCJ9\nparticipant \"Alpha\" as A\n' indagium-seq3:v1 eyJ0IjoiY2FsbCJ9\nA -> A: message\n@enduml"
+        val plantUml = "@startuml\ntitle Existing\n' indagium-seq3:v1 eyJ0IjoiY2FsbCJ9\nparticipant \"Alpha\" as A\n" +
+            "' indagium-seq3:v1 eyJ0IjoiY2FsbCJ9\nA -> A: message\n@enduml"
         val mermaid = "sequenceDiagram\ntitle Existing\nparticipant A as Alpha\n%% indagium-seq3:v1 eyJ0IjoiY2FsbCJ9\nA->>A: message"
 
         val plantParticipantOffset = seq3SourceHeaderInsertionOffset(plantUml, Seq3Dialect.PLANTUML)

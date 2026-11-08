@@ -35,6 +35,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+/** Where a click lands on the line before the click on the character, to its right. */
+private const val LINE_CLICK_X_PX = 600f
+
 /** Every participant-name choice in the source editor is the one list under the caret line. */
 class Seq3SourceEndpointListUiTest {
     @get:Rule val rule = createComposeRule()
@@ -84,7 +87,7 @@ class Seq3SourceEndpointListUiTest {
         val layouts = mutableListOf<TextLayoutResult>()
         fetchSemanticsNode().config[SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
         val box = layouts.single().getBoundingBox(offset)
-        performMouseInput { click(Offset(600f, box.center.y)) }
+        performMouseInput { click(Offset(LINE_CLICK_X_PX, box.center.y)) }
         rule.waitForIdle()
         performMouseInput { click(box.center) }
         rule.waitForIdle()

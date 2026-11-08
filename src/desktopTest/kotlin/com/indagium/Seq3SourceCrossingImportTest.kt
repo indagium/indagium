@@ -89,6 +89,7 @@ class Seq3SourceCrossingImportTest {
             assertNotEquals(plain, indented, dialect.name)
             // The closers really are at their openers' indent now.
             val rows = indented.split('\n')
+
             fun indentOf(text: String, occurrence: Int) =
                 rows.filter { it.trim() == text }[occurrence].let { it.length - it.trimStart().length }
             assertEquals(indentOf("activate Alias_2", 0), indentOf("deactivate Alias_2", 0), dialect.name)

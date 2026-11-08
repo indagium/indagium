@@ -47,6 +47,7 @@ internal typealias DiagramWorkspaceLayout = TileNode<DiagramWorkspaceSectionId>
 private const val DIAGRAM_MESSAGES_TILE_WEIGHT = 1.6f
 private const val DIAGRAM_NARROW_PREVIEW_WEIGHT = 1.5f
 private const val DIAGRAM_SOURCE_TILE_WEIGHT = 0.9f
+private const val DIAGRAM_SIDE_COLUMN_WEIGHT = 0.9f
 
 /** A preset changes the saved tree and weight distribution; panels keep their place when hidden. */
 internal enum class DiagramWorkspacePreset(
@@ -95,7 +96,7 @@ internal fun diagramWorkspaceEditorLayout(sourceWeight: Float = 1f, previewWeigh
                     TileLeaf(DiagramWorkspaceSectionId.LIFELINES, 1f),
                     TileLeaf(DiagramWorkspaceSectionId.ARTIFACTS, 1f),
                 ),
-                0.9f,
+                DIAGRAM_SIDE_COLUMN_WEIGHT,
             ),
             TileLeaf(DiagramWorkspaceSectionId.SOURCE, sourceWeight),
             TileLeaf(DiagramWorkspaceSectionId.PREVIEW, previewWeight),

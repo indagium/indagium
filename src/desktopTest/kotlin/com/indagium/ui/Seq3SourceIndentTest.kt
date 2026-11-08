@@ -166,7 +166,10 @@ class Seq3SourceIndentTest {
         val divider = lines("@startuml", "alt a", "    A -> B: x", "    else")
         assertEquals(lines("@startuml", "alt a", "    A -> B: x", "else"), requireNotNull(seq3SourceAutoOutdent(divider, divider.length, puml)).text)
         val mermaid = lines("sequenceDiagram", "    loop a", "        A->>B: x", "        end")
-        assertEquals(lines("sequenceDiagram", "    loop a", "        A->>B: x", "    end"), requireNotNull(seq3SourceAutoOutdent(mermaid, mermaid.length, mmd)).text)
+        assertEquals(
+            lines("sequenceDiagram", "    loop a", "        A->>B: x", "    end"),
+            requireNotNull(seq3SourceAutoOutdent(mermaid, mermaid.length, mmd)).text,
+        )
         assertNull(seq3SourceAutoOutdent(lines("@startuml", "alt a", "end"), "@startuml\nalt a\nend".length, puml))
         assertNull(seq3SourceAutoOutdent(lines("@startuml", "loop a", "    else"), "@startuml\nloop a\n    else".length, puml), "else means nothing in a loop")
         assertNull(seq3SourceAutoOutdent(lines("@startuml", "loop a", "    endpoint"), "@startuml\nloop a\n    endpoint".length, puml))

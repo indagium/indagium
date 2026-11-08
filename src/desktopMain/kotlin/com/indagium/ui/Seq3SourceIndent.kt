@@ -35,7 +35,7 @@ import com.indagium.diagram3.Seq3Dialect
  *   lines keep the level of their surroundings. PlantUML's `++` / `--` suffix is treated alike.
  *
  * The same walk tells which opener a closer or divider belongs to ([Seq3SourceLineLevel.partner]),
- * which the editor's opener/closer highlighting (Seq3SourceMatch.kt) reads, so the pairs it shows
+ * which the editor's opener/closer highlighting (Seq3ConstructMark.kt) reads, so the pairs it shows
  * always agree with the indentation.
  */
 
@@ -91,16 +91,26 @@ internal class Seq3SourceIndentState(private val dialect: Seq3Dialect) {
     fun feed(text: String, tag: Int = -1): Seq3SourceLineLevel {
         if (text.isEmpty()) return Seq3SourceLineLevel(Seq3SourceLineKind.BLANK, -1)
         if (isComment(text)) return Seq3SourceLineLevel(Seq3SourceLineKind.COMMENT, -1)
-        if (isHeader(text)) {
-            if (dialect == Seq3Dialect.MERMAID) bodyStarted = true
-            return Seq3SourceLineLevel(Seq3SourceLineKind.HEADER, 0)
-        }
-        if (text.equals("end", ignoreCase = true)) {
-            val index = frames.indexOfLast { !it.activation }
-            if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base, orphan = true)
-            val closed = frames.removeAt(index)
-            return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, closed.indent, partner = closed.tag)
-        }
+        if (isHeader(text)) return feedHeader()
+        if (text.equals("end", ignoreCase = true)) return feedEnd()
+        return feedStatement(text, tag)
+    }
+
+    private fun feedHeader(): Seq3SourceLineLevel {
+        if (dialect == Seq3Dialect.MERMAID) bodyStarted = true
+        return Seq3SourceLineLevel(Seq3SourceLineKind.HEADER, 0)
+    }
+
+    /** An `end` closes the innermost open block; with none open it is an orphan. */
+    private fun feedEnd(): Seq3SourceLineLevel {
+        val index = frames.indexOfLast { !it.activation }
+        if (index < 0) return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, base, orphan = true)
+        val closed = frames.removeAt(index)
+        return Seq3SourceLineLevel(Seq3SourceLineKind.CLOSER, closed.indent, partner = closed.tag)
+    }
+
+    /** A line that is not blank, a comment, a header or an `end`: an opener, an activation, a divider or plain text. */
+    private fun feedStatement(text: String, tag: Int): Seq3SourceLineLevel {
         val word = text.takeWhile { !it.isWhitespace() }.lowercase()
         if (word in SEQ3_BLOCK_OPENERS || (word == "rect" && dialect == Seq3Dialect.MERMAID)) {
             val level = currentLevel
@@ -281,7 +291,9 @@ internal fun seq3SourceEnter(
     // (and the header line) sends the new line to the level after it.
     val keptLine = if (last.kind == Seq3SourceLineKind.CLOSER || last.kind == Seq3SourceLineKind.MIDDLE) {
         seq3SourceIndentString(last.level) + beforeCaret.trimStart(' ', '\t')
-    } else beforeCaret
+    } else {
+        beforeCaret
+    }
     val indent = when (last.kind) {
         Seq3SourceLineKind.CLOSER, Seq3SourceLineKind.MIDDLE, Seq3SourceLineKind.OPENER, Seq3SourceLineKind.HEADER ->
             seq3SourceIndentString(afterLevel)
@@ -336,6 +348,31 @@ internal fun seq3SourceTypedOutdent(
     return seq3SourceAutoOutdent(newText, caret, dialect)
 }
 
+/** The start offsets of the lines the selection [first, last] touches; a selection ending at a line start does not touch that line. */
+private fun seq3SourceTouchedLineStarts(source: String, first: Int, last: Int): List<Int> {
+    val starts = mutableListOf<Int>()
+    var cursor = lineStartOf(source, first)
+    val lastTouched = if (last > first && source[last - 1] == '\n') last - 1 else last
+    while (true) {
+        starts += cursor
+        val next = source.indexOf('\n', cursor)
+        if (next < 0 || next >= lastTouched) break
+        cursor = next + 1
+    }
+    return starts
+}
+
+/** What Tab (or Shift+Tab with [shift]) does to one [line] starting at [lineStart]: null for none, else the line start paired with the
+ *  characters added there or, when negative, removed. */
+private fun seq3SourceTabChange(line: String, lineStart: Int, shift: Boolean, unit: String): Pair<Int, Int>? {
+    if (!shift) return if (line.trim('\r').isEmpty()) null else lineStart to unit.length
+    val removable = when {
+        line.startsWith("\t") -> 1
+        else -> line.takeWhile { it == ' ' }.length.coerceAtMost(SEQ3_SOURCE_INDENT_WIDTH)
+    }
+    return if (removable == 0) null else lineStart to -removable
+}
+
 /**
  * Tab / Shift+Tab. A collapsed Tab inserts one indent of spaces. Otherwise every touched line moves
  * one level in (Tab) or up to one level out (Shift+Tab, four spaces or one leading tab); a selection
@@ -351,28 +388,9 @@ internal fun seq3SourceTab(source: String, selectionStart: Int, selectionEnd: In
         val caret = first + unit.length
         return Seq3SourceEdit(text, caret, caret)
     }
-    val starts = mutableListOf<Int>()
-    var cursor = lineStartOf(source, first)
-    val lastTouched = if (last > first && source[last - 1] == '\n') last - 1 else last
-    while (true) {
-        starts += cursor
-        val next = source.indexOf('\n', cursor)
-        if (next < 0 || next >= lastTouched) break
-        cursor = next + 1
-    }
     // (line start, characters added at it or, when negative, removed from it)
-    val changes = starts.mapNotNull { lineStart ->
-        val lineEnd = lineEndOf(source, lineStart)
-        val line = source.substring(lineStart, lineEnd)
-        if (!shift) {
-            if (line.trim('\r').isEmpty()) null else lineStart to unit.length
-        } else {
-            val removable = when {
-                line.startsWith("\t") -> 1
-                else -> line.takeWhile { it == ' ' }.length.coerceAtMost(SEQ3_SOURCE_INDENT_WIDTH)
-            }
-            if (removable == 0) null else lineStart to -removable
-        }
+    val changes = seq3SourceTouchedLineStarts(source, first, last).mapNotNull { lineStart ->
+        seq3SourceTabChange(source.substring(lineStart, lineEndOf(source, lineStart)), lineStart, shift, unit)
     }
     if (changes.isEmpty()) return Seq3SourceEdit(source, selectionStart, selectionEnd)
     val text = buildString(source.length + changes.size * unit.length) {
@@ -388,6 +406,7 @@ internal fun seq3SourceTab(source: String, selectionStart: Int, selectionEnd: In
         }
         append(source, copied, source.length)
     }
+
     fun map(offset: Int): Int = offset + changes.sumOf { (lineStart, delta) ->
         if (delta > 0) (if (offset >= lineStart) delta else 0)
         else -(offset - lineStart).coerceIn(0, -delta)

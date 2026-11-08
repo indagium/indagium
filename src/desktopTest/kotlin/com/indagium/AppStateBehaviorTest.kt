@@ -17,7 +17,6 @@ import com.indagium.model.CtxMenuState
 import com.indagium.model.CustomIssueRule
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.indagium.model.Filter
-import com.indagium.model.SavedFilter
 import com.indagium.model.FilterMode
 import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
@@ -36,6 +35,7 @@ import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.MessageRule
 import com.indagium.model.ProcessNameMode
 import com.indagium.model.RuleTarget
+import com.indagium.model.SavedFilter
 import com.indagium.model.SearchMode
 import com.indagium.model.SearchScope
 import com.indagium.model.SearchScopeBehavior

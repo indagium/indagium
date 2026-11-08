@@ -175,6 +175,7 @@ class Seq3SourceEditsTest {
         val before = "alt ok\n$indentedMarker\n    B -> A: hi"
         val runStart = before.indexOf(indentedMarker)
         val statement = runStart + indentedMarker.length + 1
+
         fun shown(text: String, start: Int, end: Int) = seq3SourceShownCaretAtHiddenRun(text, start, end, puml)
         assertEquals(statement, shown(before, runStart, statement), "the whole run: shown at the statement")
         assertEquals(statement, shown(before, statement, runStart), "a reversed selection is the same")
@@ -333,7 +334,11 @@ class Seq3SourceEditsTest {
         val onMarker = Seq3SourceDiagnostic(4, "on the marker above two")
         val caretOnTwo = withMarkers.indexOf("A -> Pay") + 3
         assertEquals(onTwo, seq3SourceDiagnosticAtCaret(withMarkers, caretOnTwo, listOf(onTwo), puml, showMarkers = false))
-        assertEquals(onMarker, seq3SourceDiagnosticAtCaret(withMarkers, caretOnTwo, listOf(onMarker), puml, showMarkers = false), "a hidden line is shown as the line after it")
+        assertEquals(
+            onMarker,
+            seq3SourceDiagnosticAtCaret(withMarkers, caretOnTwo, listOf(onMarker), puml, showMarkers = false),
+            "a hidden line is shown as the line after it",
+        )
         assertNull(seq3SourceDiagnosticAtCaret(withMarkers, withMarkers.indexOf("A -> B") + 1, listOf(onTwo), puml, showMarkers = false))
         assertNull(seq3SourceDiagnosticAtCaret(withMarkers, 0, emptyList(), puml, showMarkers = false))
     }
@@ -349,7 +354,11 @@ class Seq3SourceEditsTest {
         val above = seq3SourceApplyFix(source, fix, 2, 2)
         assertEquals(2, above.selectionStart, "a caret above the insertion does not move")
         val atLineStart = source.indexOf("A -> Pay")
-        assertEquals(edit.text.indexOf("A -> Pay"), seq3SourceApplyFix(source, fix, atLineStart, atLineStart).selectionStart, "a caret at the line start goes with that line")
+        assertEquals(
+            edit.text.indexOf("A -> Pay"),
+            seq3SourceApplyFix(source, fix, atLineStart, atLineStart).selectionStart,
+            "a caret at the line start goes with that line",
+        )
     }
 
     @Test

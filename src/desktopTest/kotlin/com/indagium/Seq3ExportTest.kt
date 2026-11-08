@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.DiagramExportMode
+import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
@@ -8,7 +9,6 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3RasterTheme
-import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.model.AnnBlock
 import com.indagium.model.AnnotationLogBlockStyle

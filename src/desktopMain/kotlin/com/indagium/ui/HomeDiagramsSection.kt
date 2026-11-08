@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -27,9 +27,9 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,8 +54,8 @@ import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 // The New tab's Diagrams section: the diagram library as a list or, with Grid | List, as cards with a preview image (the ones without a
-// source log, the ones with one, or all), a search box, "+ New diagram" and a row / card menu (Rename, Delete). Rows, search, empty states and how a ticket row opens are the pure
-// HomeDiagrams.kt; the library itself is AppState.seq3Sessions. Every click gives root keyboard focus back through [onReclaimFocus]
+// source log, the ones with one, or all), a search box, "+ New diagram" and a row / card menu (Rename, Delete). Rows, search, empty states and
+// how a ticket row opens are the pure HomeDiagrams.kt; the library itself is AppState.seq3Sessions. Every click gives root keyboard focus back through [onReclaimFocus]
 // (CLAUDE.md's clickable-steals-focus gotcha), around the search field excepted, which is meant to hold it. Previews are drawn only in
 // Grid view, on a background thread, by HomeDiagramThumbnails.kt.
 
@@ -355,7 +355,10 @@ private fun HomeDiagramsGrid(
     }
 }
 
-/** One card: the preview, the title (with the "No ticket" badge in All), the participants, the update time and the ticket; the "⋯" menu sits over the preview's corner. */
+/**
+ * One card: the preview, the title (with the "No ticket" badge in All), the participants, the update time and the ticket; the "⋯" menu sits
+ * over the preview's corner.
+ */
 @Composable
 private fun HomeDiagramCard(
     state: AppState,

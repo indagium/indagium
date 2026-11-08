@@ -21,8 +21,8 @@ import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
-import com.indagium.diagram3.toPlantUml
 import com.indagium.diagram3.toMermaid
+import com.indagium.diagram3.toPlantUml
 import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
@@ -184,6 +184,7 @@ class Seq3SessionTest {
         val root = createTempDirectory("indagium-seq3-dialect-reopen").toFile()
         val libraryFile = File(root, "library.cache")
         val tab = mkTab("log", "sample.log", twoTagEntries())
+
         fun newState(stateFile: String) = AppState(
             File(root, stateFile),
             notesDir = File(root, "notes"),
@@ -1131,15 +1132,17 @@ class Seq3SessionTest {
             assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
             val view = state.seq3Sessions.viewState(id)!!
             val generation = view.sourceEditorGeneration
+
             fun source(alias: String, name: String = "qweqwe", second: Boolean = false, reverse: Boolean = false): String {
                 val first = if (dialect == Seq3Dialect.MERMAID) "participant \"$alias\" as \"$name\""
-                    else "participant \"$name\" as $alias"
+                else "participant \"$name\" as $alias"
                 val other = if (dialect == Seq3Dialect.MERMAID) "participant Other as Other"
-                    else "participant \"Other\" as Other"
+                else "participant \"Other\" as Other"
                 val declarations = if (!second) listOf(first) else if (reverse) listOf(other, first) else listOf(first, other)
                 return (listOf(if (dialect == Seq3Dialect.MERMAID) "sequenceDiagram" else "@startuml") + declarations +
                     (if (dialect == Seq3Dialect.PLANTUML) listOf("@enduml") else emptyList())).joinToString("\n")
             }
+
             fun apply(text: String) {
                 assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, text, dialect), "$dialect: $text")
                 assertEquals(text, view.sourceDraft)
@@ -1173,10 +1176,12 @@ class Seq3SessionTest {
             val id = state.seq3Sessions.beginEmpty("log")!!
             assertTrue(state.seq3Sessions.prepareSourceDraft(id))
             assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
+
             fun source(alias: String): String = when (dialect) {
                 Seq3Dialect.MERMAID -> "sequenceDiagram\nparticipant $alias as Alpha\nparticipant B as Beta\n$alias->>B: hello"
                 Seq3Dialect.PLANTUML -> "@startuml\nparticipant \"Alpha\" as $alias\nparticipant \"Beta\" as B\n$alias -> B: hello\n@enduml"
             }
+
             fun apply(text: String) = assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, text, dialect))
             apply(source("A"))
             val before = state.seq3Sessions.sessions.single { it.id == id }.document
@@ -2203,6 +2208,7 @@ class Seq3SessionTest {
         val id = session.beginEmpty("log")!!
         session.setDialect(id, Seq3Dialect.PLANTUML)
         assertTrue(session.prepareSourceDraft(id))
+
         fun stackSize() = session.sessions.single { it.id == id }.undoStack.size
 
         session.applyLiveSourceDraft(id, liveSource("one"), Seq3Dialect.PLANTUML)
@@ -2216,6 +2222,9 @@ class Seq3SessionTest {
         now += 100
         session.applyLiveSourceDraft(id, session.viewState(id)!!.sourceDraft.replace("Canvas", "Typed"), Seq3Dialect.PLANTUML)
         assertEquals(4, stackSize(), "a canvas command in between keeps the next source edit separate")
-        assertEquals(listOf("Edit source", "Edit source", "Add custom message", "Edit source"), session.sessions.single { it.id == id }.undoStack.map { it.label })
+        assertEquals(
+            listOf("Edit source", "Edit source", "Add custom message", "Edit source"),
+            session.sessions.single { it.id == id }.undoStack.map { it.label },
+        )
     }
 }

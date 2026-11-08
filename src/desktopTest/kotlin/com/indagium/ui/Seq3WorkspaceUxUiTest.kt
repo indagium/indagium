@@ -362,7 +362,10 @@ class Seq3WorkspaceUxUiTest {
         showWorkspace(sessionId, 1440, 900)
         val titles = rule.onAllNodesWithText("Messages", useUnmergedTree = true)
             .fetchSemanticsNodes()
-            .filter { node -> generateSequence(node.parent) { it.parent }.any { it.config.getOrNull(SemanticsProperties.TestTag) == "diagram-tile-header-messages" } }
+            .filter { node ->
+                generateSequence(node.parent) { it.parent }
+                    .any { it.config.getOrNull(SemanticsProperties.TestTag) == "diagram-tile-header-messages" }
+            }
         assertEquals(1, titles.size, "the tile header holds the title once")
         val layouts = mutableListOf<TextLayoutResult>()
         titles.single().config.getOrNull(SemanticsActions.GetTextLayoutResult)?.action?.invoke(layouts)

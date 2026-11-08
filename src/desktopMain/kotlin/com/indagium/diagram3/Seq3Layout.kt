@@ -710,12 +710,8 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         centers,
         headerHeight,
         doc.fragments.any { it.visibility == Seq3Visibility.VISIBLE },
-        delaysByRowIndex,
-        bandLeft,
-        contentRight,
-        siblingBoundaryPadding,
+        RowBuildSpacing(delaysByRowIndex, bandLeft, contentRight, siblingBoundaryPadding, fragmentNotePadding),
         tm,
-        fragmentNotePadding,
     )
 
     // WP10: which row, if any, creates/destroys each lifeline — see resolveSeq3Lifecycle's own
@@ -1907,6 +1903,20 @@ private class RowBuildResult(
     val rowYByIndex: Map<Int, Pair<Double, Double>> = emptyMap(),
 )
 
+/** What [buildRows] places between and around the plain rows: the delay bands and the extra pitch the fragments ask for. */
+private class RowBuildSpacing(
+    // WP11: every VISIBLE delay, keyed by the exact emission INDEX (into the same `emissions` list
+    // buildRows iterates) it draws after — see layoutSeq3's own call site comment for why this
+    // is resolved before buildRows rather than as a post-pass.
+    val delaysByRowIndex: Map<Int, List<Seq3Delay>> = emptyMap(),
+    val bandLeft: Double = MARGIN,
+    val bandRight: Double = MARGIN,
+    val siblingBoundaryPadding: Map<Int, Double> = emptyMap(),
+    // Extra pitch directly below a row whose note must stay inside the fragment that closes on it —
+    // see fragmentNoteTailPadding. Applied before any delay band so the band starts below the note.
+    val fragmentNotePadding: Map<Int, Double> = emptyMap(),
+)
+
 private fun buildRows(
     emissions: List<Emission>,
     requirements: List<RowRequirement>,
@@ -1919,18 +1929,14 @@ private fun buildRows(
     // message intrudes a fixed amount into the header band (see FRAGMENT_TOP_RESERVE's own doc and
     // fragmentBoxFrom's clamp below, which is the second, defensive half of this same fix).
     fragmentsPresent: Boolean,
-    // WP11: every VISIBLE delay, keyed by the exact emission INDEX (into the same `emissions` list
-    // this function iterates) it draws after — see layoutSeq3's own call site comment for why this
-    // is resolved before buildRows rather than as a post-pass.
-    delaysByRowIndex: Map<Int, List<Seq3Delay>> = emptyMap(),
-    bandLeft: Double = MARGIN,
-    bandRight: Double = MARGIN,
-    siblingBoundaryPadding: Map<Int, Double> = emptyMap(),
+    spacing: RowBuildSpacing,
     textMetrics: Seq3TextMetrics,
-    // Extra pitch directly below a row whose note must stay inside the fragment that closes on it —
-    // see fragmentNoteTailPadding. Applied before any delay band so the band starts below the note.
-    fragmentNotePadding: Map<Int, Double> = emptyMap(),
 ): RowBuildResult {
+    val delaysByRowIndex = spacing.delaysByRowIndex
+    val bandLeft = spacing.bandLeft
+    val bandRight = spacing.bandRight
+    val siblingBoundaryPadding = spacing.siblingBoundaryPadding
+    val fragmentNotePadding = spacing.fragmentNotePadding
     val rows = mutableListOf<Seq3RowGeometry>()
     val delayBoxes = mutableListOf<Seq3DelayBox>()
     val first = HashMap<String, Int>()

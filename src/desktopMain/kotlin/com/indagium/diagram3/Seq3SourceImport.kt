@@ -1063,25 +1063,21 @@ private const val BARE_ALIAS = "[^\\s\"'@{}<>#:;,]+"
 
 private fun parseParticipant(text: String, dialect: Seq3Dialect): Triple<String, String, Seq3LifelineKind>? {
     fun kindOf(word: String) = if (word == "actor") Seq3LifelineKind.ACTOR else Seq3LifelineKind.PARTICIPANT
-    if (dialect == Seq3Dialect.MERMAID) {
+    return if (dialect == Seq3Dialect.MERMAID) {
         Regex("^(participant|actor)\\s+(\\S+)\\s+as\\s+(.+)$").matchEntire(text)?.let {
-            return Triple(it.groupValues[2], unescapeSource(it.groupValues[3], dialect), kindOf(it.groupValues[1]))
+            Triple(it.groupValues[2], unescapeSource(it.groupValues[3], dialect), kindOf(it.groupValues[1]))
+        } ?: Regex("^(participant|actor)\\s+($BARE_ALIAS)$").matchEntire(text)?.let {
+            Triple(it.groupValues[2], it.groupValues[2], kindOf(it.groupValues[1]))
         }
-        Regex("^(participant|actor)\\s+($BARE_ALIAS)$").matchEntire(text)?.let {
-            return Triple(it.groupValues[2], it.groupValues[2], kindOf(it.groupValues[1]))
+    } else {
+        Regex("^(participant|actor)\\s+\"(.*)\"\\s+as\\s+(\\S+)$").matchEntire(text)?.let {
+            Triple(it.groupValues[3], unescapeSource(it.groupValues[2], dialect), kindOf(it.groupValues[1]))
+        } ?: Regex("^(participant|actor)\\s+($BARE_ALIAS)\\s+as\\s+($BARE_ALIAS)$").matchEntire(text)?.let {
+            Triple(it.groupValues[3], it.groupValues[2], kindOf(it.groupValues[1]))
+        } ?: Regex("^(participant|actor)\\s+($BARE_ALIAS)$").matchEntire(text)?.let {
+            Triple(it.groupValues[2], it.groupValues[2], kindOf(it.groupValues[1]))
         }
-        return null
     }
-    Regex("^(participant|actor)\\s+\"(.*)\"\\s+as\\s+(\\S+)$").matchEntire(text)?.let {
-        return Triple(it.groupValues[3], unescapeSource(it.groupValues[2], dialect), kindOf(it.groupValues[1]))
-    }
-    Regex("^(participant|actor)\\s+($BARE_ALIAS)\\s+as\\s+($BARE_ALIAS)$").matchEntire(text)?.let {
-        return Triple(it.groupValues[3], it.groupValues[2], kindOf(it.groupValues[1]))
-    }
-    Regex("^(participant|actor)\\s+($BARE_ALIAS)$").matchEntire(text)?.let {
-        return Triple(it.groupValues[2], it.groupValues[2], kindOf(it.groupValues[1]))
-    }
-    return null
 }
 
 /** The editor's view of a participant declaration line, so it accepts exactly what the import does. */
@@ -1433,15 +1429,19 @@ internal fun sourceEmissionAnchors(source: String, dialect: Seq3Dialect): List<S
         if (parseArrow(text, dialect) != null || parseMessageNote(text, dialect) != null) {
             emissions += SourceEmissionAnchor(index + 1, marker.id, marker.entryId)
             pending = null
-        } else if (text.isNotBlank() && !isSourceComment(text, dialect) &&
-            !text.startsWith("activate ") && !text.startsWith("deactivate ") &&
-            !text.startsWith("create ") && !text.startsWith("destroy ")
-        ) {
+        } else if (endsPendingSourceMarker(text, dialect)) {
             pending = null
         }
     }
     return emissions
 }
+
+private val SOURCE_DIRECTIVE_PREFIXES = listOf("activate ", "deactivate ", "create ", "destroy ")
+
+/** Whether a statement that is not a message, a note or a marker drops the marker waiting for its row: any text other than a
+ *  comment or a directive that the marker may precede. */
+private fun endsPendingSourceMarker(text: String, dialect: Seq3Dialect): Boolean =
+    text.isNotBlank() && !isSourceComment(text, dialect) && SOURCE_DIRECTIVE_PREFIXES.none { text.startsWith(it) }
 
 /** Binds a directive to the previous source emission, as the emitters place it after that row.
  *  Before the first row, it binds to the first emission. This uses statement order rather than

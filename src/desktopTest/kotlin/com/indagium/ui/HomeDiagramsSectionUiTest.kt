@@ -5,22 +5,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.compose.ui.test.onRoot
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.toPixelMap
-import java.awt.image.BufferedImage
-import javax.imageio.ImageIO
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
@@ -37,14 +35,22 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import java.awt.image.BufferedImage
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import javax.imageio.ImageIO
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+/** The thread id of the test log entries. */
+private const val TEST_TID = 11
+
+/** How long a preview thumbnail may take to appear. */
+private const val THUMBNAIL_TIMEOUT_MS = 10_000L
 
 /** The New tab's Diagrams section as a user drives it: segments, search, "+ New diagram", opening each kind of row, the row menu
  *  (Rename, Delete with its confirmation), the empty states and the Grid | List view with its previews. */
@@ -105,8 +111,8 @@ class HomeDiagramsSectionUiTest {
     }
 
     private fun entries() = listOf(
-        LogEntry(1, "10:00:00.000", LogLevel.I, "Checkout", "start", 7, 11),
-        LogEntry(2, "10:00:00.050", LogLevel.I, "Gateway", "charge", 7, 11),
+        LogEntry(1, "10:00:00.000", LogLevel.I, "Checkout", "start", 7, TEST_TID),
+        LogEntry(2, "10:00:00.050", LogLevel.I, "Gateway", "charge", 7, TEST_TID),
     )
 
     // ---- segments -------------------------------------------------------------------------------------------
@@ -276,7 +282,7 @@ class HomeDiagramsSectionUiTest {
         show()
 
         rule.onNodeWithTag(rowTag(itemId)).performClick()
-        rule.waitUntil(10_000) { state.seq3Sessions.sessions.isNotEmpty() }
+        rule.waitUntil(THUMBNAIL_TIMEOUT_MS) { state.seq3Sessions.sessions.isNotEmpty() }
         rule.waitForIdle()
 
         val session = state.seq3Sessions.sessions.single()
@@ -293,7 +299,7 @@ class HomeDiagramsSectionUiTest {
         show()
 
         rule.onNodeWithTag(rowTag(orphan.id)).performClick()
-        rule.waitUntil(10_000) { state.seq3Sessions.sessions.isNotEmpty() && state.pendingDiagramNotice != null }
+        rule.waitUntil(THUMBNAIL_TIMEOUT_MS) { state.seq3Sessions.sessions.isNotEmpty() && state.pendingDiagramNotice != null }
         rule.waitForIdle()
 
         val session = state.seq3Sessions.sessions.single()
@@ -480,7 +486,7 @@ class HomeDiagramsSectionUiTest {
     }
 
     private fun waitForThumb(id: String) {
-        rule.waitUntil(10_000) { rule.onAllNodesWithTag("home-diagrams-thumb-$id", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
+        rule.waitUntil(THUMBNAIL_TIMEOUT_MS) { rule.onAllNodesWithTag("home-diagrams-thumb-$id", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
     }
 
     @Test
@@ -593,7 +599,7 @@ class HomeDiagramsSectionUiTest {
         addDiagram("Sketch", loginSource, "Cache")
         state.updateSettings { it.copy(homeDiagramsView = HomeDiagramsView.GRID) }
         show()
-        rule.waitUntil(10_000) { HomeDiagramThumbnails.renderCount == 2 }
+        rule.waitUntil(THUMBNAIL_TIMEOUT_MS) { HomeDiagramThumbnails.renderCount == 2 }
 
         clickView("List")
         addDiagram("Third", loginSource, "Bus")

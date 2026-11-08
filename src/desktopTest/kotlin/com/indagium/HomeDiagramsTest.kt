@@ -12,8 +12,8 @@ import com.indagium.ui.DiagramSourceIdentity
 import com.indagium.ui.DiagramTicketFilter
 import com.indagium.ui.HomeDiagramLogFile
 import com.indagium.ui.HomeDiagramLogProblem
-import com.indagium.ui.homeDiagramLogProblemNotice
 import com.indagium.ui.homeDiagramGridColumns
+import com.indagium.ui.homeDiagramLogProblemNotice
 import com.indagium.ui.homeDiagramMatches
 import com.indagium.ui.homeDiagramParticipantsLabel
 import com.indagium.ui.homeDiagramRows
@@ -41,6 +41,7 @@ class HomeDiagramsTest {
 
     private fun summaries(): List<DiagramLibrarySummary> {
         val store = DiagramLibraryStore(File(createTempDirectory("home-diagrams").toFile(), "library.cache"))
+
         fun add(title: String, source: DiagramSourceIdentity, vararg participants: String, at: Long) {
             val document = Seq3Document(
                 title = title,
@@ -94,6 +95,7 @@ class HomeDiagramsTest {
     @Test
     fun eachSegmentListsItsDiagramsNewestFirst() {
         val all = summaries()
+
         fun titles(segment: HomeDiagramSegment, query: String = "") = homeDiagramRows(all, segment, query, now).map { it.title }
 
         assertEquals(listOf("Login flow", "Empty sketch"), titles(HomeDiagramSegment.NO_TICKET))

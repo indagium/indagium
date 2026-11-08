@@ -1,6 +1,5 @@
 package com.indagium
 
-import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Command
@@ -36,6 +35,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+
+/** The id (and time) of the last "hot" occurrence of the collapse fixture. */
+private const val LAST_HOT_OCCURRENCE = 11
 
 /** The editor shows `seq3IndentSource(toSource(...))`; the importer must read it exactly like the
  *  unindented export. */
@@ -75,7 +77,7 @@ class Seq3SourceIndentImportTest {
                         occurrence(8, 8, mapOf("s" to "warm")),
                         occurrence(9, 9, mapOf("s" to "hot")),
                         occurrence(10, 10, mapOf("s" to "hot")),
-                        occurrence(11, 11, mapOf("s" to "hot")),
+                        occurrence(LAST_HOT_OCCURRENCE, LAST_HOT_OCCURRENCE.toLong(), mapOf("s" to "hot")),
                     ),
                 ),
                 Seq3Message(

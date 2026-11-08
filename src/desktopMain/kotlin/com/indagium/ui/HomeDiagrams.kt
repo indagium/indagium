@@ -54,7 +54,10 @@ internal fun homeDiagramMatches(summary: DiagramLibrarySummary, query: String): 
     return words.all { it in haystack }
 }
 
-/** What one row of the section shows. [ticketLabel] is blank unless the row has a ticket and the segment shows it; [noTicketBadge] marks a log-free row in All. */
+/**
+ * What one row of the section shows. [ticketLabel] is blank unless the row has a ticket and the segment shows it; [noTicketBadge] marks a
+ * log-free row in All.
+ */
 internal data class HomeDiagramRow(
     val id: String,
     val title: String,
@@ -101,7 +104,10 @@ internal fun homeDiagramGridColumns(availableWidthDp: Float, gapDp: Float = 8f):
     return fit.coerceIn(1, HOME_DIAGRAM_GRID_MAX_COLUMNS)
 }
 
-/** The line shown instead of the list when [segment] has no rows for [query]; [offersNew] is true when "New diagram" is the way forward (nothing was searched for). */
+/**
+ * The line shown instead of the list when [segment] has no rows for [query]; [offersNew] is true when "New diagram" is the way forward
+ * (nothing was searched for).
+ */
 internal data class HomeDiagramsEmpty(val message: String, val offersNew: Boolean)
 
 internal fun homeDiagramsEmpty(segment: HomeDiagramSegment, query: String): HomeDiagramsEmpty {

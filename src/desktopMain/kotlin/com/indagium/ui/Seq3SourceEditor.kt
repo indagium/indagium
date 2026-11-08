@@ -6,9 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,22 +13,27 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.OutputTransformation
+import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.foundation.text.input.TextFieldDecorator
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
-import androidx.compose.foundation.text.input.OutputTransformation
-import androidx.compose.foundation.text.input.TextFieldBuffer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -55,12 +57,8 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -69,27 +67,28 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import com.indagium.diagram3.Seq3Dialect
-import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3SourceDiagnostic
 import com.indagium.diagram3.Seq3SourceFix
@@ -97,8 +96,9 @@ import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.parseSeq3SourceArrowEndpoints
 import com.indagium.diagram3.parseSeq3SourceParticipant
 import com.indagium.diagram3.sourceEmissionAnchors
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.widthIn
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /** A caret that settles on a message's line links the diagram to it after this pause. */
@@ -195,7 +195,9 @@ internal fun Seq3SourceHeaderActions(state: AppState, session: Seq3WorkspaceSess
             toggleSeq3SourceAutoIndent(state)
             view.sourceFocusRequestGeneration++
         }
-    } else Seq3SourceSettingsMenu(state, view)
+    } else {
+        Seq3SourceSettingsMenu(state, view)
+    }
 }
 
 /** The Source tile header shows its three toggles inline from this width; narrower, they fold into one Settings menu. */
@@ -289,8 +291,12 @@ internal fun Seq3SourceEditorPane(
                     lastValue.text, typed.text, typed.selection.start, typed.selection.collapsed, view.sourceEditorDialect,
                     autoIndent = state.settings.diagramSourceAutoIndent,
                 )
-            } else null
-            val next = if (outdent == null) typed else {
+            } else {
+                null
+            }
+            val next = if (outdent == null) {
+                typed
+            } else {
                 val fixed = TextFieldValue(outdent.text, TextRange(outdent.selectionStart, outdent.selectionEnd))
                 editorState.edit {
                     replace(0, length, fixed.text)
@@ -515,8 +521,9 @@ internal fun Seq3SourceEditorPane(
     }
     // Closing the bar, by Esc or its button, gives the keyboard back to the editor.
     LaunchedEffect(session.id, view.sourceFindOpen) {
-        if (view.sourceFindOpen) findWasOpen[0] = true
-        else if (findWasOpen[0]) {
+        if (view.sourceFindOpen) {
+            findWasOpen[0] = true
+        } else if (findWasOpen[0]) {
             findWasOpen[0] = false
             runCatching { requester.requestFocus() }
         }
@@ -590,14 +597,18 @@ internal fun Seq3SourceEditorPane(
     val endpointTrigger = if (autocomplete) seq3SourceEndpointTrigger(sourceText, selection, view.sourceEditorDialect, snippetFields) else null
     val suggestionTrigger = if (autocomplete) {
         openMenu?.trigger ?: endpointTrigger ?: seq3SourceSuggestionTrigger(sourceText, selection, view.sourceEditorDialect)
-    } else null
+    } else {
+        null
+    }
     val activeDismissal = seq3SourceDismissalAfterEdit(dismissedSuggestion, suggestionTrigger)
     if (activeDismissal != dismissedSuggestion) dismissedSuggestion = activeDismissal
     val sourceSuggestions = if (openMenu != null) {
         seq3SourceEndpointMenuSuggestions(participantChoices)
-    } else suggestionTrigger?.let {
-        seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias }, participantChoices)
-    }.orEmpty()
+    } else {
+        suggestionTrigger?.let {
+            seq3SourceActiveSuggestions(sourceText, it, view.sourceEditorDialect, participantChoices.map { choice -> choice.alias }, participantChoices)
+        }.orEmpty()
+    }
     val menuActiveIndex = openMenu?.let { seq3SourceEndpointMenuActiveIndex(it.trigger, participantChoices) } ?: 0
     LaunchedEffect(suggestionTrigger?.query, openMenu?.trigger?.start, view.sourceEditorDialect) {
         selectedSuggestionIndex = menuActiveIndex
@@ -609,7 +620,9 @@ internal fun Seq3SourceEditorPane(
     // the list belongs to is left out of what is imported, so it is not flagged while it is typed.
     val previewText = if (suggestionsVisible && suggestionTrigger != null && openMenu == null && endpointTrigger == null) {
         sourceText.removeRange(suggestionTrigger.start.coerceIn(0, sourceText.length), suggestionTrigger.end.coerceIn(0, sourceText.length))
-    } else sourceText
+    } else {
+        sourceText
+    }
     LaunchedEffect(
         session.id,
         sourceText,
@@ -746,13 +759,16 @@ internal fun Seq3SourceEditorPane(
                         lastEditorInputMs[0] = view.sourceClockMs()
                     }
                     .onPointerEvent(PointerEventType.Release, pass = PointerEventPass.Final) {
-                        if (ignoreEndpointRelease) ignoreEndpointRelease = false
-                        else {
+                        if (ignoreEndpointRelease) {
+                            ignoreEndpointRelease = false
+                        } else {
                             val selected = editorState.selection
                             val text = editorState.text.toString()
                             val trigger = if (state.settings.diagramSourceAutocomplete) {
                                 seq3SourceEndpointMenuTrigger(text, selected, view.sourceEditorDialect, snippetFields)
-                            } else null
+                            } else {
+                                null
+                            }
                             endpointMenu = trigger?.let { Seq3SourceEndpointMenu(it, text) }
                             if (trigger != null) {
                                 dismissedSuggestion = null
@@ -807,14 +823,12 @@ internal fun Seq3SourceEditorPane(
                                 }
                             }
                         }
-                        if (event.key == Key.Tab && !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)) {
+                        if (event.key == Key.Tab && event.hasNoCommandModifier()) {
                             val range = editorState.selection
                             applySourceEdit(seq3SourceTab(editorState.text.toString(), range.start, range.end, event.isShiftPressed))
                             return@onPreviewKeyEvent true
                         }
-                        if ((event.key == Key.Enter || event.key == Key.NumPadEnter) &&
-                            !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)
-                        ) {
+                        if ((event.key == Key.Enter || event.key == Key.NumPadEnter) && event.hasNoCommandModifier()) {
                             val range = editorState.selection
                             val edit = seq3SourceEnter(
                                 editorState.text.toString(), range.start, range.end, view.sourceEditorDialect,
@@ -825,9 +839,7 @@ internal fun Seq3SourceEditorPane(
                                 return@onPreviewKeyEvent true
                             }
                         }
-                        if ((event.key == Key.Backspace || event.key == Key.Delete) &&
-                            !(event.isCtrlPressed || event.isMetaPressed || event.isAltPressed)
-                        ) {
+                        if ((event.key == Key.Backspace || event.key == Key.Delete) && event.hasNoCommandModifier()) {
                             val range = editorState.selection
                             val edit = seq3SourceDeleteNextToMarkers(
                                 editorState.text.toString(),
@@ -1179,9 +1191,11 @@ private fun Seq3SourceFindBar(
                 modifier = Modifier.widthIn(min = 56.dp).testTag("seq3-source-find-count"),
             )
             // A clicked button takes the keyboard focus with it: the find field gets it back.
-            SquareIconButton("↑", fontSize = 12.sp, onClick = { onStep(false); runCatching { findRequester.requestFocus() } }, enabled = total > 0, size = 20.dp,
+            SquareIconButton("↑", fontSize = 12.sp, enabled = total > 0, size = 20.dp,
+                onClick = { onStep(false); runCatching { findRequester.requestFocus() } },
                 modifier = Modifier.testTag("seq3-source-find-prev"), tooltip = "Previous match (Shift+Enter)")
-            SquareIconButton("↓", fontSize = 12.sp, onClick = { onStep(true); runCatching { findRequester.requestFocus() } }, enabled = total > 0, size = 20.dp,
+            SquareIconButton("↓", fontSize = 12.sp, enabled = total > 0, size = 20.dp,
+                onClick = { onStep(true); runCatching { findRequester.requestFocus() } },
                 modifier = Modifier.testTag("seq3-source-find-next"), tooltip = "Next match (Enter)")
             SquareIconButton("×", fontSize = 14.sp, onClick = onClose, size = 20.dp,
                 modifier = Modifier.testTag("seq3-source-find-close"), tooltip = "Close (Esc)")
@@ -1201,7 +1215,9 @@ private fun Seq3SourceFindBar(
                         if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.NumPadEnter)) {
                             onReplace()
                             true
-                        } else false
+                        } else {
+                            false
+                        }
                     }
                     .testTag("seq3-source-replace-field"),
                 onCancel = onClose,
@@ -1528,6 +1544,9 @@ internal fun seq3SourceDismissalAfterEdit(
 
 private const val SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH = 2
 
+/** Whether none of Ctrl, Cmd or Alt is held, so the key is an editing key and not a shortcut. */
+private fun KeyEvent.hasNoCommandModifier(): Boolean = !(isCtrlPressed || isMetaPressed || isAltPressed)
+
 /**
  * What the word at the caret can complete to. A slash word is always a keyword. A bare word at the
  * start of a line is a keyword or a declared name (an arrow's source, or `Al` for `Alice`) and
@@ -1550,15 +1569,13 @@ internal fun seq3SourceSuggestionTrigger(
     while (end < source.length && source[end].isLetterOrDigitOrUnderscore()) end++
     val query = source.substring(queryStart, caret) + source.substring(caret, end)
     if (slash >= 0 && source[slash] == '/') {
-        if (slash > 0 && source[slash - 1].isLetterOrDigitOrUnderscore()) return null
-        return Seq3SourceSuggestionTrigger(slash, end, query, "/")
+        return if (slash > 0 && source[slash - 1].isLetterOrDigitOrUnderscore()) null else Seq3SourceSuggestionTrigger(slash, end, query, "/")
     }
     val lineStart = source.lastIndexOf('\n', (queryStart - 1).coerceAtLeast(0)).let { it + 1 }
     val beforeToken = source.substring(lineStart, queryStart)
     if (beforeToken.all { it.isWhitespace() }) {
         // A bare word needs two letters: a single `a` is far more likely the start of a name or a message.
-        if (query.length < SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH) return null
-        return Seq3SourceSuggestionTrigger(queryStart, end, query, "", names = true)
+        return if (query.length < SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH) null else Seq3SourceSuggestionTrigger(queryStart, end, query, "", names = true)
     }
     if (query.isEmpty() || !seq3SourceNameFollows(beforeToken.trimStart(), dialect)) return null
     return Seq3SourceSuggestionTrigger(queryStart, end, query, "", names = true, keywords = false)
@@ -1917,8 +1934,9 @@ private fun Seq3SourceSuggestionRow(
     // Arrow keys move the choice through a list longer than its window: keep it in view.
     val inView = remember { BringIntoViewRequester() }
     LaunchedEffect(active) { if (active) runCatching { inView.bringIntoView() } }
+    val rowTag = "seq3-source-suggestion-row-${if (suggestion.name) "name-" else ""}${suggestion.keyword}"
     Row(
-        Modifier.fillMaxWidth().bringIntoViewRequester(inView).testTag("seq3-source-suggestion-row-${if (suggestion.name) "name-" else ""}${suggestion.keyword}")
+        Modifier.fillMaxWidth().bringIntoViewRequester(inView).testTag(rowTag)
             .background(if (active) tc.abg else Color.Transparent, RoundedCornerShape(5.dp))
             .clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2042,8 +2060,9 @@ private fun SourceCompactMenu(
     var open by remember { mutableStateOf(false) }
     var wasOpen by remember { mutableStateOf(false) }
     LaunchedEffect(open) {
-        if (open) wasOpen = true
-        else if (wasOpen) {
+        if (open) {
+            wasOpen = true
+        } else if (wasOpen) {
             // A focusable Popup restores its previous focus while it is disposed. Wait until
             // that restoration finishes before returning focus to the source editor.
             withFrameNanos { }
@@ -2096,20 +2115,25 @@ private fun Seq3SourceActionForms(
 ) {
     val dialect = view.sourceEditorDialect
     var confirmNewDiagram by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
+
     fun addParticipant(actor: Boolean) {
         val (snippet, fields) = seq3SourceParticipantSnippet(editorState.text.toString(), dialect, actor)
         insertSnippet(snippet, fields, true)
     }
+
     fun addMessage(style: String) {
         val snippet = sourceMessageLine("From", "To", style, dialect, "message label")
         insertSnippet(snippet, sourceSnippetFields(snippet, "From" to true, "To" to true, "message label" to false), false)
     }
+
     fun applyNewDiagram() {
         val starter = seq3SourceStarter(dialect, state.seq3Sessions.newSourceDiagramTitle(session.id))
         confirmNewDiagram = false
         when (val result = state.seq3Sessions.startNewSourceDiagram(session.id, starter, dialect)) {
             is Seq3SourceImportResult.Failure -> view.sourceDiagnostics = result.diagnostics
-            is Seq3SourceImportResult.Success -> if (result.evidenceLoss) onNewDiagramEvidenceLoss(starter, dialect) else {
+            is Seq3SourceImportResult.Success -> if (result.evidenceLoss) {
+                onNewDiagramEvidenceLoss(starter, dialect)
+            } else {
                 view.sourceDiagnostics = emptyList(); view.sourceEvidenceLossPending = false
             }
         }
@@ -2128,7 +2152,9 @@ private fun Seq3SourceActionForms(
             // The same pictograms as the suggestion rows of these keywords; the other buttons carry them in their menus.
             AppButton("+ Participant", onClick = { addParticipant(false) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
                 horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-participant"),
-                leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("participant"), color, Modifier.testTag("seq3-source-insert-participant-glyph")) })
+                leadingContent = { color ->
+                    Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("participant"), color, Modifier.testTag("seq3-source-insert-participant-glyph"))
+                })
             AppButton("+ Actor", onClick = { addParticipant(true) }, variant = ButtonVariant.Ghost, textColor = tcNow.tx,
                 horizontalPadding = 7.dp, modifier = Modifier.testTag("seq3-source-insert-actor"),
                 leadingContent = { color -> Seq3SourceGlyphIcon(seq3SourceKeywordGlyph("actor"), color, Modifier.testTag("seq3-source-insert-actor-glyph")) })
@@ -2174,7 +2200,11 @@ private fun Seq3SourceActionForms(
         Column(Modifier.width(420.dp).background(tc().p, RoundedCornerShape(8.dp)).border(1.dp, tc().br, RoundedCornerShape(8.dp)).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
             AppText("Replace current diagram?", color = tc().tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            AppText("Starting a new diagram replaces the current source and diagram structure. Linked log evidence will be reviewed separately if it is affected.", color = tc().ts, fontSize = 11.sp)
+            AppText(
+                "Starting a new diagram replaces the current source and diagram structure. " +
+                    "Linked log evidence will be reviewed separately if it is affected.",
+                color = tc().ts, fontSize = 11.sp,
+            )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 AppButton("Keep editing", onClick = { confirmNewDiagram = false; reclaimFocus() }, variant = ButtonVariant.Ghost)
                 AppButton("Replace diagram", onClick = { applyNewDiagram() }, variant = ButtonVariant.Primary,
@@ -2190,7 +2220,7 @@ internal fun seq3SourceParticipantSnippet(source: String, dialect: Seq3Dialect, 
     val alias = sourceUniqueAlias("Alias", sourceParticipants(source, dialect))
     val snippet = sourceParticipantDeclaration(alias, "Name", actor, dialect)
     val fields = if (dialect == Seq3Dialect.MERMAID) sourceSnippetFields(snippet, alias to false, "Name" to false).reversed()
-        else sourceSnippetFields(snippet, "Name" to false, alias to false)
+    else sourceSnippetFields(snippet, "Name" to false, alias to false)
     return snippet to fields
 }
 
@@ -2202,10 +2232,6 @@ private fun sourceUniqueAlias(base: String, participants: List<Seq3SourcePartici
     var suffix = 2
     while ("${sanitized}_$suffix" in used) suffix++
     return "${sanitized}_$suffix"
-}
-
-private fun sourceContainsMessage(source: String, dialect: Seq3Dialect): Boolean = source.lineSequence().any { line ->
-    parseSeq3SourceArrowEndpoints(line, dialect)?.second != null
 }
 
 private fun sourceEscape(value: String, dialect: Seq3Dialect): String {
@@ -2272,9 +2298,6 @@ internal fun sourceParticipants(source: String, dialect: Seq3Dialect): List<Seq3
     return result.values.toList()
 }
 
-private fun sourceParticipantDisplayName(alias: String, participants: List<Seq3SourceParticipant>): String =
-    participants.firstOrNull { it.alias == alias }?.name ?: alias
-
 internal fun seq3SourceNoteScope(
     source: String,
     cursor: Int,
@@ -2294,7 +2317,6 @@ internal fun seq3SourceNoteScope(
     val ordered = listOfNotNull(from, to).distinct().sortedBy { alias -> participantAliases.indexOf(alias).let { if (it < 0) Int.MAX_VALUE else it } }
     return ordered.takeIf { it.isNotEmpty() }?.joinToString(",")
 }
-
 
 private fun sourceParticipantDeclaration(alias: String, name: String, actor: Boolean, dialect: Seq3Dialect): String = when (dialect) {
     Seq3Dialect.MERMAID -> "${if (actor) "actor" else "participant"} $alias as ${sourceEscape(name, dialect)}"
@@ -2344,15 +2366,6 @@ private fun insertSeq3SourceSnippet(
     return insertSeq3SourceAtMapped(source, start, end, snippet, dialect, autoIndent = autoIndent)
 }
 
-private fun insertSeq3SourceAt(
-    source: String,
-    start: Int,
-    end: Int,
-    snippet: String,
-    dialect: Seq3Dialect,
-    cursorOffset: Int = snippet.length,
-): TextFieldValue = insertSeq3SourceAtMapped(source, start, end, snippet, dialect, cursorOffset).value
-
 /** Inserts [snippet] over [start, end) with every line indented to the level of the insertion
  *  point (with [autoIndent] off, to the blanks of the line it follows). A whitespace-only stretch
  *  before the insertion on its line is replaced, not kept. */
@@ -2380,7 +2393,7 @@ private fun insertSeq3SourceAtMapped(
     val content = snippet.trim('\n', '\r')
     val leadingTrim = snippet.length - snippet.trimStart('\n', '\r').length
     val reindented = if (autoIndent) seq3SourceReindentSnippet(content, seq3SourceIndentStateAfter(before, dialect))
-        else seq3SourceFlatSnippet(content, lineIndent)
+    else seq3SourceFlatSnippet(content, lineIndent)
     val prefix = if (before.isNotEmpty() && !before.endsWith('\n')) "\n" else ""
     val suffix = if (after.isNotEmpty() && !after.startsWith('\n')) "\n" else ""
     val next = before + prefix + reindented.text + suffix + after
@@ -2449,6 +2462,7 @@ internal fun seq3SourceMarkerDeletionRanges(source: String, dialect: Seq3Dialect
     val ranges = mutableListOf<Seq3SourceRange>()
     var runStart = markerIndices.first()
     var runEnd = runStart
+
     fun appendRun(first: Int, last: Int) {
         var previousVisible = first - 1
         while (previousVisible >= 0 && isSeq3SourceMarkerLine(lines[previousVisible].text, dialect)) previousVisible--

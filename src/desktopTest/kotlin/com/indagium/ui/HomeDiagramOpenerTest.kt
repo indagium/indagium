@@ -13,6 +13,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+/** Nanoseconds in a millisecond. */
+private const val NANOS_PER_MS = 1_000_000L
+
+/** How long opening a ticket may take. */
+private const val OPEN_TIMEOUT_MS = 30_000L
+
 /** How the New tab's Diagrams section opens a diagram, against a real [AppState]: log-free rows, ticket rows with the log open, on
  *  disk (a file and an archive entry) and gone, and the notices of the fallbacks. */
 class HomeDiagramOpenerTest {
@@ -39,7 +45,7 @@ class HomeDiagramOpenerTest {
     }
 
     private fun await(timeoutMs: Long = 15_000, what: String = "condition", condition: () -> Boolean) {
-        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        val deadline = System.nanoTime() + timeoutMs * NANOS_PER_MS
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(condition(), "$what did not become true within ${timeoutMs}ms")
     }
@@ -64,7 +70,7 @@ class HomeDiagramOpenerTest {
     private fun AppState.sessionOf(id: String) = seq3Sessions.sessions.firstOrNull { it.id == id }
 
     private fun AppState.openTicket(summary: DiagramLibrarySummary, launcherTabId: String? = null) =
-        runBlocking { withTimeout(30_000) { opener().openTicket(summary, launcherTabId) } }
+        runBlocking { withTimeout(OPEN_TIMEOUT_MS) { opener().openTicket(summary, launcherTabId) } }
 
     @Test
     fun aDiagramWithoutATicketOpensInItsOwnTabAndConsumesTheNewTab() {

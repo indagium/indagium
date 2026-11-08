@@ -107,7 +107,11 @@ class Seq3SourceEndpointTriggerTest {
                 assertEquals("Alias_2", source.substring(trigger.start, trigger.end))
                 val participants = sourceParticipants(source, dialect)
                 assertEquals(participants.map { it.alias }, seq3SourceEndpointMenuSuggestions(participants).map { it.keyword }, "every participant")
-                assertEquals(participants.indexOfFirst { it.alias == "Alias_2" }, seq3SourceEndpointMenuActiveIndex(trigger, participants), "the current name is the active row")
+                assertEquals(
+                    participants.indexOfFirst { it.alias == "Alias_2" },
+                    seq3SourceEndpointMenuActiveIndex(trigger, participants),
+                    "the current name is the active row",
+                )
             }
             assertNull(seq3SourceEndpointMenuTrigger(source, TextRange(source.length), dialect), "the label is no endpoint")
         }

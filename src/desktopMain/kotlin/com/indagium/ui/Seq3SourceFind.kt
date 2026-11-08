@@ -70,6 +70,7 @@ internal fun seq3SourceReplaceAll(
         }
         append(source, copied, source.length)
     }
+
     // A position after a match moves by what the matches before it changed; one inside a match
     // lands at the end of that match's replacement.
     fun map(offset: Int): Int {

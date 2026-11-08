@@ -77,6 +77,7 @@ private fun tokenizeLine(line: String, base: Int, dialect: Seq3Dialect, out: Mut
     val text = trimmed.substring(leading)
     if (text.isEmpty()) return
     val start = base + leading
+
     fun add(from: Int, to: Int, role: Seq3SourceRole) {
         if (from < to) out += Seq3SourceToken(start + from, start + to, role)
     }
@@ -91,51 +92,65 @@ private fun tokenizeLine(line: String, base: Int, dialect: Seq3Dialect, out: Mut
     // The importer's own reading decides what a message line is, so `Loop -> B: x` stays a message.
     if (parseSeq3SourceArrowEndpoints(text, dialect) != null) return tokenizeMessage(text, dialect, ::add)
 
+    tokenizeStatement(text, word.length, lower, ::add)
+}
+
+/** A line that is not a comment, a header or a message: its leading [word] (lower-cased as [lower]) says how the rest reads. */
+private fun tokenizeStatement(text: String, wordEnd: Int, lower: String, add: (Int, Int, Seq3SourceRole) -> Unit) {
     when {
         lower in BLOCK_WORDS -> {
-            add(0, word.length, Seq3SourceRole.BLOCK)
-            addLabel(text, word.length, ::add)
+            add(0, wordEnd, Seq3SourceRole.BLOCK)
+            addLabel(text, wordEnd, add)
         }
         lower in PARTICIPANT_WORDS -> {
-            add(0, word.length, Seq3SourceRole.KEYWORD)
-            tokenizeDeclaration(text, word.length, ::add)
+            add(0, wordEnd, Seq3SourceRole.KEYWORD)
+            tokenizeDeclaration(text, wordEnd, add)
         }
-        lower == "create" -> {
-            add(0, word.length, Seq3SourceRole.KEYWORD)
-            val next = WORD.find(text, word.length)
-            if (next != null && next.value in PARTICIPANT_WORDS) {
-                add(next.range.first, next.range.last + 1, Seq3SourceRole.KEYWORD)
-                tokenizeDeclaration(text, next.range.last + 1, ::add)
-            } else addNames(text, word.length, text.length, ::add)
-        }
+        lower == "create" -> tokenizeCreate(text, wordEnd, add)
         lower in LIFECYCLE_WORDS -> {
-            add(0, word.length, Seq3SourceRole.KEYWORD)
-            addNames(text, word.length, text.length, ::add)
+            add(0, wordEnd, Seq3SourceRole.KEYWORD)
+            addNames(text, wordEnd, text.length, add)
         }
         lower == "title" -> {
-            add(0, word.length, Seq3SourceRole.KEYWORD)
-            addLabel(text, word.length, ::add)
+            add(0, wordEnd, Seq3SourceRole.KEYWORD)
+            addLabel(text, wordEnd, add)
         }
-        lower == "note" || lower == "ref" -> tokenizeNote(text, word.length, ::add)
-        lower in GENERIC_KEYWORDS -> add(0, word.length, Seq3SourceRole.KEYWORD)
+        lower == "note" || lower == "ref" -> tokenizeNote(text, wordEnd, add)
+        lower in GENERIC_KEYWORDS -> add(0, wordEnd, Seq3SourceRole.KEYWORD)
+    }
+}
+
+/** `create participant X` / `create X`: the keyword, then a declaration or just the names. */
+private fun tokenizeCreate(text: String, wordEnd: Int, add: (Int, Int, Seq3SourceRole) -> Unit) {
+    add(0, wordEnd, Seq3SourceRole.KEYWORD)
+    val next = WORD.find(text, wordEnd)
+    if (next != null && next.value in PARTICIPANT_WORDS) {
+        add(next.range.first, next.range.last + 1, Seq3SourceRole.KEYWORD)
+        tokenizeDeclaration(text, next.range.last + 1, add)
+    } else {
+        addNames(text, wordEnd, text.length, add)
     }
 }
 
 /** `A -> B: label`: names, the arrow (and a Mermaid activation sign), then the label after the colon. */
 private fun tokenizeMessage(text: String, dialect: Seq3Dialect, add: (Int, Int, Seq3SourceRole) -> Unit) {
     val arrow = ARROW_TOKEN.find(text) ?: return
-    var arrowEnd = arrow.range.last + 1
-    // Only Mermaid has the `+`/`-` sign; a PlantUML name may start with either character.
-    val signAt = if (dialect == Seq3Dialect.MERMAID) (arrowEnd until text.length).firstOrNull { !text[it].isWhitespace() } else null
-    if (signAt != null && (text[signAt] == '+' || text[signAt] == '-') && signAt + 1 < text.length && !text[signAt + 1].isWhitespace() &&
-        text[signAt + 1] != ':'
-    ) arrowEnd = signAt + 1
+    val arrowEnd = arrowEndWithSign(text, arrow.range.last + 1, dialect)
     val colon = text.indexOf(':', arrowEnd).takeIf { it >= 0 } ?: text.length
     addNames(text, 0, arrow.range.first, add)
     add(arrow.range.first, arrow.range.last + 1, Seq3SourceRole.ARROW)
     if (arrowEnd > arrow.range.last + 1) add(arrow.range.last + 1, arrowEnd, Seq3SourceRole.ARROW)
     addNames(text, arrowEnd, colon, add)
     if (colon < text.length) addLabel(text, colon + 1, add)
+}
+
+/** [arrowEnd], moved past a Mermaid activation sign (`+` / `-`) that follows the arrow directly and is not alone before the colon. */
+private fun arrowEndWithSign(text: String, arrowEnd: Int, dialect: Seq3Dialect): Int {
+    // Only Mermaid has the `+`/`-` sign; a PlantUML name may start with either character.
+    if (dialect != Seq3Dialect.MERMAID) return arrowEnd
+    val signAt = (arrowEnd until text.length).firstOrNull { !text[it].isWhitespace() } ?: return arrowEnd
+    val signed = (text[signAt] == '+' || text[signAt] == '-') && signAt + 1 < text.length
+    return if (signed && !text[signAt + 1].isWhitespace() && text[signAt + 1] != ':') signAt + 1 else arrowEnd
 }
 
 /** A participant / actor declaration after its keyword: names, quoted names and the `as` between them. */
@@ -202,6 +217,12 @@ internal data class Seq3SourcePalette(
     }
 }
 
+/** How far the two sequence colours are pulled toward the text colour. */
+private const val SEQ3_SOURCE_SEQUENCE_COLOR_BLEND = 0.5f
+
+/** How far the label colour moves from the text colour toward the secondary one. */
+private const val SEQ3_SOURCE_LABEL_BLEND = 0.35f
+
 /**
  * Every role comes from a [ThemeColors] colour that is readable on the editor's panel in all
  * presets (`tx`, `ts`, `ac`, `success`), or from the two sequence colours pulled toward `tx` so a
@@ -212,10 +233,10 @@ internal fun seq3SourcePalette(colors: ThemeColors): Seq3SourcePalette = Seq3Sou
     text = colors.tx,
     keyword = colors.ac,
     block = colors.success,
-    name = lerp(colors.seq1, colors.tx, 0.5f),
+    name = lerp(colors.seq1, colors.tx, SEQ3_SOURCE_SEQUENCE_COLOR_BLEND),
     arrow = colors.tx,
-    quoted = lerp(colors.seq2, colors.tx, 0.5f),
-    label = lerp(colors.tx, colors.ts, 0.35f),
+    quoted = lerp(colors.seq2, colors.tx, SEQ3_SOURCE_SEQUENCE_COLOR_BLEND),
+    label = lerp(colors.tx, colors.ts, SEQ3_SOURCE_LABEL_BLEND),
     comment = colors.ts,
 )
 

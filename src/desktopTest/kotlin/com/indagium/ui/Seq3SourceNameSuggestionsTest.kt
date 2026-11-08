@@ -74,7 +74,11 @@ class Seq3SourceNameSuggestionsTest {
 
     @Test
     fun theTargetAfterAnArrowOffersNamesFromTheFirstLetter() {
-        for ((arrow, dialect) in listOf("A -> " to puml, "A --> " to puml, "A ->> " to puml, "A->" to puml, "A->>" to mmd, "A-->>" to mmd, "A-)" to mmd, "A->>+" to mmd, "A-->>-" to mmd)) {
+        val arrows = listOf(
+            "A -> " to puml, "A --> " to puml, "A ->> " to puml, "A->" to puml,
+            "A->>" to mmd, "A-->>" to mmd, "A-)" to mmd, "A->>+" to mmd, "A-->>-" to mmd,
+        )
+        for ((arrow, dialect) in arrows) {
             val source = head(dialect) + arrow + "B"
             val trigger = requireNotNull(trigger(source, dialect)) { "$arrow ${dialect.name}" }
             assertTrue(trigger.names && !trigger.keywords, "$arrow: only names follow an arrow")
@@ -198,7 +202,11 @@ class Seq3SourceNameSuggestionsTest {
     fun theKeywordGlyphsOfTheToolbarAreTheSuggestionRowGlyphs() {
         for (dialect in Seq3Dialect.entries) {
             val all = seq3SourceSuggestions(dialect, "", emptyList(), "alt")
-            for (keyword in listOf("participant", "actor", "note", "call", "return", "async", "loop", "alt", "opt", "par", "critical", "break", "group", "activate", "deactivate")) {
+            val keywords = listOf(
+                "participant", "actor", "note", "call", "return", "async", "loop", "alt", "opt", "par", "critical", "break", "group",
+                "activate", "deactivate",
+            )
+            for (keyword in keywords) {
                 assertEquals(all.first { it.keyword == keyword }.glyph, seq3SourceKeywordGlyph(keyword), "$keyword ${dialect.name}")
             }
         }

@@ -101,6 +101,7 @@ class Seq3SourceActivationImportTest {
             val reference = assertIs<Seq3SourceImportResult.Success>(flatResult, "${dialect.name}: $flatResult")
             val result = assertIs<Seq3SourceImportResult.Success>(indentedResult, "${dialect.name}: $indentedResult")
             assertEquals(reference.document.messages.map { it.labelTemplate }, result.document.messages.map { it.labelTemplate }, dialect.name)
+
             // Hand-written rows get fresh ids on every import, so the bars are compared by position.
             fun bars(document: Seq3Document) = document.manualActivations.map { bar ->
                 Triple(

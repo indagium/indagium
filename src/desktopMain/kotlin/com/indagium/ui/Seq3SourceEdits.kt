@@ -72,33 +72,58 @@ internal fun seq3SourceDeleteNextToMarkers(
     val lines = seq3SourceLines(source)
     // The lines the editor hides: marker lines and the empty last line after a trailing marker.
     val hidden = hiddenSourceLineIndices(lines, source, dialect)
-    fun isMarker(i: Int) = i in hidden
     val given = shownAtRun ?: selectionStart.coerceIn(0, source.length)
-    var caret = given
-    val onMarker = lines.indexOfLast { it.start <= given }
-    if (isMarker(onMarker)) {
-        var first = onMarker
-        while (first > 0 && isMarker(first - 1)) first--
-        var last = onMarker
-        while (last < lines.lastIndex && isMarker(last + 1)) last++
-        caret = when {
-            last < lines.lastIndex -> lines[last + 1].start
-            first > 0 -> lines[first - 1].end
-            else -> 0
+    val caret = seq3SourceCaretWhereShown(lines, hidden, given)
+    val deletion = Seq3MarkerDeletion(source, lines, hidden, caret, forward)
+    return deletion.besideMarkerRun()
+        ?: if (caret == given && shownAtRun == null) {
+            null
+        } else {
+            // The caret was moved to its visible place and no marker is beside it now: the plain delete.
+            deletion.plainDelete()
         }
+}
+
+/** [given] moved off a hidden marker line to where it is shown: the start of the statement after the run, or the end of the line
+ *  before a trailing run. Any other caret stays. */
+private fun seq3SourceCaretWhereShown(lines: List<Seq3SourceLine>, hidden: Set<Int>, given: Int): Int {
+    val onMarker = lines.indexOfLast { it.start <= given }
+    if (onMarker !in hidden) return given
+    var first = onMarker
+    while (first > 0 && (first - 1) in hidden) first--
+    var last = onMarker
+    while (last < lines.lastIndex && (last + 1) in hidden) last++
+    return when {
+        last < lines.lastIndex -> lines[last + 1].start
+        first > 0 -> lines[first - 1].end
+        else -> 0
     }
-    val index = lines.indexOfLast { it.start <= caret }
-    val line = lines[index]
-    fun unchanged() = Seq3SourceEdit(source, caret, caret)
-    fun remove(start: Int, end: Int, caretAfter: Int) = Seq3SourceEdit(source.removeRange(start, end), caretAfter, caretAfter)
-    fun removeLine(target: Seq3SourceLine, caretAfter: Int): Seq3SourceEdit {
+}
+
+/** One Backspace / Delete with the collapsed [caret] (already where it is shown) over the lines of a source whose [hidden]
+ *  lines are marker lines. */
+private class Seq3MarkerDeletion(
+    private val source: String,
+    private val lines: List<Seq3SourceLine>,
+    private val hidden: Set<Int>,
+    private val caret: Int,
+    private val forward: Boolean,
+) {
+    private fun isMarker(i: Int) = i in hidden
+
+    private fun unchanged() = Seq3SourceEdit(source, caret, caret)
+
+    private fun remove(start: Int, end: Int, caretAfter: Int) = Seq3SourceEdit(source.removeRange(start, end), caretAfter, caretAfter)
+
+    private fun removeLine(target: Seq3SourceLine, caretAfter: Int): Seq3SourceEdit {
         val end = if (target.nextStart > target.end) target.nextStart else target.end
         return remove(target.start, end, caretAfter)
     }
 
     fun plainDelete(): Seq3SourceEdit = if (!forward) {
-        if (caret == 0) unchanged()
-        else {
+        if (caret == 0) {
+            unchanged()
+        } else {
             val width = if (caret >= 2 && source[caret - 1].isLowSurrogate() && source[caret - 2].isHighSurrogate()) 2 else 1
             remove(caret - width, caret, caret - width)
         }
@@ -106,28 +131,36 @@ internal fun seq3SourceDeleteNextToMarkers(
         if (caret >= source.length) unchanged()
         else remove(caret, caret + if (source[caret].isHighSurrogate() && caret + 1 < source.length) 2 else 1, caret)
     }
-    val afterRun = caret == line.start && index > 0 && isMarker(index - 1)
-    if (!forward) {
-        if (afterRun) {
-            if (line.text.isBlank()) return removeLine(line, line.start)
-            var above = index - 1
-            while (above >= 0 && isMarker(above)) above--
-            val blank = lines.getOrNull(above)?.takeIf { it.text.isBlank() } ?: return unchanged()
-            return removeLine(blank, caret - (blank.nextStart - blank.start))
+
+    /** The edit when the caret is at the line break next to a marker line, null when it is not. */
+    fun besideMarkerRun(): Seq3SourceEdit? {
+        val index = lines.indexOfLast { it.start <= caret }
+        val line = lines[index]
+        val afterRun = caret == line.start && index > 0 && isMarker(index - 1)
+        return when {
+            !forward -> if (afterRun) backspaceAfterRun(index, line) else null
+            caret == line.end && index < lines.lastIndex && isMarker(index + 1) -> deleteBeforeRun(index)
+            // The default Delete here would take the hidden run along with the visible character: the
+            // field deletes in the shown text, where the character after the caret follows the run.
+            afterRun -> plainDelete()
+            else -> null
         }
-    } else if (caret == line.end && index < lines.lastIndex && isMarker(index + 1)) {
+    }
+
+    private fun backspaceAfterRun(index: Int, line: Seq3SourceLine): Seq3SourceEdit {
+        if (line.text.isBlank()) return removeLine(line, line.start)
+        var above = index - 1
+        while (above >= 0 && isMarker(above)) above--
+        val blank = lines.getOrNull(above)?.takeIf { it.text.isBlank() } ?: return unchanged()
+        return removeLine(blank, caret - (blank.nextStart - blank.start))
+    }
+
+    private fun deleteBeforeRun(index: Int): Seq3SourceEdit {
         var below = index + 1
         while (below <= lines.lastIndex && isMarker(below)) below++
         val blank = lines.getOrNull(below)?.takeIf { it.text.isBlank() } ?: return unchanged()
         return removeLine(blank, caret)
-    } else if (afterRun) {
-        // The default Delete here would take the hidden run along with the visible character: the
-        // field deletes in the shown text, where the character after the caret follows the run.
-        return plainDelete()
     }
-    if (caret == given && shownAtRun == null) return null
-    // The caret was moved to its visible place and no marker is beside it now: the plain delete.
-    return plainDelete()
 }
 
 /** A run of single typed characters that the editor history keeps as one undo step. [caret] is
@@ -280,6 +313,7 @@ internal fun seq3SourceApplyFix(source: String, fix: Seq3SourceFix, selectionSta
         next = source + separator + fix.text
     }
     val inserted = next.length - source.length
+
     fun shift(position: Int) = position.coerceIn(0, source.length).let { if (it >= at) it + inserted else it }
     return Seq3SourceEdit(next, shift(selectionStart), shift(selectionEnd))
 }
@@ -306,6 +340,7 @@ internal fun seq3SourceToggleComment(source: String, selectionStart: Int, select
         .filter { it.text.isNotBlank() && !isSeq3SourceMarkerLine(it.text, dialect) }
     if (touched.isEmpty()) return Seq3SourceEdit(source, selectionStart, selectionEnd)
     val prefix = seq3SourceCommentPrefix(dialect)
+
     fun indentEnd(line: Seq3SourceLine) = line.start + line.text.takeWhile { it == ' ' || it == '\t' }.length
     val uncomment = touched.all { source.startsWith(prefix, indentEnd(it)) }
     // (position in the old text, characters added there or, when negative, removed from there)
@@ -328,6 +363,7 @@ internal fun seq3SourceToggleComment(source: String, selectionStart: Int, select
         append(source, copied, source.length)
     }
     val collapsed = selectionStart == selectionEnd
+
     // A selection start in front of the indentation stays in front of the new prefix, so the
     // selection still begins with the comment; a caret moves along with the text it stood in.
     fun map(offset: Int, isStart: Boolean): Int = offset + changes.sumOf { (at, delta) ->

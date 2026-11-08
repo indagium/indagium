@@ -204,6 +204,7 @@ class Seq3WorkspaceUxTest {
             }
             val id = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
             val view = requireNotNull(state.seq3Sessions.viewState(id))
+
             fun session() = state.seq3Sessions.sessions.single { it.id == id }
             assertEquals(Seq3Dialect.PLANTUML, session().dialect, "a new diagram starts in PlantUML")
             assertEquals(Seq3Dialect.PLANTUML, requireNotNull(DiagramLibraryStore(libraryFile).get(requireNotNull(session().libraryItemId))).parsed?.dialect)
@@ -254,6 +255,7 @@ class Seq3WorkspaceUxTest {
                 it.activateTab(tab.id)
             }
             val id = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+
             fun session() = state.seq3Sessions.sessions.single { it.id == id }
             val title = session().document.title
             assertTrue(title.isNotBlank())

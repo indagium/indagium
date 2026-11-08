@@ -7,8 +7,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
@@ -38,6 +38,18 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+/** How far the test clock moves to let a debounced edit settle. */
+private const val CLOCK_ADVANCE_MS = 2_000L
+
+/** How long a wait for the UI may take. */
+private const val WAIT_TIMEOUT_MS = 5_000L
+
+/** The test window's width. */
+private const val VIEWPORT_WIDTH_DP = 1280
+
+/** The test window's height. */
+private const val VIEWPORT_HEIGHT_DP = 900
 
 /** Phase 6 in a composition: caret line and diagram message linked both ways, Cmd/Ctrl+/ to toggle
  *  comments, and the find bar. */
@@ -71,14 +83,14 @@ class Seq3SourceLinkAndFindUiTest {
         // A selection written without a key or a click (as a canvas edit or a jump would) links nothing.
         val editor = rule.onNodeWithTag("seq3-source-editor")
         editor.performTextInputSelection(TextRange(rawLineStart(line, view)))
-        rule.mainClock.advanceTimeBy(2_000)
+        rule.mainClock.advanceTimeBy(CLOCK_ADVANCE_MS)
         rule.waitForIdle()
         assertNull(view.focusedMessageId, "${dialect.name}: a caret nobody moved does not link")
 
         // The user steps along the line: after a pause the diagram follows.
         editor.performKeyInput { pressKey(Key.DirectionRight) }
         rule.waitForIdle()
-        rule.waitUntil(5_000) { view.focusedMessageId != null }
+        rule.waitUntil(WAIT_TIMEOUT_MS) { view.focusedMessageId != null }
         assertEquals(second, view.focusedMessageId, dialect.name)
 
         // The first message's line focuses the first one.
@@ -86,7 +98,7 @@ class Seq3SourceLinkAndFindUiTest {
         val firstLine = sourceEmissionAnchors(view.sourceDraft, dialect).first { it.messageId == first }.line
         editor.performTextInputSelection(TextRange(rawLineStart(firstLine, view)))
         editor.performKeyInput { pressKey(Key.DirectionRight) }
-        rule.waitUntil(5_000) { view.focusedMessageId == first }
+        rule.waitUntil(WAIT_TIMEOUT_MS) { view.focusedMessageId == first }
     }
 
     // ── Linking: the focused message reveals its line ───────────────────────────────────────────
@@ -136,7 +148,7 @@ class Seq3SourceLinkAndFindUiTest {
 
         view.focusedMessageId = last
         view.scrollRequestId = last
-        rule.waitUntil(5_000) { gutterRowShown(rawLine) }
+        rule.waitUntil(WAIT_TIMEOUT_MS) { gutterRowShown(rawLine) }
         assertEquals("Linked line", gutterState(rawLine))
     }
 
@@ -395,7 +407,7 @@ class Seq3SourceLinkAndFindUiTest {
                 Box(Modifier.fillMaxSize().then(around)) { Seq3Workspace(state, sessionId) }
             }
         }
-        rule.setTestsViewport(1280, 900)
+        rule.setTestsViewport(VIEWPORT_WIDTH_DP, VIEWPORT_HEIGHT_DP)
         rule.waitForIdle()
         return sessionId
     }

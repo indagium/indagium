@@ -23,6 +23,9 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
+/** The time of the first occurrence in milliseconds; each next one is one later. */
+private const val BASE_TIME_MS = 1_000L
+
 /** The Diagrams section's Grid previews: the LRU cache (pure), the thumbnail scale and the headless drawing. */
 class HomeDiagramThumbnailsTest {
     private fun key(id: String, updatedAt: Long = 1L, variant: Int = 0) = HomeDiagramThumbKey(id, updatedAt, variant)
@@ -37,7 +40,7 @@ class HomeDiagramThumbnailsTest {
                 toLifelineId = "L${(index + 1) % lifelines}",
                 labelTemplate = "call $index",
                 kind = Seq3Kind.CALL,
-                occurrences = listOf(Seq3Occurrence(index + 1, 1_000L + index, "10:00:00.000", pid = 1, tid = 1, level = 'I', text = "call $index")),
+                occurrences = listOf(Seq3Occurrence(index + 1, BASE_TIME_MS + index, "10:00:00.000", pid = 1, tid = 1, level = 'I', text = "call $index")),
             )
         }
         return Seq3Document(lifelines = ls, messages = if (lifelines >= 2) ms else emptyList())
