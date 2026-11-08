@@ -236,6 +236,8 @@ internal fun Seq3SourceEditorPane(
     var showSourceMarkers by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(false) }
     // The word whose suggestion list was closed (Escape, or accepting a suggestion), until a character is typed into it.
     var dismissedSuggestion by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Seq3SourceSuggestionDismissal?>(null) }
+    // The word the user last typed into: a keyword list opens only for it, not for a keyword the caret merely sits in.
+    var typedWord by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<Seq3SourceTypedWord?>(null) }
     var selectedSuggestionIndex by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(0) }
     var snippetFields by remember(session.id, view.sourceEditorGeneration) { mutableStateOf<List<SourceSnippetField>>(emptyList()) }
     var snippetText by remember(session.id, view.sourceEditorGeneration) { mutableStateOf(view.sourceDraft) }
@@ -304,6 +306,8 @@ internal fun Seq3SourceEditorPane(
                 }
                 fixed
             }
+            // The editor's own edits clear the typed word where they are made, so what reaches here is typing or a caret move.
+            typedWord = seq3SourceTypedWordAfter(typedWord, lastValue.text, next.text, next.selection)
             if (next.text != lastValue.text) {
                 if (snippetText != next.text) {
                     snippetFields = rebaseSourceSnippetFields(snippetFields, snippetText, next.text)
@@ -384,6 +388,8 @@ internal fun Seq3SourceEditorPane(
     fun setEditorValue(next: TextFieldValue, record: Boolean = true) {
         val current = currentEditorValue()
         typingRun[0] = null
+        // A snippet, an external text, a fix, a replace, a comment toggle or an undo is not typing.
+        typedWord = null
         if (next.text != current.text && record) {
             undo += current
             if (undo.size > 500) undo.removeAt(0)
@@ -596,7 +602,9 @@ internal fun Seq3SourceEditorPane(
     // Typing inside an endpoint completes the whole name; elsewhere the word at the caret.
     val endpointTrigger = if (autocomplete) seq3SourceEndpointTrigger(sourceText, selection, view.sourceEditorDialect, snippetFields) else null
     val suggestionTrigger = if (autocomplete) {
-        openMenu?.trigger ?: endpointTrigger ?: seq3SourceSuggestionTrigger(sourceText, selection, view.sourceEditorDialect)
+        openMenu?.trigger ?: endpointTrigger ?: seq3SourceTypedKeywordTrigger(
+            seq3SourceSuggestionTrigger(sourceText, selection, view.sourceEditorDialect), sourceText, selection, typedWord,
+        )
     } else {
         null
     }
@@ -1540,6 +1548,83 @@ internal fun seq3SourceDismissalAfterEdit(
         trigger.query.length < dismissal.query.length -> seq3SourceDismissalOf(trigger)
         else -> null
     }
+}
+
+/**
+ * The word the user last typed into: where it starts (its `/` included for a slash word). A keyword
+ * list opens only for a word that was typed, so a caret placed in a keyword that is already written
+ * (a click, the arrow keys, an issue jump) opens nothing.
+ */
+internal data class Seq3SourceTypedWord(val start: Int)
+
+/** Where the word at [caret] starts: its first letter, digit or underscore, or the `/` in front of it (as the slash trigger reads it). */
+internal fun seq3SourceWordStartAt(source: String, caret: Int): Int {
+    val at = caret.coerceIn(0, source.length)
+    var start = at
+    while (start > 0 && source[start - 1].isLetterOrDigitOrUnderscore()) start--
+    val slash = start - 1
+    return if (slash >= 0 && source[slash] == '/' && !(slash > 0 && source[slash - 1].isLetterOrDigitOrUnderscore())) slash else start
+}
+
+/**
+ * The typed word after the editor moved from [oldText] to [newText] with [selection]. An insertion
+ * that ends at the caret and ends in a word character (or a `/`) types into the word at the caret.
+ * Deleting inside that word keeps it, so Backspace leaves the list as it is. A caret move keeps it
+ * while the caret stays in the word. Anything else (a selection, an edit away from the caret, a
+ * deletion elsewhere) ends it. Programmatic edits never reach here as typing: the editor clears the
+ * state when it makes one.
+ */
+internal fun seq3SourceTypedWordAfter(
+    typed: Seq3SourceTypedWord?,
+    oldText: String,
+    newText: String,
+    selection: TextRange,
+): Seq3SourceTypedWord? {
+    if (!selection.collapsed) return null
+    val caret = selection.start.coerceIn(0, newText.length)
+    val wordStart = seq3SourceWordStartAt(newText, caret)
+    val kept = typed?.takeIf { it.start == wordStart }
+    if (newText == oldText) return kept
+    val tail = newText.substring(caret)
+    if (!oldText.endsWith(tail)) return null
+    val oldHead = oldText.substring(0, oldText.length - tail.length)
+    val newHead = newText.substring(0, caret)
+    val common = oldHead.commonPrefixWith(newHead).length
+    if (common < newHead.length) {
+        val last = newHead.last()
+        return if (last.isLetterOrDigitOrUnderscore() || last == '/') Seq3SourceTypedWord(wordStart) else null
+    }
+    return if (oldHead.length > newHead.length) kept else null
+}
+
+/**
+ * Whether a keyword template fits the line: only indentation in front of the word at [wordStart] and
+ * only blanks from [caret] to the end of the line. A keyword typed in front of other text, or ahead
+ * of text that is already there, is not the start of a new statement.
+ */
+internal fun seq3SourceKeywordLineShape(source: String, wordStart: Int, caret: Int): Boolean {
+    val start = wordStart.coerceIn(0, source.length)
+    val lineStart = source.lastIndexOf('\n', (start - 1).coerceAtLeast(0)).let { if (start == 0) 0 else it + 1 }
+    if (!source.substring(lineStart, start).all { it.isWhitespace() }) return false
+    val from = caret.coerceIn(0, source.length)
+    val lineEnd = source.indexOf('\n', from).let { if (it < 0) source.length else it }
+    return source.substring(from, lineEnd).all { it.isWhitespace() }
+}
+
+/**
+ * [trigger] as far as its keywords may be offered: only for a word the user [typed] into, alone on
+ * its line. Otherwise a slash word offers nothing and a line-start word keeps its declared names
+ * (their rules are unchanged). Triggers that offer no keywords (arrow ends, `note over`, ...) pass.
+ */
+internal fun seq3SourceTypedKeywordTrigger(
+    trigger: Seq3SourceSuggestionTrigger?,
+    source: String,
+    selection: TextRange,
+    typed: Seq3SourceTypedWord?,
+): Seq3SourceSuggestionTrigger? {
+    if (trigger == null || !trigger.keywords) return trigger
+    if (typed?.start == trigger.start && seq3SourceKeywordLineShape(source, trigger.start, selection.start)) return trigger
+    return if (trigger.names) trigger.copy(keywords = false) else null
 }
 
 private const val SEQ3_SOURCE_BARE_TRIGGER_MIN_LENGTH = 2

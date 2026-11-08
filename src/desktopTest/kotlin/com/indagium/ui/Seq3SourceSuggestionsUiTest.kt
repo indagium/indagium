@@ -217,17 +217,20 @@ class Seq3SourceSuggestionsUiTest {
         val editor = rule.onNodeWithTag("seq3-source-editor")
 
         // The slash word is typed above `@enduml`, so the draft is valid apart from that word.
-        val first = "@startuml\nparticipant \"Alpha\" as A\n/pa"
-        editor.performTextReplacement("$first\n@enduml")
-        editor.performTextInputSelection(TextRange(first.length))
+        // It is typed into the line (a caret placed there would open no keyword list).
+        val firstHead = "@startuml\nparticipant \"Alpha\" as A"
+        editor.performTextReplacement("$firstHead\n@enduml")
+        editor.performTextInputSelection(TextRange(firstHead.length))
+        editor.performTextInput("\n/pa")
         rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
         rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.any { it.name == "Alpha" } }
         rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
         assertTrue(view.sourceDiagnostics.isEmpty(), "the half-typed word is not part of the preview: ${view.sourceDiagnostics}")
 
-        val second = "@startuml\nparticipant \"Alpha\" as A\nparticipant \"Beta\" as B\n/pa"
-        editor.performTextReplacement("$second\n@enduml")
-        editor.performTextInputSelection(TextRange(second.length))
+        val secondHead = "@startuml\nparticipant \"Alpha\" as A\nparticipant \"Beta\" as B"
+        editor.performTextReplacement("$secondHead\n@enduml")
+        editor.performTextInputSelection(TextRange(secondHead.length))
+        editor.performTextInput("\n/pa")
         rule.waitUntil(5_000) { currentSession(sessionId).document.lifelines.any { it.name == "Beta" } }
         rule.onNodeWithTag("seq3-source-suggestions", useUnmergedTree = true).assertIsDisplayed()
         assertTrue(view.sourceDiagnostics.isEmpty(), "${view.sourceDiagnostics}")
