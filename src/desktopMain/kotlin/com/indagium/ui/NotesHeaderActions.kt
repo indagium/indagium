@@ -137,7 +137,7 @@ internal fun NotesActionButtons(model: NotesActionModel, look: NotesButtonLook =
         feedback = model.feedback,
         onReclaimFocus = model.onReclaimFocus,
         look = look,
-        modifier = Modifier.testTag(notesButtonTag(NotesAction.COPY)),
+        mainTag = notesButtonTag(NotesAction.COPY),
     )
     NotesButton(NotesAction.SAVE, "Save", look, !model.locked) { model.tap { model.mutate(model.onSave) } }
     NotesButton(NotesAction.NEW, "New", look, !model.locked) { model.tap { model.mutate(model.onNewAnalysis) } }
@@ -233,6 +233,7 @@ internal fun CopyFormatSplitButton(
     modifier: Modifier = Modifier,
     onReclaimFocus: () -> Unit = {},
     look: NotesButtonLook = NotesButtonLook.LABELS,
+    mainTag: String? = null,
 ) {
     val tc = tc()
     val density = LocalDensity.current.density
@@ -245,7 +246,8 @@ internal fun CopyFormatSplitButton(
                 feedback.phase.label,
                 onClick = { feedback.start(defaultFormat); onReclaimFocus() },
                 enabled = feedback.phase != CopyPhase.Copying,
-                modifier = modifier,
+                // [modifier] sizes both halves; the test tag goes on the main half only, so the ▾ half keeps its own tag.
+                modifier = if (mainTag != null) modifier.testTag(mainTag) else modifier,
                 horizontalPadding = if (look == NotesButtonLook.COMPACT) COMPACT_PADDING else 8.dp,
                 shape = leftShape,
             )
