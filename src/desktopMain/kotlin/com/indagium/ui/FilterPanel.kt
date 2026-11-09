@@ -3332,15 +3332,22 @@ private fun UpdateSavedFilterButton(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             // Mirrors the ▾ button's width so the label is centred like the buttons below it.
             Spacer(Modifier.width(24.dp))
-            AppButton(
-                if (origin != null) "↻ Update \"${origin.name}\"" else "↻ Update existing…",
-                onClick = { if (origin != null) onUpdate(origin.id) else open = !open },
-                variant = ButtonVariant.Ghost,
-                modifier = Modifier.weight(1f),
-                labelOverflow = TextOverflow.Ellipsis,
-                tooltip = if (origin != null) "Overwrite this saved filter with the current changes"
-                else "Choose a saved filter to overwrite with the current changes",
-            )
+            // The weight sits on this Box, not on AppButton: with a tooltip AppButton wraps itself in
+            // a TooltipArea that drops the modifier, so a weight passed to it never bounds the label
+            // and a long preset name pushes the ▾ out of the panel.
+            Box(Modifier.weight(1f)) {
+                AppButton(
+                    if (origin != null) "↻ Update \"${origin.name}\"" else "↻ Update existing…",
+                    onClick = { if (origin != null) onUpdate(origin.id) else open = !open },
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.fillMaxWidth(),
+                    labelOverflow = TextOverflow.Ellipsis,
+                    // Names the preset in full, since a long one is cut short on the button.
+                    tooltip = if (origin != null) "Overwrite \"${origin.name}\" with the current changes"
+                    else "Choose a saved filter to overwrite with the current changes",
+                    tooltipMaxLines = 4,
+                )
+            }
             AppButton(
                 "▾",
                 onClick = { open = !open },
