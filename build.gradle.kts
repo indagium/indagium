@@ -994,6 +994,39 @@ tasks.matching { it.name == "createDistributable" }.configureEach {
     }
 }
 
+// jpackage takes --icon only when it builds the app itself. packageDeb packages the finished app
+// image (see above), so Compose leaves --icon out, and jpackage then writes its default Duke icon
+// over the image's lib/Indagium.png, the file the .desktop entry's Icon= names. v1.9.0 and v1.9.1
+// shipped that, and KDE showed Duke for the menu entry and every running window. Compose clears its
+// jpackage resource folder before each run, so the icon cannot be handed in up front: put the app
+// icon back into the finished .deb instead. Doing it here keeps local and CI .debs identical; CI
+// compares the packaged icon with icons/indagium.png.
+if (isLinuxHost) {
+    tasks.matching { it.name == "packageDeb" }.configureEach {
+        val debDir = layout.buildDirectory.dir("compose/binaries/main/deb")
+        val appIcon = file("icons/indagium.png")
+        doLast {
+            fun run(vararg command: String) {
+                val process = ProcessBuilder(*command).inheritIO().start()
+                check(process.waitFor() == 0) { "Command failed: ${command.joinToString(" ")}" }
+            }
+            val deb = debDir.get().asFile.listFiles { candidate -> candidate.extension == "deb" }
+                ?.maxByOrNull { it.lastModified() }
+                ?: error("packageDeb left no .deb in ${debDir.get().asFile}")
+            val work = temporaryDir.resolve("deb-icon").apply { deleteRecursively() }
+            run("dpkg-deb", "-R", deb.absolutePath, work.absolutePath)
+            val desktopFile = work.resolve("opt").walkTopDown().single { it.isFile && it.extension == "desktop" }
+            val iconPath = desktopFile.readLines().single { it.startsWith("Icon=") }.removePrefix("Icon=")
+            val packagedIcon = work.resolve(iconPath.removePrefix("/"))
+            check(packagedIcon.isFile) { "The .desktop entry's Icon=$iconPath is not in ${deb.name}" }
+            appIcon.copyTo(packagedIcon, overwrite = true)
+            // jpackage builds the .deb under fakeroot, so its files are root-owned; keep them so.
+            run("dpkg-deb", "--root-owner-group", "-b", work.absolutePath, deb.absolutePath)
+            work.deleteRecursively()
+        }
+    }
+}
+
 tasks.matching { it.name == "check" }.configureEach {
     dependsOn(testMediaSourceGenerator)
     dependsOn(testDistributionLicensing)

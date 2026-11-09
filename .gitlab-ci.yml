@@ -129,6 +129,8 @@ media-sources:
     - app_version=$(sed -n 's/^app.version=//p' gradle.properties)
     - python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform "$MEDIA_PLATFORM" --package-root "$finaldir"
     - grep -q '^Exec=.* %F$' "$final_desktop_file"
+    # The menu/taskbar icon must be ours, not jpackage's default Duke (see packageDeb in build.gradle.kts).
+    - cmp icons/indagium.png "$finaldir$(sed -n 's/^Icon=//p' "$final_desktop_file")"
     - rm -rf "$workdir"
     - rm -rf "$finaldir"
   artifacts:

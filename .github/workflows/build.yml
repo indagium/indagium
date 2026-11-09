@@ -452,6 +452,9 @@ jobs:
           desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
           desktop-file-validate "$desktop_file"
           grep -q '^Exec=.* %F$' "$desktop_file"
+          # The menu/taskbar icon must be ours, not jpackage's default Duke (see packageDeb in
+          # build.gradle.kts).
+          cmp icons/indagium.png "$workdir$(sed -n 's/^Icon=//p' "$desktop_file")"
           bash scripts/validate-native-mirror-package.sh "$workdir" native/linux/libindagium_mirror.so
           app_version=$(sed -n 's/^app.version=//p' gradle.properties)
           python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform '${{ matrix.media_platform }}' --package-root "$workdir"
