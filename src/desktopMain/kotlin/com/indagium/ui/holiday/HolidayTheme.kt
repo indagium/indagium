@@ -148,6 +148,12 @@ internal interface HolidayTheme {
     /** Optional three colors for the three segments of an expanded tile's divider. */
     fun tileDividerColors(dark: Boolean): List<Color>? = null
 
+    /** Optional smooth gradient for an expanded tile's three-dp divider. */
+    fun tileDividerGradient(dark: Boolean): List<Color>? = null
+
+    /** Accent line on the content edge of the active tab. */
+    val activeTabUnderlineDp: Float get() = 0f
+
     /** Optional dashed divider under an open tile's header (replaces the plain line; ignored when [tileDividerColors] is given). */
     fun tileDividerDashes(dark: Boolean): HolidayDividerDashes? = null
 

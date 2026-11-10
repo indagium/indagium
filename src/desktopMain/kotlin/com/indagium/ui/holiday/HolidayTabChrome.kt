@@ -94,6 +94,7 @@ internal fun Modifier.holidayTabChrome(
     idleAlpha: Float = HOLIDAY_IDLE_TAB_ALPHA,
     inverseActive: Boolean = false,
     borderWidth: Dp = 1.dp,
+    underlineWidth: Dp = 0.dp,
 ): Modifier {
     val fill = background(if (active) { if (inverseActive) tc.ac else tc.p } else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = idleAlpha), shape)
         .drawBehind {
@@ -107,6 +108,15 @@ internal fun Modifier.holidayTabChrome(
         .then(if (active && wash != null) Modifier.drawBehind { drawWash(shape, tc.ac, wash, position) } else Modifier)
         .then(if (tint == null) Modifier else Modifier.background(tint, shape))
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
+        .then(if (active && underlineWidth > 0.dp) Modifier.drawBehind {
+            val width = underlineWidth.toPx()
+            when (position) {
+                TabStripPosition.TOP -> drawRect(tc.ac, Offset(0f, size.height - width), Size(size.width, width))
+                TabStripPosition.BOTTOM -> drawRect(tc.ac, Offset.Zero, Size(size.width, width))
+                TabStripPosition.LEFT -> drawRect(tc.ac, Offset(size.width - width, 0f), Size(width, size.height))
+                TabStripPosition.RIGHT -> drawRect(tc.ac, Offset.Zero, Size(width, size.height))
+            }
+        } else Modifier)
         .then(
             when {
                 active -> Modifier.border(maxOf(ACTIVE_BORDER, borderWidth), tc.ac, shape)

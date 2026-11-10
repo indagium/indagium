@@ -217,6 +217,15 @@ class SeasonalThemesSettingsUiTest {
     }
 
     @Test
+    fun tulipsCardTurnsOnAnAnytimeThemeFromAutomatic() {
+        setup { it.updateSettings { s -> s.withHoliday { h -> h.copy(mode = HolidayMode.AUTOMATIC) } } }
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TULIPS)).performClick()
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TULIPS)).assertIsSelected()
+        assertEquals(HolidayPack.TULIPS, state.settings.holiday.pack)
+        assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+    }
+
+    @Test
     fun beerCardsSelectTheirOwnTheme() {
         setup()
         openSeasonalTab()

@@ -189,6 +189,16 @@ class HolidayTabSceneUiTest {
     }
 
     @Test
+    fun tulipsChromeRendersInBothPalettes() {
+        for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
+            if (::state.isInitialized) state.close()
+            setup(look(HolidayPack.TULIPS) { it.copy(lightness = lightness) }) { fit(it) }
+            rule.onNodeWithTag("tab-b").assertExists()
+            dump("tulips-${lightness.name.lowercase()}")
+        }
+    }
+
+    @Test
     fun beerLooksLikeTheDesign() {
         listOf(HolidayPack.BEER_TIME_YELLOW to HolidayLightness.DARK, HolidayPack.BEER_TIME_GREEN to HolidayLightness.LIGHT).forEach { (pack, lightness) ->
             if (::state.isInitialized) state.close()

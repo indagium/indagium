@@ -1975,6 +1975,7 @@ enum class HolidayPack {
     BEER_TIME_YELLOW,
     BEER_TIME_GREEN,
     READY_PROMPT,
+    TULIPS,
 }
 
 /** Whether a pack renders its light or dark palette; FOLLOW_PRESET takes the family of the user's own theme preset. */
