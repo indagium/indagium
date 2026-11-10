@@ -157,7 +157,7 @@ fun AppSettings.withHoliday(fn: (HolidaySettings) -> HolidaySettings): AppSettin
 fun AppSettings.withRegularTheme(preset: ThemePreset): AppSettings = copy(theme = preset).withHoliday { it.copy(mode = HolidayMode.OFF) }
 
 /** [this] with seasonal theme [pack] on: selected, and switched on as Always if it was off (an Automatic choice is kept). */
-fun HolidaySettings.withPackOn(pack: HolidayPack): HolidaySettings = copy(pack = pack, mode = if (mode == HolidayMode.OFF) HolidayMode.ALWAYS else mode)
+fun HolidaySettings.withPackOn(pack: HolidayPack): HolidaySettings = copy(pack = pack, mode = if (mode == HolidayMode.OFF || (mode == HolidayMode.AUTOMATIC && HOLIDAY_THEMES[pack]?.supportsAutomatic == false)) HolidayMode.ALWAYS else mode)
 
 /** The active pack's look, or null (no pack). Provided by App.kt next to LocalTheme. */
 internal val LocalHoliday = compositionLocalOf<HolidayLook?> { null }

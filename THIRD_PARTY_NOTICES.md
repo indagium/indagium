@@ -16,6 +16,7 @@ Paths in the application table are relative to `licenses/` in the repository and
 | kotlin-logging | 8.0.4 | Logging used by the MCP SDK | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
 | Apache Commons | Compress 1.28.0, Lang 3.18.0, IO 2.20.0, Codec 1.19.0 and others | Archive, text, I/O and validation utilities | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
 | Jansi | 2.4.2 | Transitive dependency (terminal colour support) | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
+| Press Start 2P | Google Fonts upstream | Pixel lettering in the Ready prompt theme | `OFL-1.1` | `PressStart2P-OFL.txt` (also bundled alongside the font) |
 | Multiplatform Markdown Renderer | 0.41.0 | Markdown rendering in notes and AI panels | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
 | ZXing | 3.5.3 | QR code for the wireless-debugging pairing dialog | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
 | XZ for Java | 1.10 | XZ/7z decompression | `0BSD` | `application/texts/xz-java-0bsd.txt` |

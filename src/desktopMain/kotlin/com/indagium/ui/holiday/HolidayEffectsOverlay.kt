@@ -39,10 +39,10 @@ internal fun HolidayEffectsOverlay(modifier: Modifier = Modifier, behindContent:
     val fx = holiday.effects
     val particles = fx.activeEffects.filterIsInstance<HolidayParticleEffect>().filter { !behindContent || it.behindContent }
     val flashes = if (behindContent) emptyList() else fx.activeEffects.filterIsInstance<HolidayFlashEffect>()
-    if ((particles.none { it.moves } && flashes.none { it.moves }) || fx.speedScale <= 0f) return
+    if (particles.isEmpty() && flashes.isEmpty()) return
     if (!holidayPicturesRunning(animate = true)) return
     val sharedClock = LocalHolidayEffectClock.current
-    val fallbackClock = rememberHolidayClock(running = sharedClock == null)
+    val fallbackClock = rememberHolidayClock(running = sharedClock == null && fx.speedScale > 0f && (particles.any { it.moves } || flashes.any { it.moves }))
     val clock = sharedClock ?: fallbackClock
     val fields = remember(fx, behindContent) {
         fx.activeEffects.filterIsInstance<HolidayParticleEffect>().mapIndexedNotNull { i, e ->

@@ -638,7 +638,7 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     val holiday = LocalHoliday.current
     val dividerColors = holiday?.theme?.tileDividerColors(holiday.isDark)
     val dividerDashes = holiday?.theme?.tileDividerDashes(holiday.isDark)?.takeIf { dividerColors == null }
-    val dividerDp = if (dividerColors != null) 3f else dividerDashes?.heightDp ?: 1f
+    val dividerDp = if (dividerColors != null) 3f else dividerDashes?.heightDp ?: holiday?.theme?.borderWidthDp ?: 1f
     val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else dividerDp
     val region = s.regionOf(id)
     // A tile in a scrolling column whose slot says so is sized by what its body asks for: the body is measured at its natural height.
@@ -660,7 +660,7 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             .alpha(if (s.drag.dragged == id) TILE_DRAGGED_CARD_ALPHA else 1f)
             .clip(shape)
             .background(tc.p)
-            .border(1.dp, tc.br, shape)
+            .border((holiday?.theme?.borderWidthDp ?: 1f).dp, tc.br, shape)
             .holidayExcluded(s.spec.holidayClear(id))
             .holidayLandingAnchor()
             .testTag("${s.spec.tagPrefix}-card-${s.spec.keyOf(id)}"),
@@ -669,7 +669,7 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             TileHeader(s, id, slot, rect, collapsed)
             if (!collapsed) {
                 if (dividerDashes != null) HolidayDashedDivider(dividerDashes)
-                else if (dividerColors == null) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                else if (dividerColors == null) Box(Modifier.fillMaxWidth().height(dividerDp.dp).background(tc.br))
                 else Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(
                     0f to dividerColors[0], 1f / 3f to dividerColors[0], 1f / 3f to dividerColors[1],
                     2f / 3f to dividerColors[1], 2f / 3f to dividerColors[2], 1f to dividerColors[2],
@@ -721,7 +721,8 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
     val key = s.spec.keyOf(id)
     val parts = slot.headerParts?.invoke(rect?.w ?: 0f) ?: tileHeaderParts(rect?.w ?: 0f)
     val callbacks = s.callbacks
-    val titleFont = LocalHoliday.current?.theme?.labelFontFamily ?: LocalUiFontFamily.current
+    val titleTheme = LocalHoliday.current?.theme
+    val titleFont = titleTheme?.labelFontFamily ?: LocalUiFontFamily.current
     Row(
         Modifier.fillMaxWidth().height(s.spec.headerDp.dp).padding(horizontal = 8.dp).testTag("$prefix-header-$key"),
         verticalAlignment = Alignment.CenterVertically,
@@ -731,11 +732,11 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
         if (parts.showIcon) Icon(slot.icon, contentDescription = null, tint = slot.iconTint ?: tc.ts, modifier = Modifier.size(15.dp))
         val title: @Composable (Modifier) -> Unit = { titleModifier ->
             AppText(
-                slot.title,
+                if (titleTheme?.uppercaseLabels == true) slot.title.uppercase() else slot.title,
                 color = tc.tx,
-                fontSize = s.spec.titleSp.sp,
+                fontSize = (titleTheme?.labelSizeSp ?: s.spec.titleSp.toFloat()).sp,
                 fontFamily = titleFont,
-                fontWeight = FontWeight.Medium,
+                fontWeight = if (titleTheme?.labelSizeSp != null) FontWeight.Normal else FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = titleModifier,

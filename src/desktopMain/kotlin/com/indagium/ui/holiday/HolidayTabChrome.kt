@@ -92,8 +92,10 @@ internal fun Modifier.holidayTabChrome(
     texture: HolidayTabTexture = HolidayTabTexture.RIBS,
     wash: Float? = null,
     idleAlpha: Float = HOLIDAY_IDLE_TAB_ALPHA,
+    inverseActive: Boolean = false,
+    borderWidth: Dp = 1.dp,
 ): Modifier {
-    val fill = background(if (active) tc.p else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = idleAlpha), shape)
+    val fill = background(if (active) { if (inverseActive) tc.ac else tc.p } else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = idleAlpha), shape)
         .drawBehind {
             when (texture) {
                 HolidayTabTexture.RIBS -> if (!active) drawRibs(shape, chrome.rib)
@@ -107,8 +109,8 @@ internal fun Modifier.holidayTabChrome(
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
         .then(
             when {
-                active -> Modifier.border(ACTIVE_BORDER, tc.ac, shape)
-                texture != HolidayTabTexture.RIBS -> Modifier.border(1.dp, tc.br, shape)
+                active -> Modifier.border(maxOf(ACTIVE_BORDER, borderWidth), tc.ac, shape)
+                texture != HolidayTabTexture.RIBS -> Modifier.border(borderWidth, tc.br, shape)
                 else -> Modifier
             },
         )

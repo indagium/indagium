@@ -36,7 +36,7 @@ class HauntedManorThemeTest {
         assertEquals(HolidayPack.PUMPKIN_PATCH, HolidaySettings().pack)
         assertEquals(HolidayPack.PUMPKIN_PATCH, HOLIDAY_THEMES.values.first().pack)
         assertEquals(
-            listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN),
+            listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN, HolidayPack.READY_PROMPT),
             HOLIDAY_THEMES.keys.toList(),
         )
 

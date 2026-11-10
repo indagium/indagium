@@ -91,6 +91,25 @@ class HolidayOverlayUiTest {
     }
 
     @Test
+    fun readyScanlinesRenderWhenRainbowTapeIsDisabled() {
+        val look = lookWith { it.copy(pack = HolidayPack.READY_PROMPT,
+            effectToggles = mapOf("ready.rainbow" to false, "ready.scanlines" to true)) }
+        rule.setContent {
+            CompositionLocalProvider(LocalHoliday provides look, LocalHolidayPaused provides false) {
+                Box(Modifier.size(120.dp, 90.dp).background(Color.White).testTag("scanline-root")) {
+                    HolidayEffectsOverlay(Modifier.fillMaxSize())
+                }
+            }
+        }
+        rule.waitForIdle()
+        assertTrue(overlayExists(), "static scanlines render without any moving effect")
+        val pixels = rule.onNodeWithTag("scanline-root").captureToImage().toPixelMap()
+        val x = pixels.width / 2
+        val brightness = (0 until pixels.height).map { y -> pixels[x, y].red }
+        assertTrue(brightness.max() - brightness.min() > .03f, "scanline bands are drawn")
+    }
+
+    @Test
     fun manorGhostIsVisibleAsAFaintWashOverOpaqueContent() {
         val look = lookWith {
             it.copy(pack = HolidayPack.HAUNTED_MANOR, lightness = HolidayLightness.DARK,

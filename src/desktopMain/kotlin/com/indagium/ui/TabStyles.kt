@@ -474,8 +474,12 @@ internal fun TabShell(
     val sourceColor = if (appearance.showStripe) tabSourceColor(appearance.kind, tc) else Color.Transparent
     val lit = isActive || dragging
     val labelStyle = tabLabelStyle(style, isActive, lit, tc).let { base ->
-        val themed = holiday?.theme?.labelFontFamily?.let { base.copy(family = it) } ?: base
-        if (holiday?.theme?.tabTexture == HolidayTabTexture.STONE) {
+        val themed = (holiday?.theme?.labelFontFamily?.let { base.copy(family = it) } ?: base).let {
+            holiday?.theme?.labelSizeSp?.let { size -> it.copy(size = size.sp, weight = FontWeight.Normal) } ?: it
+        }
+        if (isActive && holiday?.theme?.inverseActiveTab == true) {
+            themed.copy(color = tc.onAc)
+        } else if (holiday?.theme?.tabTexture == HolidayTabTexture.STONE) {
             themed.copy(size = 12.sp, weight = FontWeight.Normal, color = if (lit) tc.tx else tc.ts)
         } else {
             themed
@@ -516,6 +520,8 @@ internal fun TabShell(
                                 groupTint.takeIf { holiday.theme.tintTabsByGroup },
                                 radius = holiday.theme.corners.tabDp.dp, shape = shape, texture = holiday.theme.tabTexture,
                                 wash = holiday.theme.activeTabWashAlpha(holiday.isDark),
+                                inverseActive = holiday.theme.inverseActiveTab,
+                                borderWidth = holiday.theme.borderWidthDp.dp,
                                 // Over the scene behind the tab bar an idle tab is opaque, so the picture never shows through a tab.
                                 idleAlpha = if (holidaySceneShown(holiday.effects.tabScene, position)) 1f else HOLIDAY_IDLE_TAB_ALPHA,
                             )
@@ -569,6 +575,7 @@ internal fun TabShell(
                         visible = appearance.closeAlways || lit || hov,
                         style = style,
                         position = position,
+                        color = if (isActive && holiday?.theme?.inverseActiveTab == true) tc.onAc else null,
                         onClose = onClose,
                     )
                 }
@@ -578,7 +585,20 @@ internal fun TabShell(
                 }
                 if (appearance.showBadge) TabBadge(tabKindBadge(appearance.kind), "tab-badge-$pointerKey")
                 TooltipArea(tooltip = { TabTooltipBody(tooltip) }, modifier = Modifier.weight(1f).testTag("tab-label-$pointerKey")) {
-                    TabLabelText(label, appearance.secondLine, labelStyle)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(Modifier.weight(1f, fill = false)) {
+                            TabLabelText(if (holiday?.theme?.uppercaseLabels == true) label.uppercase() else label, appearance.secondLine, labelStyle)
+                        }
+                        if (isActive && holiday?.theme?.activeTabCursor == true) {
+                            val shared = LocalHolidayEffectClock.current
+                            val running = holidayPicturesRunning(animate = holiday.effects.animatePicture && holiday.effects.speedScale > 0f)
+                            val fallback = rememberHolidayClock(running = running && shared == null)
+                            val clock = shared ?: fallback
+                            Box(Modifier.width(8.dp).height(9.dp).testTag("tab-cursor-$pointerKey").drawBehind {
+                                if (!running || clock.value % 1f < .5f) drawRect(tc.onAc)
+                            })
+                        }
+                    }
                 }
                 if (appearance.closeButtonPosition == TabCloseButtonPosition.RIGHT) {
                     TabCloseSlot(
@@ -587,6 +607,7 @@ internal fun TabShell(
                         visible = appearance.closeAlways || lit || hov,
                         style = style,
                         position = position,
+                        color = if (isActive && holiday?.theme?.inverseActiveTab == true) tc.onAc else null,
                         onClose = onClose,
                     )
                 }
@@ -618,6 +639,7 @@ private fun TabCloseSlot(
     visible: Boolean,
     style: TabStripStyle,
     position: TabStripPosition,
+    color: Color?,
     onClose: () -> Unit,
 ) {
     if (!showClose) return
@@ -626,6 +648,7 @@ private fun TabCloseSlot(
             onClick = onClose,
             modifier = Modifier.testTag("tab-close-$pointerKey"),
             shape = tabCloseButtonShape(style, position),
+            color = color,
         )
     } else {
         // Keeps the label's room stable: the button appears on hover without the text reflowing.

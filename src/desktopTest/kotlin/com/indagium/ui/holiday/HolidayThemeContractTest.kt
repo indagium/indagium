@@ -125,14 +125,14 @@ class HolidayThemeContractTest {
     }
 
     @Test
-    fun designSizesAndCornersArePositive() {
+    fun designSizesArePositiveAndCornersAreNonnegative() {
         themes.forEach { theme ->
             theme.picture?.let { assertTrue(it.designWidthDp > 0f && it.designHeightDp > 0f, "${theme.pack} picture design size") }
             theme.companion?.let {
                 assertTrue(it.designWidthDp > 0f && it.designHeightDp > 0f, "${theme.pack} companion design size")
                 assertTrue(it.label.isNotBlank(), "${theme.pack} companion needs a label for the menu")
             }
-            assertTrue(theme.corners.tabDp > 0f && theme.corners.toolbarDp > 0 && theme.corners.tileDp > 0, "${theme.pack} corners")
+            assertTrue(theme.corners.tabDp >= 0f && theme.corners.toolbarDp >= 0 && theme.corners.tileDp >= 0, "${theme.pack} corners")
         }
     }
 

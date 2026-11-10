@@ -5783,6 +5783,10 @@ Beer time Yellow and Green share the SVG picture and mug companion from the Beer
 both can activate automatically on Fridays from 17:00 until local midnight. `HolidayTheme.automaticAt` supplies that schedule, while other packs
 retain their inclusive yearly ranges. The local clock is refreshed on minute boundaries so the transition does not require an app restart.
 
+Ready prompt is an anytime, manually selected 8-bit computer theme. It uses blue boot-screen and beige-case palettes, square chrome,
+inverse active tabs, bundled Press Start 2P labels, a blinking block cursor, a computer picture and sprite-balloon companion. Its optional
+CRT scanlines are static and render independently of animated rainbow tape. The pack does not enter the automatic holiday rotation.
+
 A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
 pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
 changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.

@@ -114,6 +114,9 @@ internal interface HolidayTheme {
     /** Human-readable description of the Automatic schedule. */
     val automaticLabel: String? get() = null
 
+    /** False for themes that are deliberately selected only by hand. */
+    val supportsAutomatic: Boolean get() = true
+
     /** Extra words that find the theme's Settings rows in the settings search. */
     val keywords: List<String> get() = emptyList()
 
@@ -125,12 +128,17 @@ internal interface HolidayTheme {
 
     /** Optional label typeface. Log text and explicitly chosen monospace text keep their own fonts. */
     val labelFontFamily: FontFamily? get() = null
+    val labelSizeSp: Float? get() = null
+    val uppercaseLabels: Boolean get() = false
+    val activeTabCursor: Boolean get() = false
+    val borderWidthDp: Float get() = 1f
     val tabShape: HolidayTabShape? get() = null
 
     /** Optional symmetric inset on the cross-axis of a tab strip. */
     val tabCrossAxisInsetDp: Float? get() = null
     val tabTexture: HolidayTabTexture get() = HolidayTabTexture.RIBS
     val tintTabsByGroup: Boolean get() = true
+    val inverseActiveTab: Boolean get() = false
     val tabOrnament: HolidayTabOrnament? get() = null
 
     /** Optional decoration on toolbar button groups. */

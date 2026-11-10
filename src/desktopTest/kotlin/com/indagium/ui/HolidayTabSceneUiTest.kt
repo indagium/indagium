@@ -179,6 +179,16 @@ class HolidayTabSceneUiTest {
     }
 
     @Test
+    fun readyPromptHasAnActiveCursorInBothPalettes() {
+        for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
+            if (::state.isInitialized) state.close()
+            setup(look(HolidayPack.READY_PROMPT) { it.copy(lightness = lightness) }) { fit(it) }
+            assertTrue(rule.onNodeWithTag("tab-cursor-b", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot.width > 0f)
+            dump("ready-${lightness.name.lowercase()}")
+        }
+    }
+
+    @Test
     fun beerLooksLikeTheDesign() {
         listOf(HolidayPack.BEER_TIME_YELLOW to HolidayLightness.DARK, HolidayPack.BEER_TIME_GREEN to HolidayLightness.LIGHT).forEach { (pack, lightness) ->
             if (::state.isInitialized) state.close()

@@ -2,6 +2,7 @@
 
 package com.indagium.ui
 
+import com.indagium.ui.holiday.LocalHoliday
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -753,7 +754,7 @@ fun ToolbarBtn(
     val button: @Composable () -> Unit = {
         Box(
             modifier
-                .border(1.dp, if (active && enabled) tc.ac else tc.br, shape)
+                .border((LocalHoliday.current?.theme?.borderWidthDp ?: 1f).dp, if (active && enabled) tc.ac else tc.br, shape)
                 .background(
                     when {
                         active && enabled -> tc.ac
@@ -839,6 +840,7 @@ fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     shape: Shape = CORNER_MD,
+    color: Color? = null,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -852,7 +854,7 @@ fun CloseButton(
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,
     ) {
-        AppText("×", color = tc.td, fontSize = 16.sp)
+        AppText("×", color = color ?: tc.td, fontSize = 16.sp)
     }
 }
 

@@ -190,9 +190,9 @@ private fun SeasonalThemesTab(state: AppState, themes: Map<HolidayPack, HolidayT
 private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, onSelect: (HolidayMode) -> Unit) {
     val tc = tc()
     CompactSetting(SEASONAL_ANCHOR_WHEN) {
-        val modes = listOf(HolidayMode.ALWAYS, HolidayMode.AUTOMATIC)
+        val modes = if (theme.supportsAutomatic) listOf(HolidayMode.ALWAYS, HolidayMode.AUTOMATIC) else listOf(HolidayMode.ALWAYS)
         SegmentedControl(
-            options = listOf("Always", if (theme.automaticLabel == null) "Only during its dates" else "Automatic"),
+            options = if (theme.supportsAutomatic) listOf("Always", if (theme.automaticLabel == null) "Only during its dates" else "Automatic") else listOf("Always"),
             selectedIndices = setOfNotNull(modes.indexOf(mode).takeIf { it >= 0 }),
             onToggle = { onSelect(modes[it]) },
             modifier = Modifier.testTag(SEASONAL_MODE_TAG),
@@ -205,7 +205,7 @@ private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, onSelect: (HolidayMo
 @Composable
 private fun AutomaticStatus(state: AppState, theme: HolidayTheme, holiday: HolidaySettings) {
     val now by rememberHolidayNow()
-    if (holiday.mode != HolidayMode.AUTOMATIC || theme.automaticAt(now)) return
+    if (!theme.supportsAutomatic || holiday.mode != HolidayMode.AUTOMATIC || theme.automaticAt(now)) return
     val tc = tc()
     AppText(
         "${theme.label} turns on ${holidayDatesLabel(theme).substringBefore(" – ")}; until then your theme is ${state.settings.theme.label}",
