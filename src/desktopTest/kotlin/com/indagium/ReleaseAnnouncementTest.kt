@@ -47,12 +47,9 @@ class ReleaseAnnouncementTest {
         assertTrue(release.themes.isEmpty(), "the Halloween packs belong to the next release")
         assertNull(initialReleaseStep(release, "", ""), "a fresh install does not show historical announcements")
         val next = loadReleaseAnnouncement()
-        assertEquals("1.9.1", next.version)
+        assertEquals("1.9.2", next.version)
         assertTrue(next.pages.isNotEmpty(), "the new release bundles its real notes")
-        assertEquals(
-            listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN),
-            next.themes,
-        )
+        assertTrue(next.themes.isEmpty(), "the special themes were announced in 1.9.1")
         val current = loadReleaseAnnouncement("1.9.1", { name ->
             when (name) {
                 "whats-new-start.txt" -> "1.9.0"
@@ -121,7 +118,7 @@ class ReleaseAnnouncementTest {
         assertTrue(preview.preview)
         assertEquals(release.version, preview.version)
         assertEquals(release.pages, preview.pages)
-        assertEquals(release.themes, preview.themes)
+        assertTrue(preview.themes.isNotEmpty(), "preview offers theme examples when this release has none")
         assertFalse(preview.pages.any { "This is a preview" in it.markdown })
     }
 
