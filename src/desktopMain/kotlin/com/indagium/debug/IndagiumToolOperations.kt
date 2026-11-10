@@ -194,7 +194,6 @@ internal class IndagiumToolOperations(
         "list_filter_presets" to { listFilterPresets() },
         "apply_filter_preset" to { a -> applyFilterPresetRoute(a.str("tabId") ?: "", a.str("presetId") ?: "") },
         "stop_tailing" to { a -> stopTailingRoute(a.str("tabId") ?: "") },
-        "resolve_log_source" to { a -> resolveLogSourceRoute(a) },
         "get_source_file" to { a ->
             getSourceFileRoute(
                 a.str("filePath") ?: "", a.anyInt("startLine") ?: 1,
@@ -213,9 +212,6 @@ internal class IndagiumToolOperations(
         "set_highlighters" to { a -> setHighlightersRoute(a.str("tabId") ?: "", a) },
         "register_source_folder" to { a -> appState.registerSourceFolder(a.str("path") ?: "") },
         "reindex_sources" to { a -> reindexSourcesRoute(a.str("folder")) },
-        "add_manual_collapse" to { a ->
-            addManualCollapseRoute(a.str("tabId") ?: "", a.anyInt("startLineId"), a.anyInt("endLineId"))
-        },
         "add_sequence" to { a -> addSequenceRoute(a.str("tabId") ?: "", a) },
         "save_filter_preset" to { a -> saveFilterPresetRoute(a.str("tabId") ?: "", a.str("name") ?: "") },
         "search_similar_cases" to { a ->
@@ -285,6 +281,25 @@ internal class IndagiumToolOperations(
         coreOperationHandlers + testSuiteOperations.handlers + testRunOperations.handlers
 
     private val rowDependentSuspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
+        "resolve_log_source" to { a ->
+            val tabId = a.str("tabId")
+            val lineId = a.anyInt("lineId")
+            if (tabId != null && lineId != null) {
+                withLoadedRows(tabId) { loaded -> resolveLogSourceRoute(a, loaded) }
+            } else {
+                resolveLogSourceRoute(a)
+            }
+        },
+        "add_manual_collapse" to { a ->
+            val tabId = a.str("tabId") ?: ""
+            if (tabId.isBlank()) {
+                addManualCollapseRoute(tabId, a.anyInt("startLineId"), a.anyInt("endLineId"))
+            } else {
+                withLoadedRows(tabId) {
+                    addManualCollapseRoute(it.id, a.anyInt("startLineId"), a.anyInt("endLineId"))
+                }
+            }
+        },
         "get_sequence_summary" to { a -> withLoadedRows(a.str("tabId") ?: "") {
             getSequenceSummary(
                 tabId = it.id,
@@ -361,10 +376,14 @@ internal class IndagiumToolOperations(
     )
 
     private suspend fun <T> withLoadedRows(tabId: String, action: (LogTab) -> T): Any? {
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
-        val tab = appState.awaitTabLoaded(tabId)
-            ?: return mapOf("error" to "tab $tabId could not be loaded")
-        return appState.withPinnedRows(tab) { action(tab) }
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        val pinned = appState.awaitPinnedLoadedTab(tabId)
+            ?: return if (appState.tab(tabId) == null) {
+                mapOf("error" to "no such tab: $tabId")
+            } else {
+                mapOf("error" to "tab $tabId could not be loaded")
+            }
+        return pinned.use { action(it.tab) }
     }
 
     // Hoisted onto AppState (ui/AppState.kt's own `caseSearch`) so this MCP/AI tool surface and the
@@ -877,7 +896,7 @@ internal class IndagiumToolOperations(
     // so a client — or a human reading the error — knows exactly which Settings action to take;
     // a resolve that ran but simply found nothing is NOT an error, it's `{ matches: [] }`, so a
     // client can tell "misconfigured" apart from "configured correctly, no match for this line."
-    private fun resolveLogSourceRoute(a: Map<String, Any?>): Map<String, Any?> {
+    private fun resolveLogSourceRoute(a: Map<String, Any?>, loadedRowTab: LogTab? = null): Map<String, Any?> {
         if (appState.settings.sourceFolders.isEmpty()) {
             return mapOf("error" to "no source folders configured — add one in Settings → Source code")
         }
@@ -889,7 +908,10 @@ internal class IndagiumToolOperations(
         val lineId = a.anyInt("lineId")
         val message = a.str("message")
         val matches = when {
-            tabId != null && lineId != null -> appState.resolveForLine(tabId, lineId, limit)
+            tabId != null && lineId != null -> {
+                if (loadedRowTab == null) return mapOf("error" to "tab $tabId could not be loaded")
+                appState.resolveForLine(loadedRowTab.id, lineId, limit)
+            }
             message != null -> appState.resolveLogSource(a.str("tag"), message, limit)
             else -> return mapOf("error" to "provide either tabId+lineId or message (+optional tag)")
         }

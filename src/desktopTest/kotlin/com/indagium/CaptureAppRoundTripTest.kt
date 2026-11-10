@@ -2,9 +2,11 @@ package com.indagium
 
 import androidx.compose.ui.graphics.ImageBitmap
 import com.indagium.capture.*
+import com.indagium.debug.IndagiumToolOperations
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
+import com.indagium.model.TabContentState
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
 import com.indagium.ui.settingsFromJson
@@ -17,6 +19,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -45,6 +50,105 @@ private const val FIXTURE_ROW_COUNT = 3
 private const val SECOND_ROW_INDEX = 1
 
 class CaptureAppRoundTripTest {
+    @Test
+    fun captureExportToolWaitsForUnloadedImportedSnapshotRestoreToFinish() = runBlocking {
+        val root = createTempDirectory("capture-ai-unloaded-restore").toFile()
+        var now = 0L
+        val gateRestore = AtomicBoolean(false)
+        val restoreEntered = CountDownLatch(1)
+        val releaseRestore = CountDownLatch(1)
+        val sourceArchive = CaptureArchiveFixtures.exportWithVideo(root)
+        val state = AppState(
+            autosaveFile = File(root, "autosave"),
+            autoExportNotes = false,
+            archiveCacheDir = File(root, "cache"),
+            notesDir = File(root, "notes"),
+            monotonicNowNanos = { now },
+            beforeImportedSnapshotStored = {
+                if (gateRestore.get()) {
+                    restoreEntered.countDown()
+                    check(releaseRestore.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                        "test did not release the restored capture resource gate"
+                    }
+                }
+            },
+        ).also { it.closedTabRowsReleaseDelayMs = 10L }
+        try {
+            state.settings = state.settings.copy(inactiveTabUnloadMinutes = 30)
+            val tabId = state.openCaptureFile(sourceArchive)
+            waitLoaded(state, tabId)
+            withTimeout(WAIT_TIMEOUT_MS) {
+                while (state.captureSnapshotSessionFor(tabId) == null) delay(POLL_INTERVAL_MS)
+            }
+            val extraction = assertNotNull(state.captureSnapshotSessionFor(tabId)).directory
+            state.tabs = state.tabs + mkTab("visible", "visible.log", emptyList())
+            state.activateTab("visible")
+            now = TimeUnit.MINUTES.toNanos(30)
+            withTimeout(WAIT_TIMEOUT_MS) {
+                while (state.tab(tabId)?.contentState != TabContentState.UNLOADED) {
+                    state.sweepInactiveTabs()
+                    delay(POLL_INTERVAL_MS)
+                }
+            }
+            withTimeout(WAIT_TIMEOUT_MS) {
+                while (CaptureExtractionCache.holdsLease(extraction) || CaptureExtractionCache.isInUse(extraction)) {
+                    delay(POLL_INTERVAL_MS)
+                }
+            }
+
+            gateRestore.set(true)
+            val reload = assertNotNull(state.ensureTabLoaded(tabId))
+            assertTrue(restoreEntered.await(WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+            assertEquals(TabContentState.LOADED, state.tab(tabId)?.contentState)
+            assertNull(state.captureSnapshotSessionFor(tabId), "rows publish before the imported capture link is restored")
+
+            val gateway = IndagiumToolOperations(state).toolGateway
+            val started = gateway.executeSuspending(
+                "export_capture_snapshot",
+                mapOf("tabId" to tabId, "range" to "all", "includeVideo" to false, "filename" to "after-unload"),
+            ) as Map<*, *>
+            val operationId = assertNotNull(started["operationId"] as? String, started.toString())
+            delay(100)
+            val waiting = gateway.executeSuspending(
+                "get_capture_operation_status",
+                mapOf("operationId" to operationId),
+            ) as Map<*, *>
+            assertEquals("running", waiting["status"], "export must wait for the full restored-load job")
+
+            releaseRestore.countDown()
+            val completed = withTimeout(WAIT_TIMEOUT_MS) {
+                var status = gateway.executeSuspending(
+                    "get_capture_operation_status",
+                    mapOf("operationId" to operationId),
+                ) as Map<*, *>
+                while (status["status"] == "running") {
+                    delay(POLL_INTERVAL_MS)
+                    status = gateway.executeSuspending(
+                        "get_capture_operation_status",
+                        mapOf("operationId" to operationId),
+                    ) as Map<*, *>
+                }
+                status
+            }
+            assertEquals("completed", completed["status"], completed.toString())
+            val result = assertNotNull(completed["result"] as? Map<*, *>, completed.toString())
+            val outputFile = File(assertNotNull(result["path"] as? String, result.toString()))
+            assertTrue(CaptureArchiveReader.isCaptureArchive(outputFile))
+            CaptureArchiveReader.open(outputFile, File(root, "export-cache")).use { exported ->
+                assertEquals(3, exported.logFile.readLines().size)
+                assertTrue(exported.logFile.readText().contains("row 3"))
+            }
+            reload.join()
+            assertNotNull(state.captureSnapshotSessionFor(tabId), "the imported resource link is restored before export completes")
+            assertTrue(CaptureExtractionCache.holdsLease(extraction))
+        } finally {
+            releaseRestore.countDown()
+            state.close()
+            root.deleteRecursively()
+        }
+        Unit
+    }
+
     @Test
     fun importedAiLastMinutesAndExplicitSnapshotsUseTheEditorPlayheadAndFullCaptureBounds() = runBlocking {
         val root = createTempDirectory("capture-ai-explicit-range").toFile()

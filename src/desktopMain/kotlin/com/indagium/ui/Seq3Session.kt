@@ -417,8 +417,8 @@ class Seq3Session(
     internal fun beginEmpty(tabId: String, origin: TabRef?): String? {
         val originGroupId = appState.tabGroupIdForOrigin(origin)
         val tab = appState.tab(tabId) ?: return null
-        val source = sourceIdentity(tab)
-        val title = defaultSeq3Title(libraryStore.forSource(source).map { it.title }.toSet())
+        val titles = sourceIdentityForLoadedTab(tab.id)?.let(libraryStore::forSource).orEmpty().map { it.title }.toSet()
+        val title = defaultSeq3Title(titles)
         val document = Seq3Document(title = title)
         val id = "seq3-${UUID.randomUUID()}"
         val session = Seq3WorkspaceSession(
@@ -435,7 +435,7 @@ class Seq3Session(
 
         val exportMode = appState.settings.diagramDefaultExportMode
         val encoded = encodeSeq3Note(document, session.dialect, exportMode = exportMode)
-        val item = saveToLibrary(session, tab, encoded)
+        val item = saveToLibrary(session, encoded)
         if (item != null) {
             replace(id) { it.copy(libraryItemId = item.id, exportMode = exportMode) }
         }
@@ -465,7 +465,7 @@ class Seq3Session(
         )
         publishSession(session, originGroupId, document)
         val exportMode = appState.settings.diagramDefaultExportMode
-        val item = saveToLibrary(session, null, encodeSeq3Note(document, session.dialect, exportMode = exportMode))
+        val item = saveToLibrary(session, encodeSeq3Note(document, session.dialect, exportMode = exportMode))
         if (item != null) {
             replace(id) { it.copy(libraryItemId = item.id, exportMode = exportMode) }
         }
@@ -501,7 +501,8 @@ class Seq3Session(
         val id = "seq3-${UUID.randomUUID()}"
         // Unique against THIS exact log's own library entries (not the whole library) — two
         // different logs are free to each have their own "Untitled diagram".
-        val title = defaultSeq3Title(libraryStore.forSource(sourceIdentity(tab)).map { it.title }.toSet())
+        val titles = sourceIdentityForLoadedTab(tab.id)?.let(libraryStore::forSource).orEmpty().map { it.title }.toSet()
+        val title = defaultSeq3Title(titles)
         val session = Seq3WorkspaceSession(
             id = id,
             sourceTabId = tab.id,
@@ -769,7 +770,6 @@ class Seq3Session(
         val document = applySeq3NoteSeeds(fresh.copy(notes = previouslySeededNotes), current.noteSeeds)
             .copy(title = current.document.title.ifBlank { fresh.title })
         generatedBaselines[id] = document
-        val tab = current.sourceTabId?.let(appState::tab)
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         // Deliberately called BEFORE the replace() below, not nested inside its lambda: `replace`
         // is `sessions = sessions.map { ... }` over a snapshot taken when the outer call starts, so
@@ -780,9 +780,7 @@ class Seq3Session(
         // in the one replace() call below, means whichever one runs last (this call's own
         // saveToLibrary, or a concurrently superseded generation) is what sticks — never a lost
         // write. See this phase's PR review for the exact hazard.
-        val libraryItemId = tab?.let {
-            saveToLibrary(current, it, encodeSeq3Note(document, current.dialect, exportMode = exportMode))?.id
-        }
+        val libraryItemId = saveToLibrary(current, encodeSeq3Note(document, current.dialect, exportMode = exportMode))?.id
         replace(id) { latest ->
             latest.copy(
                 document = document,
@@ -1681,14 +1679,11 @@ class Seq3Session(
      * this function's write can't violate. */
     private fun autoSaveDraftToLibrary(id: String) {
         val current = session(id) ?: return
-        val tab = current.sourceTabId?.let(appState::tab)
-        // A linked log that is not loaded yet (a restore in progress) must not be saved over. A
-        // session with no log at all still saves: a ticket-less one has no source to keep, and one
-        // whose log is closed keeps its existing record's source (see sourceIdentityOf).
-        if (tab == null && (current.sourceTabId != null || sourceIdentityOf(current) == null)) return
+        // sourceIdentityOf resolves loaded rows under a pin, falls back to the saved record when
+        // rows are unavailable, and keeps an unknown ticket dirty without writing it.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val encoded = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
-        val item = saveToLibrary(current, tab, encoded) ?: return
+        val item = saveToLibrary(current, encoded) ?: return
         replace(id) { it.copy(libraryItemId = item.id, exportMode = exportMode) }
     }
 
@@ -1764,13 +1759,13 @@ class Seq3Session(
             ?: appState.addNoteBlock(tabId, text)
         if (blockId != null) {
             val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
-            val libraryItemId = appState.tab(tabId)?.let { tab -> saveToLibrary(current, tab, plainText)?.id }
+            val savedItem = saveToLibrary(current, plainText)
             replace(id) {
                 it.copy(
                     confirmedBlockId = blockId,
-                    dirty = false,
+                    dirty = savedItem == null,
                     draftSavedAtMillis = clock(),
-                    libraryItemId = libraryItemId ?: it.libraryItemId,
+                    libraryItemId = savedItem?.id ?: it.libraryItemId,
                     exportMode = exportMode,
                 )
             }
@@ -1807,12 +1802,15 @@ class Seq3Session(
      * [reportSaveRejection] and this returns null, same as the pre-existing "nothing to return"
      * contract every caller already handles with `?.`/`?:`.
      */
-    private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab?, encodedNote: String): DiagramLibraryItem? {
+    private fun saveToLibrary(current: Seq3WorkspaceSession, encodedNote: String): DiagramLibraryItem? {
         val title = current.document.title.ifBlank { "Untitled diagram" }
         val snapshot = DiagramLibrarySnapshot(encodedNote)
-        // With a live log the record takes that log's identity; without one it keeps the source it
-        // already has (a ticket diagram whose log is closed) or has none (a ticket-less diagram).
-        val source = tab?.let(::sourceIdentity) ?: sourceIdentityOf(current) ?: DiagramSourceIdentity.NONE
+        // A ticket with no loaded rows and no stored identity cannot be written safely. Keep the
+        // draft dirty so a later explicit save can retry once its source is available.
+        val source = sourceIdentityOf(current) ?: run {
+            replace(current.id) { it.copy(dirty = true) }
+            return null
+        }
         val result = if (current.libraryItemId == null || libraryStore.get(current.libraryItemId) == null) {
             libraryStore.tryCreate(title, "", source, snapshot)
         } else {
@@ -1929,7 +1927,7 @@ class Seq3Session(
         flush(id) // W3: see confirm()'s identical call for why.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
-        val item = saveToLibrary(current, tab, plainText) ?: return null
+        val item = saveToLibrary(current, plainText) ?: return null
         val blockId = when (mode) {
             Seq3AttachmentMode.SNAPSHOT -> attachLibrarySnapshot(tabId, item.id)
             Seq3AttachmentMode.LINKED -> attachLibraryLink(tabId, item.id)
@@ -2034,32 +2032,37 @@ class Seq3Session(
             // W1c: tryUpdate, not update — this write can hit the same size/library-full rejections as
             // saveToLibrary (see that function's own doc), and it runs from publishGenerated/markDirty,
             // exactly the chains W1c requires never to let an IllegalArgumentException escape.
-            val result = libraryStore.tryUpdate(libraryItemId) { item ->
-                item.copy(
-                    title = current.document.title.ifBlank { item.title },
-                    source = sourceIdentity(tab),
-                    snapshot = DiagramLibrarySnapshot(plainText),
-                    updatedAt = clock(),
-                )
-            }
-            resolveLibraryWrite(id, result)?.let { updated ->
-                syncable.forEach { (blockId, parsed, attachment) ->
-                    val linkedText = encodeSeq3Note(
-                        current.document,
-                        current.dialect,
-                        parsed.caption,
-                        exportMode,
-                        attachment = attachment.copy(revision = updated.updatedAt),
+            val source = sourceIdentityOf(current)
+            if (source == null) {
+                replace(id) { it.copy(dirty = true) }
+            } else {
+                val result = libraryStore.tryUpdate(libraryItemId) { item ->
+                    item.copy(
+                        title = current.document.title.ifBlank { item.title },
+                        source = source,
+                        snapshot = DiagramLibrarySnapshot(plainText),
+                        updatedAt = clock(),
                     )
-                    appState.updateBlock(tabId, blockId, linkedText)
                 }
-                libraryRevision++
-                replace(id) {
-                    it.copy(
-                        exportMode = exportMode,
-                        dirty = false,
-                        draftSavedAtMillis = clock(),
-                    )
+                resolveLibraryWrite(id, result)?.let { updated ->
+                    syncable.forEach { (blockId, parsed, attachment) ->
+                        val linkedText = encodeSeq3Note(
+                            current.document,
+                            current.dialect,
+                            parsed.caption,
+                            exportMode,
+                            attachment = attachment.copy(revision = updated.updatedAt),
+                        )
+                        appState.updateBlock(tabId, blockId, linkedText)
+                    }
+                    libraryRevision++
+                    replace(id) {
+                        it.copy(
+                            exportMode = exportMode,
+                            dirty = false,
+                            draftSavedAtMillis = clock(),
+                        )
+                    }
                 }
             }
         }
@@ -2072,17 +2075,31 @@ class Seq3Session(
     // rationale as SeqDiagramCoordinator's identically-named field for v1/v2.
     private var libraryRevision by mutableStateOf(0)
 
-    private fun sourceIdentity(tab: LogTab): DiagramSourceIdentity =
-        DiagramSourceIdentity(sourcePath = tab.sourcePath ?: tab.filename, contentFingerprint = computeLogFingerprint(tab.logData))
+    /** Resolves only a current, loaded tab snapshot. The snapshot and row pin are acquired together
+     *  under AppState.stateLock; hashing happens after that lock is released while the pin keeps
+     *  large/releasable rows resident. */
+    private fun sourceIdentityForLoadedTab(tabId: String): DiagramSourceIdentity? {
+        val pinned = appState.pinLoadedTabSnapshot(tabId) ?: return null
+        return pinned.use { loaded ->
+            DiagramSourceIdentity(
+                sourcePath = loaded.tab.sourcePath ?: loaded.tab.filename,
+                contentFingerprint = computeLogFingerprint(loaded.tab.logData),
+            )
+        }
+    }
 
     /** The source identity a library record of [current] has or should get: that of its live log,
      *  else the one its record already carries, else none for a diagram that has no ticket. Null
      *  for a ticket diagram whose log is gone and that has no record yet: its identity is unknown,
      *  so nothing may be saved for it. */
-    private fun sourceIdentityOf(current: Seq3WorkspaceSession): DiagramSourceIdentity? =
-        current.sourceTabId?.let(appState::tab)?.let(::sourceIdentity)
+    private fun sourceIdentityOf(current: Seq3WorkspaceSession): DiagramSourceIdentity? {
+        if (current.sourceTabId == null) {
+            return current.libraryItemId?.let(libraryStore::get)?.source
+                ?: DiagramSourceIdentity.NONE.takeIf { !current.hasTicket }
+        }
+        return sourceIdentityForLoadedTab(current.sourceTabId)
             ?: current.libraryItemId?.let(libraryStore::get)?.source
-            ?: DiagramSourceIdentity.NONE.takeIf { !current.hasTicket }
+    }
 
     /** Returns only diagrams created from this exact log identity — the v3 counterpart of
      *  [SeqDiagramCoordinator.libraryForTab]. The fingerprint makes this deliberately stricter than
@@ -2090,7 +2107,8 @@ class Seq3Session(
     fun libraryForTab(tab: LogTab): List<DiagramLibraryItem> {
         @Suppress("UNUSED_VARIABLE")
         val observedRevision = libraryRevision
-        return libraryStore.forSource(sourceIdentity(tab))
+        val source = sourceIdentityForLoadedTab(tab.id) ?: return emptyList()
+        return libraryStore.forSource(source)
     }
 
     /** WP17: the `ref` fragment picker's data source — [libraryForTab] above is deliberately NOT

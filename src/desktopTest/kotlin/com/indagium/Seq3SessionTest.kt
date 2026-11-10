@@ -29,6 +29,7 @@ import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
+import com.indagium.model.TabContentState
 import com.indagium.model.ThemePreset
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
@@ -41,16 +42,19 @@ import com.indagium.ui.defaultSeq3Title
 import com.indagium.ui.mkTab
 import com.indagium.ui.seq3ViewToken
 import com.indagium.utils.computeLogFingerprint
+import com.indagium.utils.parseLogFileResult
 import java.io.File
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -101,12 +105,13 @@ class Seq3SessionTest {
         LogEntry(2, "10:00:00.050", LogLevel.I, "Consumer", "handle op", SHARED_PID, SHARED_TID),
     )
 
-    private fun stateFor(tab: LogTab): AppState {
+    private fun stateFor(tab: LogTab, monotonicNowNanos: () -> Long = System::nanoTime): AppState {
         val root = createTempDirectory("indagium-seq3-sessions").toFile()
         return AppState(
             File(root, "state.cache"),
             notesDir = File(root, "notes"),
             diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+            monotonicNowNanos = monotonicNowNanos,
         ).also { state ->
             state.tabs = listOf(tab)
             state.activateTab(tab.id)
@@ -140,6 +145,169 @@ class Seq3SessionTest {
 
         assertNull(id)
         assertTrue(state.seq3Sessions.sessions.isEmpty())
+    }
+
+    @Test
+    fun diagramWritesAfterSourceUnloadKeepIdentityAndCanBeReopenedFromTheReloadedLog() {
+        val root = createTempDirectory("seq3-source-unloaded-writes").toFile()
+        val sourceFile = File(root, "source.log").apply {
+            writeText(
+                "10-10 10:00:00.000  7  11 I Producer: start op\n" +
+                    "10-10 10:00:00.050  7  11 I Consumer: handle op\n",
+            )
+        }
+        val rows = parseLogFileResult(sourceFile).entries
+        val libraryFile = File(root, "library.cache")
+        val library = DiagramLibraryStore(libraryFile)
+        val parserCalls = AtomicInteger()
+        var monotonicNow = 0L
+        val state = AppState(
+            autosaveFile = File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            parser = { file -> parserCalls.incrementAndGet(); parseLogFileResult(file) },
+            diagramLibraryStore = library,
+            monotonicNowNanos = { monotonicNow },
+        )
+        try {
+            state.closedTabRowsReleaseDelayMs = 10L
+            state.settings = state.settings.copy(inactiveTabUnloadMinutes = 30)
+            state.tabs = listOf(
+                mkTab("source", sourceFile.name, rows).copy(sourcePath = sourceFile.absolutePath),
+                mkTab("visible", "visible.log", emptyList()),
+            )
+            state.activateTab("source")
+            state.startPendingRestoredTabLoads()
+
+            val id = state.seq3Sessions.begin("source", rows.mapTo(linkedSetOf()) { it.id })!!
+            awaitGenerated(state, id)
+            val libraryItemId = assertNotNull(state.seq3Sessions.sessions.single { it.id == id }.libraryItemId)
+            val initialItem = assertNotNull(library.get(libraryItemId))
+            val initialIdentity = initialItem.source
+            val linkedBlockId = assertNotNull(state.seq3Sessions.attachLiveLink(id))
+            val linkedTextBeforeUnload = (state.tab("source")!!.annotations.blocks.single { it.id == linkedBlockId } as AnnBlock.Note).text
+
+            assertEquals(ActiveSurface.Diagram3(id), state.activeSurface)
+            monotonicNow = TimeUnit.MINUTES.toNanos(31)
+            await {
+                state.sweepInactiveTabs()
+                state.tab("source")?.contentState == TabContentState.UNLOADED
+            }
+            assertEquals(ActiveSurface.Diagram3(id), state.activeSurface, "the diagram stays active while its source releases rows")
+            assertEquals(0, parserCalls.get())
+
+            state.seq3Sessions.updateTitle(id, "Edited while source is unloaded")
+            state.seq3Sessions.flush(id)
+            val autosaved = assertNotNull(library.get(libraryItemId))
+            assertEquals(initialIdentity, autosaved.source, "autosave must retain the last known source fingerprint")
+            assertEquals("Edited while source is unloaded", autosaved.parsed?.document?.title)
+            val linkedAfterSync = (state.tab("source")!!.annotations.blocks.single { it.id == linkedBlockId } as AnnBlock.Note).text
+            assertNotEquals(linkedTextBeforeUnload, linkedAfterSync, "live-link sync should publish the latest edited document")
+
+            assertEquals(linkedBlockId, state.seq3Sessions.confirm(id), "confirm updates the same note after unload")
+            val snapshotBlockId = assertNotNull(state.seq3Sessions.attachSnapshot(id), "snapshot attachment saves after unload")
+            val afterAllWrites = assertNotNull(library.get(libraryItemId))
+            assertEquals(initialIdentity, afterAllWrites.source)
+            assertEquals("Edited while source is unloaded", afterAllWrites.parsed?.document?.title)
+            assertTrue(afterAllWrites.attachments.any { it.blockId == snapshotBlockId })
+            assertEquals(0, parserCalls.get(), "identity fallback must not reparse the source during any write")
+
+            val reloaded = assertNotNull(kotlinx.coroutines.runBlocking { state.awaitTabLoaded("source") })
+            assertEquals(TabContentState.LOADED, reloaded.contentState)
+            assertEquals(1, parserCalls.get())
+            assertEquals(initialIdentity, state.seq3Sessions.libraryForTab(reloaded).single { it.id == libraryItemId }.source)
+
+            state.seq3Sessions.close(id)
+            assertTrue(state.seq3Sessions.openLibraryItem(libraryItemId, "source"))
+            assertEquals("Edited while source is unloaded", state.seq3Sessions.activeSession?.document?.title)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun ticketWritesDeferWithoutKnownIdentityWhileEmptyLoadedLogsAndStandaloneUseRealIdentities() {
+        val root = createTempDirectory("seq3-unknown-source-identity").toFile()
+        val library = DiagramLibraryStore(File(root, "library.cache"))
+        val state = AppState(
+            autosaveFile = File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = library,
+        )
+        try {
+            val loadingTab = mkTab("loading", "loading.log", emptyList()).copy(
+                sourcePath = File(root, "loading.log").absolutePath,
+                contentState = TabContentState.LOADING,
+            )
+            state.tabs = listOf(loadingTab)
+            val ticketId = state.seq3Sessions.beginEmpty("loading")!!
+            assertNull(state.seq3Sessions.sessions.single { it.id == ticketId }.libraryItemId)
+            assertTrue(state.seq3Sessions.sessions.single { it.id == ticketId }.dirty)
+
+            state.tabs = listOf(loadingTab.copy(contentState = TabContentState.FAILED))
+            state.seq3Sessions.updateTitle(ticketId, "Still deferred")
+            state.seq3Sessions.flush(ticketId)
+            assertNull(state.seq3Sessions.sessions.single { it.id == ticketId }.libraryItemId)
+            assertTrue(state.seq3Sessions.sessions.single { it.id == ticketId }.dirty)
+
+            state.tabs = emptyList()
+            state.seq3Sessions.updateTitle(ticketId, "Source closed")
+            state.seq3Sessions.flush(ticketId)
+            assertNull(state.seq3Sessions.sessions.single { it.id == ticketId }.libraryItemId)
+            assertTrue(state.seq3Sessions.sessions.single { it.id == ticketId }.dirty)
+            assertTrue(library.search().isEmpty())
+
+            val emptySource = File(root, "empty.log").apply { writeText("") }
+            state.tabs = listOf(mkTab("empty", emptySource.name, emptyList()).copy(sourcePath = emptySource.absolutePath))
+            val emptyId = state.seq3Sessions.beginEmpty("empty")!!
+            val emptyItemId = assertNotNull(state.seq3Sessions.sessions.single { it.id == emptyId }.libraryItemId)
+            val emptyItem = assertNotNull(library.get(emptyItemId))
+            assertEquals(emptySource.absolutePath, emptyItem.source.sourcePath)
+            assertEquals(computeLogFingerprint(emptyList()), emptyItem.source.contentFingerprint)
+
+            val standaloneId = assertNotNull(state.seq3Sessions.beginStandalone())
+            val standaloneItemId = assertNotNull(state.seq3Sessions.sessions.single { it.id == standaloneId }.libraryItemId)
+            assertEquals(DiagramSourceIdentity.NONE, library.get(standaloneItemId)?.source)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun savedTicketIdentitySurvivesLoadingFailedAndClosedSourceShells() {
+        val root = createTempDirectory("seq3-stored-ticket-identity").toFile()
+        val library = DiagramLibraryStore(File(root, "library.cache"))
+        val state = AppState(
+            autosaveFile = File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = library,
+        )
+        try {
+            val source = mkTab("source", "source.log", twoTagEntries())
+            state.tabs = listOf(source)
+            val id = state.seq3Sessions.beginEmpty("source")!!
+            val session = state.seq3Sessions.sessions.single { it.id == id }
+            val itemId = assertNotNull(session.libraryItemId)
+            val originalIdentity = assertNotNull(library.get(itemId)).source
+
+            listOf(TabContentState.LOADING, TabContentState.FAILED).forEachIndexed { index, contentState ->
+                state.tabs = listOf(source.copy(logData = emptyList(), rmap = emptyMap(), contentState = contentState))
+                state.seq3Sessions.updateTitle(id, "${contentState.name} edit $index")
+                state.seq3Sessions.flush(id)
+                assertEquals(originalIdentity, library.get(itemId)?.source, "$contentState shell must use stored identity")
+                assertEquals("${contentState.name} edit $index", library.get(itemId)?.parsed?.document?.title)
+            }
+
+            state.tabs = emptyList()
+            state.seq3Sessions.updateTitle(id, "Closed source edit")
+            state.seq3Sessions.flush(id)
+            assertEquals(originalIdentity, library.get(itemId)?.source, "closed source must use the stored identity")
+            assertEquals("Closed source edit", library.get(itemId)?.parsed?.document?.title)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test

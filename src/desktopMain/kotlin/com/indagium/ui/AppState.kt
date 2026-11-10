@@ -350,6 +350,14 @@ internal class RowsPin internal constructor(private val onClose: (() -> Unit)?) 
     }
 }
 
+/** A loaded tab snapshot whose row store remains resident until [close]. */
+internal class PinnedLoadedTab internal constructor(
+    val tab: LogTab,
+    private val rowsPin: RowsPin,
+) : AutoCloseable {
+    override fun close() = rowsPin.close()
+}
+
 /** A closed tab's store that could not be released at the delay because a reader still pinned it. */
 private class PendingRowRelease(val target: RowReleaseTarget, var forceTrim: Boolean)
 
@@ -3855,11 +3863,15 @@ class AppState(
         val filename = filenameParam?.let {
             requireNotNull(captureArchiveName(it)) { "filename must be a valid archive basename" }
         }
-        val controller = captureControllerFor(tabId)
-        val result = if (controller == null) {
-            exportStoppedCaptureSnapshotForAi(tabId, range, minutes ?: 5, includeVideo, filename, explicitBounds)
-        } else {
-            exportLiveCaptureSnapshotForAi(tabId, controller, range, minutes ?: 5, includeVideo, filename, explicitBounds)
+        val pinned = awaitPinnedLoadedTab(tabId, waitForRestoreCompletion = true)
+            ?: error("The bound capture tab is no longer available")
+        val result = pinned.use {
+            val controller = captureControllerFor(tabId)
+            if (controller == null) {
+                exportStoppedCaptureSnapshotForAi(tabId, range, minutes ?: 5, includeVideo, filename, explicitBounds)
+            } else {
+                exportLiveCaptureSnapshotForAi(tabId, controller, range, minutes ?: 5, includeVideo, filename, explicitBounds)
+            }
         }
         if (open) openExportedCaptureForAi(result.file)
         mapOf(
@@ -6948,6 +6960,45 @@ class AppState(
         }
         return null
     }
+
+    /**
+     * Loads [tabId] if needed, then atomically revalidates the published row snapshot and pins it.
+     * When [waitForRestoreCompletion] is true, also joins the full restored-load job: restored
+     * capture resources are linked after rows are published LOADED, so row readiness alone is not
+     * enough for callers that immediately query those resources.
+     */
+    internal suspend fun awaitPinnedLoadedTab(
+        tabId: String,
+        waitForRestoreCompletion: Boolean = false,
+    ): PinnedLoadedTab? {
+        while (currentCoroutineContext().isActive) {
+            val awaited = awaitTabLoaded(tabId) ?: return null
+            if (waitForRestoreCompletion) {
+                val loadJob = synchronized(stateLock) { contentLoadJobs[tabId] }
+                if (loadJob != null) loadJob.join()
+                val restored = tab(tabId)
+                if (restored == null) return null
+                if (restored.contentState != TabContentState.LOADED) continue
+            }
+            pinLoadedTabSnapshot(tabId, awaited.logData)?.let { return it }
+            if (tab(tabId) == null) return null
+            yield()
+        }
+        return null
+    }
+
+    /**
+     * Pins exactly the current loaded snapshot if it still matches [expectedRows]. Snapshot lookup,
+     * loaded-state validation, and row-pin acquisition share [stateLock], closing the unload gap
+     * between [awaitTabLoaded] and a later reader pin.
+     */
+    internal fun pinLoadedTabSnapshot(tabId: String, expectedRows: List<LogEntry>? = null): PinnedLoadedTab? =
+        synchronized(stateLock) {
+            val current = tabs.firstOrNull { it.id == tabId } ?: return@synchronized null
+            if (current.contentState != TabContentState.LOADED) return@synchronized null
+            if (expectedRows != null && current.logData !== expectedRows) return@synchronized null
+            PinnedLoadedTab(current, pinRows(current))
+        }
 
     private fun ensureTabLoaded(tabId: String, retryFailed: Boolean, showGlobalLoading: Boolean): Job? {
         val source = synchronized(stateLock) {

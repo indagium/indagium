@@ -10,6 +10,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.CustomIssueRule
 import com.indagium.model.CustomIssueSite
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import com.indagium.model.TabContentState
 import com.indagium.model.VideoAttachment
@@ -18,6 +19,7 @@ import com.indagium.utils.ParsedLog
 import com.indagium.utils.computeItems
 import com.indagium.utils.parseLogFileResult
 import com.indagium.video.VideoPlayerController
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -33,7 +35,10 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotSame
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class InactiveTabResidencyTest {
@@ -651,6 +656,207 @@ class InactiveTabResidencyTest {
                 app.close()
                 dir.deleteRecursively()
             }
+        }
+    }
+
+    @Test
+    fun rowToolsLoadSourceRowsWhileMessageAndMetadataToolsStayLoadFree() = runBlocking {
+        val dir = createTempDirectory("inactive-tab-row-tool-load").toFile()
+        var now = 0L
+        val sourceDir = File(dir, "src").apply { mkdirs() }
+        File(sourceDir, "Widget.kt").writeText(
+            "class WidgetHost { fun attach(id: String) { Log.d(\"Widget\", \"widget attached ${'$'}id\") } }",
+        )
+        val sourceFile = File(dir, "hidden.log").apply {
+            writeText(
+                (1..3).joinToString("\n", postfix = "\n") { index ->
+                    "10-10 10:00:00.00${index - 1}  7  11 I Widget: widget attached $index"
+                },
+            )
+        }
+        val parserCalls = AtomicInteger()
+        val app = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            autoExportNotes = false,
+            parser = { file -> parserCalls.incrementAndGet(); parseLogFileResult(file) },
+            monotonicNowNanos = { now },
+        )
+        try {
+            app.settings = app.settings.copy(
+                sourceFolders = listOf(sourceDir.absolutePath),
+                inactiveTabUnloadMinutes = 30,
+            )
+            app.reindexSources(sourceDir.absolutePath)
+            waitUntil("the source index should publish") {
+                app.sourceIndexStatusForFolder(sourceDir.absolutePath).siteCount > 0
+            }
+            app.tabs = listOf(
+                mkTab("hidden", sourceFile.name, emptyList()).copy(
+                    sourcePath = sourceFile.absolutePath,
+                    contentState = TabContentState.UNLOADED,
+                ),
+                mkTab("visible", "visible.log", parsedRows(1)),
+            )
+            app.activeTabId = "visible"
+            app.activeSurface = ActiveSurface.Log("visible")
+            app.startPendingRestoredTabLoads()
+            val gateway = IndagiumToolOperations(app).toolGateway
+
+            val messageResult = gateway.executeSuspending(
+                "resolve_log_source",
+                mapOf("tag" to "Widget", "message" to "widget attached 2"),
+            ) as Map<*, *>
+            val messageMatches = messageResult["matches"] as List<*>
+            assertTrue(messageMatches.isNotEmpty(), "the message form should resolve against the source index")
+            assertEquals(TabContentState.UNLOADED, app.tab("hidden")?.contentState)
+            assertEquals(0, parserCalls.get(), "message-only source resolution must not load log rows")
+
+            val sequence = gateway.executeSuspending(
+                "add_sequence",
+                mapOf("tabId" to "hidden", "matchText" to "attached"),
+            ) as Map<*, *>
+            assertEquals(true, sequence["ok"])
+            val preset = gateway.executeSuspending(
+                "save_filter_preset",
+                mapOf("tabId" to "hidden", "name" to "metadata-only"),
+            ) as Map<*, *>
+            assertEquals(true, preset["ok"])
+            assertEquals(0, parserCalls.get(), "metadata-only tools must not parse the source")
+
+            val collapse = gateway.executeSuspending(
+                "add_manual_collapse",
+                mapOf("tabId" to "hidden", "startLineId" to 1, "endLineId" to 3),
+            ) as Map<*, *>
+            assertEquals(true, collapse["ok"])
+            assertEquals(TabContentState.LOADED, app.tab("hidden")?.contentState)
+            assertEquals(1, parserCalls.get())
+            assertEquals(1, app.tab("hidden")?.manualBlocks?.size)
+
+            now += TimeUnit.MINUTES.toNanos(31)
+            waitUntil("the row tool should release its pin so the hidden source unloads") {
+                app.sweepInactiveTabs()
+                app.tab("hidden")?.contentState == TabContentState.UNLOADED
+            }
+            val rowResult = gateway.executeSuspending(
+                "resolve_log_source",
+                mapOf("tabId" to "hidden", "lineId" to 2, "message" to "ignored row message"),
+            ) as Map<*, *>
+            assertEquals(messageMatches, rowResult["matches"])
+            assertEquals("hidden", rowResult["tabId"])
+            assertEquals(2, rowResult["lineId"])
+            assertEquals(2, parserCalls.get(), "row-form source resolution reloads the released snapshot once")
+
+            val noSuchTab = gateway.executeSuspending(
+                "add_manual_collapse",
+                mapOf("tabId" to "missing", "startLineId" to 1, "endLineId" to 2),
+            ) as Map<*, *>
+            assertTrue((noSuchTab["error"] as String).contains("no such tab"))
+
+            app.tabs = app.tabs + mkTab("missing-source", "gone.log", emptyList()).copy(
+                sourcePath = File(dir, "gone.log").absolutePath,
+                contentState = TabContentState.UNLOADED,
+            )
+            val loadFailure = gateway.executeSuspending(
+                "add_manual_collapse",
+                mapOf("tabId" to "missing-source", "startLineId" to 1, "endLineId" to 2),
+            ) as Map<*, *>
+            assertTrue((loadFailure["error"] as String).contains("could not be loaded"), loadFailure.toString())
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rowToolCancellationReleasesTheLoadedSnapshotPin() {
+        val dir = createTempDirectory("inactive-tab-tool-cancellation-pin").toFile()
+        var now = 0L
+        val source = File(dir, "hidden.log").also { simpleLog(it) }
+        val cancelOnRead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val backingRows = parsedRows(2)
+        val rows = object : AbstractList<LogEntry>() {
+            override val size: Int get() = backingRows.size
+
+            override fun get(index: Int): LogEntry {
+                if (cancelOnRead.get()) throw CancellationException("cancel row read")
+                return backingRows[index]
+            }
+        }
+        val app = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            autoExportNotes = false,
+            monotonicNowNanos = { now },
+            parser = { ParsedLog(LogFormat.LOGCAT, rows) },
+        ).also { it.closedTabRowsReleaseDelayMs = 10L }
+        try {
+            app.settings = app.settings.copy(inactiveTabUnloadMinutes = 30)
+            app.tabs = listOf(
+                mkTab("hidden", source.name, emptyList()).copy(sourcePath = source.absolutePath, contentState = TabContentState.UNLOADED),
+                mkTab("visible", "visible.log", parsedRows(1)),
+            )
+            app.activeTabId = "visible"
+            app.activeSurface = ActiveSurface.Log("visible")
+            app.startPendingRestoredTabLoads()
+            runBlocking { assertNotNull(app.awaitTabLoaded("hidden")) }
+            cancelOnRead.set(true)
+
+            val failure = runCatching {
+                runBlocking {
+                    IndagiumToolOperations(app).toolGateway.executeSuspending(
+                        "get_visible_lines",
+                        mapOf("tabId" to "hidden"),
+                    )
+                }
+            }.exceptionOrNull()
+            assertIs<CancellationException>(failure)
+
+            now = TimeUnit.MINUTES.toNanos(31)
+            waitUntil("cancelled row tool releases the pin so the hidden source can unload") {
+                app.sweepInactiveTabs()
+                app.tab("hidden")?.contentState == TabContentState.UNLOADED
+            }
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun atomicLoadedPinRejectsAStaleRowsSnapshotAndCanPinTheReloadedRows() = runBlocking {
+        val dir = createTempDirectory("inactive-tab-stale-row-pin").toFile()
+        val source = File(dir, "hidden.log").also { simpleLog(it) }
+        val app = newState(dir)
+        try {
+            app.tabs = listOf(
+                mkTab("hidden", source.name, parsedRows(1)).copy(sourcePath = source.absolutePath),
+            )
+            val originalRows = requireNotNull(app.tab("hidden")).logData
+
+            app.tabs = listOf(
+                requireNotNull(app.tab("hidden")).copy(
+                    logData = emptyList(),
+                    rmap = emptyMap(),
+                    contentState = TabContentState.UNLOADED,
+                ),
+            )
+            assertNull(app.pinLoadedTabSnapshot("hidden", originalRows), "an unloaded shell cannot pin stale rows")
+
+            val pinned = requireNotNull(app.awaitPinnedLoadedTab("hidden"))
+            try {
+                assertEquals(TabContentState.LOADED, pinned.tab.contentState)
+                assertNotSame(originalRows, pinned.tab.logData, "reload publishes a new current row snapshot")
+                assertNull(
+                    app.pinLoadedTabSnapshot("hidden", originalRows),
+                    "loaded-state validation must also reject an old row-list identity",
+                )
+                val latestPin = requireNotNull(app.awaitPinnedLoadedTab("hidden"))
+                latestPin.close()
+            } finally {
+                pinned.close()
+            }
+        } finally {
+            app.close()
+            dir.deleteRecursively()
         }
     }
 
