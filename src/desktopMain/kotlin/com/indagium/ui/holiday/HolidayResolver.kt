@@ -106,7 +106,7 @@ internal fun resolveHolidayEffects(h: HolidaySettings, theme: HolidayTheme): Hol
         )
         // Static decorations stay as set; nothing moves.
         HolidayIntensity.OFF -> HolidayEffects(
-            emptyList(), tabScene, picture, false, companion, icons,
+            chosen.filterIsInstance<HolidaySceneEffect>(), tabScene, picture, false, companion, icons,
             overLog = false, countScale = 0f, speedScale = 0f, flashMinGapSec = HOLIDAY_FLASH_GAP_FULL_SEC,
         )
     }

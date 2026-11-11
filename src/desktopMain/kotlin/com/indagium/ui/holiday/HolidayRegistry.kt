@@ -8,10 +8,11 @@ import com.indagium.ui.holiday.manor.HauntedManorTheme
 import com.indagium.ui.holiday.pumpkin.PumpkinPatchTheme
 import com.indagium.ui.holiday.ready.ReadyTheme
 import com.indagium.ui.holiday.tulips.TulipsTheme
+import com.indagium.ui.holiday.bear.CoffeeBearTheme
 
 /** The registered themes in registry order (the tie-break when several packs' dates overlap). A new pack is added here and nowhere else. */
 internal val HOLIDAY_THEMES: Map<HolidayPack, HolidayTheme> = holidayThemeRegistry(
-    PumpkinPatchTheme, HauntedManorTheme, TrickOrTreatTheme, BeerYellowTheme, BeerGreenTheme, ReadyTheme, TulipsTheme,
+    PumpkinPatchTheme, HauntedManorTheme, TrickOrTreatTheme, BeerYellowTheme, BeerGreenTheme, ReadyTheme, TulipsTheme, CoffeeBearTheme,
 )
 
 /** [themes] keyed by pack, in the order given. */

@@ -226,6 +226,15 @@ class SeasonalThemesSettingsUiTest {
     }
 
     @Test
+    fun coffeeBearCardTurnsOnAnAnytimeThemeFromAutomatic() {
+        setup { it.updateSettings { s -> s.withHoliday { h -> h.copy(mode = HolidayMode.AUTOMATIC) } } }
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.COFFEE_BEAR)).performClick()
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.COFFEE_BEAR)).assertIsSelected()
+        assertEquals(HolidayPack.COFFEE_BEAR, state.settings.holiday.pack)
+        assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+    }
+
+    @Test
     fun beerCardsSelectTheirOwnTheme() {
         setup()
         openSeasonalTab()

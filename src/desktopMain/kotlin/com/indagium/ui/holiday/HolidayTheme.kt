@@ -72,6 +72,10 @@ internal interface HolidayScenePainter {
     fun draw(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean)
 
     fun drawFrame(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean, time: Float) = draw(scope, layout, dark)
+
+    /** Scene switches remain available even when intensity makes all motion still. */
+    fun drawFrame(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean, time: Float, enabledEffects: Set<String>) =
+        drawFrame(scope, layout, dark, time)
 }
 
 /** A backdrop art: the picture under the filter sections, drawn at time [t] seconds in its own [designWidthDp] x [designHeightDp] coordinates. */

@@ -24,6 +24,11 @@ internal interface HolidayEffectSpec {
     val moves: Boolean get() = true
 }
 
+/** A switch for an optional part drawn by the theme's title scene. */
+internal interface HolidaySceneEffect : HolidayEffectSpec {
+    override val moves: Boolean get() = false
+}
+
 /** A particle effect: [spawn] gives the same field for the same arguments (seeded), so a frame is a function of the clock only. */
 internal interface HolidayParticleEffect : HolidayEffectSpec {
     /** Draw behind window content when the decoration must never cover text or controls. */

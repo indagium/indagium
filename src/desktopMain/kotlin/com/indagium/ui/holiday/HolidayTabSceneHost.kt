@@ -141,7 +141,7 @@ internal fun Modifier.holidayTabBarScene(
         onDrawBehind {
             if (layout != null) {
                 val time = if (look.effects.animatePicture) (clock?.value ?: HOLIDAY_STILL_TIME) * look.effects.speedScale else HOLIDAY_STILL_TIME
-                clipPath(clip) { clipRect(left, 0f, right, size.height) { painter.drawFrame(this, layout, look.isDark, time) } }
+                clipPath(clip) { clipRect(left, 0f, right, size.height) { painter.drawFrame(this, layout, look.isDark, time, look.effects.activeEffects.filterIsInstance<HolidaySceneEffect>().mapTo(mutableSetOf()) { it.id }) } }
             }
         }
     }

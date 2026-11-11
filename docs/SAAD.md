@@ -5791,6 +5791,12 @@ Tulips is a manually selected anytime pack with sage studio palettes, purple acc
 a swaying tulip scene, and drifting petals and butterflies. The original tulip painting is bundled for the softly masked filter backdrop
 and round Notes companion; native drawing applies the reference crops and fades without modifying the source painting.
 
+Coffee bear is a manually selected anytime pack built around the supplied polar-bear painting. Its navy and warm cream palettes use
+red coffee-cup accents; the pack supplies coffee-themed toolbar icons, snowy title-bar scenery, snowfall, and painting-based backdrop
+and Notes companion art. The original JPEG is bundled unchanged and cropped or masked by the native painters.
+`HolidaySceneEffect` lets the northern-lights switch reach the scene painter independently of snowfall; intensity Off keeps selected scenery
+visible at its still frame while stopping moving overlay effects.
+
 A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
 pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
 changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.
