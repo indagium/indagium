@@ -5789,7 +5789,8 @@ CRT scanlines are static and render independently of animated rainbow tape. The 
 
 Tulips is a manually selected anytime pack with sage studio palettes, purple accents, bouquet-gradient tile dividers, art-tool icons,
 a swaying tulip scene, and drifting petals and butterflies. A transparent PNG composited from all 16 visible layers of the supplied `IMG_0018.PSD` is bundled for the filter backdrop
-and round Notes companion; native drawing applies the reference crops and fades while preserving authored brush edges.
+and round Notes companion; native drawing restores the original JPEG’s sage canvas color beneath the translucent PSD layers,
+then applies the reference crops and fades. The painting therefore retains its original ground in both application palettes.
 
 Coffee bear is a manually selected anytime pack built around the supplied polar-bear painting. Its navy and warm cream palettes use
 red coffee-cup accents; the pack supplies coffee-themed toolbar icons, snowy title-bar scenery, snowfall, and painting-based backdrop

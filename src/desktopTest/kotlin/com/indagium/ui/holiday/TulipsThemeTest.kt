@@ -57,6 +57,27 @@ class TulipsThemeTest {
         assertTrue(resolveHolidayEffects(settings.copy(intensity = HolidayIntensity.OFF), theme).activeEffects.isEmpty())
     }
 
+    @Test fun paintingGroundDoesNotChangeWithTheApplicationBackground() {
+        val picture = assertNotNull(theme.picture)
+        val companion = assertNotNull(theme.companion)
+        fun render(background: Color, companionArt: Boolean): ImageBitmap {
+            val bitmap = ImageBitmap(300, 420)
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(bitmap), Size(300f, 420f)) {
+                drawRect(background)
+                if (companionArt) companion.draw(this, 0f, true) else picture.draw(this, 0f, true)
+            }
+            return bitmap
+        }
+        for (companionArt in listOf(false, true)) {
+            val black = render(Color.Black, companionArt).toPixelMap()
+            val white = render(Color.White, companionArt).toPixelMap()
+            val samples = if (companionArt) listOf(80 to 100, 120 to 60, 180 to 120)
+                else listOf(30 to 20, 150 to 10, 280 to 200)
+            for ((x, y) in samples) assertEquals(black[x, y].toArgb(), white[x, y].toArgb(),
+                "the painting's sage ground must cover the application background")
+        }
+    }
+
     @Test fun paintingBackdropsRenderInBothPalettes() {
         val picture = assertNotNull(theme.picture)
         val companion = assertNotNull(theme.companion)

@@ -33,6 +33,9 @@ private val painting by lazy {
     val bytes = requireNotNull(TulipsTheme::class.java.getResourceAsStream("/holiday/tulips/painting.png")).use { it.readBytes() }
     Image.makeFromEncoded(bytes).toComposeImageBitmap()
 }
+// The PSD omits the canvas color. Restore the sage ground from the original supplied JPEG
+// so translucent strokes retain the painting's colors in either application palette.
+private val paintingGround = Color(0xFF798577)
 private val petal = parsePath("M6 1C9 3 10 7 6 11 2 7 3 3 6 1z")
 private data class ArtPetal(val x: Float, val y: Float, val color: Color, val angle: Float, val delayed: Boolean = false)
 private val picturePetals = listOf(
@@ -61,7 +64,10 @@ internal object TulipsPicture : HolidayPicturePainter {
     override val designHeightDp = 420f
     private val clip = Path().apply { addRoundRect(RoundRect(Rect(2f, 0f, 298f, 420f), CornerRadius(6f))) }
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
-        clipPath(clip) { drawImage(painting, dstOffset = IntOffset(2, 0), dstSize = IntSize(296, 420)) }
+        clipPath(clip) {
+            drawRect(paintingGround, Offset(2f, 0f), Size(296f, 420f))
+            drawImage(painting, dstOffset = IntOffset(2, 0), dstSize = IntSize(296, 420))
+        }
         clipRect(0f, 0f, 300f, 420f) { artPetals(picturePetals, t, 420f, 12f) }
     }
 }
@@ -74,6 +80,7 @@ internal object TulipsCompanion : HolidayCompanionPainter {
         val image = painting
         val side = minOf(image.width, image.height)
         drawIntoCanvas { it.saveLayer(Rect(4f, 4f, 236f, 236f), Paint()) }
+        drawRect(paintingGround, Offset(4f, 4f), Size(232f, 232f))
         drawImage(image, srcOffset = IntOffset((image.width - side) / 2, (image.height - side) / 2), srcSize = IntSize(side, side),
             dstOffset = IntOffset(4, 4), dstSize = IntSize(232, 232))
         drawRect(
