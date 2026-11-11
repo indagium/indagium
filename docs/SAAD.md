@@ -5788,12 +5788,14 @@ inverse active tabs, bundled Press Start 2P labels, a blinking block cursor, a c
 CRT scanlines are static and render independently of animated rainbow tape. The pack does not enter the automatic holiday rotation.
 
 Tulips is a manually selected anytime pack with sage studio palettes, purple accents, bouquet-gradient tile dividers, art-tool icons,
-a swaying tulip scene, and drifting petals and butterflies. The original tulip painting is bundled for the softly masked filter backdrop
-and round Notes companion; native drawing applies the reference crops and fades without modifying the source painting.
+a swaying tulip scene, and drifting petals and butterflies. A transparent PNG composited from all 16 visible layers of the supplied `IMG_0018.PSD` is bundled for the filter backdrop
+and round Notes companion; native drawing applies the reference crops and fades while preserving authored brush edges.
 
 Coffee bear is a manually selected anytime pack built around the supplied polar-bear painting. Its navy and warm cream palettes use
 red coffee-cup accents; the pack supplies coffee-themed toolbar icons, snowy title-bar scenery, snowfall, and painting-based backdrop
-and Notes companion art. The original JPEG is bundled unchanged and cropped or masked by the native painters.
+and Notes companion art. The PNG exported from all six visible layers of `IMG_0011.PSD` preserves the artist’s alpha and layer opacity; native painters crop
+it without a traced silhouette. Both PSD exports retain the full 1668 × 2388 canvas and are reproducible with
+`scripts/export_holiday_psd.py` (developer-only `psd-tools==1.26.1` dependency).
 `HolidaySceneEffect` lets the northern-lights switch reach the scene painter independently of snowfall; intensity Off keeps selected scenery
 visible at its still frame while stopping moving overlay effects.
 

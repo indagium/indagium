@@ -9,7 +9,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.toComposeImageBitmap
@@ -24,12 +23,9 @@ import kotlin.math.floor
 import kotlin.math.sin
 
 private val painting by lazy {
-    val bytes = requireNotNull(CoffeeBearTheme::class.java.getResourceAsStream("/holiday/bear/painting.jpg")).use { it.readBytes() }
+    val bytes = requireNotNull(CoffeeBearTheme::class.java.getResourceAsStream("/holiday/bear/painting.png")).use { it.readBytes() }
     Image.makeFromEncoded(bytes).toComposeImageBitmap()
 }
-// The supplied painting includes a flat background; this clip follows the original painted bear.
-// Coordinates remain in original image pixels, so the JPEG is packaged unchanged.
-private val silhouette = parsePath("M539 500 C529 469 541 429 566 417 C589 406 613 430 630 457 C662 450 696 451 727 464 C744 433 776 425 799 441 C827 458 838 489 832 526 C824 556 821 595 810 624 C842 658 868 691 895 723 C929 765 961 817 982 870 C1003 916 979 951 950 984 C931 1002 915 1019 894 1032 C914 1097 926 1205 936 1298 C947 1420 944 1539 923 1627 C911 1659 875 1667 838 1654 C799 1640 766 1647 738 1655 C711 1631 703 1582 693 1545 C684 1593 679 1630 656 1653 C627 1658 591 1641 566 1656 C538 1663 505 1653 493 1630 C467 1553 468 1440 472 1328 C475 1223 478 1114 479 1056 C478 1002 462 951 440 909 C405 845 376 787 354 719 C341 683 331 631 335 596 C337 562 358 551 383 556 C409 553 432 566 438 594 C440 631 447 660 458 684 C479 726 507 758 540 776 C556 783 572 783 587 778 C554 754 538 727 532 695 C520 638 528 603 528 571 C529 545 534 520 539 500Z")
 private val steam1 = parsePath("M172 168c-5 -7 5 -11 0 -18s5 -11 0 -16")
 private val steam2 = parsePath("M181 166c-4 -6 4 -9 0 -15s4 -9 0 -13")
 private val companionSteam1 = parsePath("M147 178c-4.5 -6.3 4.5 -9.9 0 -16.2s4.5 -9.9 0 -14.4")
@@ -41,10 +37,10 @@ private val snow = listOf(SnowSpot(24f,30f,2.2f,6f,0f), SnowSpot(62f,90f,1.6f,7.
     SnowSpot(226f,60f,1.8f,6f,0f), SnowSpot(262f,120f,2.4f,7.5f,-2.5f), SnowSpot(284f,30f,1.5f,5.2f,-4f),
     SnowSpot(40f,200f,1.6f,6f,0f), SnowSpot(268f,240f,1.8f,7.5f,-2.5f), SnowSpot(18f,300f,2f,5.2f,-4f), SnowSpot(286f,300f,1.6f,6f,0f))
 
-/** Source crop established from the mockup's eyes and cup positions. */
+/** Crops in the 1668 x 2388 PSD canvas; the picture includes the complete authored feet. */
 private fun DrawScope.paintBear(x: Float, y: Float, w: Float, h: Float, sourceHeight: Float) {
-    withTransform({ translate(x, y); scale(w / 688f, h / sourceHeight, Offset.Zero); translate(-320f, -369f) }) {
-        clipPath(silhouette) { drawImage(painting, Offset.Zero) }
+    withTransform({ translate(x, y); scale(w / 911f, h / sourceHeight, Offset.Zero); translate(-424f, -494f) }) {
+        drawImage(painting, Offset.Zero)
     }
 }
 private fun DrawScope.drawSteam(time: Float, companion: Boolean) {
@@ -81,7 +77,7 @@ internal object CoffeeBearPicture : HolidayPicturePainter {
             }
             drawPath(snowbank, Brush.verticalGradient(listOf(Color.White, Color(0xFFd6eaf3)), startY = 350f, endY = 420f))
             drawOval(Color(0xFF8fb6c9).copy(alpha = .4f), Offset(78f, 384f), Size(144f, 16f))
-            paintBear(54f, 30f, 193f, 360f, 1290f)
+            paintBear(54f, 30f, 193f, 360f, 1740f)
             drawSteam(t, false)
             drawLids(t, false)
         }
@@ -94,7 +90,7 @@ internal object CoffeeBearCompanion : HolidayCompanionPainter {
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
         clipRect(0f, 0f, 240f, 240f) {
             drawCircle(Color(0xFFd9eef7).copy(alpha = .55f), 110f, Offset(122f, 128f))
-            paintBear(0f, 2f, 240f, 237f, 680f)
+            paintBear(0f, 2f, 240f, 237f, 910f)
             drawSteam(t, true)
             drawLids(t, true)
         }

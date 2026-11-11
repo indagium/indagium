@@ -30,7 +30,7 @@ import kotlin.math.sin
 
 /** Original user-supplied painting, shared by both placements. */
 private val painting by lazy {
-    val bytes = requireNotNull(TulipsTheme::class.java.getResourceAsStream("/holiday/tulips/painting.jpg")).use { it.readBytes() }
+    val bytes = requireNotNull(TulipsTheme::class.java.getResourceAsStream("/holiday/tulips/painting.png")).use { it.readBytes() }
     Image.makeFromEncoded(bytes).toComposeImageBitmap()
 }
 private val petal = parsePath("M6 1C9 3 10 7 6 11 2 7 3 3 6 1z")
