@@ -364,6 +364,12 @@ Saved filters, their JSON export/import and the restored session retain each rul
 text styles. The JSON filter library also carries your saved custom palette; importing it merges
 those colours with your existing palette.
 
+The **Error level** row is a built-in whole-row highlight for entries parsed as level **E**. It is
+enabled by default with a red background. Edit its background, text colour, font, bold and italic
+style in the Highlighters section. Settings → Editor behavior sets the global style; each tab follows
+that style until you edit its Error row, then **Use global** clears the tab override. Compare tabs
+keep their own Error style while you change which filter the other side displays.
+
 Highlighters from **klogg** can be imported: drop the klogg `.conf` on the filter panel, or use
 **Import** in Saved filters. Each klogg highlighter set arrives as a saved filter that keeps klogg's
 own behaviour (first whole-line match wins, capture groups, colours); the review dialog lists any
@@ -563,6 +569,15 @@ Beyond blocks, a note has:
 - **Issue description** — your private working context. It is stored with the note and used for
   similarity search, but is **never** included in the exported Markdown.
 - **Prefix** and **suffix** — text before and after the blocks, for a summary and a conclusion.
+
+### Spelling and personal vocabulary
+
+Notes editors can show local English spelling and grammar suggestions. Put the caret on a marked
+word and press **Alt+Enter** (Option+Return on macOS) to open its choices. **Add to vocabulary**
+accepts a single spelling word across all existing editors; Settings → Editor behavior → **Personal
+vocabulary** lets you search, add or remove saved words. Vocabulary suppresses spelling suggestions
+for that complete word in both English variants, while grammar and style suggestions remain. **Ignore**
+still dismisses a suggestion for the current app session only.
 
 ### Getting it out
 
@@ -948,7 +963,7 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 | **General** | Workspace profile, first-run/setup assistant, and the default parent plus separate analysis, capture-session, snapshot, and saved-ZIP folders |
 | **Capture** | adb and optional scrcpy paths, log buffers, mirror mode, recording/audio options, video limits, naming, storage guard, and capture troubleshooting |
 | **Appearance** | Theme (20 built in), independent interface and log fonts, log font size, interface scale, row numbers, minimap, icon-only toolbar |
-| **Editor behavior** | Search scope behavior, what `⌘F` opens, whether it also shows Original, whether new files open with Original, split selection/Find linking, row wrapping limits, navigation scroll margin, tag list sizes |
+| **Editor behavior** | Search scope behavior, what `⌘F` opens, whether it also shows Original, whether new files open with Original, split selection/Find linking, row wrapping limits, navigation scroll margin, tag list sizes, Error-row style, personal proofreading vocabulary |
 | **Export & annotations** | Default save directory, Markdown vs Jira log-block style, block numbering, prefix label, auto-export, copy-masking rules |
 | **Automation** | MCP control server on/off, port, allow browser clients, regenerate token, connection info, diagnostic logging |
 | **AI providers** | Provider profiles, models, reasoning effort, API keys, remote-disclosure acknowledgement, max tool calls per request, connection test |

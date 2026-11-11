@@ -77,6 +77,10 @@ import com.indagium.model.ProofreadingSettings
 import com.indagium.proofread.EnglishProofreadingService
 import com.indagium.proofread.ProofreadingCategory
 import com.indagium.proofread.ProofreadingIssue
+import com.indagium.proofread.isProofreadingVocabularyIssue
+import com.indagium.proofread.normalizeProofreadingVocabulary
+import com.indagium.proofread.normalizeProofreadingVocabularyWord
+import com.indagium.proofread.proofreadingVocabularyWordForIssue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlin.math.max
@@ -87,6 +91,7 @@ internal data class ProofreadingUi(
     val service: EnglishProofreadingService,
     val settings: ProofreadingSettings,
     val ignoredSuggestions: MutableSet<String>,
+    val onAddVocabularyWord: (String) -> Unit = {},
 )
 
 internal val LocalProofreadingUi = staticCompositionLocalOf<ProofreadingUi?> { null }
@@ -337,13 +342,21 @@ internal fun ProofreadingAssist(
     val latestApply = rememberUpdatedState(onValueChange)
     val latestFocusRestore = rememberUpdatedState(onFocusRestored)
     val latestInteractionChange = rememberUpdatedState(onInteractionActiveChange)
+    val latestProofreadingSettings = rememberUpdatedState(ui?.settings)
     val active = canProofread && (editorFocused || keyboardPopupOpen)
     val latestActive = rememberUpdatedState(active)
+    val vocabularyKeys = remember(ui?.settings?.vocabulary) {
+        normalizeProofreadingVocabulary(ui?.settings?.vocabulary.orEmpty())
+            .mapNotNull(::normalizeProofreadingVocabularyWord).toSet()
+    }
     val firstActionFocusRequester = remember(targetId) { FocusRequester() }
     val density = LocalDensity.current
 
     // Marks follow the text while the next check is pending, so typing never blanks the underlines.
-    val liveIssues = if (active) remember(snapshot, value.text) { shiftProofreadingIssues(snapshot.issues, snapshot.text, value.text) } else emptyList()
+    val liveIssues = if (active) remember(snapshot, value.text, vocabularyKeys) {
+        shiftProofreadingIssues(snapshot.issues, snapshot.text, value.text)
+            .filterNot { isProofreadingVocabularyIssue(value.text, it, vocabularyKeys) }
+    } else emptyList()
     val latestLive = rememberUpdatedState(liveIssues)
     SideEffect { anchorState?.marks = liveIssues }
 
@@ -399,7 +412,7 @@ internal fun ProofreadingAssist(
         }
     }
 
-    LaunchedEffect(targetId, value.text, active, ui?.settings?.language) {
+    LaunchedEffect(targetId, value.text, active, ui?.settings?.language, ui?.settings?.vocabulary) {
         if (!active || value.text.isBlank()) {
             snapshot = IssueSnapshot(value.text, emptyList())
             return@LaunchedEffect
@@ -407,15 +420,19 @@ internal fun ProofreadingAssist(
         val text = value.text
         snapshot = IssueSnapshot(text, shiftProofreadingIssues(snapshot.issues, snapshot.text, text))
         val language = ui.settings.language
+        val vocabulary = normalizeProofreadingVocabulary(ui.settings.vocabulary)
+        val vocabularyKeys = vocabulary.mapNotNull(::normalizeProofreadingVocabularyWord).toSet()
         delay(PROOFREADING_DEBOUNCE_MS)
         val result = try {
-            ui.service.check(text, language)
+            ui.service.check(text, language, vocabularyKeys)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {
             emptyList()
         }
-        if (latestActive.value && latestValue.value.text == text) {
+        if (latestActive.value && latestValue.value.text == text &&
+            normalizeProofreadingVocabulary(latestProofreadingSettings.value?.vocabulary.orEmpty()) == vocabulary
+        ) {
             snapshot = IssueSnapshot(
                 text,
                 result.filter { issue ->
@@ -469,7 +486,13 @@ internal fun ProofreadingAssist(
     }
     val shouldShowPopup = active && issueForPopup != null && positionProvider != null
     val compositionText = value.text
-    LaunchedEffect(shouldShowPopup) { if (!shouldShowPopup) popupHovered = false }
+    LaunchedEffect(shouldShowPopup, keyboardPopupOpen, issueForPopup) {
+        if (!shouldShowPopup) popupHovered = false
+        if (keyboardPopupOpen && issueForPopup == null) {
+            setKeyboardPopupOpen(false)
+            latestFocusRestore.value()
+        }
+    }
 
     fun dismissPopupAndRestoreFocus() {
         passive = null
@@ -518,6 +541,7 @@ internal fun ProofreadingAssist(
         ProofreadingSuggestionPopup(
             issue = requireNotNull(issueForPopup),
             flagged = compositionText.substringOrNull(issueForPopup.start, issueForPopup.end).orEmpty(),
+            canAddToVocabulary = proofreadingVocabularyWordForIssue(compositionText, issueForPopup) != null,
             positionProvider = requireNotNull(positionProvider),
             keyboardOpen = keyboardPopupOpen,
             firstActionFocusRequester = firstActionFocusRequester,
@@ -563,6 +587,24 @@ internal fun ProofreadingAssist(
                     latestFocusRestore.value()
                 }
             },
+            onAddToVocabulary = { issue ->
+                val latest = latestValue.value
+                if (latestAvailable.value && latestActive.value && latest.text == compositionText) {
+                    val word = proofreadingVocabularyWordForIssue(latest.text, issue)
+                    if (word != null) {
+                        ui.onAddVocabularyWord(word)
+                        val key = normalizeProofreadingVocabularyWord(word)
+                        snapshot = IssueSnapshot(
+                            latest.text,
+                            liveIssues.filterNot { isProofreadingVocabularyIssue(latest.text, it, key?.let(::setOf).orEmpty()) },
+                        )
+                        passive = null
+                        hoverCandidate = null
+                        setKeyboardPopupOpen(false)
+                        latestFocusRestore.value()
+                    }
+                }
+            },
         )
     }
 }
@@ -582,6 +624,7 @@ internal fun proofreadingDetailMessage(issue: ProofreadingIssue): String? {
 private fun ProofreadingSuggestionPopup(
     issue: ProofreadingIssue,
     flagged: String,
+    canAddToVocabulary: Boolean,
     positionProvider: PopupPositionProvider,
     keyboardOpen: Boolean,
     firstActionFocusRequester: FocusRequester,
@@ -591,6 +634,7 @@ private fun ProofreadingSuggestionPopup(
     onEscape: () -> Unit,
     onReplace: (ProofreadingIssue, String) -> Unit,
     onIgnore: (ProofreadingIssue) -> Unit,
+    onAddToVocabulary: (ProofreadingIssue) -> Unit,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
@@ -667,6 +711,22 @@ private fun ProofreadingSuggestionPopup(
                         onApply = { onReplace(issue, replacement) },
                     )
                 }
+            }
+            if (canAddToVocabulary) {
+                AppButton(
+                    "Add to vocabulary",
+                    onClick = { onAddToVocabulary(issue) },
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.testTag("proofreading-add-to-vocabulary")
+                        .onPreviewKeyEvent { event ->
+                            if (keyboardOpen && isProofreadingActivationKey(event)) {
+                                onAddToVocabulary(issue)
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                )
             }
             var ignoreFocused by remember(issue.start) { mutableStateOf(false) }
             AppButton(

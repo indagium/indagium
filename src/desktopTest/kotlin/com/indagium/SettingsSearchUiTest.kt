@@ -80,6 +80,25 @@ class SettingsSearchUiTest {
     }
 
     @Test
+    fun personalVocabularyCanBeAddedAndRemovedFromEditorSettings() {
+        val state = AppState()
+        rule.setContent { SettingsDialog(state, onDismiss = {}) }
+        type("personal vocabulary")
+        rule.onNodeWithText("Personal proofreading vocabulary").performClick()
+        rule.waitForIdle()
+
+        val query = rule.onNodeWithTag("proofreading-vocabulary-query")
+        query.performTextInput("  Indagium  ")
+        rule.onNodeWithTag("proofreading-vocabulary-add").performClick()
+        rule.waitForIdle()
+        rule.runOnIdle { assertEquals(listOf("Indagium"), state.settings.proofreading.vocabulary) }
+
+        rule.onNodeWithText("Remove").performClick()
+        rule.waitForIdle()
+        rule.runOnIdle { assertEquals(emptyList(), state.settings.proofreading.vocabulary) }
+    }
+
+    @Test
     fun scopeBehaviorOffersAFixedTwoSearchesDefault() {
         val state = AppState()
         rule.setContent { SettingsDialog(state, onDismiss = {}) }

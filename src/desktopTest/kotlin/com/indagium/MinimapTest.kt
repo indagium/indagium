@@ -1,6 +1,7 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogItem
@@ -9,6 +10,7 @@ import com.indagium.model.ManualCollapseDirection
 import com.indagium.ui.CRASH_COLOR
 import com.indagium.ui.MAX_WORDS_PER_ROW
 import com.indagium.ui.MINIMAP_MAX_BUCKETS
+import com.indagium.ui.MinimapSampler
 import com.indagium.ui.MinimapWord
 import com.indagium.ui.computeMinimapBars
 import com.indagium.ui.minimapBucketOf
@@ -231,6 +233,21 @@ class MinimapTest {
         val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
 
         assertEquals(Color.Green, bars[0].color)
+    }
+
+    @Test
+    fun errorFallbackUsesConfiguredColorAndStyleChangesInvalidateSamples() {
+        val items = listOf(row(50, LogLevel.E, "error text"))
+        val crashIds = BitSet()
+        val sampler = MinimapSampler()
+        val redStyle = ErrorHighlightStyle(color = Color.Red)
+        val blueStyle = ErrorHighlightStyle(color = Color.Blue)
+
+        assertEquals(Color.Red, sampler.update(items, crashIds, 1, emptyList(), muted, errorHighlightStyle = redStyle).single().color)
+        val changed = sampler.update(items, crashIds, 1, emptyList(), muted, errorHighlightStyle = blueStyle)
+        assertEquals(Color.Blue, changed.single().color)
+        assertEquals(1, sampler.lastResolvedCount)
+        assertTrue(!sampler.lastWasIncremental)
     }
 
     @Test

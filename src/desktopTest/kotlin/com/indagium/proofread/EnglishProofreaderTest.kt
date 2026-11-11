@@ -48,6 +48,22 @@ class EnglishProofreaderTest {
     }
 
     @Test
+    fun savedBaseWordSuppressesLanguageToolsPossessiveSpellingRange() = runBlocking {
+        val source = "The flarble's effect."
+        EnglishProofreadingService().use { service ->
+            val initial = service.check(source, "en-US")
+            assertTrue(initial.any { issue ->
+                issue.category == ProofreadingCategory.SPELLING && source.substring(issue.start, issue.end) == "flarble"
+            }, "LanguageTool should flag the base word in a possessive: $initial")
+
+            val saved = service.check(source, "en-US", setOf("flarble"))
+            assertFalse(saved.any { issue ->
+                issue.category == ProofreadingCategory.SPELLING && source.substring(issue.start, issue.end) == "flarble"
+            }, "the saved base word should suppress the possessive spelling mark: $saved")
+        }
+    }
+
+    @Test
     fun engineIsLazyAndChecksAreSerializedOnOneWorker() = runBlocking {
         val created = AtomicInteger()
         val calls = AtomicInteger()

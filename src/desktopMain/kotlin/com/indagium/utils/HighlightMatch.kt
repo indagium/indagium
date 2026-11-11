@@ -1,8 +1,10 @@
 package com.indagium.utils
 
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 
 // The one highlighter matcher: LogRow's rendering (ui/LogViewer.kt buildLogLineRender) and the
 // minimap (ui/Minimap.kt) both go through here, so "which highlighter owns this row" can never
@@ -20,6 +22,8 @@ internal data class LineHighlight(val wholeLine: Highlighter?, val spans: List<H
         val NONE = LineHighlight(null, emptyList())
     }
 }
+
+internal data class WholeLineHighlightOwner(val index: Int, val highlighter: Highlighter?)
 
 /** True when the rule came from klogg and should keep its matching and color-variance semantics. */
 internal fun Highlighter.isKloggStyle(): Boolean = kloggStyle
@@ -108,22 +112,52 @@ internal fun resolveLineHighlight(
     lineText: String,
     highlighters: List<Highlighter>,
     regexContext: RegexEvaluationContext,
+    errorStyle: ErrorHighlightStyle? = null,
 ): LineHighlight {
     val active = highlighters.filter { it.on && it.pattern.isNotBlank() }
-    if (active.isEmpty()) return LineHighlight.NONE
-    val winnerIdx = active.indexOfFirst { it.wholeLine && highlighterMatches(it, entry, lineText, regexContext) }
-    val winner = active.getOrNull(winnerIdx)
+    val owner = resolveWholeLineHighlightOwner(entry, lineText, highlighters, regexContext, errorStyle)
+    val winnerIdx = owner.index
+    val winner = owner.highlighter
     val candidates = when {
         winner == null -> active
         winner.isKloggStyle() -> active.subList(0, winnerIdx)
         else -> active
     }.filter { !it.wholeLine }
-    if (winner == null && candidates.isEmpty()) return LineHighlight.NONE
     val indagium = candidates.filter { !it.isKloggStyle() }
     val klogg = candidates.filter { it.isKloggStyle() }.asReversed()
     val spans = (indagium + klogg).flatMap { highlighterSpans(it, entry, lineText, regexContext) }
-    return LineHighlight(winner, spans)
+    return if (winner == null && spans.isEmpty()) LineHighlight.NONE else LineHighlight(winner, spans)
 }
+
+/** Shared whole-row owner lookup for rendering and the minimap. Index -1 denotes the Error fallback. */
+internal fun resolveWholeLineHighlightOwner(
+    entry: LogEntry,
+    lineText: String,
+    highlighters: List<Highlighter>,
+    regexContext: RegexEvaluationContext,
+    errorStyle: ErrorHighlightStyle? = null,
+): WholeLineHighlightOwner {
+    val active = highlighters.filter { it.on && it.pattern.isNotBlank() }
+    val winnerIdx = active.indexOfFirst { it.wholeLine && highlighterMatches(it, entry, lineText, regexContext) }
+    if (winnerIdx >= 0) return WholeLineHighlightOwner(winnerIdx, active[winnerIdx])
+    val fallback = errorStyle?.takeIf { it.enabled && entry.level == LogLevel.E }?.asErrorHighlighter()
+    return WholeLineHighlightOwner(-1, fallback)
+}
+
+/** A built-in fallback paint owner. Matching uses parsed level metadata, never text/regex content. */
+private fun ErrorHighlightStyle.asErrorHighlighter() = Highlighter(
+    id = "__error-level__",
+    pattern = "E",
+    regex = false,
+    color = color,
+    on = true,
+    wholeLine = true,
+    textColor = textColor,
+    backgroundEnabled = backgroundEnabled,
+    fontFamily = fontFamily,
+    bold = bold,
+    italic = italic,
+)
 
 /**
  * How many rows each highlighter's pattern finds, as shown next to a highlighter in the filter

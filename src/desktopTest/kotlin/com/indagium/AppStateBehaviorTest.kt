@@ -120,6 +120,16 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
+private const val TAB_TOKEN_FIELDS_BEFORE_ARCHIVE_CANDIDATE = 9
+private const val TAB_TOKEN_FIELDS_BEFORE_SHOW_TIME_DELTA = 10
+private const val TAB_TOKEN_FIELDS_BEFORE_LOG_FORMAT = 14
+
+private fun String.truncatedTabTokenToFieldCount(fieldCount: Int): String {
+    if (!startsWith("tab\t")) return this
+    val fields = substringAfter('\t').split('|', limit = Int.MAX_VALUE).take(fieldCount)
+    return "tab\t${fields.joinToString("|")}"
+}
+
 // Ceiling for the latches in the mcpControlServer* race tests, which wait on a real Ktor server
 // start or on the test thread reaching its next step. It was 2s, and the v1.9.0 tag run failed one
 // (firstCompleted) on GitHub's macOS runner. Like waitUntil's ceiling below, it costs nothing on a
@@ -2648,16 +2658,12 @@ class AppStateBehaviorTest {
         waitUntil { state.tabs.size == 1 && !state.isLoading }
         state.autosaveNow()
 
-        // Simulate a pre-PERF-3b cache. Strip archiveCandidate and every field appended after it:
-        // showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, and
-        // captureArchivePath (positions 10-15). Seven suffix fields total must be removed to
-        // reproduce a token from before archive metadata existed.
+        // Simulate a pre-PERF-3b cache by keeping only fields that preceded archiveCandidate.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
             if (i > tabsIdx && line.startsWith("tab\t")) {
-                line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
-                    .substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+                line.truncatedTabTokenToFieldCount(TAB_TOKEN_FIELDS_BEFORE_ARCHIVE_CANDIDATE)
             } else {
                 line
             }
@@ -2699,15 +2705,13 @@ class AppStateBehaviorTest {
         waitUntil { state.tabs.size == 1 && !state.isLoading }
         state.autosaveNow()
 
-        // Simulate a token written before showTimeDelta: preserve archiveCandidate, but remove
-        // showTimeDelta and every later append-only field (attachment, note target, mapping,
-        // format, and capture archive path).
+        // Simulate a token written before showTimeDelta: preserve archiveCandidate and all older
+        // fields, while omitting showTimeDelta and every field appended after it.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
             if (i > tabsIdx && line.startsWith("tab\t")) {
-                line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
-                    .substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+                line.truncatedTabTokenToFieldCount(TAB_TOKEN_FIELDS_BEFORE_SHOW_TIME_DELTA)
             } else {
                 line
             }
@@ -4976,9 +4980,9 @@ class AppStateBehaviorTest {
         state.autosaveNow()
 
         val legacyCache = cacheFile.readLines().map { line ->
-            // The two latest fields are logFormat and captureArchivePath. Strip both to create a
-            // genuine legacy token whose content must be parsed before its format is known.
-            if (line.startsWith("tab\t")) line.substringBeforeLast('|').substringBeforeLast('|') else line
+            // Keep fields only through retraceMappingPath so logFormat and every later append are
+            // absent; the raw DLT content must be parsed before its format is known.
+            line.truncatedTabTokenToFieldCount(TAB_TOKEN_FIELDS_BEFORE_LOG_FORMAT)
         }
         cacheFile.writeText(legacyCache.joinToString("\n") + "\n")
 

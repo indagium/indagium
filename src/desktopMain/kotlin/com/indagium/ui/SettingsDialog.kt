@@ -50,6 +50,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +69,8 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
+import com.indagium.proofread.normalizeProofreadingVocabulary
+import com.indagium.proofread.normalizeProofreadingVocabularyWord
 import com.indagium.ui.holiday.*
 import com.indagium.update.PROJECT_REPO_URL
 import com.indagium.voice.VoiceLanguageCatalog
@@ -1233,6 +1236,32 @@ private fun StorageInfoTooltip(text: String) {
 
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
+    val stylePalette = remember(
+        state,
+        state.settings.highlighterCustomColors,
+        state.settings.highlighterCustomColorEditorExpanded,
+    ) {
+        HighlighterStylePaletteActions(
+            customColors = customHighlightColors(state.settings.highlighterCustomColors),
+            onSaveCustomColor = { color ->
+                val hex = highlightColorHex(color)
+                state.updateSettings { settings ->
+                    val current = customHighlightColors(settings.highlighterCustomColors)
+                    if (hex in current.map(::highlightColorHex) || current.size >= MAX_CUSTOM_HIGHLIGHT_COLORS) settings
+                    else settings.copy(highlighterCustomColors = (current.map(::highlightColorHex) + hex).take(MAX_CUSTOM_HIGHLIGHT_COLORS))
+                }
+            },
+            onDeleteCustomColor = { color ->
+                state.updateSettings { settings ->
+                    settings.copy(highlighterCustomColors = settings.highlighterCustomColors.filterNot { parseHighlightHex(it) == color })
+                }
+            },
+            customColorEditorExpanded = state.settings.highlighterCustomColorEditorExpanded,
+            onCustomColorEditorExpandedChange = { expanded ->
+                state.updateSettings { it.copy(highlighterCustomColorEditorExpanded = expanded) }
+            },
+        )
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         // Rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
         // so cells line up as columns and the last column ends on the right content edge.
@@ -1487,6 +1516,91 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
         }
+        SettingsControlRow {
+            ErrorHighlightStyleSettings(
+                style = state.settings.errorHighlightStyle,
+                palette = stylePalette,
+                onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
+            )
+        }
+        ProofreadingVocabularyManager(state)
+    }
+}
+
+@Composable
+private fun ProofreadingVocabularyManager(state: AppState) {
+    var query by remember { mutableStateOf("") }
+    val proofreading = state.settings.proofreading
+    val words = proofreading.vocabulary
+    val queryKey = normalizeProofreadingVocabularyWord(query)
+    val duplicate = queryKey != null && words.any {
+        normalizeProofreadingVocabularyWord(it) == queryKey
+    }
+    val visible = remember(words, query) { words.filter { query.isBlank() || it.contains(query.trim(), ignoreCase = true) } }
+    val tc = tc()
+    Column(
+        Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).border(1.dp, tc.br, CORNER_MD)
+            .padding(10.dp).settingsAnchor("Personal proofreading vocabulary").testTag("proofreading-vocabulary-manager"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppText("Personal vocabulary", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            AppText("${words.size} words", color = tc.td, fontSize = 10.sp)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            InlineField(
+                query,
+                { query = it },
+                "Search or add a word",
+                Modifier.weight(1f).testTag("proofreading-vocabulary-query"),
+                onClear = { query = "" },
+                onSubmit = { if (queryKey != null && !duplicate) addVocabularyWord(state, query) },
+            )
+            AppButton(
+                "Add",
+                onClick = { addVocabularyWord(state, query) },
+                enabled = queryKey != null && !duplicate,
+                modifier = Modifier.testTag("proofreading-vocabulary-add"),
+            )
+        }
+        Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
+            visible.forEach { word ->
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppText(word, color = tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    AppButton(
+                        "Remove",
+                        onClick = {
+                            val removedKey = normalizeProofreadingVocabularyWord(word)
+                            state.updateSettings { settings ->
+                                val current = settings.proofreading.vocabulary
+                                settings.copy(
+                                    proofreading = settings.proofreading.copy(
+                                        vocabulary = normalizeProofreadingVocabulary(
+                                            current.filterNot { normalizeProofreadingVocabularyWord(it) == removedKey },
+                                        ),
+                                    ),
+                                )
+                            }
+                        },
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.testTag("proofreading-vocabulary-remove-${word.hashCode()}"),
+                    )
+                }
+            }
+            if (visible.isEmpty()) AppText(if (words.isEmpty()) "No saved words" else "No matching words", color = tc.td, fontSize = 10.sp)
+        }
+    }
+}
+
+private fun addVocabularyWord(state: AppState, raw: String) {
+    val word = normalizeProofreadingVocabularyWord(raw) ?: return
+    state.updateSettings { settings ->
+        val normalized = normalizeProofreadingVocabulary(settings.proofreading.vocabulary + raw.trim())
+        val containsWord = normalized.any { normalizeProofreadingVocabularyWord(it) == word }
+        if (containsWord) settings.copy(proofreading = settings.proofreading.copy(vocabulary = normalized)) else settings
     }
 }
 

@@ -120,6 +120,12 @@ class SettingsSearchTest {
     }
 
     @Test
+    fun errorHighlightingAndPersonalVocabularyAreSearchable() {
+        assertTrue("Error level rows" in labels("error highlight"))
+        assertTrue("Personal proofreading vocabulary" in labels("dictionary words"))
+    }
+
+    @Test
     fun matchRangesMergeAndIgnoreCase() {
         assertEquals(listOf(0..2), matchRanges("Log font", listOf("log")))
         assertEquals(listOf(0..2, 4..7), matchRanges("Log font", listOf("log", "font")))

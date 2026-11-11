@@ -1038,6 +1038,9 @@ data class LogTab(
     // omitted from tab tokens: restore always creates an unloaded shell.
     val contentState: TabContentState = TabContentState.LOADED,
     val contentLoadError: String? = null,
+    // Null means inherit the global error-row style until the first local edit. Reset removes the
+    // override. Serialized in the append-only final tab-token field.
+    val errorHighlightStyle: ErrorHighlightStyle? = null,
 )
 
 /** Copy presentation preferences captured when a legacy note is opened/restored. */
@@ -1047,6 +1050,10 @@ data class LegacyLogRefPreferences(
     val copyPidTid: Boolean,
     val copyPidAsName: Boolean,
 )
+
+/** Resolves a tab's nullable override against the current global default. */
+internal fun LogTab.effectiveErrorHighlightStyle(global: ErrorHighlightStyle): ErrorHighlightStyle =
+    errorHighlightStyle ?: global
 
 fun LogTab.searchFor(scope: SearchScope): LogSearchState = searches[scope]
 
@@ -1284,6 +1291,23 @@ data class VoiceInputSettings(
 data class ProofreadingSettings(
     val enabled: Boolean = true,
     val language: String = "en-US",
+    /** User vocabulary shared by every proofreading editor; normalized on edit and JSON decode. */
+    val vocabulary: List<String> = emptyList(),
+)
+
+/** Default red used to tint parsed Error-level log rows. */
+@Suppress("MagicNumber")
+val DEFAULT_ERROR_HIGHLIGHT_COLOR: Color = Color(0xFFf85149)
+
+/** Appearance of parsed Error-level log rows. A tab may override the global setting. */
+data class ErrorHighlightStyle(
+    val enabled: Boolean = true,
+    val color: Color = DEFAULT_ERROR_HIGHLIGHT_COLOR,
+    val backgroundEnabled: Boolean = true,
+    val textColor: Color? = null,
+    val fontFamily: String? = null,
+    val bold: Boolean? = null,
+    val italic: Boolean? = null,
 )
 
 /** Linux-only AWT FileDialog backend preference. Changes take effect after restarting Indagium. */
@@ -1674,6 +1698,8 @@ data class AppSettings(
     val homeDiagramsSegment: HomeDiagramSegment = HomeDiagramSegment.NO_TICKET,
     // How that section lays its diagrams out (Grid | List), remembered app-wide. JSON-only (ui/HomeLayoutSettingsJson.kt); appended last.
     val homeDiagramsView: HomeDiagramsView = HomeDiagramsView.LIST,
+    // Global default for parsed Error-level rows; per-tab overrides live on LogTab. JSON only.
+    val errorHighlightStyle: ErrorHighlightStyle = ErrorHighlightStyle(),
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */

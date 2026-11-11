@@ -1,6 +1,9 @@
 package com.indagium
 
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
@@ -15,6 +18,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
@@ -38,7 +42,12 @@ import org.junit.Rule
 import org.junit.Test
 import java.awt.image.BufferedImage
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import javax.imageio.ImageIO
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ProofreadingPopupUiTest {
@@ -181,6 +190,7 @@ class ProofreadingPopupUiTest {
 
         rule.onNodeWithText("Write 'a lot' as two words.").assertIsDisplayed()
         rule.onNodeWithText("grammar").assertIsDisplayed()
+        assertTrue(runCatching { rule.onNodeWithTag("proofreading-add-to-vocabulary").fetchSemanticsNode() }.isFailure)
     }
 
     @Test
@@ -406,10 +416,17 @@ class ProofreadingPopupUiTest {
         val replacement = rule.onNodeWithTag("proofreading-suggestion-option-0")
         replacement.assertIsFocused()
         popup.performKeyInput { pressKey(Key.Tab) }
+        val add = rule.onNodeWithTag("proofreading-add-to-vocabulary")
+        add.assertIsFocused()
+        popup.performKeyInput { pressKey(Key.Tab) }
         val ignore = rule.onNodeWithTag("proofreading-suggestion-ignore")
         ignore.assertIsFocused()
-        ignore.performKeyInput { withKeyDown(Key.ShiftLeft) { pressKey(Key.Tab) } }
+        popup.performKeyInput { withKeyDown(Key.ShiftLeft) { pressKey(Key.Tab) } }
+        add.assertIsFocused()
+        popup.performKeyInput { withKeyDown(Key.ShiftLeft) { pressKey(Key.Tab) } }
         replacement.assertIsFocused()
+        popup.performKeyInput { pressKey(Key.Tab) }
+        add.assertIsFocused()
         popup.performKeyInput { pressKey(Key.Tab) }
         ignore.assertIsFocused()
         ignore.performKeyInput { pressKey(Key.Spacebar) }
@@ -418,11 +435,218 @@ class ProofreadingPopupUiTest {
         assertPopupMissing()
     }
 
-    private fun proofreadingUi(checker: (String) -> List<ProofreadingIssue>): ProofreadingUi {
+    @Test
+    fun keyboardCanAddOnlyASpellingWordToVocabularyAndDismissItsPopup() {
+        val addedWords = mutableListOf<String>()
+        val proofreading = proofreadingUi(
+            checker = { text ->
+                val start = text.indexOf("speling")
+                if (start < 0) emptyList()
+                else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", listOf("spelling"), "vocabulary-test"))
+            },
+            onAddVocabularyWord = addedWords::add,
+        )
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-add-vocabulary",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        editor.performTextInputSelection(TextRange(4))
+        rule.letProofreadingSettle()
+        editor.performKeyInput { withKeyDown(Key.AltLeft) { pressKey(Key.Enter) } }
+        rule.waitForIdle()
+
+        val popup = rule.onNodeWithTag("proofreading-suggestion-popup")
+        val replacement = rule.onNodeWithTag("proofreading-suggestion-option-0")
+        replacement.assertIsFocused()
+        popup.performKeyInput { pressKey(Key.Tab) }
+        val add = rule.onNodeWithTag("proofreading-add-to-vocabulary")
+        add.assertIsFocused()
+        add.performKeyInput { pressKey(Key.Spacebar) }
+        rule.waitForIdle()
+
+        assertEquals(listOf("speling"), addedWords)
+        assertPopupMissing()
+    }
+
+    @Test
+    fun mouseCanAddASpellingWordToVocabulary() {
+        val addedWords = mutableListOf<String>()
+        val proofreading = proofreadingUi(onAddVocabularyWord = addedWords::add) { text ->
+            val start = text.indexOf("speling")
+            if (start < 0) emptyList()
+            else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", listOf("spelling"), "mouse-vocabulary"))
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-add-vocabulary-mouse",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.letProofreadingSettle()
+        rule.hoverUntilSuggestionOpens(editor)
+
+        rule.onNodeWithTag("proofreading-add-to-vocabulary").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("speling"), addedWords)
+        assertPopupMissing()
+    }
+
+    @Test
+    fun addingPossessiveBaseWordPersistsAndSuppressesItAfterRecheck() {
+        val addedWords = mutableListOf<String>()
+        val checkCount = AtomicInteger()
+        val localService = EnglishProofreadingService {
+            EnglishProofreader { text, _ ->
+                checkCount.incrementAndGet()
+                val start = text.indexOf("flarble")
+                if (start < 0) emptyList()
+                else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", emptyList(), "possessive-vocabulary"))
+            }
+        }.also { service = it }
+        var currentUi by mutableStateOf<ProofreadingUi?>(null)
+        currentUi = ProofreadingUi(localService, ProofreadingSettings(), mutableSetOf()) { word ->
+            addedWords += word
+            val latest = requireNotNull(currentUi)
+            currentUi = latest.copy(settings = latest.settings.copy(vocabulary = latest.settings.vocabulary + word))
+        }
+        rule.setContent {
+            CompositionLocalProvider(
+                LocalTheme provides LIGHT_THEME,
+                LocalProofreadingUi provides currentUi,
+            ) {
+                AnnotationMarkdownEditorDialog(
+                    title = "Edit note",
+                    initialText = "The flarble's effect.",
+                    confirmLabel = "Save note",
+                    windowSize = IntSize(760, 760),
+                    sessionKey = "proofreading-possessive-vocabulary",
+                    onConfirm = {},
+                    onDismiss = {},
+                )
+            }
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.letProofreadingSettle()
+        val flaggedPosition = rule.hoverUntilSuggestionOpens(editor)
+        rule.onNodeWithTag("proofreading-add-to-vocabulary").performClick()
+        rule.waitForIdle()
+
+        assertEquals(listOf("flarble"), addedWords)
+        assertEquals(listOf("flarble"), currentUi?.settings?.vocabulary)
+        assertPopupMissing()
+
+        rule.letProofreadingSettle()
+        assertTrue(checkCount.get() >= 2, "the updated vocabulary should be checked again")
+        editor.performMouseInput {
+            moveTo(Offset(400f, 150f))
+            moveTo(flaggedPosition)
+        }
+        rule.mainClock.advanceTimeBy(500)
+        rule.waitForIdle()
+        assertFalse(rule.suggestionPopupExists(), "the saved base word should remain suppressed after recheck")
+    }
+
+    @Test
+    fun addToVocabularyIsHiddenForAnIneligiblePartialSpellingRange() {
+        val proofreading = proofreadingUi { text ->
+            val start = text.indexOf("speling")
+            if (start < 0) emptyList()
+            else listOf(ProofreadingIssue(start, start + 3, "Possible spelling mistake", listOf("spelling"), "partial-spelling"))
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-partial-vocabulary",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.letProofreadingSettle()
+        rule.hoverUntilSuggestionOpens(editor)
+
+        assertFalse(runCatching { rule.onNodeWithTag("proofreading-add-to-vocabulary").fetchSemanticsNode() }.isSuccess)
+    }
+
+    @Test
+    fun aVocabularyChangeWhileACheckIsInFlightDoesNotRestoreItsOldMark() {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        val checkCount = AtomicInteger()
+        val localService = EnglishProofreadingService {
+            EnglishProofreader { text, _ ->
+                if (checkCount.incrementAndGet() == 1) {
+                    checkStarted.countDown()
+                    releaseCheck.await(5, TimeUnit.SECONDS)
+                }
+                val start = text.indexOf("Indagium")
+                if (start < 0) emptyList()
+                else listOf(ProofreadingIssue(start, start + 8, "Possible spelling mistake", listOf("inadium"), "vocabulary-race"))
+            }
+        }.also { service = it }
+        var currentUi by mutableStateOf(ProofreadingUi(localService, ProofreadingSettings(), mutableSetOf()))
+        rule.setContent {
+            CompositionLocalProvider(
+                LocalTheme provides LIGHT_THEME,
+                LocalProofreadingUi provides currentUi,
+            ) {
+                AnnotationMarkdownEditorDialog(
+                    title = "Edit note",
+                    initialText = "Indagium works",
+                    confirmLabel = "Save note",
+                    windowSize = IntSize(760, 760),
+                    sessionKey = "proofreading-vocabulary-race",
+                    onConfirm = {},
+                    onDismiss = {},
+                )
+            }
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.mainClock.advanceTimeBy(700)
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS), "the original vocabulary-free check should be in flight")
+
+        rule.runOnUiThread {
+            currentUi = currentUi.copy(settings = currentUi.settings.copy(vocabulary = listOf("Indagium")))
+        }
+        rule.waitForIdle()
+        releaseCheck.countDown()
+        rule.letProofreadingSettle()
+        editor.performTextInputSelection(TextRange(4))
+        editor.performKeyInput { withKeyDown(Key.AltLeft) { pressKey(Key.Enter) } }
+        rule.waitForIdle()
+        assertPopupMissing()
+    }
+
+    private fun proofreadingUi(
+        onAddVocabularyWord: (String) -> Unit = {},
+        checker: (String) -> List<ProofreadingIssue>,
+    ): ProofreadingUi {
         val localService = EnglishProofreadingService {
             EnglishProofreader { text, _ -> checker(text) }
         }.also { service = it }
-        return ProofreadingUi(localService, ProofreadingSettings(), mutableSetOf())
+        return ProofreadingUi(localService, ProofreadingSettings(), mutableSetOf(), onAddVocabularyWord)
     }
 
     private fun assertPopupMissing() {

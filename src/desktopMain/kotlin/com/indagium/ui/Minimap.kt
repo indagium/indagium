@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Highlighter
 import com.indagium.model.LogAnalysis
 import com.indagium.model.LogItem
@@ -42,6 +43,7 @@ import com.indagium.model.entry
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.highlighterMatches
 import com.indagium.utils.isAppendOnlyExtensionOf
+import com.indagium.utils.resolveWholeLineHighlightOwner
 import com.indagium.utils.visibleLogLineText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -136,11 +138,12 @@ private fun resolveMinimapColor(
     highlighters: List<Highlighter>,
     regexContext: RegexEvaluationContext,
     mutedColor: Color,
+    errorHighlightStyle: ErrorHighlightStyle? = null,
 ): Color = if (isCrash) {
     CRASH_COLOR
 } else {
     val lineText = lazy(LazyThreadSafetyMode.NONE) { visibleLogLineText(item.entry) }
-    matchingWholeLineColor(highlighters, item.entry, lineText, regexContext)
+    matchingWholeLineColor(highlighters, item.entry, lineText, regexContext, errorHighlightStyle)
         ?: minimapLevelColor(item.entry.level)
         ?: matchingTextColor(highlighters, item.entry, lineText, regexContext)
         ?: headerColor(item)
@@ -152,13 +155,13 @@ private fun matchingWholeLineColor(
     entry: com.indagium.model.LogEntry,
     lineText: Lazy<String>,
     regexContext: RegexEvaluationContext,
-): Color? = highlighters.firstOrNull {
-    it.wholeLine && highlighterMatches(it, entry, lineText.value, regexContext)
-}?.let { highlighter ->
-    when {
-        highlighter.backgroundEnabled -> highlighter.color
-        else -> highlighter.textColor
-    }
+    errorHighlightStyle: ErrorHighlightStyle? = null,
+): Color? {
+    val hasExplicitWholeLineRule = highlighters.any { it.on && it.pattern.isNotBlank() && it.wholeLine }
+    val hasErrorFallback = entry.level == LogLevel.E && errorHighlightStyle?.enabled == true
+    if (!hasExplicitWholeLineRule && !hasErrorFallback) return null
+    return resolveWholeLineHighlightOwner(entry, lineText.value, highlighters, regexContext, errorHighlightStyle)
+        .highlighter?.let { if (it.backgroundEnabled) it.color else it.textColor }
 }
 
 private fun minimapLevelColor(level: LogLevel): Color? = when (level) {
@@ -260,10 +263,11 @@ private fun resolveMinimapBar(
     highlighters: List<Highlighter>,
     regexContext: RegexEvaluationContext,
     mutedColor: Color,
+    errorHighlightStyle: ErrorHighlightStyle? = null,
 ) = MinimapBar(
     words = splitIntoWordBlocks(visibleLogLineText(item.entry)),
     indent = item.indentOrZero(),
-    color = resolveMinimapColor(item, isCrashItem(item, crashIds), highlighters, regexContext, mutedColor),
+    color = resolveMinimapColor(item, isCrashItem(item, crashIds), highlighters, regexContext, mutedColor, errorHighlightStyle),
 )
 
 /** Buckets [items] into at most [rowCount] drawable rows and resolves each row's word-shape +
@@ -282,7 +286,11 @@ internal fun computeMinimapBars(
     highlighters: List<Highlighter>,
     mutedColor: Color,
     regexContext: RegexEvaluationContext = RegexEvaluationContext(),
-): List<MinimapBar> = MinimapSampler().update(items, crashIds, rowCount, highlighters, mutedColor, regexContext)
+    errorHighlightStyle: ErrorHighlightStyle? = null,
+): List<MinimapBar> = MinimapSampler().update(
+    items, crashIds, rowCount, highlighters, mutedColor, regexContext,
+    errorHighlightStyle = errorHighlightStyle,
+)
 
 /**
  * Remembers the resolved bars of every [minimapSampleStride]-th item between calls, so a live capture
@@ -308,6 +316,7 @@ internal class MinimapSampler {
     private var sampleEntryIds: IntArray = IntArray(0)
     private var highlighters: List<Highlighter> = emptyList()
     private var mutedColor: Color = Color.Unspecified
+    private var errorHighlightStyle: ErrorHighlightStyle? = null
     private var crashIds: BitSet = BitSet()
 
     /** Test hook: how many items were resolved by the last [update] (not served from the memo). */
@@ -327,6 +336,7 @@ internal class MinimapSampler {
         mutedColor: Color,
         regexContext: RegexEvaluationContext = RegexEvaluationContext(),
         cancellationCheck: () -> Unit = {},
+        errorHighlightStyle: ErrorHighlightStyle? = null,
     ): List<MinimapBar> = synchronized(this) {
         val n = items.size
         val rows = rowCount.coerceAtMost(n)
@@ -335,7 +345,7 @@ internal class MinimapSampler {
             return emptyList()
         }
         val newStride = minimapSampleStride(n, rows)
-        val keptFactor = reusableFactor(items, crashIds, highlighters, mutedColor, newStride)
+        val keptFactor = reusableFactor(items, crashIds, highlighters, mutedColor, newStride, errorHighlightStyle)
         val sampleCount = (n + newStride - 1) / newStride
         val newSamples = ArrayList<MinimapBar>(sampleCount)
         val newIds = IntArray(sampleCount)
@@ -351,7 +361,7 @@ internal class MinimapSampler {
         for (j in kept until sampleCount) {
             cancellationCheck()
             val item = items[j * newStride]
-            newSamples += resolveMinimapBar(item, crashIds, highlighters, regexContext, mutedColor)
+            newSamples += resolveMinimapBar(item, crashIds, highlighters, regexContext, mutedColor, errorHighlightStyle)
             newIds[j] = item.entry.id
         }
         lastResolvedCount = sampleCount - kept
@@ -362,6 +372,7 @@ internal class MinimapSampler {
         sampleEntryIds = newIds
         this.highlighters = highlighters
         this.mutedColor = mutedColor
+        this.errorHighlightStyle = errorHighlightStyle
         this.crashIds = crashIds.clone() as BitSet
         return barsFromSamples(newSamples, newStride, n, rows)
     }
@@ -374,10 +385,12 @@ internal class MinimapSampler {
         newHighlighters: List<Highlighter>,
         newMutedColor: Color,
         newStride: Int,
+        newErrorHighlightStyle: ErrorHighlightStyle?,
     ): Int {
         val previous = lastItems ?: return 0
         val sameInputs = previous.isNotEmpty() && items.isAppendOnlyExtensionOf(previous) &&
-            newMutedColor == mutedColor && (newHighlighters === highlighters || newHighlighters == highlighters)
+            newMutedColor == mutedColor && newErrorHighlightStyle == errorHighlightStyle &&
+            (newHighlighters === highlighters || newHighlighters == highlighters)
         // Strides are powers of two and only grow on an append (N / R is non-decreasing), so a larger
         // one is a multiple of the old one; anything else is not worth reasoning about.
         val factor = if (sameInputs && newStride >= stride && newStride % stride == 0) newStride / stride else 0
@@ -397,6 +410,7 @@ internal class MinimapSampler {
         samples = emptyList()
         sampleEntryIds = IntArray(0)
         highlighters = emptyList()
+        errorHighlightStyle = null
         crashIds = BitSet()
         lastResolvedCount = 0
         lastWasIncremental = false
@@ -601,6 +615,7 @@ fun Minimap(
     tc: ThemeColors,
     onHideMinimap: () -> Unit,
     modifier: Modifier = Modifier,
+    errorHighlightStyle: ErrorHighlightStyle? = null,
 ) {
     var heightPx by remember { mutableStateOf(0) }
     val density = LocalDensity.current
@@ -624,14 +639,17 @@ fun Minimap(
     // Remembers the resolved bars across live-capture batches, so each batch only resolves its new
     // samples (see MinimapSampler). Falls back to a bounded full rebuild for anything but a pure append.
     val sampler = remember { MinimapSampler() }
-    LaunchedEffect(items, rowCount, crashSites, highlighters, tc) {
+    LaunchedEffect(items, rowCount, crashSites, highlighters, tc, errorHighlightStyle) {
         bars = if (items.isEmpty() || rowCount <= 0) {
             emptyList()
         } else {
             withContext(Dispatchers.Default) {
                 val crashIds = BitSet()
                 crashSites.forEach { crashIds.set(it.entry.id) }
-                sampler.update(items, crashIds, rowCount, highlighters, tc.td, cancellationCheck = { ensureActive() })
+                sampler.update(
+                    items, crashIds, rowCount, highlighters, tc.td,
+                    cancellationCheck = { ensureActive() }, errorHighlightStyle = errorHighlightStyle,
+                )
             }
         }
     }

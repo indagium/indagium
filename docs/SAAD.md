@@ -898,8 +898,10 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   `TileSlot.actionsFollowTitle` (the action follows the title; the free room is after it) and `LocalTileHeaderWidthDp`. The tile owns the Copy feedback
   (`rememberCopyFeedback`) and hands it to the panel (`BoundAnnotationPanel(actionsInHeader = true, copyFeedbackState)`), which then leaves its own bar out
   (`AnnotationPanel` used on its own still draws the bar, tag `notes-toolbar`, with a hairline under it, as before). The buttons are the log toolbar's
-  `AppButton`s (outlined, rounded, transparent on the card, natural height) `TILE_HEADER_GAP_DP` apart, and every click or dismissed popup (the Copy format menu,
-  the recent notes list) hands the keyboard back to the panel's `FocusRequester`. The AI composer follows the same style
+  `AppButton`s (outlined, rounded, transparent on the card, natural height) `TILE_HEADER_GAP_DP` apart. Copy and Recent menus keep focus while open;
+  closing them or choosing an item restores the Notes panel `FocusRequester`. The Notes `TileSlot` marks its whole body-root focus target as a panel
+  target so a partially visible panel does not scroll to expose its clipped bottom during restoration; smaller editor/caret targets keep the normal
+  minimum bring-into-view behavior. The AI composer follows the same style
   but is not a toolbar: it sits on the card (tag `ai-composer`, no band or border) as the tile's fixed part below the conversation, with a text field
   (0.5 dp border, `CORNER_MD`, like the buttons; 60 dp by default), the Send button (unchanged), an outlined mic (`DictationMic(outlined = true)`) and an 11 sp hint on one row,
   `TILE_HEADER_GAP_DP` apart. There is no splitter between the conversation and the composer: the tile is resized from its own handle and the conversation
@@ -2066,6 +2068,15 @@ toggles the rule list when the section is expanded; when collapsed, it expands b
 Whole-section Highlighters visibility is an independent filter-panel UI state,
 persisted at the end of its positional token without changing the older list-only expansion field.
 
+The built-in Error-level whole-row rule is a fallback in the shared resolver, after explicit
+whole-line rules and before normal search/selection/crash painting priority. It matches the parsed
+`LogLevel.E` value only, never words such as "Error" in a message. `ErrorHighlightStyle` carries
+enabled/background/color/text/font/bold/italic settings globally and nullable per tab; a tab's null
+override inherits the current app style until first edit. The tab override is the last tab-token
+field and participates in autosave snapshots independently of filter presets. Original and Filtered
+rows and the minimap use the same fallback ownership. Compare filter copies preserve the source tab's
+style while each side resolves its own Error rows.
+
 **`utils/HighlightMatch.kt` is the one matcher.** `highlighterMatches` answers "does this enabled
 highlighter find its pattern on this row" (tag limit and target honoured); `resolveLineHighlight`
 turns a row plus the tab's highlighters into a `LineHighlight(wholeLine, spans)`; `countHighlighterRows`
@@ -2954,10 +2965,14 @@ replacements without changing text automatically. Markdown syntax, code, URLs, p
 metadata and other technical spans are excluded while source offsets are preserved. Decorations and
 ignored suggestions are session UI state, not note content or exported markup. The JSON-only
 `ProofreadingSettings` defaults to enabled with `en-US`; `en-GB` is the other supported variant.
-Suggestion popups remain passive while typing. Press Alt+Enter (Option+Return on macOS) with the
-caret on an issue to enter keyboard mode; Tab/Shift+Tab move between replacements and Ignore,
-Enter/Space activates the focused choice, and Escape returns to the editor without changing text.
-Escape suppresses the passive popup until the caret or text changes.
+Its app-wide vocabulary is normalized to trimmed, case-insensitive single words and shared by
+existing editors. Only an exact spelling issue for a complete saved word is filtered; grammar,
+style and capitalization remain. `ProofreadingAssist` keys checks by the normalized vocabulary,
+filters live shifted marks immediately, and checks the latest settings again before committing an
+async result. Suggestion popups remain passive while typing. Press Alt+Enter (Option+Return on
+macOS) with the caret on an issue to enter keyboard mode; Tab/Shift+Tab move between replacements,
+Add to vocabulary and Ignore, Enter/Space activates the focused choice, and Escape returns to the
+editor without changing text. Escape suppresses the passive popup until the caret or text changes.
 
 ### 14.5 Update checker
 

@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.HighlightTarget
@@ -109,12 +110,16 @@ internal class HighlighterSectionState {
     var addFontFamily by mutableStateOf<String?>(null)
     var addBold by mutableStateOf<Boolean?>(null)
     var addItalic by mutableStateOf<Boolean?>(null)
+    var errorBackgroundPickerOpen by mutableStateOf(false)
+    var errorForegroundPickerOpen by mutableStateOf(false)
     val addScopeChip = mutableStateOf<String?>(null)
 
     fun closeColorPickers() {
         rowColorPickerId = null
         addColorPickerOpen = false
         addForegroundPickerOpen = false
+        errorBackgroundPickerOpen = false
+        errorForegroundPickerOpen = false
     }
 }
 
@@ -153,6 +158,10 @@ internal data class HighlighterActions(
     val onPaletteColumnsChange: (Int) -> Unit,
     val customColorEditorExpanded: Boolean = true,
     val onCustomColorEditorExpandedChange: (Boolean) -> Unit = {},
+    val errorHighlightStyle: ErrorHighlightStyle = ErrorHighlightStyle(),
+    val errorHighlightInherited: Boolean = true,
+    val onChangeErrorHighlightStyle: (ErrorHighlightStyle) -> Unit = {},
+    val onResetErrorHighlightStyle: () -> Unit = {},
 )
 
 // Counts run off the UI thread and are keyed on the fields that decide what matches (not colour,
@@ -224,7 +233,9 @@ internal fun HighlighterSection(
     val filter = tab.filter
     val regexHighlightAvailable = filter.mode == FilterMode.KEYWORD && filter.kwRegex && filter.kwText.isNotBlank()
     val displayedCount = filter.highlighters.size + if (regexHighlightAvailable) 1 else 0
-    val enabledCount = filter.highlighters.count { it.on } + if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0
+    val enabledCount = filter.highlighters.count { it.on } +
+        (if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0) +
+        (if (actions.errorHighlightStyle.enabled) 1 else 0)
     var kwPickerOpen by remember { mutableStateOf(false) }
     var editingId by remember(tab.id) { mutableStateOf<String?>(null) }
     var addFocused by remember { mutableStateOf(false) }
@@ -304,6 +315,14 @@ internal fun HighlighterSection(
             bodyModifier = bodyModifier,
         ),
     ) {
+        if (fpState.highlightersExpanded) {
+            ErrorLevelHighlightRow(
+                style = actions.errorHighlightStyle,
+                inherited = actions.errorHighlightInherited,
+                controlsState = sectionState,
+                actions = actions,
+            )
+        }
         if (fpState.highlightersExpanded && displayedCount > 0 && fpState.hlListExpanded) {
             val rows = minOf(displayedCount, filterListRows) * HL_ROW_DP + if (editing != null) HL_EDITOR_EXTRA_DP else 0
             FlexScrollBox(rows, Modifier.testTag("filter-highlighters-list")) {
@@ -395,6 +414,112 @@ internal fun HighlighterSection(
         }
     }
 }
+
+@Composable
+private fun ErrorLevelHighlightRow(
+    style: ErrorHighlightStyle,
+    inherited: Boolean,
+    controlsState: HighlighterSectionState,
+    actions: HighlighterActions,
+) {
+    val tc = tc()
+    var styleExpanded by remember { mutableStateOf(false) }
+    val update = actions.onChangeErrorHighlightStyle
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            RoundIndicator(
+                active = style.enabled,
+                color = style.color,
+                onClick = { update(style.copy(enabled = !style.enabled)) },
+            )
+            AppText("Error level", color = if (style.enabled) tc.tx else tc.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            AppText(if (inherited) "Inherited" else "Override", color = tc.td, fontSize = 9.sp)
+            if (!inherited) {
+                AppButton("Use global", onClick = actions.onResetErrorHighlightStyle, variant = ButtonVariant.Ghost,
+                    modifier = Modifier.testTag("error-highlight-reset"))
+            }
+            AppButton(if (styleExpanded) "Done" else "Edit", onClick = { styleExpanded = !styleExpanded }, variant = ButtonVariant.Ghost,
+                modifier = Modifier.testTag("error-highlight-edit"))
+        }
+        if (styleExpanded) HighlighterStyleControls(
+            state = HighlighterStyleControlsState(
+                backgroundColor = style.color,
+                backgroundEnabled = style.backgroundEnabled,
+                foregroundColor = style.textColor,
+                bold = style.bold,
+                italic = style.italic,
+                fontFamily = style.fontFamily,
+                backgroundPickerOpen = controlsState.errorBackgroundPickerOpen,
+                foregroundPickerOpen = controlsState.errorForegroundPickerOpen,
+            ),
+            palette = actions.stylePaletteActions(),
+            onChange = HighlighterStyleControlActions(
+                onBackgroundColor = { update(style.copy(color = it)) },
+                onBackgroundEnabled = { update(style.copy(backgroundEnabled = it)) },
+                onForegroundColor = { update(style.copy(textColor = it)) },
+                onBold = { update(style.copy(bold = it)) },
+                onItalic = { update(style.copy(italic = it)) },
+                onFontFamily = { update(style.copy(fontFamily = it)) },
+                onBackgroundPickerOpen = { controlsState.errorBackgroundPickerOpen = it },
+                onForegroundPickerOpen = { controlsState.errorForegroundPickerOpen = it },
+            ),
+            testTagPrefix = "error-highlight",
+        )
+        if (styleExpanded) StylePreview(style.toPreviewHighlighter())
+    }
+}
+
+@Composable
+internal fun ErrorHighlightStyleSettings(
+    style: ErrorHighlightStyle,
+    palette: HighlighterStylePaletteActions,
+    onChange: (ErrorHighlightStyle) -> Unit,
+) {
+    val tc = tc()
+    var expanded by remember { mutableStateOf(false) }
+    var backgroundPickerOpen by remember { mutableStateOf(false) }
+    var foregroundPickerOpen by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).settingsAnchor("Error level rows"), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            RoundIndicator(style.enabled, style.color, { onChange(style.copy(enabled = !style.enabled)) })
+            AppText("Error level rows", color = if (style.enabled) tc.tx else tc.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            AppButton(if (expanded) "Done" else "Edit style", onClick = { expanded = !expanded }, variant = ButtonVariant.Ghost)
+        }
+        if (expanded) HighlighterStyleControls(
+            state = HighlighterStyleControlsState(
+                backgroundColor = style.color,
+                backgroundEnabled = style.backgroundEnabled,
+                foregroundColor = style.textColor,
+                bold = style.bold,
+                italic = style.italic,
+                fontFamily = style.fontFamily,
+                backgroundPickerOpen = backgroundPickerOpen,
+                foregroundPickerOpen = foregroundPickerOpen,
+            ),
+            palette = palette,
+            onChange = HighlighterStyleControlActions(
+                onBackgroundColor = { onChange(style.copy(color = it)) },
+                onBackgroundEnabled = { onChange(style.copy(backgroundEnabled = it)) },
+                onForegroundColor = { onChange(style.copy(textColor = it)) },
+                onBold = { onChange(style.copy(bold = it)) },
+                onItalic = { onChange(style.copy(italic = it)) },
+                onFontFamily = { onChange(style.copy(fontFamily = it)) },
+                onBackgroundPickerOpen = { backgroundPickerOpen = it },
+                onForegroundPickerOpen = { foregroundPickerOpen = it },
+            ),
+            testTagPrefix = "error-highlight-global",
+        )
+        if (expanded) StylePreview(style.toPreviewHighlighter())
+    }
+}
+
+private fun ErrorHighlightStyle.toPreviewHighlighter() = Highlighter(
+    id = "error-preview", pattern = "", regex = false, color = color, on = true, wholeLine = true,
+    textColor = textColor, backgroundEnabled = backgroundEnabled, fontFamily = fontFamily, bold = bold, italic = italic,
+)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -542,7 +667,7 @@ private fun EditorRow(caption: String, content: @Composable RowScope.() -> Unit)
     }
 }
 
-private data class HighlighterStyleControlsState(
+internal data class HighlighterStyleControlsState(
     val backgroundColor: Color,
     val backgroundEnabled: Boolean,
     val foregroundColor: Color?,
@@ -553,7 +678,7 @@ private data class HighlighterStyleControlsState(
     val foregroundPickerOpen: Boolean,
 )
 
-private data class HighlighterStyleControlActions(
+internal data class HighlighterStyleControlActions(
     val onBackgroundColor: (Color) -> Unit,
     val onBackgroundEnabled: (Boolean) -> Unit,
     val onForegroundColor: (Color?) -> Unit,
@@ -564,11 +689,24 @@ private data class HighlighterStyleControlActions(
     val onForegroundPickerOpen: (Boolean) -> Unit,
 )
 
+internal data class HighlighterStylePaletteActions(
+    val customColors: List<Color>,
+    val onSaveCustomColor: (Color) -> Unit,
+    val onDeleteCustomColor: (Color) -> Unit,
+    val customColorEditorExpanded: Boolean,
+    val onCustomColorEditorExpandedChange: (Boolean) -> Unit,
+)
+
+private fun HighlighterActions.stylePaletteActions() = HighlighterStylePaletteActions(
+    customColors, onSaveCustomColor, onDeleteCustomColor, customColorEditorExpanded,
+    onCustomColorEditorExpandedChange,
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun HighlighterStyleControls(
+internal fun HighlighterStyleControls(
     state: HighlighterStyleControlsState,
-    actions: HighlighterActions,
+    palette: HighlighterStylePaletteActions,
     onChange: HighlighterStyleControlActions,
     testTagPrefix: String,
 ) {
@@ -584,13 +722,13 @@ private fun HighlighterStyleControls(
             color = state.backgroundColor,
             pickerOpen = state.backgroundPickerOpen,
             testTagPrefix = "$testTagPrefix-background",
-            customColors = actions.customColors,
-            onSaveCustomColor = actions.onSaveCustomColor,
-            onDeleteCustomColor = actions.onDeleteCustomColor,
+            customColors = palette.customColors,
+            onSaveCustomColor = palette.onSaveCustomColor,
+            onDeleteCustomColor = palette.onDeleteCustomColor,
             onColorChange = onChange.onBackgroundColor,
             onPickerOpenChange = onChange.onBackgroundPickerOpen,
-            customColorEditorExpanded = actions.customColorEditorExpanded,
-            onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+            customColorEditorExpanded = palette.customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = palette.onCustomColorEditorExpandedChange,
             onToggleEnabled = {
                 val enabled = !state.backgroundEnabled
                 onChange.onBackgroundEnabled(enabled)
@@ -609,13 +747,13 @@ private fun HighlighterStyleControls(
             color = state.foregroundColor ?: contrastingTextColor(state.backgroundColor),
             pickerOpen = state.foregroundPickerOpen,
             testTagPrefix = "$testTagPrefix-foreground",
-            customColors = actions.customColors,
-            onSaveCustomColor = actions.onSaveCustomColor,
-            onDeleteCustomColor = actions.onDeleteCustomColor,
+            customColors = palette.customColors,
+            onSaveCustomColor = palette.onSaveCustomColor,
+            onDeleteCustomColor = palette.onDeleteCustomColor,
             onColorChange = { onChange.onForegroundColor(it) },
             onPickerOpenChange = onChange.onForegroundPickerOpen,
-            customColorEditorExpanded = actions.customColorEditorExpanded,
-            onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+            customColorEditorExpanded = palette.customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = palette.onCustomColorEditorExpandedChange,
             onToggleEnabled = {
                 if (state.foregroundColor == null) {
                     onChange.onForegroundColor(contrastingTextColor(state.backgroundColor))
@@ -1020,7 +1158,7 @@ private fun HighlighterEditor(
                 backgroundPickerOpen = backgroundColorPickerOpen,
                 foregroundPickerOpen = foregroundColorPickerOpen,
             ),
-            actions = actions,
+            palette = actions.stylePaletteActions(),
             onChange = HighlighterStyleControlActions(
                 onBackgroundColor = { draft = draft.copy(color = it) },
                 onBackgroundEnabled = { draft = draft.copy(backgroundEnabled = it) },
@@ -1287,7 +1425,7 @@ private fun HighlighterAddForm(
                 backgroundPickerOpen = sectionState.addColorPickerOpen,
                 foregroundPickerOpen = addForegroundPickerOpen,
             ),
-            actions = actions,
+            palette = actions.stylePaletteActions(),
             onChange = HighlighterStyleControlActions(
                 onBackgroundColor = actions.onSetNewColor,
                 onBackgroundEnabled = { sectionState.addBackgroundEnabled = it },
