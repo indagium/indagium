@@ -51,7 +51,9 @@ class HolidayThemesTest {
         assertEquals(HolidayPack.PUMPKIN_PATCH, activeHolidayPack(auto, LocalDate.of(2026, 10, 24)))
         assertEquals(HolidayPack.PUMPKIN_PATCH, activeHolidayPack(auto, LocalDate.of(2026, 10, 31)))
         assertEquals(HolidayPack.PUMPKIN_PATCH, activeHolidayPack(auto, LocalDate.of(2026, 11, 1)))
-        assertNull(activeHolidayPack(auto, LocalDate.of(2026, 11, 2)))
+        // The day after Halloween's window is Día de Muertos' last day (its window is Oct 31 - Nov 2); nothing is active after it.
+        assertEquals(HolidayPack.DIA_DE_MUERTOS, activeHolidayPack(auto, LocalDate.of(2026, 11, 2)))
+        assertNull(activeHolidayPack(auto, LocalDate.of(2026, 11, 3)))
     }
 
     @Test
@@ -146,7 +148,8 @@ class HolidayThemesTest {
         assertEquals(themeColors(ThemePreset.GRUVBOX), effectiveThemeColors(settings, LocalDate.of(2026, 10, 31)))
         val seasonal = settings.withHoliday { it.copy(mode = HolidayMode.AUTOMATIC) }
         assertSame(PUMPKIN_DARK, effectiveThemeColors(seasonal, LocalDate.of(2026, 10, 31)))
-        assertEquals(themeColors(ThemePreset.GRUVBOX), effectiveThemeColors(seasonal, LocalDate.of(2026, 11, 2)))
+        // Nov 3: past Halloween and Día de Muertos, before Thanksgiving, so no pack applies.
+        assertEquals(themeColors(ThemePreset.GRUVBOX), effectiveThemeColors(seasonal, LocalDate.of(2026, 11, 3)))
     }
 
     @Test
