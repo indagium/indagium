@@ -32,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
@@ -1267,8 +1268,9 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
         // so cells line up as columns and the last column ends on the right content edge.
         // The fourth row groups every Ctrl+F / Find setting. It and the last row reserve an
         // identical two-line label area in every cell so their controls align even though some
-        // labels wrap.
+        // labels wrap. "Error rows" opens its style editor in a full-width panel right below the grid.
         val finalRowLabelAreaHeight = 28.dp
+        var errorStyleExpanded by remember { mutableStateOf(false) }
 
         SettingsGrid(columns = 4, rowSpacing = 16.dp) {
             CompactSetting("Visible tabs") {
@@ -1336,6 +1338,18 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
             CompactSettingWithTooltip(
+                label = "Error rows",
+                tooltip = "Tints every Error-level row in every tab. Crash rows, by contrast, colors the rows of an " +
+                    "expanded crash group. A tab can override this style from its Highlighters section.",
+            ) {
+                ErrorRowsSettingControl(
+                    style = state.settings.errorHighlightStyle,
+                    styleExpanded = errorStyleExpanded,
+                    onStyleExpandedChange = { errorStyleExpanded = it },
+                    onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
+                )
+            }
+            CompactSettingWithTooltip(
                 label = "Row number",
                 tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
                     "you filter or fold rows, so it always points back to the same spot in the full log.",
@@ -1387,21 +1401,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     options = listOf("On", "Off"),
                     selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
                     onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Process names in new tabs",
-                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-                    "different logs with two different sets of processes. Per-tab picks reset every session " +
-                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
                 )
             }
             CompactSettingWithTooltip(
@@ -1492,6 +1491,30 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
                 )
             }
+            CompactSettingWithTooltip(
+                label = "Process names in new tabs",
+                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                    "different logs with two different sets of processes. Per-tab picks reset every session " +
+                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                )
+            }
+        }
+        if (errorStyleExpanded) {
+            ErrorRowsStylePanel(
+                style = state.settings.errorHighlightStyle,
+                palette = stylePalette,
+                onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
+            )
         }
         SettingsControlRow {
             CompactSettingWithTooltip(
@@ -1516,15 +1539,22 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
         }
-        SettingsControlRow {
-            ErrorHighlightStyleSettings(
-                style = state.settings.errorHighlightStyle,
-                palette = stylePalette,
-                onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
-            )
-        }
         ProofreadingVocabularyManager(state)
     }
+}
+
+/** True when [typed] normalizes to a word that [words] already holds. */
+internal fun isVocabularyDuplicate(typed: String, words: List<String>): Boolean {
+    val key = normalizeProofreadingVocabularyWord(typed) ?: return false
+    return words.any { normalizeProofreadingVocabularyWord(it) == key }
+}
+
+/** The one helper line under the vocabulary field: the duplicate warning while the typed word is already saved, else the word count. */
+internal fun vocabularyHelperText(typed: String, words: List<String>): String = when {
+    isVocabularyDuplicate(typed, words) -> "Already in your vocabulary."
+    words.isEmpty() -> "No saved words"
+    words.size == 1 -> "1 word"
+    else -> "${words.size} words"
 }
 
 @Composable
@@ -1533,64 +1563,90 @@ private fun ProofreadingVocabularyManager(state: AppState) {
     val proofreading = state.settings.proofreading
     val words = proofreading.vocabulary
     val queryKey = normalizeProofreadingVocabularyWord(query)
-    val duplicate = queryKey != null && words.any {
-        normalizeProofreadingVocabularyWord(it) == queryKey
-    }
+    val duplicate = isVocabularyDuplicate(query, words)
     val visible = remember(words, query) { words.filter { query.isBlank() || it.contains(query.trim(), ignoreCase = true) } }
     val tc = tc()
-    Column(
-        Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).border(1.dp, tc.br, CORNER_MD)
-            .padding(10.dp).settingsAnchor("Personal proofreading vocabulary").testTag("proofreading-vocabulary-manager"),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+    val listShape = RoundedCornerShape(6.dp)
+    CompactSettingWithTooltip(
+        label = "Personal vocabulary",
+        tooltip = "Words spelling suggestions accept in notes and captions. Used while English proofreading is On.",
+        // Dimmed while proofreading is Off, but still editable: the words are kept for when it is turned back on.
+        modifier = Modifier.fillMaxWidth().alpha(if (proofreading.enabled) 1f else 0.5f).testTag("proofreading-vocabulary-manager"),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            AppText("Personal vocabulary", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            AppText("${words.size} words", color = tc.td, fontSize = 10.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            InlineField(
-                query,
-                { query = it },
-                "Search or add a word",
-                Modifier.weight(1f).testTag("proofreading-vocabulary-query"),
-                onClear = { query = "" },
-                onSubmit = { if (queryKey != null && !duplicate) addVocabularyWord(state, query) },
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                InlineField(
+                    query,
+                    { query = it },
+                    "Search or add a word",
+                    Modifier.weight(1f).testTag("proofreading-vocabulary-query"),
+                    onClear = { query = "" },
+                    onSubmit = {
+                        if (queryKey != null && !duplicate) {
+                            addVocabularyWord(state, query)
+                            query = ""
+                        }
+                    },
+                )
+                AppButton(
+                    "Add",
+                    onClick = {
+                        addVocabularyWord(state, query)
+                        query = ""
+                    },
+                    enabled = queryKey != null && !duplicate,
+                    modifier = Modifier.testTag("proofreading-vocabulary-add"),
+                )
+            }
+            AppText(
+                vocabularyHelperText(query, words),
+                color = if (duplicate) tc.ts else tc.td,
+                fontSize = 10.sp,
+                modifier = Modifier.testTag("proofreading-vocabulary-helper"),
             )
-            AppButton(
-                "Add",
-                onClick = { addVocabularyWord(state, query) },
-                enabled = queryKey != null && !duplicate,
-                modifier = Modifier.testTag("proofreading-vocabulary-add"),
-            )
-        }
-        Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
-            visible.forEach { word ->
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            if (words.isNotEmpty()) {
+                val scroll = rememberScrollState()
+                Box(
+                    Modifier.fillMaxWidth().heightIn(max = 180.dp)
+                        .background(tc.p2, listShape).border(1.dp, tc.br, listShape),
                 ) {
-                    AppText(word, color = tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                    AppButton(
-                        "Remove",
-                        onClick = {
-                            val removedKey = normalizeProofreadingVocabularyWord(word)
-                            state.updateSettings { settings ->
-                                val current = settings.proofreading.vocabulary
-                                settings.copy(
-                                    proofreading = settings.proofreading.copy(
-                                        vocabulary = normalizeProofreadingVocabulary(
-                                            current.filterNot { normalizeProofreadingVocabularyWord(it) == removedKey },
-                                        ),
-                                    ),
+                    Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = (THIN_SCROLLBAR_DP + 2f).dp)) {
+                        visible.forEach { word ->
+                            Row(
+                                Modifier.fillMaxWidth().height(24.dp).padding(start = 8.dp, end = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AppText(word, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                                SquareIconButton(
+                                    "×",
+                                    fontSize = 12.sp,
+                                    onClick = {
+                                        val removedKey = normalizeProofreadingVocabularyWord(word)
+                                        state.updateSettings { settings ->
+                                            val current = settings.proofreading.vocabulary
+                                            settings.copy(
+                                                proofreading = settings.proofreading.copy(
+                                                    vocabulary = normalizeProofreadingVocabulary(
+                                                        current.filterNot { normalizeProofreadingVocabularyWord(it) == removedKey },
+                                                    ),
+                                                ),
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("proofreading-vocabulary-remove-${word.hashCode()}"),
+                                    tooltip = "Remove",
                                 )
                             }
-                        },
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.testTag("proofreading-vocabulary-remove-${word.hashCode()}"),
-                    )
+                        }
+                        if (visible.isEmpty()) {
+                            AppText("No matching words", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                        }
+                    }
+                    Box(Modifier.matchParentSize()) {
+                        ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                    }
                 }
             }
-            if (visible.isEmpty()) AppText(if (words.isEmpty()) "No saved words" else "No matching words", color = tc.td, fontSize = 10.sp)
         }
     }
 }

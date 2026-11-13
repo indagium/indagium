@@ -233,9 +233,7 @@ internal fun HighlighterSection(
     val filter = tab.filter
     val regexHighlightAvailable = filter.mode == FilterMode.KEYWORD && filter.kwRegex && filter.kwText.isNotBlank()
     val displayedCount = filter.highlighters.size + if (regexHighlightAvailable) 1 else 0
-    val enabledCount = filter.highlighters.count { it.on } +
-        (if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0) +
-        (if (actions.errorHighlightStyle.enabled) 1 else 0)
+    val enabledCount = highlighterEnabledCount(filter, regexHighlightAvailable)
     var kwPickerOpen by remember { mutableStateOf(false) }
     var editingId by remember(tab.id) { mutableStateOf<String?>(null) }
     var addFocused by remember { mutableStateOf(false) }
@@ -415,6 +413,10 @@ internal fun HighlighterSection(
     }
 }
 
+/** How many of the section's list rows are on: the highlighters plus the Regex row. The Error rows row is not a list row and shows its own state. */
+internal fun highlighterEnabledCount(filter: Filter, regexHighlightAvailable: Boolean): Int =
+    filter.highlighters.count { it.on } + (if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0)
+
 @Composable
 private fun ErrorLevelHighlightRow(
     style: ErrorHighlightStyle,
@@ -435,14 +437,23 @@ private fun ErrorLevelHighlightRow(
                 color = style.color,
                 onClick = { update(style.copy(enabled = !style.enabled)) },
             )
-            AppText("Error level", color = if (style.enabled) tc.tx else tc.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
-            AppText(if (inherited) "Inherited" else "Override", color = tc.td, fontSize = 9.sp)
+            AppText("Error rows", color = if (style.enabled) tc.tx else tc.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
             if (!inherited) {
-                AppButton("Use global", onClick = actions.onResetErrorHighlightStyle, variant = ButtonVariant.Ghost,
-                    modifier = Modifier.testTag("error-highlight-reset"))
+                Box(
+                    Modifier.background(tc.ac.copy(.13f), CORNER_SM)
+                        .border(1.dp, tc.ac.copy(.27f), CORNER_SM)
+                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                        .testTag("error-highlight-override-badge"),
+                ) { AppText("This tab", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+                SquareIconButton(
+                    "↺", fontSize = 12.sp, onClick = actions.onResetErrorHighlightStyle,
+                    modifier = Modifier.testTag("error-highlight-reset"), tooltip = "Use default",
+                )
             }
-            AppButton(if (styleExpanded) "Done" else "Edit", onClick = { styleExpanded = !styleExpanded }, variant = ButtonVariant.Ghost,
-                modifier = Modifier.testTag("error-highlight-edit"))
+            SquareIconButton(
+                "✎", fontSize = 12.sp, onClick = { styleExpanded = !styleExpanded },
+                modifier = Modifier.testTag("error-highlight-edit"), tooltip = if (styleExpanded) "Close style" else "Edit style",
+            )
         }
         if (styleExpanded) HighlighterStyleControls(
             state = HighlighterStyleControlsState(
@@ -468,27 +479,55 @@ private fun ErrorLevelHighlightRow(
             ),
             testTagPrefix = "error-highlight",
         )
-        if (styleExpanded) StylePreview(style.toPreviewHighlighter())
+        if (styleExpanded) StylePreview(style.toPreviewHighlighter(), ERROR_ROW_PREVIEW_SAMPLE)
     }
 }
 
+/** The sample Error row both error-row style editors preview their style on. */
+private const val ERROR_ROW_PREVIEW_SAMPLE = "E AndroidRuntime: FATAL EXCEPTION: main"
+
+/** The Settings › Editor behaviour "Error rows" cell content: the On | Off switch and the Style toggle that opens [ErrorRowsStylePanel]. */
 @Composable
-internal fun ErrorHighlightStyleSettings(
+internal fun ErrorRowsSettingControl(
+    style: ErrorHighlightStyle,
+    styleExpanded: Boolean,
+    onStyleExpandedChange: (Boolean) -> Unit,
+    onChange: (ErrorHighlightStyle) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (style.enabled) 0 else 1),
+            onToggle = { idx -> onChange(style.copy(enabled = idx == 0)) },
+            modifier = Modifier.testTag("error-highlight-global-switch"),
+        )
+        AppButton(
+            if (styleExpanded) "Style ▾" else "Style ▸",
+            onClick = { onStyleExpandedChange(!styleExpanded) },
+            variant = ButtonVariant.Secondary,
+            modifier = Modifier.testTag("error-highlight-global-style-toggle"),
+            leadingContent = { Box(Modifier.size(12.dp).background(style.color, CORNER_SM)) },
+        )
+    }
+}
+
+/** The full-width style editor shown below the Editor behaviour grid while the "Error rows" Style button is open. */
+@Composable
+internal fun ErrorRowsStylePanel(
     style: ErrorHighlightStyle,
     palette: HighlighterStylePaletteActions,
     onChange: (ErrorHighlightStyle) -> Unit,
 ) {
     val tc = tc()
-    var expanded by remember { mutableStateOf(false) }
     var backgroundPickerOpen by remember { mutableStateOf(false) }
     var foregroundPickerOpen by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).settingsAnchor("Error level rows"), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            RoundIndicator(style.enabled, style.color, { onChange(style.copy(enabled = !style.enabled)) })
-            AppText("Error level rows", color = if (style.enabled) tc.tx else tc.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
-            AppButton(if (expanded) "Done" else "Edit style", onClick = { expanded = !expanded }, variant = ButtonVariant.Ghost)
-        }
-        if (expanded) HighlighterStyleControls(
+    val cardShape = RoundedCornerShape(6.dp)
+    Column(
+        Modifier.fillMaxWidth().background(tc.p2, cardShape).border(1.dp, tc.br, cardShape)
+            .padding(horizontal = 12.dp, vertical = 10.dp).testTag("error-highlight-global-panel"),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        HighlighterStyleControls(
             state = HighlighterStyleControlsState(
                 backgroundColor = style.color,
                 backgroundEnabled = style.backgroundEnabled,
@@ -511,8 +550,9 @@ internal fun ErrorHighlightStyleSettings(
                 onForegroundPickerOpen = { foregroundPickerOpen = it },
             ),
             testTagPrefix = "error-highlight-global",
+            wide = true,
         )
-        if (expanded) StylePreview(style.toPreviewHighlighter())
+        StylePreview(style.toPreviewHighlighter(), ERROR_ROW_PREVIEW_SAMPLE)
     }
 }
 
@@ -709,6 +749,8 @@ internal fun HighlighterStyleControls(
     palette: HighlighterStylePaletteActions,
     onChange: HighlighterStyleControlActions,
     testTagPrefix: String,
+    // True where the editor has room to spare (the Settings dialog): spelled-out colour labels, a wider font picker and a larger status line.
+    wide: Boolean = false,
 ) {
     val tc = tc()
     FlowRow(
@@ -717,7 +759,8 @@ internal fun HighlighterStyleControls(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         HighlighterStyleColorControl(
-            label = "Bg",
+            label = if (wide) "Background" else "Bg",
+            background = true,
             enabled = state.backgroundEnabled,
             color = state.backgroundColor,
             pickerOpen = state.backgroundPickerOpen,
@@ -742,7 +785,8 @@ internal fun HighlighterStyleControls(
             toggleTestTag = "$testTagPrefix-background-toggle",
         )
         HighlighterStyleColorControl(
-            label = "Fg",
+            label = if (wide) "Text" else "Fg",
+            background = false,
             enabled = state.foregroundColor != null,
             color = state.foregroundColor ?: contrastingTextColor(state.backgroundColor),
             pickerOpen = state.foregroundPickerOpen,
@@ -791,7 +835,7 @@ internal fun HighlighterStyleControls(
             defaultLabel = "Log font",
             fallbackFamily = LocalLogFontFamily.current,
             onSelect = onChange.onFontFamily,
-            modifier = Modifier.widthIn(min = 88.dp, max = 112.dp),
+            modifier = if (wide) Modifier.widthIn(min = 160.dp, max = 240.dp) else Modifier.widthIn(min = 88.dp, max = 112.dp),
             testTagPrefix = "$testTagPrefix-font",
             showPreview = false,
         )
@@ -801,7 +845,7 @@ internal fun HighlighterStyleControls(
         AppText(
             "Bold ${styleOverrideName(state.bold)} · Italic ${styleOverrideName(state.italic)}",
             color = tc.td,
-            fontSize = 9.sp,
+            fontSize = if (wide) 10.sp else 9.sp,
             modifier = Modifier.testTag("$testTagPrefix-style-state"),
         )
     }
@@ -814,6 +858,7 @@ internal fun HighlighterStyleControls(
 )
 private fun HighlighterStyleColorControl(
     label: String,
+    background: Boolean,
     enabled: Boolean,
     color: Color,
     pickerOpen: Boolean,
@@ -833,11 +878,11 @@ private fun HighlighterStyleColorControl(
     val tc = tc()
     val shape = RoundedCornerShape(6.dp)
     var hovered by remember(groupTestTag) { mutableStateOf(false) }
-    val targetName = if (label == "Bg") "Background" else "Text color"
-    val tooltipText = when (label to enabled) {
-        "Bg" to true -> "Background is on. Click chip to turn off; click swatch to choose color."
-        "Bg" to false -> "Background is off. Click chip to turn on; swatch chooses color and turns it on."
-        "Fg" to true -> "Text color is on. Click chip to inherit log color; swatch chooses text color."
+    val targetName = if (background) "Background" else "Text color"
+    val tooltipText = when {
+        background && enabled -> "Background is on. Click chip to turn off; click swatch to choose color."
+        background -> "Background is off. Click chip to turn on; swatch chooses color and turns it on."
+        enabled -> "Text color is on. Click chip to inherit log color; swatch chooses text color."
         else -> "Text color is inherited. Click chip to set it; swatch chooses text color."
     }
     TooltipArea(tooltip = { ToolbarTooltip(tooltipText, maxLines = 3) }) {
@@ -989,7 +1034,7 @@ private fun LargeBackgroundColorPreview(color: Color, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StylePreview(highlighter: Highlighter) {
+private fun StylePreview(highlighter: Highlighter, sampleText: String = "Preview matched text") {
     val tc = tc()
     val previewAlpha = if (highlighter.wholeLine) {
         HL_WHOLE_LINE_BACKGROUND_ALPHA
@@ -1010,7 +1055,7 @@ private fun StylePreview(highlighter: Highlighter) {
             .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
         Text(
-            "Preview matched text",
+            sampleText,
             style = TextStyle(
                 color = highlighter.textColor ?: tc.tx,
                 fontFamily = FontCatalog.resolveOrNull(highlighter.fontFamily) ?: LocalLogFontFamily.current,

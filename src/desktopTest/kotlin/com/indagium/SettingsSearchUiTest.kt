@@ -1,14 +1,20 @@
 package com.indagium
 
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
 import com.indagium.model.SearchScopeBehavior
@@ -19,6 +25,8 @@ import com.indagium.ui.isMacOs
 import org.junit.Rule
 import org.junit.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /** Drives the real Settings dialog: typing into the nav search, Esc, and opening a result. */
 @OptIn(ExperimentalTestApi::class)
@@ -84,7 +92,7 @@ class SettingsSearchUiTest {
         val state = AppState()
         rule.setContent { SettingsDialog(state, onDismiss = {}) }
         type("personal vocabulary")
-        rule.onNodeWithText("Personal proofreading vocabulary").performClick()
+        rule.onNodeWithText("Personal vocabulary").performClick()
         rule.waitForIdle()
 
         val query = rule.onNodeWithTag("proofreading-vocabulary-query")
@@ -93,9 +101,86 @@ class SettingsSearchUiTest {
         rule.waitForIdle()
         rule.runOnIdle { assertEquals(listOf("Indagium"), state.settings.proofreading.vocabulary) }
 
-        rule.onNodeWithText("Remove").performClick()
+        // Adding clears the field, so the helper line counts the saved word.
+        rule.onNodeWithText("1 word").assertExists()
+        rule.onNodeWithText("Already in your vocabulary.").assertDoesNotExist()
+
+        // Typing a saved word again (any case) warns instead of counting and blocks Add.
+        query.performTextInput("indagium")
+        rule.onNodeWithText("Already in your vocabulary.").assertExists()
+        rule.onNodeWithTag("proofreading-vocabulary-add").assertIsNotEnabled()
+        query.performTextClearance()
+        rule.onNodeWithText("1 word").assertExists()
+
+        rule.onNodeWithTag("proofreading-vocabulary-remove-${"Indagium".hashCode()}").performClick()
         rule.waitForIdle()
         rule.runOnIdle { assertEquals(emptyList(), state.settings.proofreading.vocabulary) }
+        rule.onNodeWithText("No saved words").assertExists()
+    }
+
+    @Test
+    fun vocabularyStaysEditableWhileProofreadingIsOff() {
+        val state = AppState()
+        state.updateSettings { it.copy(proofreading = it.proofreading.copy(enabled = false)) }
+        rule.setContent { SettingsDialog(state, onDismiss = {}) }
+        type("personal vocabulary")
+        rule.onNodeWithText("Personal vocabulary").performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("proofreading-vocabulary-query").performTextInput("Indagium")
+        rule.onNodeWithTag("proofreading-vocabulary-add").performClick()
+        rule.waitForIdle()
+        rule.runOnIdle { assertEquals(listOf("Indagium"), state.settings.proofreading.vocabulary) }
+    }
+
+    private fun openEditorBehavior(state: AppState) {
+        rule.setContent { SettingsDialog(state, onDismiss = {}) }
+        type("minimap")
+        rule.onNodeWithText("Minimap").performClick()
+        rule.waitForIdle()
+    }
+
+    private fun top(label: String): Float = rule.onNodeWithText(label).fetchSemanticsNode().positionInRoot.y
+
+    @Test
+    fun editorBehaviorGridKeepsTheCtrlFCellsOnTheirOwnRow() {
+        openEditorBehavior(AppState())
+
+        fun row(vararg labels: String): Float {
+            val tops = labels.map(::top)
+            assertTrue(tops.all { it == tops.first() }, "${labels.toList()} must share a row, tops=$tops")
+            return tops.first()
+        }
+        val row2 = row("Row wrapping", "Crash rows", "Error rows", "Row number")
+        val row3 = row("Minimap", "Follow live logs", "Regex summary", "Original panel")
+        val row4 = row("Ctrl+F opens", "Ctrl+F also shows Original", "Search scope behavior", "Link split selection and Find")
+        val row5 = row("Video follow readout", "New video links:\ndouble-click seeks", "Process names in new tabs")
+        assertTrue(row2 < row3 && row3 < row4 && row4 < row5, "rows out of order: $row2 $row3 $row4 $row5")
+    }
+
+    @Test
+    fun errorRowsCellSwitchesAndOpensTheStylePanelBelowTheGrid() {
+        val state = AppState()
+        openEditorBehavior(state)
+
+        rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
+        rule.onNodeWithText("Style ▸").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("error-highlight-global-panel").assertExists()
+        rule.onNodeWithText("Style ▾").assertExists()
+        // The wide editor spells out the colour labels and previews on a sample Error row.
+        rule.onNodeWithText("Background").assertExists()
+        rule.onNodeWithText("Text").assertExists()
+        rule.onNodeWithText("E AndroidRuntime: FATAL EXCEPTION: main").assertExists()
+        assertTrue(top("Style ▾") < rule.onNodeWithTag("error-highlight-global-panel").fetchSemanticsNode().positionInRoot.y)
+
+        rule.onNodeWithText("Style ▾").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
+
+        rule.runOnIdle { assertTrue(state.settings.errorHighlightStyle.enabled) }
+        rule.onNode(hasText("Off") and hasAnyAncestor(hasTestTag("error-highlight-global-switch"))).performClick()
+        rule.runOnIdle { assertFalse(state.settings.errorHighlightStyle.enabled) }
     }
 
     @Test

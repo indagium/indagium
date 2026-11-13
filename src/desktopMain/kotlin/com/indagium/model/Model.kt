@@ -1295,9 +1295,8 @@ data class ProofreadingSettings(
     val vocabulary: List<String> = emptyList(),
 )
 
-/** Default red used to tint parsed Error-level log rows. */
-@Suppress("MagicNumber")
-val DEFAULT_ERROR_HIGHLIGHT_COLOR: Color = Color(0xFFf85149)
+/** Default red used to tint parsed Error-level log rows: the Error level's own colour. */
+val DEFAULT_ERROR_HIGHLIGHT_COLOR: Color = LogLevel.E.defaultColor
 
 /** Appearance of parsed Error-level log rows. A tab may override the global setting. */
 data class ErrorHighlightStyle(
