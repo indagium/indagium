@@ -716,7 +716,13 @@ internal fun AppearanceSystemFontSelectors(state: AppState) {
 /** Test tag of the Shape style control. */
 internal const val SHAPE_STYLE_CONTROL_TAG = "shape-style"
 
-private const val SHAPE_STYLE_HINT = "Corners of tiles and the toolbar. Theme default keeps each theme's own shapes; tabs follow your Tab style."
+/** Test tag of the Toolbar shape control. */
+internal const val TOOLBAR_SHAPE_CONTROL_TAG = "toolbar-shape"
+
+private const val SHAPE_STYLE_HINT =
+    "Corners of the tiles. Theme default keeps each theme's own shapes; tabs follow your Tab style and the toolbar has its own setting."
+private const val TOOLBAR_SHAPE_HINT =
+    "Corners of the toolbar's button groups and the Layout menu button. Theme default keeps each theme's own shapes."
 
 internal fun shapeStyleLabel(style: ShapeStyle): String = when (style) {
     ShapeStyle.THEME -> "Theme default"
@@ -726,7 +732,7 @@ internal fun shapeStyleLabel(style: ShapeStyle): String = when (style) {
     ShapeStyle.ROUND -> "Round"
 }
 
-// How round the tiles, the toolbar's button groups and the tabs are, for every theme (ui/UiCorners.kt).
+// How round the tiles are, for every theme (ui/UiCorners.kt).
 @Composable
 internal fun ShapeStyleSetting(state: AppState) {
     val tc = tc()
@@ -742,11 +748,28 @@ internal fun ShapeStyleSetting(state: AppState) {
     }
 }
 
+// How round the toolbar's button groups and the Layout menu button are, separately from the tiles (ui/UiCorners.kt).
+@Composable
+internal fun ToolbarShapeSetting(state: AppState) {
+    val tc = tc()
+    CompactSetting("Toolbar shape") {
+        val styles = ShapeStyle.entries
+        SegmentedControl(
+            options = styles.map(::shapeStyleLabel),
+            selectedIndices = setOf(styles.indexOf(state.settings.toolbarShapeStyle)),
+            onToggle = { idx -> state.updateSettings { it.copy(toolbarShapeStyle = styles[idx]) } },
+            modifier = Modifier.testTag(TOOLBAR_SHAPE_CONTROL_TAG),
+        )
+        AppText(TOOLBAR_SHAPE_HINT, color = tc.td, fontSize = 10.sp)
+    }
+}
+
 @Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
     ThemeSettingsBlock(state)
     ShapeStyleSetting(state)
+    ToolbarShapeSetting(state)
     AppearanceBasicsRow(state)
     AppearanceSystemFontSelectors(state)
     TabsAppearanceSettings(state)

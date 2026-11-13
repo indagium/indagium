@@ -59,6 +59,7 @@ class ChromeSettingsCodecTest {
         assertEquals(CHROME_VERTICAL_TAB_BAR_DP, s.verticalTabBarWidthDp)
         assertEquals(ToolbarPlacement.WITH_TABS_END, s.toolbarFallbackPlacement)
         assertEquals(ShapeStyle.THEME, s.shapeStyle)
+        assertEquals(ShapeStyle.THEME, s.toolbarShapeStyle)
     }
 
     @Test
@@ -80,6 +81,7 @@ class ChromeSettingsCodecTest {
             verticalTabBarWidthDp = 312.5f,
             toolbarFallbackPlacement = ToolbarPlacement.OWN_EDGE,
             shapeStyle = ShapeStyle.ROUND,
+            toolbarShapeStyle = ShapeStyle.SQUARE,
         )
         val back = decode(custom.settingsJson())
         assertEquals(15, back.fontSize)
@@ -99,6 +101,27 @@ class ChromeSettingsCodecTest {
         assertEquals(312.5f, back.verticalTabBarWidthDp)
         assertEquals(ToolbarPlacement.OWN_EDGE, back.toolbarFallbackPlacement)
         assertEquals(ShapeStyle.ROUND, back.shapeStyle)
+        assertEquals(ShapeStyle.SQUARE, back.toolbarShapeStyle)
+    }
+
+    @Test
+    fun toolbarShapeStyleIsItsOwnKeyStoredByNameAndNeverFollowsTheShapeStyle() {
+        ShapeStyle.entries.forEach {
+            val back = decode(AppSettings().copy(toolbarShapeStyle = it).settingsJson())
+            assertEquals(it, back.toolbarShapeStyle)
+            assertEquals(ShapeStyle.THEME, back.shapeStyle, "the tiles' Shape style is untouched")
+        }
+        val both = decode(AppSettings().copy(shapeStyle = ShapeStyle.ROUND, toolbarShapeStyle = ShapeStyle.SOFT).settingsJson())
+        assertEquals(ShapeStyle.ROUND, both.shapeStyle)
+        assertEquals(ShapeStyle.SOFT, both.toolbarShapeStyle)
+        assertTrue("\"toolbarShapeStyle\":\"SOFT\"" in AppSettings(toolbarShapeStyle = ShapeStyle.SOFT).settingsJson())
+
+        val unknown = withKeys(AppSettings(toolbarShapeStyle = ShapeStyle.SQUARE)) { it["toolbarShapeStyle"] = parse("\"HEXAGON\"") }
+        assertEquals(ShapeStyle.THEME, decode(unknown).toolbarShapeStyle)
+        // An old file with shapeStyle but no toolbarShapeStyle keeps the toolbar at the theme default.
+        val old = withKeys(AppSettings(shapeStyle = ShapeStyle.ROUND, toolbarShapeStyle = ShapeStyle.ROUND)) { it.remove("toolbarShapeStyle") }
+        assertEquals(ShapeStyle.THEME, decode(old).toolbarShapeStyle)
+        assertEquals(ShapeStyle.ROUND, decode(old).shapeStyle)
     }
 
     @Test
@@ -179,7 +202,7 @@ class ChromeSettingsCodecTest {
                     "tabStripStyle", "tabSizeMode", "tabLabelMode", "tabShowTypeBadge", "tabShowSourceStripe",
                     "tabCloseOnEvery", "chromeLocked", "tabStripPosition", "toolbarPlacement", "toolbarEdge",
                     "tabCloseButtonPosition",
-                    "toolbarOuter", "toolbarAlign", "verticalTabBarWidthDp", "toolbarFallbackPlacement", "shapeStyle",
+                    "toolbarOuter", "toolbarAlign", "verticalTabBarWidthDp", "toolbarFallbackPlacement", "shapeStyle", "toolbarShapeStyle",
                 ).toSet(),
             )
         }

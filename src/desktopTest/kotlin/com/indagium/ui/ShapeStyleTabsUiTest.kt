@@ -72,7 +72,7 @@ class ShapeStyleTabsUiTest {
             CompositionLocalProvider(
                 LocalTheme provides (look?.colors ?: LIGHT_THEME),
                 LocalHoliday provides look,
-                LocalUiCorners provides resolveUiCorners(shapeStyle, look),
+                LocalUiCorners provides resolveUiCorners(shapeStyle, ShapeStyle.THEME, look),
             ) {
                 Box(Modifier.width(200.dp).background(Color.Magenta).testTag("host")) {
                     TabShell(

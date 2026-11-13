@@ -1699,9 +1699,12 @@ data class AppSettings(
     val homeDiagramsView: HomeDiagramsView = HomeDiagramsView.LIST,
     // Global default for parsed Error-level rows; per-tab overrides live on LogTab. JSON only.
     val errorHighlightStyle: ErrorHighlightStyle = ErrorHighlightStyle(),
-    // How round the tiles, the toolbar's button groups and the tabs are (ui/UiCorners.kt). JSON-only (ui/ChromeSettingsJson.kt),
-    // appended last: the frozen positional settings decoder must not gain a field.
+    // How round the tiles are (ui/UiCorners.kt). JSON-only (ui/ChromeSettingsJson.kt), appended last: the frozen positional settings
+    // decoder must not gain a field.
     val shapeStyle: ShapeStyle = ShapeStyle.THEME,
+    // How round the toolbar's button groups and the Layout menu button are, separately from the tiles' [shapeStyle]. JSON-only
+    // (ui/ChromeSettingsJson.kt), appended last.
+    val toolbarShapeStyle: ShapeStyle = ShapeStyle.THEME,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1822,8 +1825,8 @@ enum class TabSizeMode { FIXED, FIT }
 enum class TabCloseButtonPosition { LEFT, RIGHT }
 
 /**
- * How round the tiles, the toolbar's button groups and the tabs are (Settings > Appearance > Shape style). Stored by name, so new values
- * go last.
+ * How round the tiles ([AppSettings.shapeStyle], Settings > Appearance > Shape style) or the toolbar's button groups
+ * ([AppSettings.toolbarShapeStyle], Toolbar shape) are. Tabs are never part of it. Stored by name, so new values go last.
  */
 enum class ShapeStyle {
     /** Each theme's own shapes: the regular 8 / 7 dp look, or the corners a seasonal pack sets. The default. */
@@ -1832,13 +1835,13 @@ enum class ShapeStyle {
     /** No rounding at all. */
     SQUARE,
 
-    /** The regular themes' small radii (tiles 8, toolbar 7, tabs 6 dp), whatever the theme. */
+    /** The regular themes' small radii (tiles 8, toolbar 7 dp), whatever the theme. */
     SOFT,
 
-    /** Clearly rounded corners (tiles 12, toolbar 10, tabs 10 dp). */
+    /** Clearly rounded corners (tiles 12, toolbar 10 dp). */
     ROUNDED,
 
-    /** The roundest: large tile radius, capsule-shaped toolbar groups, tabs 14 dp. */
+    /** The roundest: 16 dp tiles, capsule-shaped toolbar groups. */
     ROUND,
 }
 
@@ -1956,6 +1959,7 @@ data class ProfileAppearance(
     val toolbarAlign: ToolbarAlign? = null,
     val verticalTabBarWidthDp: Float? = null,
     val shapeStyle: ShapeStyle? = null,
+    val toolbarShapeStyle: ShapeStyle? = null,
 )
 
 /**

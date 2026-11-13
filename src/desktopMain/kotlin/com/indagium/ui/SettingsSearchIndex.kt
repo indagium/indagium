@@ -117,19 +117,26 @@ private fun general() = listOf(
     ),
 )
 
+// Settings > Appearance > Shape style and Toolbar shape (ui/UiCorners.kt).
+private fun appearanceShapes() = listOf(
+    entry(
+        SettingsSection.Appearance, "Shape style",
+        "Corners of the tiles: theme default, square, soft, rounded or round. Tabs and the toolbar have their own settings.",
+        listOf("shape", "corners", "rounded", "square", "round", "radius", "soft", "tiles"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Toolbar shape",
+        "Corners of the toolbar's button groups and the Layout menu button: theme default, square, soft, rounded or round (a capsule).",
+        listOf("toolbar", "buttons", "menu buttons", "corners", "rounded", "square", "round", "capsule", "pill"),
+    ),
+)
+
 private fun appearance() = buildList {
     add(
         entry(
             SettingsSection.Appearance, "Theme",
             "Color theme of the whole window.",
             listOf("dark", "light", "palette", "colors", "look"),
-        ),
-    )
-    add(
-        entry(
-            SettingsSection.Appearance, "Shape style",
-            "Corners of tiles and the toolbar: theme default, square, soft, rounded or round.",
-            listOf("shape", "corners", "rounded", "square", "round", "radius", "soft"),
         ),
     )
     add(
@@ -794,7 +801,7 @@ private fun issueTracker() = listOf(
 )
 
 internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> =
-    general() + appearance() + editorBehavior() + exportAnnotations() + capture() +
+    general() + appearance() + appearanceShapes() + editorBehavior() + exportAnnotations() + capture() +
         automation() + aiProviders() + voiceInput() + customAiCommands() + sourceCode() + issues() + testing() + issueTracker()
 
 // Bidirectional groups of interchangeable words. A query token that equals (or, from 3 letters on,

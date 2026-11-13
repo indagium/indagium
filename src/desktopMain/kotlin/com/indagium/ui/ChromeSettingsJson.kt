@@ -23,7 +23,7 @@ import kotlinx.serialization.json.put
 
 // The window chrome's settings (AppSettings.tabStripStyle, tabSizeMode, tabLabelMode, tabShowTypeBadge, tabShowSourceStripe,
 // tabCloseOnEvery, tabCloseButtonPosition, chromeLocked, tabStripPosition, toolbarPlacement, toolbarEdge, toolbarOuter, toolbarAlign,
-// verticalTabBarWidthDp, toolbarFallbackPlacement, shapeStyle), JSON only. They live here, not in
+// verticalTabBarWidthDp, toolbarFallbackPlacement, shapeStyle, toolbarShapeStyle), JSON only. They live here, not in
 // AutosaveCodec.kt, which is already at detekt's per-file function limit. Enums are stored by name. The decoder never throws:
 // an absent, unknown or wrongly typed value leaves the field at its default (a fresh AppSettings), so an old autosave, a legacy
 // positional token or a hand-edited file all give the long-standing tab strip.
@@ -46,6 +46,7 @@ internal fun JsonObjectBuilder.putChromeSettings(settings: AppSettings) {
     put("verticalTabBarWidthDp", settings.verticalTabBarWidthDp)
     put("toolbarFallbackPlacement", settings.toolbarFallbackPlacement.name)
     put("shapeStyle", settings.shapeStyle.name)
+    put("toolbarShapeStyle", settings.toolbarShapeStyle.name)
 }
 
 private inline fun <reified E : Enum<E>> JsonElement?.enumOrDefault(default: E): E {
@@ -85,4 +86,5 @@ internal fun AppSettings.withChromeSettingsFrom(o: JsonObject): AppSettings = co
     verticalTabBarWidthDp = o["verticalTabBarWidthDp"].tabBarWidthOrDefault(verticalTabBarWidthDp),
     toolbarFallbackPlacement = o["toolbarFallbackPlacement"].fallbackPlacementOrDefault(toolbarFallbackPlacement),
     shapeStyle = o["shapeStyle"].enumOrDefault<ShapeStyle>(shapeStyle),
+    toolbarShapeStyle = o["toolbarShapeStyle"].enumOrDefault<ShapeStyle>(toolbarShapeStyle),
 )

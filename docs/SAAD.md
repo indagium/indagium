@@ -1077,13 +1077,15 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
   alone on its bar sits at its start, centre or end (`toolbarAlign`; left / centre / right on a horizontal bar, top / centre / bottom on a vertical one).
   A vertical tab bar is `verticalTabBarWidthDp` wide (card width = that + 4), a toolbar-only bar 36 dp (horizontal) or 40 dp (vertical, 96 dp while the
   button labels are on, with an ellipsis for a longer label); a toolbar sharing a vertical tab bar leaves the tabs at least 150 dp (it scrolls instead).
-- **Corners (Shape style).** `AppSettings.shapeStyle` (`ShapeStyle`: Theme default, Square, Soft, Rounded, Round; JSON-only, `ui/ChromeSettingsJson.kt`;
-  Settings > Appearance > Shape style; part of a workspace profile's appearance group) is read through one resolver, `resolveUiCorners(style, look)` in
+- **Corners (Shape style, Toolbar shape).** Two independent settings share the `ShapeStyle` enum (Theme default, Square, Soft, Rounded, Round; both JSON-only,
+  `ui/ChromeSettingsJson.kt`, both part of a workspace profile's appearance group): `AppSettings.shapeStyle` (Settings > Appearance > Shape style) drives the tiles
+  and card bars (`tileDp`, `workspaceTileDp`), `AppSettings.toolbarShapeStyle` (Toolbar shape) drives only the toolbar's button groups and the Layout menu
+  button (`toolbarDp`). Both are read through one resolver, `resolveUiCorners(style, toolbarStyle, look)` in
   `ui/UiCorners.kt`, provided by `App.kt` as `LocalUiCorners` (read with `currentUiCorners()`; a test host that provides nothing resolves Theme default against
   `LocalHoliday`). `UiCorners` holds the log-view tile and card-bar radius (`tileDp`), the toolbar's button-group radius (`toolbarDp`, `UI_CORNER_CAPSULE` for Round:
   half the bar's thickness, which `ToolbarShapes` and the Layout menu button draw as 50% corners) and the New tab, diagram and Tests workspace tile
   radius (`workspaceTileDp`). **Theme default is exactly today's values**: 8 / 7 dp without a pack, the pack's `corners` with one, the workspace tiles 8 dp; the
-  fixed styles (Square 0, Soft 8 / 7, Rounded 12 / 10, Round 16 / capsule) apply under every theme. **The Shape style never reaches the tabs**: they keep the
+  fixed styles (Square 0, Soft 8 / 7, Rounded 12 / 10, Round 16 / capsule) apply under every theme. **Neither setting reaches the tabs**: they keep the
   user's Tab style or the pack's own tabs. Segmented controls, fields, chips, menus and dialogs keep their shapes too.
 - **Toolbar shapes.** `MainToolbar` has three: the horizontal row (`BAR`), the vertical stack of full-width buttons (`COLUMN`, a bar of its own on a left or
   right edge) and a row that wraps onto further lines (`FLOW`, the toolbar inside a vertical tab bar, at its top or bottom, and a toolbar tile wider than

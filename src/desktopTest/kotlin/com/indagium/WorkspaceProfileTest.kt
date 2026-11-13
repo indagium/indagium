@@ -407,6 +407,22 @@ class WorkspaceProfileTest {
     }
 
     @Test
+    fun theToolbarShapeIsAppliedComparedAndDefaultsToTheThemeWhenNull() {
+        val live = AppSettings().copy(toolbarShapeStyle = ShapeStyle.SQUARE)
+        val round = WorkspaceProfile.CLASSIC.spec.copy(appearance = ProfileAppearance(toolbarShapeStyle = ShapeStyle.ROUND))
+        val applied = live.withProfileSpec(round)
+        assertEquals(ShapeStyle.ROUND, applied.toolbarShapeStyle)
+        assertEquals(ShapeStyle.THEME, applied.shapeStyle, "the tiles' Shape style is a separate field")
+        assertTrue("Toolbar shape" in profileDifferences(round, live))
+        assertFalse("Shape style" in profileDifferences(round, live))
+        assertEquals(emptyList(), profileDifferences(round, applied))
+
+        val unset = WorkspaceProfile.CLASSIC.spec.copy(appearance = ProfileAppearance())
+        assertEquals(ShapeStyle.THEME, live.withProfileSpec(unset).toolbarShapeStyle, "a null field is the app default")
+        assertEquals(ShapeStyle.SQUARE, currentProfileAppearance(live).toolbarShapeStyle)
+    }
+
+    @Test
     fun aMissingGroupAppliesAndComparesAsTheDefaults() {
         val defaults = AppSettings()
         val live = customizedLiveSettings(defaults)

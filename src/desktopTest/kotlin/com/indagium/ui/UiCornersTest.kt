@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,43 +47,62 @@ class UiCornersTest {
         return checkNotNull(resolveHolidayLook(settings, LocalDate.parse("2026-10-31"))) { "no look for $pack" }
     }
 
+    private val theme = ShapeStyle.THEME
+
     @Test
-    fun themeWithoutAPackIsTodaysValuesAndTheTabStyleDrawsItsOwnCorners() {
-        val c = resolveUiCorners(ShapeStyle.THEME, null)
-        assertEquals(8, c.tileDp)
-        assertEquals(7, c.toolbarDp)
-        assertEquals(8, c.workspaceTileDp)
+    fun themeAndThemeWithoutAPackIsTodaysValues() {
+        val c = resolveUiCorners(theme, theme, null)
+        assertEquals(UiCorners(8, 7, 8), c)
         assertEquals(8, LOG_VIEW_CHROME_SPEC.cornerDp, "the regular tile corner is the log view's spec")
     }
 
     @Test
-    fun themeWithAPackIsThatPacksCornersAndTheWorkspaceTilesStayAtEight() {
+    fun themeAndThemeWithAPackIsThatPacksCornersAndTheWorkspaceTilesStayAtEight() {
         assertTrue(HOLIDAY_THEMES.isNotEmpty())
         HOLIDAY_THEMES.keys.forEach { pack ->
             val look = lookFor(pack)
             val own = look.theme.corners
-            val c = resolveUiCorners(ShapeStyle.THEME, look)
-            assertEquals(own.tileDp, c.tileDp, "$pack tiles")
-            assertEquals(own.toolbarDp, c.toolbarDp, "$pack toolbar")
-            assertEquals(8, c.workspaceTileDp, "$pack: packs never changed the workspace tiles")
+            assertEquals(UiCorners(own.tileDp, own.toolbarDp, 8), resolveUiCorners(theme, theme, look), "$pack: packs never changed the workspace tiles")
         }
     }
 
     @Test
-    fun eachFixedStyleGivesItsRowWithOrWithoutAPackAndTheWorkspaceTilesFollow() {
+    fun theShapeStyleChangesOnlyTheTiles() {
         val looks = listOf<HolidayLook?>(null) + HOLIDAY_THEMES.keys.map(::lookFor)
         looks.forEach { look ->
-            assertEquals(UiCorners(0, 0, 0), resolveUiCorners(ShapeStyle.SQUARE, look))
-            assertEquals(UiCorners(8, 7, 8), resolveUiCorners(ShapeStyle.SOFT, look))
-            assertEquals(UiCorners(12, 10, 12), resolveUiCorners(ShapeStyle.ROUNDED, look))
-            assertEquals(UiCorners(16, UI_CORNER_CAPSULE, 16), resolveUiCorners(ShapeStyle.ROUND, look))
+            val base = resolveUiCorners(theme, theme, look)
+            ShapeStyle.entries.forEach { style ->
+                assertEquals(base.toolbarDp, resolveUiCorners(style, theme, look).toolbarDp, "$style leaves the toolbar alone")
+            }
+            listOf(ShapeStyle.SQUARE to 0, ShapeStyle.SOFT to 8, ShapeStyle.ROUNDED to 12, ShapeStyle.ROUND to 16).forEach { (style, tile) ->
+                assertEquals(UiCorners(tile, base.toolbarDp, tile), resolveUiCorners(style, theme, look), "$style")
+            }
         }
     }
 
     @Test
-    fun onlyRoundIsACapsule() {
+    fun theToolbarShapeChangesOnlyTheToolbar() {
+        val looks = listOf<HolidayLook?>(null) + HOLIDAY_THEMES.keys.map(::lookFor)
+        looks.forEach { look ->
+            val base = resolveUiCorners(theme, theme, look)
+            ShapeStyle.entries.forEach { toolbar ->
+                val c = resolveUiCorners(theme, toolbar, look)
+                assertEquals(base.tileDp, c.tileDp, "$toolbar leaves the tiles alone")
+                assertEquals(base.workspaceTileDp, c.workspaceTileDp)
+            }
+            assertEquals(0, resolveUiCorners(theme, ShapeStyle.SQUARE, look).toolbarDp)
+            assertEquals(7, resolveUiCorners(theme, ShapeStyle.SOFT, look).toolbarDp)
+            assertEquals(10, resolveUiCorners(theme, ShapeStyle.ROUNDED, look).toolbarDp)
+            assertEquals(UI_CORNER_CAPSULE, resolveUiCorners(theme, ShapeStyle.ROUND, look).toolbarDp)
+        }
+    }
+
+    @Test
+    fun onlyTheToolbarsRoundIsACapsuleAndTheShapeStyleNeverIs() {
         ShapeStyle.entries.forEach {
-            assertEquals(it == ShapeStyle.ROUND, isCapsuleCorner(resolveUiCorners(it, null).toolbarDp), "$it")
+            assertEquals(it == ShapeStyle.ROUND, isCapsuleCorner(resolveUiCorners(theme, it, null).toolbarDp), "toolbar $it")
+            assertFalse(isCapsuleCorner(resolveUiCorners(it, theme, null).toolbarDp), "shape $it")
+            assertFalse(isCapsuleCorner(resolveUiCorners(it, theme, null).tileDp), "shape $it")
         }
     }
 
@@ -127,7 +147,7 @@ class ShapeStyleUiTest {
         toolbarDp = toolbarCornerDp()
     }
 
-    private fun show(style: ShapeStyle?) {
+    private fun show(style: ShapeStyle?, toolbar: ShapeStyle = ShapeStyle.THEME) {
         directory = createTempDirectory("shape-style-ui").toFile()
         state = AppState(
             autosaveFile = File(directory, "state.cache"),
@@ -145,7 +165,7 @@ class ShapeStyleUiTest {
             CompositionLocalProvider(
                 LocalTheme provides LIGHT_THEME,
                 LocalHoliday provides null,
-                LocalUiCorners provides style?.let { resolveUiCorners(it, null) },
+                LocalUiCorners provides style?.let { resolveUiCorners(it, toolbar, null) },
             ) {
                 Probe()
                 Box(Modifier.size(800.dp, 500.dp)) {
@@ -170,27 +190,44 @@ class ShapeStyleUiTest {
     }
 
     @Test
-    fun squareGivesZeroDpTilesASquareCardBarAndASquareToolbarGroup() {
+    fun shapeStyleSquareGivesZeroDpTilesAndASquareCardBarButLeavesTheToolbarAtSeven() {
         show(ShapeStyle.SQUARE)
         assertEquals(0, tileDp)
-        assertEquals(0, toolbarDp)
+        assertEquals(7, toolbarDp)
         assertFalse(cornerIsRounded("tab-strip"), "a square card bar")
+        assertTrue(cornerIsRounded("layout-menu-button"), "the toolbar button keeps its 7 dp corner")
+        assertEquals(RoundedCornerShape(7.dp), ToolbarShapes(vertical = false, cornerDp = toolbarDp).solo)
+    }
+
+    @Test
+    fun shapeStyleRoundGivesSixteenDpTilesAndARoundedCardBarButNoCapsuleToolbar() {
+        show(ShapeStyle.ROUND)
+        assertEquals(16, tileDp)
+        assertEquals(7, toolbarDp)
+        assertTrue(cornerIsRounded("tab-strip"), "a rounded card bar")
+        assertEquals(RoundedCornerShape(7.dp), ToolbarShapes(vertical = false, cornerDp = toolbarDp).solo)
+    }
+
+    @Test
+    fun toolbarShapeSquareSquaresTheToolbarButtonAndLeavesTheTilesAtEight() {
+        show(ShapeStyle.THEME, toolbar = ShapeStyle.SQUARE)
+        assertEquals(8, tileDp)
+        assertEquals(0, toolbarDp)
         assertFalse(cornerIsRounded("layout-menu-button"), "a square toolbar button")
         assertEquals(RoundedCornerShape(0.dp), ToolbarShapes(vertical = false, cornerDp = toolbarDp).solo)
     }
 
     @Test
-    fun roundGivesSixteenDpTilesARoundedCardBarAndACapsuleToolbarGroup() {
-        show(ShapeStyle.ROUND)
-        assertEquals(16, tileDp)
+    fun toolbarShapeRoundGivesACapsuleToolbarGroupAndLeavesTheTilesAtEight() {
+        show(ShapeStyle.THEME, toolbar = ShapeStyle.ROUND)
+        assertEquals(8, tileDp)
         assertEquals(UI_CORNER_CAPSULE, toolbarDp)
-        assertTrue(cornerIsRounded("tab-strip"), "a rounded card bar")
         assertTrue(cornerIsRounded("layout-menu-button"), "a capsule toolbar button")
         assertEquals(RoundedCornerShape(50), ToolbarShapes(vertical = false, cornerDp = toolbarDp).solo)
     }
 }
 
-/** Settings > Appearance > Shape style: the control writes [com.indagium.model.AppSettings.shapeStyle]. */
+/** Settings > Appearance > Shape style and Toolbar shape: each control writes its own field. */
 @OptIn(ExperimentalTestApi::class)
 class ShapeStyleSettingUiTest {
     @get:Rule
@@ -205,8 +242,8 @@ class ShapeStyleSettingUiTest {
         if (::directory.isInitialized) directory.deleteRecursively()
     }
 
-    private fun choose(label: String) {
-        rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(SHAPE_STYLE_CONTROL_TAG))).performClick()
+    private fun choose(tag: String, label: String) {
+        rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(tag))).performClick()
         rule.waitForIdle()
     }
 
@@ -221,10 +258,21 @@ class ShapeStyleSettingUiTest {
             autoExportNotes = false,
         )
         rule.setContent {
-            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Box(Modifier.size(700.dp, 200.dp)) { ShapeStyleSetting(state) } }
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Box(Modifier.size(700.dp, 200.dp)) {
+                Column {
+                    ShapeStyleSetting(state)
+                    ToolbarShapeSetting(state)
+                }
+            }
+            }
         }
         rule.waitForIdle()
-        rule.onNodeWithText("Corners of tiles and the toolbar. Theme default keeps each theme's own shapes; tabs follow your Tab style.").assertExists()
+        rule.onNodeWithText(
+            "Corners of the toolbar's button groups and the Layout menu button. Theme default keeps each theme's own shapes.",
+        ).assertExists()
+        rule.onNodeWithText(
+            "Corners of the tiles. Theme default keeps each theme's own shapes; tabs follow your Tab style and the toolbar has its own setting.",
+        ).assertExists()
         assertEquals(ShapeStyle.THEME, state.settings.shapeStyle)
         val choices = listOf(
             "Square" to ShapeStyle.SQUARE,
@@ -233,10 +281,16 @@ class ShapeStyleSettingUiTest {
             "Round" to ShapeStyle.ROUND,
             "Theme default" to ShapeStyle.THEME,
         )
-        choices
-            .forEach { (label, style) ->
-                choose(label)
-                assertEquals(style, state.settings.shapeStyle, label)
-            }
+        choices.forEach { (label, style) ->
+            choose(SHAPE_STYLE_CONTROL_TAG, label)
+            assertEquals(style, state.settings.shapeStyle, label)
+            assertEquals(ShapeStyle.THEME, state.settings.toolbarShapeStyle, "the toolbar's own setting is untouched")
+        }
+        choose(SHAPE_STYLE_CONTROL_TAG, "Theme default")
+        choices.forEach { (label, style) ->
+            choose(TOOLBAR_SHAPE_CONTROL_TAG, label)
+            assertEquals(style, state.settings.toolbarShapeStyle, label)
+            assertEquals(ShapeStyle.THEME, state.settings.shapeStyle, "the tiles' Shape style is untouched")
+        }
     }
 }

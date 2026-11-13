@@ -162,6 +162,18 @@ class SettingsSearchTest {
     }
 
     @Test
+    fun toolbarShapeIsFoundByItsWordsAndShapeStyleNoLongerClaimsTheToolbar() {
+        assertTrue("Toolbar shape" in labels("toolbar"), labels("toolbar").toString())
+        for (query in listOf("menu buttons", "capsule", "pill", "toolbar corners", "buttons")) {
+            assertTrue("Toolbar shape" in labels(query), "$query: ${labels(query)}")
+        }
+        val entry = searchSettings("toolbar shape", all).first { it.label == "Toolbar shape" }
+        assertEquals("Toolbar shape", entry.anchor)
+        val shape = searchSettings("corners", all).first { it.label == "Shape style" }
+        assertTrue(shape.hint.startsWith("Corners of the tiles"), shape.hint)
+    }
+
+    @Test
     fun theSeasonalTabsRowIsFoundAndOpensTheSpecialThemesTab() {
         for (query in listOf("seasonal tabs", "my tab style", "special tab")) {
             assertTrue("Special theme tabs" in labels(query), "$query: ${labels(query)}")

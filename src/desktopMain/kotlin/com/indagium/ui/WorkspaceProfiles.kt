@@ -124,6 +124,7 @@ private fun appearanceDifferences(a: ProfileAppearance, s: AppSettings): List<St
     differs("Toolbar alignment", a.toolbarAlign, s.toolbarAlign)
     differs("Tab bar width", a.verticalTabBarWidthDp, s.verticalTabBarWidthDp)
     differs("Shape style", a.shapeStyle, s.shapeStyle)
+    differs("Toolbar shape", a.toolbarShapeStyle, s.toolbarShapeStyle)
 }
 
 private fun behaviorDifferences(b: ProfileBehavior, s: AppSettings): List<String> = buildList {
@@ -165,9 +166,14 @@ internal fun ProfileAppearance?.orAppDefaults(): ProfileAppearance {
         toolbarOuter = a.toolbarOuter ?: d.toolbarOuter,
         toolbarAlign = a.toolbarAlign ?: d.toolbarAlign,
         verticalTabBarWidthDp = a.verticalTabBarWidthDp ?: d.verticalTabBarWidthDp,
-        shapeStyle = a.shapeStyle ?: d.shapeStyle,
-    )
+        shapeStyle = a.shapeStyle,
+        toolbarShapeStyle = a.toolbarShapeStyle,
+    ).withShapeDefaults(d)
 }
+
+// The two corner styles' defaults, apart from [orAppDefaults] to keep that function's branch count in bounds.
+private fun ProfileAppearance.withShapeDefaults(d: ProfileAppearance): ProfileAppearance =
+    copy(shapeStyle = shapeStyle ?: d.shapeStyle, toolbarShapeStyle = toolbarShapeStyle ?: d.toolbarShapeStyle)
 
 /** See [orAppDefaults] for [ProfileAppearance]. */
 internal fun ProfileBehavior?.orAppDefaults(): ProfileBehavior {
@@ -228,8 +234,11 @@ private fun AppSettings.withProfileAppearance(a: ProfileAppearance): AppSettings
         toolbarOuter = a.toolbarOuter ?: toolbarOuter,
         toolbarAlign = a.toolbarAlign ?: toolbarAlign,
         verticalTabBarWidthDp = a.verticalTabBarWidthDp ?: verticalTabBarWidthDp,
-        shapeStyle = a.shapeStyle ?: shapeStyle,
-    ).let { next -> a.toolbarPlacement?.let(next::withToolbarPlacement) ?: next }
+    ).withProfileShapes(a)
+        .let { next -> a.toolbarPlacement?.let(next::withToolbarPlacement) ?: next }
+
+private fun AppSettings.withProfileShapes(a: ProfileAppearance): AppSettings =
+    copy(shapeStyle = a.shapeStyle ?: shapeStyle, toolbarShapeStyle = a.toolbarShapeStyle ?: toolbarShapeStyle)
 
 private fun AppSettings.withProfileBehavior(b: ProfileBehavior): AppSettings =
     copy(

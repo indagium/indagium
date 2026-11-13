@@ -611,6 +611,7 @@ class CustomWorkspaceProfileTest {
         toolbarAlign = ToolbarAlign.CENTER,
         verticalTabBarWidthDp = 210.5f,
         shapeStyle = ShapeStyle.ROUNDED,
+        toolbarShapeStyle = ShapeStyle.ROUND,
     )
 
     private val fullBehavior = ProfileBehavior(
