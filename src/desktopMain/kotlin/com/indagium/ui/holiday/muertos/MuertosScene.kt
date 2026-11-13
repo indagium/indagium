@@ -18,6 +18,7 @@ import com.indagium.ui.holiday.HolidayBandSpace
 import com.indagium.ui.holiday.HolidaySceneLayout
 import com.indagium.ui.holiday.HolidayScenePainter
 import com.indagium.ui.holiday.parsePath
+import com.indagium.ui.holiday.swayAngle
 
 // The papel picado string in the title bar: flags hang from a wire, a gap is left over the app name. Flags are grouped about four to a part so
 // a narrow bar drops whole groups (the leftmost first, the composition is right-aligned) instead of cutting a flag.

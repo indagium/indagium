@@ -15,13 +15,7 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import com.indagium.ui.holiday.muertos.MuertosTheme
-import com.indagium.ui.holiday.muertos.drawSvg
-import com.indagium.ui.holiday.muertos.easeInOut
-import com.indagium.ui.holiday.muertos.flameShape
-import com.indagium.ui.holiday.muertos.glowFlicker
 import com.indagium.ui.holiday.muertos.muertosLidsClosed
-import com.indagium.ui.holiday.muertos.steamOpacity
-import com.indagium.ui.holiday.muertos.svgResource
 import com.indagium.ui.holiday.muertos.wingFlap
 import org.junit.Test
 import java.awt.image.BufferedImage
@@ -106,7 +100,7 @@ class MuertosVisualTest {
             Triple("picture-back", 300, 420), Triple("picture-front", 300, 420), Triple("companion", 240, 240),
             Triple("companion-lids", 240, 240), Triple("monarch-wings", 64, 48),
         )) {
-            val svg = svgResource(name)
+            val svg = holidaySvg("muertos", name)
             val pixels = render(w, h) { drawSvg(svg) }.toPixelMap()
             val painted = (0 until h step 2).sumOf { y -> (0 until w step 2).count { x -> pixels[x, y].alpha > 0f } }
             assertTrue(painted > 20, "$name renders (painted $painted)")

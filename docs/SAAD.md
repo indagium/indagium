@@ -5826,6 +5826,19 @@ glows and flames, copal smoke, petals, monarchs, flags and blink are drawn nativ
 pure function of the clock with `HOLIDAY_STILL_TIME` as a calm pose. Its tile divider uses the new `HolidayTheme.tileDividerBlocks`
 (`HolidayDividerBlocks`: colours repeating as hard blocks of a fixed width), drawn by `HolidayBlockDivider` in `TileCard` like the dashed divider.
 
+Thanksgiving is the harvest pack, an Automatic holiday on November 21 to 30: wide enough for the fourth Thursday (November 22 to 28) and the
+weekend after it, and clear of the Día de Muertos window, so it never competes for a day. It is registered last. Its picture is a window onto a
+harvest table (hills, an autumn tree, a candlelit cornucopia and pie) and its companion a turkey that fans its tail, bobs and blinks; the title
+bar is a harvest field of bales, shocks, a barn and swaying wheat, and the effects are falling maple and oak leaves and geese flying south.
+The art follows Muertos' split: the still layers are SVG in `resources/holiday/thanksgiving/` (the picture is three, back / window / room,
+so the sun, geese and leaves sit between them, clipped to the glass; the companion is tail / body / head / lids; the title bar is far field,
+near field, bales, shocks, barn and one SVG per wheat stalk; the title-bar sun is a right-aligned element drawn between the two stretched
+fields, so it stays round beside the barn in any bar width and sets behind the near field), and the sun, geese, leaves, candle glows and flames, pie smoke, tail fan, head
+bob, blink and wheat sway are native, each a pure function of the clock with `HOLIDAY_STILL_TIME` as a calm pose. The keyframe helpers every
+animated pack shares (`easeInOut`, `cycle`, `alternateEase`, `keyframes`, the flicker, flame, smoke, falling-leaf and sway curves, the blink,
+`drawSteamWisp`, `holidaySvg` and `drawSvg`) live in `ui/holiday/HolidayKeyframes.kt`; `muertos/` and `thanksgiving/` keep only their own
+shapes (monarchs and flags, leaves and geese). The tile divider is the three-segment `tileDividerColors` (rust, gold, olive).
+
 A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
 pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
 changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.

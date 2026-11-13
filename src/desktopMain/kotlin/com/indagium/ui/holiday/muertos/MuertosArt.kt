@@ -7,26 +7,31 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import com.indagium.ui.holiday.HOLIDAY_STILL_TIME
 import com.indagium.ui.holiday.HolidayCompanionPainter
 import com.indagium.ui.holiday.HolidayPicturePainter
+import com.indagium.ui.holiday.drawSteamWisp
+import com.indagium.ui.holiday.drawSvg
+import com.indagium.ui.holiday.flameShape
+import com.indagium.ui.holiday.glowFlicker
+import com.indagium.ui.holiday.holidayBlinkClosed
+import com.indagium.ui.holiday.holidaySvg
 import com.indagium.ui.holiday.parsePath
+import com.indagium.ui.holiday.swayAngle
 
 // The picture and the companion are two layers each. The static art (sky, altar, portrait, skull) is SVG, drawn by Skia's SVGDOM; Skia SVG
 // does not run CSS animation and is unreliable with radial gradients, so everything that moves or glows is drawn natively on top, from the
 // design's keyframes (MuertosMotion.kt). A frame is a pure function of t; HOLIDAY_STILL_TIME is a calm pose (no blink, flames at rest).
 
 private val ARCH: Path by lazy { parsePath("M6 420V150A144 144 0 0 1 294 150V420Z") }
-private val PICTURE_BACK by lazy { svgResource("picture-back") }
-private val PICTURE_FRONT by lazy { svgResource("picture-front") }
-private val COMPANION_ART by lazy { svgResource("companion") }
-private val COMPANION_LIDS by lazy { svgResource("companion-lids") }
+private val PICTURE_BACK by lazy { holidaySvg("muertos", "picture-back") }
+private val PICTURE_FRONT by lazy { holidaySvg("muertos", "picture-front") }
+private val COMPANION_ART by lazy { holidaySvg("muertos", "companion") }
+private val COMPANION_LIDS by lazy { holidaySvg("muertos", "companion-lids") }
 private val FLAME_OUTER_PATH: Path by lazy { parsePath(FLAME_OUTER) }
 private val FLAME_INNER_PATH: Path by lazy { parsePath(FLAME_INNER) }
 private val SMOKE_PATHS by lazy { PICTURE_SMOKE.map { parsePath(it.d) } }
@@ -36,13 +41,6 @@ private val FLAME_INNER_COLOR = Color(0xFFfff0a8)
 private val GLOW_COLOR = Color(0xFFffc24a)
 private val WARM_COLOR = Color(0xFFffb347)
 private val FLAME_BASE = Offset(0f, 2f)
-
-// Stroke width and the smoke's travel: s-steam goes from 6 down to -26 (a 32-unit rise) while it widens from .9 to 1.25.
-private const val STEAM_START = 6f
-private const val STEAM_RISE = 32f
-private const val STEAM_NARROW = .9f
-private const val STEAM_WIDEN = .35f
-private const val STEAM_STILL = .35f
 
 private fun DrawScope.drawGlows(t: Float, still: Boolean) {
     val flicker = if (still) 1f else glowFlicker(t)
@@ -71,19 +69,7 @@ private fun DrawScope.drawFlames(t: Float, still: Boolean) {
 private fun DrawScope.drawSmoke(t: Float, still: Boolean) {
     PICTURE_SMOKE.forEachIndexed { i, smoke ->
         val path = SMOKE_PATHS[i]
-        val bounds = path.getBounds()
-        val u = if (still) STEAM_STILL else steamPhase(t, smoke.late)
-        val move = easeInOut(u)
-        val origin = Offset(bounds.center.x, bounds.bottom)
-        withTransform({
-            translate(0f, STEAM_START - STEAM_RISE * move)
-            scale(STEAM_NARROW + STEAM_WIDEN * move, 1f, origin)
-        }) {
-            drawPath(
-                path, Color.White.copy(alpha = smoke.alpha * steamOpacity(u)),
-                style = Stroke(smoke.width, cap = StrokeCap.Round),
-            )
-        }
+        drawSteamWisp(path, path.getBounds(), smoke.width, smoke.alpha, smoke.late, t, still)
     }
 }
 
@@ -111,7 +97,7 @@ internal object MuertosPicture : HolidayPicturePainter {
 }
 
 /** Whether the calavera's eyes are closed at [t]: the last 4 % of every 5.2 s blink, `cf-lid`'s 94 % to 98 %. */
-internal fun muertosLidsClosed(t: Float): Boolean = cycle(t, 5.2f).let { it >= .94f && it < .98f }
+internal fun muertosLidsClosed(t: Float): Boolean = holidayBlinkClosed(t)
 
 internal object MuertosCompanion : HolidayCompanionPainter {
     override val label = "Calavera in the Notes corner"

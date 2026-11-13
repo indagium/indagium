@@ -1,4 +1,4 @@
 # Announcements: "version <release> <pack IDs...>" or "after <release> <pack IDs...>".
 # An "after" entry belongs only to the first release after the given version.
 version 1.9.1 PUMPKIN_PATCH HAUNTED_MANOR TRICK_OR_TREAT BEER_TIME_YELLOW BEER_TIME_GREEN
-after 1.9.2 READY_PROMPT TULIPS COFFEE_BEAR DIA_DE_MUERTOS
+after 1.9.2 READY_PROMPT TULIPS COFFEE_BEAR DIA_DE_MUERTOS THANKSGIVING

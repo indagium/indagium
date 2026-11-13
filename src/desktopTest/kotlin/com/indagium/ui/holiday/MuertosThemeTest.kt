@@ -31,8 +31,10 @@ class MuertosThemeTest {
 
     private val theme get() = HOLIDAY_THEMES.getValue(HolidayPack.DIA_DE_MUERTOS)
 
-    @Test fun isTheLastRegisteredPackSoTheHalloweenPacksKeepTheirTieBreak() {
-        assertEquals(HolidayPack.DIA_DE_MUERTOS, HOLIDAY_THEMES.keys.last())
+    @Test fun isRegisteredAfterTheHalloweenPacksSoTheyKeepTheirTieBreak() {
+        val order = HOLIDAY_THEMES.keys.toList()
+        assertTrue(order.indexOf(HolidayPack.DIA_DE_MUERTOS) > order.indexOf(HolidayPack.PUMPKIN_PATCH))
+        assertTrue(order.indexOf(HolidayPack.DIA_DE_MUERTOS) > order.indexOf(HolidayPack.TRICK_OR_TREAT))
         assertEquals("Día de Muertos", theme.label)
         assertEquals("Día de Muertos", theme.occasion)
         assertTrue(theme.supportsAutomatic)

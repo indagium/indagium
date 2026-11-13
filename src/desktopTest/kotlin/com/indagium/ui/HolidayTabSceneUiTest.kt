@@ -209,6 +209,16 @@ class HolidayTabSceneUiTest {
     }
 
     @Test
+    fun thanksgivingChromeRendersInBothPalettes() {
+        for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
+            if (::state.isInitialized) state.close()
+            setup(look(HolidayPack.THANKSGIVING) { it.copy(lightness = lightness) }) { fit(it) }
+            rule.onNodeWithTag("tab-b").assertExists()
+            dump("thanksgiving-${lightness.name.lowercase()}")
+        }
+    }
+
+    @Test
     fun coffeeBearChromeRendersInBothPalettes() {
         for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
             if (::state.isInitialized) state.close()
