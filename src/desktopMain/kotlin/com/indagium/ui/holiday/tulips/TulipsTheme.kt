@@ -43,21 +43,22 @@ internal object TulipsTheme : HolidayTheme {
     override val icons = TulipsIcons
     override val effects: List<HolidayEffectSpec> = listOf(TulipPetals, TulipButterflies)
 
+    // The backgrounds lean toward the painting's sage wall (about #7a8676) so the picture under the filters fades into them gently.
     override fun palette(dark: Boolean) = if (dark) theme(
-        0xFF1e231d, 0xFF262c25, 0xFF2f362d, 0xFF3e473b, 0xFFeef0e6,
+        0xFF283027, 0xFF2e352c, 0xFF373f35, 0xFF475043, 0xFFeef0e6,
         0xFFc3cbb8, 0xFF8f9a86, 0xFFb48cf0, 0xFFb48cf0, 0xFFf2d21c, onAc = 0xFF1c0b33,
     ).copy(abg = Color(0xFFb48cf0).copy(alpha = .16f), sl = Color(0xFFb48cf0).copy(alpha = .2f),
         hv = Color.White.copy(alpha = .05f), searchMatchBg = Color(0xFFf2d21c).copy(alpha = .3f),
         searchCurrentBg = Color(0xFFb48cf0).copy(alpha = .5f)) else theme(
-        0xFFeef0e8, 0xFFfbfcf8, 0xFFe4e8dc, 0xFFc3cbb5, 0xFF23291f,
+        0xFFe1e6d9, 0xFFfbfcf8, 0xFFd8ded0, 0xFFbcc5ad, 0xFF23291f,
         0xFF4c5644, 0xFF5d6754, 0xFF7a2fbf, 0xFF7a2fbf, 0xFFd4252e,
         hv = Color.Black.copy(alpha = .04f),
     ).copy(abg = Color(0xFF7a2fbf).copy(alpha = .1f), sl = Color(0xFF7a2fbf).copy(alpha = .12f),
         searchMatchBg = Color(0xFFf2d21c).copy(alpha = .35f), searchCurrentBg = Color(0xFF7a2fbf).copy(alpha = .3f))
 
     override fun chrome(dark: Boolean) = if (dark)
-        HolidayChromeColors(Color(0xFF1a1f19), Color(0xFF2f362d), Color.Transparent)
-    else HolidayChromeColors(Color(0xFFdfe4d6), Color(0xFFd2d9c7), Color.Transparent)
+        HolidayChromeColors(Color(0xFF232a22), Color(0xFF373f35), Color.Transparent)
+    else HolidayChromeColors(Color(0xFFd5dccb), Color(0xFFc8d0bb), Color.Transparent)
 }
 
 private val bouquetColors = listOf(0xFF7b2fbf, 0xFFd4252e, 0xFFf2d21c, 0xFFe46a9a, 0xFF6fb33f).map(::Color)

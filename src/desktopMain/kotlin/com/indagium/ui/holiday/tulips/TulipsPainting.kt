@@ -2,18 +2,14 @@
 
 package com.indagium.ui.holiday.tulips
 
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -67,16 +63,40 @@ private fun DrawScope.artPetals(items: List<ArtPetal>, time: Float, height: Floa
     }
 }
 
+// How far in from each edge the painting melts into the window behind it, in design units. The fade follows a smoothstep, so it starts
+// and ends without a visible band: the painting's sage gradually becomes the theme's background.
+private const val PICTURE_FEATHER = 48f
+
+// The erase across one edge, sampled evenly from fully erased to untouched along a smoothstep, so the gradient has no knee.
+private val featherRamp = List(9) { i -> (i / 8f).let { u -> Color.Black.copy(alpha = 1f - u * u * (3f - 2f * u)) } }
+
+// The erase brush across one edge, from [from] (fully erased) to [to] (untouched).
+private fun featherBrush(horizontal: Boolean, from: Float, to: Float): Brush =
+    if (horizontal) Brush.horizontalGradient(featherRamp, startX = from, endX = to) else Brush.verticalGradient(featherRamp, startY = from, endY = to)
+
+/** Erases [area]'s edges in the current layer with soft gradients, so it melts into whatever is behind instead of ending in a hard line. */
+private fun DrawScope.featherEdges(area: Rect, feather: Float) {
+    val erase = BlendMode.DstOut
+    val height = Size(feather, area.height)
+    val width = Size(area.width, feather)
+    drawRect(featherBrush(true, area.left, area.left + feather), Offset(area.left, area.top), height, blendMode = erase)
+    drawRect(featherBrush(true, area.right, area.right - feather), Offset(area.right - feather, area.top), height, blendMode = erase)
+    drawRect(featherBrush(false, area.top, area.top + feather), Offset(area.left, area.top), width, blendMode = erase)
+    drawRect(featherBrush(false, area.bottom, area.bottom - feather), Offset(area.left, area.bottom - feather), width, blendMode = erase)
+}
+
 internal object TulipsPicture : HolidayPicturePainter {
     override val designWidthDp = 300f
     override val designHeightDp = 420f
-    private val clip = Path().apply { addRoundRect(RoundRect(Rect(2f, 0f, 298f, 420f), CornerRadius(6f))) }
+    private val area = Rect(2f, 0f, 298f, 420f)
 
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
-        clipPath(clip) {
-            drawRect(paintingGround, Offset(2f, 0f), Size(296f, 420f))
-            drawImage(painting, dstOffset = IntOffset(2, 0), dstSize = IntSize(296, 420))
-        }
+        // The painting goes into its own layer so its feathered edges fade to transparent, not to a colour.
+        drawIntoCanvas { it.saveLayer(area, Paint()) }
+        drawRect(paintingGround, area.topLeft, area.size)
+        drawImage(painting, dstOffset = IntOffset(2, 0), dstSize = IntSize(296, 420))
+        featherEdges(area, PICTURE_FEATHER)
+        drawIntoCanvas { it.restore() }
         clipRect(0f, 0f, 300f, 420f) { artPetals(picturePetals, t, 420f, 12f) }
     }
 }

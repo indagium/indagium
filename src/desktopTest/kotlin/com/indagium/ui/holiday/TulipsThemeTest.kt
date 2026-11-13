@@ -33,8 +33,8 @@ class TulipsThemeTest {
         assertEquals(HolidayMode.ALWAYS, settings.mode)
         assertEquals(theme, activeHolidayTheme(settings, LocalDateTime.of(2026, 4, 1, 12, 0)))
         assertFalse(theme.supportsAutomatic)
-        assertEquals(Color(0xFF1e231d), theme.palette(true).bg)
-        assertEquals(Color(0xFFeef0e8), theme.palette(false).bg)
+        assertEquals(Color(0xFF283027), theme.palette(true).bg)
+        assertEquals(Color(0xFFe1e6d9), theme.palette(false).bg)
         assertEquals(Color(0xFFb48cf0), theme.palette(true).ac)
         assertEquals(Color(0xFF7a2fbf), theme.palette(false).ac)
         assertEquals("Find", assertNotNull(theme.icons?.findIcon(Color.Black)).name)
@@ -73,8 +73,9 @@ class TulipsThemeTest {
         for (companionArt in listOf(false, true)) {
             val black = render(Color.Black, companionArt).toPixelMap()
             val white = render(Color.White, companionArt).toPixelMap()
+            // The picture's outer 48 units fade into the window on purpose (feathered edges), so its samples sit inside them.
             val samples = if (companionArt) listOf(80 to 100, 120 to 60, 180 to 120)
-            else listOf(30 to 20, 150 to 10, 280 to 200)
+            else listOf(70 to 70, 150 to 70, 230 to 200)
             for ((x, y) in samples) assertEquals(black[x, y].toArgb(), white[x, y].toArgb(),
                 "the painting's sage ground must cover the application background")
         }
