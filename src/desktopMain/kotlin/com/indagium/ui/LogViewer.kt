@@ -956,6 +956,7 @@ internal fun buildLogLineRender(
     // keyword and Find range is still computed against visibleLogLineText and remapped onto the
     // shorter text (remapHiddenPidTidRange), and processDisplay is ignored (there is no pid field).
     showPidTid: Boolean = true,
+    errorHighlightStyle: ErrorHighlightStyle? = null,
 ): LogLineRender {
     // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
     // source of truth (utils/TextMatch.kt) — never against what's actually rendered below, which
@@ -973,7 +974,7 @@ internal fun buildLogLineRender(
     // there in practice, not just in the common case — see the OFF-byte-identical test coverage in
     // ProcessNameRenderingTest.
     val lineText = visibleLogLineText(entry)
-    val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext)
+    val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext, errorHighlightStyle)
     // A klogg whole-line rule recolours every character of the row through the base colours below,
     // so it survives wrapping (visualLogLineForWrapLimit rebuilds lines from these same spans).
     val wholeLineRule = lineHighlight.wholeLine
@@ -2026,6 +2027,7 @@ internal fun LogViewer(
                                             rowBoundsAbs = boundsMap,
                                             regexContext = highlightRegexContext,
                                             highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
+                                            errorHighlightStyle = effectiveTab.effectiveErrorHighlightStyle(settings.errorHighlightStyle),
                                             autoWrap = settings.autoLogRowWrap,
                                             showRowNumbers = settings.showRowNumbers,
                                             showTimeDelta = effectiveTab.showTimeDelta,
@@ -2133,6 +2135,7 @@ internal fun LogViewer(
                                     items = listItems,
                                     analysis = effectiveTab.analysis,
                                     highlighters = effectiveTab.filter.highlighters,
+                                    errorHighlightStyle = effectiveTab.effectiveErrorHighlightStyle(settings.errorHighlightStyle),
                                     lazyState = lazyState,
                                     tc = tc,
                                     onHideMinimap = onToggleMinimap,
@@ -3538,6 +3541,7 @@ private fun LogRow(
     // false (a narrow tiled pane, whose column header drops PID/TID — pidTidColumnsVisible) renders
     // the row without its pid/tid text; copying rows (entry-based) is unaffected.
     showPidTid: Boolean = true,
+    errorHighlightStyle: ErrorHighlightStyle? = null,
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
@@ -3607,7 +3611,7 @@ private fun LogRow(
     // readable — so the text has to be rebuilt when selection toggles.
     val lineRender = remember(
         tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
-        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid,
+        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid, errorHighlightStyle,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
@@ -3629,6 +3633,7 @@ private fun LogRow(
             cellBg = cellBg,
             suppressLineTextColor = isSel || isCrashGroupRow,
             showPidTid = showPidTid,
+            errorHighlightStyle = errorHighlightStyle,
         )
         if (autoWrap) built else built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars))
     }

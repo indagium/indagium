@@ -120,6 +120,17 @@ class SettingsSearchTest {
     }
 
     @Test
+    fun errorHighlightingAndPersonalVocabularyAreSearchable() {
+        assertTrue("Error rows" in labels("error highlight"))
+        assertTrue("Error rows" in labels("error level"))
+        assertTrue("Error rows" in labels("crash"))
+        assertTrue("Personal vocabulary" in labels("dictionary words"))
+        assertTrue("Personal vocabulary" in labels("personal"))
+        // The index titles match the on-screen anchors exactly.
+        assertTrue(SETTINGS_SEARCH_INDEX.none { it.label == "Error level rows" || it.label == "Personal proofreading vocabulary" })
+    }
+
+    @Test
     fun matchRangesMergeAndIgnoreCase() {
         assertEquals(listOf(0..2), matchRanges("Log font", listOf("log")))
         assertEquals(listOf(0..2, 4..7), matchRanges("Log font", listOf("log", "font")))

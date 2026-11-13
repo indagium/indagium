@@ -32,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
@@ -50,6 +51,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +70,8 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
+import com.indagium.proofread.normalizeProofreadingVocabulary
+import com.indagium.proofread.normalizeProofreadingVocabularyWord
 import com.indagium.ui.holiday.*
 import com.indagium.update.PROJECT_REPO_URL
 import com.indagium.voice.VoiceLanguageCatalog
@@ -366,7 +370,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                                 SettingsSection.General -> GeneralSettingsSection(state, ::reclaimFocus)
                                 SettingsSection.Appearance -> AppearanceSettingsSection(state)
                                 SettingsSection.Capture -> CaptureSettingsSection(state)
-                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
+                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state, ::reclaimFocus)
                                 SettingsSection.Issues -> IssuesSettingsSection(state)
                                 SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
                                 SettingsSection.Automation -> AutomationSettingsSection(state)
@@ -1232,14 +1236,42 @@ private fun StorageInfoTooltip(text: String) {
 }
 
 @Composable
-private fun EditorBehaviorSettingsSection(state: AppState) {
+private fun EditorBehaviorSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
+    val stylePalette = remember(
+        state,
+        state.settings.highlighterCustomColors,
+        state.settings.highlighterCustomColorEditorExpanded,
+    ) {
+        HighlighterStylePaletteActions(
+            customColors = customHighlightColors(state.settings.highlighterCustomColors),
+            onSaveCustomColor = { color ->
+                val hex = highlightColorHex(color)
+                state.updateSettings { settings ->
+                    val current = customHighlightColors(settings.highlighterCustomColors)
+                    if (hex in current.map(::highlightColorHex) || current.size >= MAX_CUSTOM_HIGHLIGHT_COLORS) settings
+                    else settings.copy(highlighterCustomColors = (current.map(::highlightColorHex) + hex).take(MAX_CUSTOM_HIGHLIGHT_COLORS))
+                }
+            },
+            onDeleteCustomColor = { color ->
+                state.updateSettings { settings ->
+                    settings.copy(highlighterCustomColors = settings.highlighterCustomColors.filterNot { parseHighlightHex(it) == color })
+                }
+            },
+            customColorEditorExpanded = state.settings.highlighterCustomColorEditorExpanded,
+            onCustomColorEditorExpandedChange = { expanded ->
+                state.updateSettings { it.copy(highlighterCustomColorEditorExpanded = expanded) }
+            },
+        )
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         // Rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
         // so cells line up as columns and the last column ends on the right content edge.
         // The fourth row groups every Ctrl+F / Find setting. It and the last row reserve an
         // identical two-line label area in every cell so their controls align even though some
-        // labels wrap.
+        // labels wrap. "Error rows" opens its style editor in a popup under its Style button. The last row holds
+        // the proofreading cells in columns 1 and 2 (an empty cell fills row 5's column 4 first).
         val finalRowLabelAreaHeight = 28.dp
+        var errorStyleExpanded by remember { mutableStateOf(false) }
 
         SettingsGrid(columns = 4, rowSpacing = 16.dp) {
             CompactSetting("Visible tabs") {
@@ -1307,6 +1339,23 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
             CompactSettingWithTooltip(
+                label = "Error rows",
+                tooltip = "Tints every Error-level row in every tab. Crash rows, by contrast, colors the rows of an " +
+                    "expanded crash group. A tab can override this style from its Highlighters section. " +
+                    "Tabs with their own style ignore this switch until reset.",
+            ) {
+                ErrorRowsSettingControl(
+                    style = state.settings.errorHighlightStyle,
+                    styleExpanded = errorStyleExpanded,
+                    onStyleExpandedChange = { errorStyleExpanded = it },
+                    onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
+                    palette = stylePalette,
+                    tabOverrideCount = state.errorHighlightOverrideCount,
+                    onResetTabOverrides = state::resetErrorHighlightOverrides,
+                    onStyleClosed = reclaimFocus,
+                )
+            }
+            CompactSettingWithTooltip(
                 label = "Row number",
                 tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
                     "you filter or fold rows, so it always points back to the same spot in the full log.",
@@ -1358,21 +1407,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     options = listOf("On", "Off"),
                     selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
                     onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Process names in new tabs",
-                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-                    "different logs with two different sets of processes. Per-tab picks reset every session " +
-                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
                 )
             }
             CompactSettingWithTooltip(
@@ -1463,8 +1497,25 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
                 )
             }
-        }
-        SettingsControlRow {
+            CompactSettingWithTooltip(
+                label = "Process names in new tabs",
+                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                    "different logs with two different sets of processes. Per-tab picks reset every session " +
+                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                )
+            }
+            // Fills row 5's fourth column so proofreading starts the next row in column 1.
+            Spacer(Modifier)
             CompactSettingWithTooltip(
                 label = "English proofreading",
                 tooltip = "Suggests English spelling and grammar corrections in notes and captions. " +
@@ -1487,6 +1538,124 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
         }
+        ProofreadingVocabularyManager(state)
+    }
+}
+
+/** True when [typed] normalizes to a word that [words] already holds. */
+internal fun isVocabularyDuplicate(typed: String, words: List<String>): Boolean {
+    val key = normalizeProofreadingVocabularyWord(typed) ?: return false
+    return words.any { normalizeProofreadingVocabularyWord(it) == key }
+}
+
+/** The one helper line under the vocabulary field: the duplicate warning while the typed word is already saved, else the word count. */
+internal fun vocabularyHelperText(typed: String, words: List<String>): String = when {
+    isVocabularyDuplicate(typed, words) -> "Already in your vocabulary."
+    words.isEmpty() -> "No saved words"
+    words.size == 1 -> "1 word"
+    else -> "${words.size} words"
+}
+
+@Composable
+private fun ProofreadingVocabularyManager(state: AppState) {
+    var query by remember { mutableStateOf("") }
+    val proofreading = state.settings.proofreading
+    val words = proofreading.vocabulary
+    val queryKey = normalizeProofreadingVocabularyWord(query)
+    val duplicate = isVocabularyDuplicate(query, words)
+    val visible = remember(words, query) { words.filter { query.isBlank() || it.contains(query.trim(), ignoreCase = true) } }
+    val tc = tc()
+    val listShape = RoundedCornerShape(6.dp)
+    CompactSettingWithTooltip(
+        label = "Personal vocabulary",
+        tooltip = "Words spelling suggestions accept in notes and captions. Used while English proofreading is On.",
+        // Dimmed while proofreading is Off, but still editable: the words are kept for when it is turned back on.
+        modifier = Modifier.fillMaxWidth().alpha(if (proofreading.enabled) 1f else 0.5f).testTag("proofreading-vocabulary-manager"),
+    ) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                InlineField(
+                    query,
+                    { query = it },
+                    "Search or add a word",
+                    Modifier.weight(1f).testTag("proofreading-vocabulary-query"),
+                    onClear = { query = "" },
+                    onSubmit = {
+                        if (queryKey != null && !duplicate) {
+                            addVocabularyWord(state, query)
+                            query = ""
+                        }
+                    },
+                )
+                AppButton(
+                    "Add",
+                    onClick = {
+                        addVocabularyWord(state, query)
+                        query = ""
+                    },
+                    enabled = queryKey != null && !duplicate,
+                    modifier = Modifier.testTag("proofreading-vocabulary-add"),
+                )
+            }
+            AppText(
+                vocabularyHelperText(query, words),
+                color = if (duplicate) tc.ts else tc.td,
+                fontSize = 10.sp,
+                modifier = Modifier.testTag("proofreading-vocabulary-helper"),
+            )
+            if (words.isNotEmpty()) {
+                val scroll = rememberScrollState()
+                Box(
+                    Modifier.fillMaxWidth().heightIn(max = 180.dp)
+                        .background(tc.p2, listShape).border(1.dp, tc.br, listShape),
+                ) {
+                    Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = (THIN_SCROLLBAR_DP + 2f).dp)) {
+                        visible.forEach { word ->
+                            Row(
+                                Modifier.fillMaxWidth().height(24.dp).padding(start = 8.dp, end = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AppText(word, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                                SquareIconButton(
+                                    "×",
+                                    fontSize = 12.sp,
+                                    onClick = {
+                                        val removedKey = normalizeProofreadingVocabularyWord(word)
+                                        state.updateSettings { settings ->
+                                            val current = settings.proofreading.vocabulary
+                                            settings.copy(
+                                                proofreading = settings.proofreading.copy(
+                                                    vocabulary = normalizeProofreadingVocabulary(
+                                                        current.filterNot { normalizeProofreadingVocabularyWord(it) == removedKey },
+                                                    ),
+                                                ),
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("proofreading-vocabulary-remove-${word.hashCode()}"),
+                                    tooltip = "Remove",
+                                )
+                            }
+                        }
+                        if (visible.isEmpty()) {
+                            AppText("No matching words", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                        }
+                    }
+                    Box(Modifier.matchParentSize()) {
+                        ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun addVocabularyWord(state: AppState, raw: String) {
+    val word = normalizeProofreadingVocabularyWord(raw) ?: return
+    state.updateSettings { settings ->
+        val normalized = normalizeProofreadingVocabulary(settings.proofreading.vocabulary + raw.trim())
+        val containsWord = normalized.any { normalizeProofreadingVocabularyWord(it) == word }
+        if (containsWord) settings.copy(proofreading = settings.proofreading.copy(vocabulary = normalized)) else settings
     }
 }
 

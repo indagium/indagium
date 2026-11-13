@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,9 +19,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.IntOffset
@@ -39,7 +48,7 @@ import kotlin.math.roundToInt
 // The Notes actions (Preview, Copy ▾, Save, New, Locate log…, Open ▾) and the Copy feedback they share. In the Notes TILE they are part of the
 // tile's one header row while they fit there, and in the panel's bar under it when they do not (NotesTile in LogViewTiling.kt, decided by
 // NotesHeaderLayout.kt); wherever the panel is used without a tile it draws them in that bar (AnnotationPanel.kt). Either way they are the same text
-// buttons, and every click or dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
+// buttons. A menu keeps focus while it is open; dismissing it or choosing an action hands the keyboard back to the panel.
 
 /** The Notes actions' inputs; the values and callbacks are those the panel has always been given (see BoundAnnotationPanel). */
 @Suppress("LongParameterList") // a flat bundle of the values and callbacks the panel always took one by one
@@ -156,10 +165,14 @@ internal fun NotesActionButtons(model: NotesActionModel, look: NotesButtonLook =
             Box {
                 AppButton(
                     "▾",
-                    modifier = Modifier.width(18.dp),
+                    modifier = Modifier.width(18.dp).testTag(NOTES_RECENT_NOTES_TAG),
                     horizontalPadding = 0.dp,
                     shape = RECENT_DROPDOWN_SHAPE,
-                    onClick = { model.tap(model.onToggleRecentNotes) },
+                    onClick = {
+                        val closing = model.recentMenuOpen
+                        model.onToggleRecentNotes()
+                        if (closing) model.onReclaimFocus()
+                    },
                 )
                 if (model.recentMenuOpen) RecentNotes(model, tc)
             }
@@ -180,6 +193,9 @@ private fun RecentNotes(model: NotesActionModel, tc: ThemeColors) {
 
 /** Test tag of the ▾ half of the Copy split button (its main half carries the caller's tag, `notes-button-copy` on the Notes buttons). */
 internal const val NOTES_COPY_FORMATS_TAG = "notes-copy-formats"
+internal const val NOTES_RECENT_NOTES_TAG = "notes-recent-notes"
+internal const val NOTES_RECENT_POPUP_TAG = "notes-recent-popup"
+internal const val NOTES_COPY_POPUP_TAG = "notes-copy-popup"
 
 internal enum class CopyPhase(val label: String) {
     Idle("Copy"),
@@ -240,6 +256,13 @@ internal fun CopyFormatSplitButton(
     val leftShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
     val rightShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
     var expanded by remember { mutableStateOf(false) }
+    val popupFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(expanded) {
+        if (expanded) {
+            withFrameNanos { }
+            runCatching { popupFocusRequester.requestFocus() }
+        }
+    }
     Box {
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
             AppButton(
@@ -253,7 +276,11 @@ internal fun CopyFormatSplitButton(
             )
             AppButton(
                 "▾",
-                onClick = { expanded = !expanded; onReclaimFocus() },
+                onClick = {
+                    val closing = expanded
+                    expanded = !expanded
+                    if (closing) onReclaimFocus()
+                },
                 enabled = feedback.phase != CopyPhase.Copying,
                 modifier = modifier.width(18.dp).testTag(NOTES_COPY_FORMATS_TAG),
                 horizontalPadding = 0.dp,
@@ -271,7 +298,19 @@ internal fun CopyFormatSplitButton(
                     Modifier.width(176.dp)
                         .background(tc.p, RoundedCornerShape(7.dp))
                         .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                        .padding(vertical = 4.dp),
+                        .padding(vertical = 4.dp)
+                        .focusRequester(popupFocusRequester)
+                        .focusable()
+                        .testTag(NOTES_COPY_POPUP_TAG)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                                expanded = false
+                                onReclaimFocus()
+                                true
+                            } else {
+                                false
+                            }
+                        },
                 ) {
                     AnnotationCopyFormat.entries.forEach { format ->
                         HoverBox(

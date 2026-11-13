@@ -1947,6 +1947,7 @@ internal fun RecentNotesPopup(
                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
                 .focusRequester(popupFr)
                 .focusable()
+                .testTag(NOTES_RECENT_POPUP_TAG)
                 .onPreviewKeyEvent { ev ->
                     if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (ev.key) {

@@ -8075,6 +8075,16 @@ class AppState(
         }
     }
 
+    /** Number of tabs that keep their own Error-rows style, which wins over the global one in Settings. */
+    val errorHighlightOverrideCount: Int get() = tabs.count { it.errorHighlightStyle != null }
+
+    /** Clears every tab's own Error-rows style so all tabs follow the global setting again. */
+    fun resetErrorHighlightOverrides() = synchronized(stateLock) {
+        tabs.filter { it.errorHighlightStyle != null }.forEach { tab ->
+            upTab(tab.id) { it.copy(errorHighlightStyle = null) }
+        }
+    }
+
     // In-view search matches (LogSearchState.matchIds) go stale whenever the item list a slot
     // searches changes shape — new logData/stack-trace groups, a filter edit (Filtered only), or
     // grouping (sequences/manual blocks). Not expand/collapse: search always runs over a fully

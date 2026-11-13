@@ -49,6 +49,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -60,9 +61,15 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.HighlightTarget
@@ -109,12 +116,16 @@ internal class HighlighterSectionState {
     var addFontFamily by mutableStateOf<String?>(null)
     var addBold by mutableStateOf<Boolean?>(null)
     var addItalic by mutableStateOf<Boolean?>(null)
+    var errorBackgroundPickerOpen by mutableStateOf(false)
+    var errorForegroundPickerOpen by mutableStateOf(false)
     val addScopeChip = mutableStateOf<String?>(null)
 
     fun closeColorPickers() {
         rowColorPickerId = null
         addColorPickerOpen = false
         addForegroundPickerOpen = false
+        errorBackgroundPickerOpen = false
+        errorForegroundPickerOpen = false
     }
 }
 
@@ -153,6 +164,10 @@ internal data class HighlighterActions(
     val onPaletteColumnsChange: (Int) -> Unit,
     val customColorEditorExpanded: Boolean = true,
     val onCustomColorEditorExpandedChange: (Boolean) -> Unit = {},
+    val errorHighlightStyle: ErrorHighlightStyle = ErrorHighlightStyle(),
+    val errorHighlightInherited: Boolean = true,
+    val onChangeErrorHighlightStyle: (ErrorHighlightStyle) -> Unit = {},
+    val onResetErrorHighlightStyle: () -> Unit = {},
 )
 
 // Counts run off the UI thread and are keyed on the fields that decide what matches (not colour,
@@ -224,7 +239,7 @@ internal fun HighlighterSection(
     val filter = tab.filter
     val regexHighlightAvailable = filter.mode == FilterMode.KEYWORD && filter.kwRegex && filter.kwText.isNotBlank()
     val displayedCount = filter.highlighters.size + if (regexHighlightAvailable) 1 else 0
-    val enabledCount = filter.highlighters.count { it.on } + if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0
+    val enabledCount = highlighterEnabledCount(filter, regexHighlightAvailable)
     var kwPickerOpen by remember { mutableStateOf(false) }
     var editingId by remember(tab.id) { mutableStateOf<String?>(null) }
     var addFocused by remember { mutableStateOf(false) }
@@ -304,6 +319,14 @@ internal fun HighlighterSection(
             bodyModifier = bodyModifier,
         ),
     ) {
+        if (fpState.highlightersExpanded) {
+            ErrorLevelHighlightRow(
+                style = actions.errorHighlightStyle,
+                inherited = actions.errorHighlightInherited,
+                controlsState = sectionState,
+                actions = actions,
+            )
+        }
         if (fpState.highlightersExpanded && displayedCount > 0 && fpState.hlListExpanded) {
             val rows = minOf(displayedCount, filterListRows) * HL_ROW_DP + if (editing != null) HL_EDITOR_EXTRA_DP else 0
             FlexScrollBox(rows, Modifier.testTag("filter-highlighters-list")) {
@@ -395,6 +418,244 @@ internal fun HighlighterSection(
         }
     }
 }
+
+/** How many of the section's list rows are on: the highlighters plus the Regex row. The Error rows row is not a list row and shows its own state. */
+internal fun highlighterEnabledCount(filter: Filter, regexHighlightAvailable: Boolean): Int =
+    filter.highlighters.count { it.on } + (if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0)
+
+@Composable
+private fun ErrorLevelHighlightRow(
+    style: ErrorHighlightStyle,
+    inherited: Boolean,
+    controlsState: HighlighterSectionState,
+    actions: HighlighterActions,
+) {
+    val tc = tc()
+    var styleExpanded by remember { mutableStateOf(false) }
+    val update = actions.onChangeErrorHighlightStyle
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            RoundIndicator(
+                active = style.enabled,
+                color = style.color,
+                onClick = { update(style.copy(enabled = !style.enabled)) },
+            )
+            AppText("Error rows", color = if (style.enabled) tc.tx else tc.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            if (!inherited) {
+                Box(
+                    Modifier.background(tc.ac.copy(.13f), CORNER_SM)
+                        .border(1.dp, tc.ac.copy(.27f), CORNER_SM)
+                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                        .testTag("error-highlight-override-badge"),
+                ) { AppText("This tab", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+                SquareIconButton(
+                    "↺", fontSize = 12.sp, onClick = actions.onResetErrorHighlightStyle,
+                    modifier = Modifier.testTag("error-highlight-reset"), tooltip = "Use default",
+                )
+            }
+            SquareIconButton(
+                "✎", fontSize = 12.sp, onClick = { styleExpanded = !styleExpanded },
+                modifier = Modifier.testTag("error-highlight-edit"), tooltip = if (styleExpanded) "Close style" else "Edit style",
+            )
+        }
+        if (styleExpanded) HighlighterStyleControls(
+            state = HighlighterStyleControlsState(
+                backgroundColor = style.color,
+                backgroundEnabled = style.backgroundEnabled,
+                foregroundColor = style.textColor,
+                bold = style.bold,
+                italic = style.italic,
+                fontFamily = style.fontFamily,
+                backgroundPickerOpen = controlsState.errorBackgroundPickerOpen,
+                foregroundPickerOpen = controlsState.errorForegroundPickerOpen,
+            ),
+            palette = actions.stylePaletteActions(),
+            onChange = HighlighterStyleControlActions(
+                onBackgroundColor = { update(style.copy(color = it)) },
+                onBackgroundEnabled = { update(style.copy(backgroundEnabled = it)) },
+                onForegroundColor = { update(style.copy(textColor = it)) },
+                onBold = { update(style.copy(bold = it)) },
+                onItalic = { update(style.copy(italic = it)) },
+                onFontFamily = { update(style.copy(fontFamily = it)) },
+                onBackgroundPickerOpen = { controlsState.errorBackgroundPickerOpen = it },
+                onForegroundPickerOpen = { controlsState.errorForegroundPickerOpen = it },
+            ),
+            testTagPrefix = "error-highlight",
+        )
+        if (styleExpanded) StylePreview(style.toPreviewHighlighter(), ERROR_ROW_PREVIEW_SAMPLE)
+    }
+}
+
+/** The sample Error row both error-row style editors preview their style on. */
+private const val ERROR_ROW_PREVIEW_SAMPLE = "E AndroidRuntime: FATAL EXCEPTION: main"
+
+/**
+ * The Settings › Editor behaviour "Error rows" cell content: the On | Off switch, the Style button that opens
+ * [ErrorRowsStylePanel] in a popup under it, and, while any tab keeps its own style (which wins over this
+ * switch), a line saying so with a button that clears those overrides.
+ */
+@Composable
+internal fun ErrorRowsSettingControl(
+    style: ErrorHighlightStyle,
+    styleExpanded: Boolean,
+    onStyleExpandedChange: (Boolean) -> Unit,
+    onChange: (ErrorHighlightStyle) -> Unit,
+    palette: HighlighterStylePaletteActions,
+    tabOverrideCount: Int,
+    onResetTabOverrides: () -> Unit,
+    // Called after the style popup closed, so the owner can take keyboard focus back (a dismissed Popup leaves none).
+    onStyleClosed: () -> Unit = {},
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    val windowSize = LocalWindowInfo.current.containerSize
+    val popupWidth = with(density) { ERROR_ROWS_STYLE_POPUP_WIDTH.coerceAtMost((windowSize.width.toDp() - 24.dp).coerceAtLeast(240.dp)) }
+    var wasOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(styleExpanded) {
+        if (styleExpanded) {
+            wasOpen = true
+        } else if (wasOpen) {
+            wasOpen = false
+            onStyleClosed()
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (style.enabled) 0 else 1),
+                onToggle = { idx -> onChange(style.copy(enabled = idx == 0)) },
+                modifier = Modifier.testTag("error-highlight-global-switch"),
+            )
+            Box {
+                AppButton(
+                    if (styleExpanded) "Style ▾" else "Style ▸",
+                    onClick = { onStyleExpandedChange(!styleExpanded) },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.testTag("error-highlight-global-style-toggle"),
+                    leadingContent = { Box(Modifier.size(12.dp).background(style.color, CORNER_SM)) },
+                )
+                if (styleExpanded) {
+                    // Focusable, so Esc and an outside click reach this layer first; the colour and font popups opened
+                    // inside it are layers above it, so a click inside them is not an outside click here and Esc
+                    // closes the innermost popup first.
+                    Popup(
+                        popupPositionProvider = ErrorRowsStylePopupPosition(with(density) { ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING.roundToPx() }),
+                        onDismissRequest = { onStyleExpandedChange(false) },
+                        properties = PopupProperties(focusable = true),
+                        onPreviewKeyEvent = { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                                onStyleExpandedChange(false)
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                    ) {
+                        // The outer padding leaves room for the shadow, which a popup layer would otherwise clip.
+                        Box(Modifier.width(popupWidth + ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING * 2).padding(ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING)) {
+                            ErrorRowsStylePanel(style = style, palette = palette, onChange = onChange)
+                        }
+                    }
+                }
+            }
+        }
+        if (tabOverrideCount > 0) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                AppText(
+                    if (tabOverrideCount == 1) "1 tab uses its own style" else "$tabOverrideCount tabs use their own style",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    modifier = Modifier.testTag("error-highlight-override-count"),
+                )
+                AppButton(
+                    "Reset tabs",
+                    onClick = onResetTabOverrides,
+                    variant = ButtonVariant.Ghost,
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.testTag("error-highlight-reset-tabs"),
+                )
+            }
+        }
+    }
+}
+
+private val ERROR_ROWS_STYLE_POPUP_WIDTH = 520.dp
+private val ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING = 7.dp
+
+/** Places the style popup's card under the Style button, start edges aligned, kept inside the window (flipped above when there is no room below). */
+internal class ErrorRowsStylePopupPosition(private val shadowPaddingPx: Int) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset = seq3PopoverPosition(
+        // The popup content carries the shadow padding on every side, the visible card does not: place the card.
+        anchor = IntRect(
+            anchorBounds.left - shadowPaddingPx, anchorBounds.top + shadowPaddingPx,
+            anchorBounds.right, anchorBounds.bottom - shadowPaddingPx,
+        ),
+        popup = popupContentSize,
+        window = windowSize,
+        gapPx = ERROR_ROWS_STYLE_POPUP_GAP_PX,
+    )
+}
+
+private const val ERROR_ROWS_STYLE_POPUP_GAP_PX = 4
+
+/** The style editor the "Error rows" Style button opens in a popup: the colour, text, font and preview controls on a menu-style card. */
+@Composable
+internal fun ErrorRowsStylePanel(
+    style: ErrorHighlightStyle,
+    palette: HighlighterStylePaletteActions,
+    onChange: (ErrorHighlightStyle) -> Unit,
+) {
+    val tc = tc()
+    var backgroundPickerOpen by remember { mutableStateOf(false) }
+    var foregroundPickerOpen by remember { mutableStateOf(false) }
+    val cardShape = RoundedCornerShape(7.dp)
+    Column(
+        Modifier.fillMaxWidth().shadow(8.dp, cardShape).background(tc.p, cardShape).border(1.dp, tc.br, cardShape)
+            .padding(horizontal = 12.dp, vertical = 10.dp).testTag("error-highlight-global-panel"),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        HighlighterStyleControls(
+            state = HighlighterStyleControlsState(
+                backgroundColor = style.color,
+                backgroundEnabled = style.backgroundEnabled,
+                foregroundColor = style.textColor,
+                bold = style.bold,
+                italic = style.italic,
+                fontFamily = style.fontFamily,
+                backgroundPickerOpen = backgroundPickerOpen,
+                foregroundPickerOpen = foregroundPickerOpen,
+            ),
+            palette = palette,
+            onChange = HighlighterStyleControlActions(
+                onBackgroundColor = { onChange(style.copy(color = it)) },
+                onBackgroundEnabled = { onChange(style.copy(backgroundEnabled = it)) },
+                onForegroundColor = { onChange(style.copy(textColor = it)) },
+                onBold = { onChange(style.copy(bold = it)) },
+                onItalic = { onChange(style.copy(italic = it)) },
+                onFontFamily = { onChange(style.copy(fontFamily = it)) },
+                onBackgroundPickerOpen = { backgroundPickerOpen = it },
+                onForegroundPickerOpen = { foregroundPickerOpen = it },
+            ),
+            testTagPrefix = "error-highlight-global",
+            wide = true,
+        )
+        StylePreview(style.toPreviewHighlighter(), ERROR_ROW_PREVIEW_SAMPLE)
+    }
+}
+
+private fun ErrorHighlightStyle.toPreviewHighlighter() = Highlighter(
+    id = "error-preview", pattern = "", regex = false, color = color, on = true, wholeLine = true,
+    textColor = textColor, backgroundEnabled = backgroundEnabled, fontFamily = fontFamily, bold = bold, italic = italic,
+)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -542,7 +803,7 @@ private fun EditorRow(caption: String, content: @Composable RowScope.() -> Unit)
     }
 }
 
-private data class HighlighterStyleControlsState(
+internal data class HighlighterStyleControlsState(
     val backgroundColor: Color,
     val backgroundEnabled: Boolean,
     val foregroundColor: Color?,
@@ -553,7 +814,7 @@ private data class HighlighterStyleControlsState(
     val foregroundPickerOpen: Boolean,
 )
 
-private data class HighlighterStyleControlActions(
+internal data class HighlighterStyleControlActions(
     val onBackgroundColor: (Color) -> Unit,
     val onBackgroundEnabled: (Boolean) -> Unit,
     val onForegroundColor: (Color?) -> Unit,
@@ -564,13 +825,28 @@ private data class HighlighterStyleControlActions(
     val onForegroundPickerOpen: (Boolean) -> Unit,
 )
 
+internal data class HighlighterStylePaletteActions(
+    val customColors: List<Color>,
+    val onSaveCustomColor: (Color) -> Unit,
+    val onDeleteCustomColor: (Color) -> Unit,
+    val customColorEditorExpanded: Boolean,
+    val onCustomColorEditorExpandedChange: (Boolean) -> Unit,
+)
+
+private fun HighlighterActions.stylePaletteActions() = HighlighterStylePaletteActions(
+    customColors, onSaveCustomColor, onDeleteCustomColor, customColorEditorExpanded,
+    onCustomColorEditorExpandedChange,
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun HighlighterStyleControls(
+internal fun HighlighterStyleControls(
     state: HighlighterStyleControlsState,
-    actions: HighlighterActions,
+    palette: HighlighterStylePaletteActions,
     onChange: HighlighterStyleControlActions,
     testTagPrefix: String,
+    // True where the editor has room to spare (the Settings dialog): spelled-out colour labels, a wider font picker and a larger status line.
+    wide: Boolean = false,
 ) {
     val tc = tc()
     FlowRow(
@@ -579,18 +855,19 @@ private fun HighlighterStyleControls(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         HighlighterStyleColorControl(
-            label = "Bg",
+            label = if (wide) "Background" else "Bg",
+            background = true,
             enabled = state.backgroundEnabled,
             color = state.backgroundColor,
             pickerOpen = state.backgroundPickerOpen,
             testTagPrefix = "$testTagPrefix-background",
-            customColors = actions.customColors,
-            onSaveCustomColor = actions.onSaveCustomColor,
-            onDeleteCustomColor = actions.onDeleteCustomColor,
+            customColors = palette.customColors,
+            onSaveCustomColor = palette.onSaveCustomColor,
+            onDeleteCustomColor = palette.onDeleteCustomColor,
             onColorChange = onChange.onBackgroundColor,
             onPickerOpenChange = onChange.onBackgroundPickerOpen,
-            customColorEditorExpanded = actions.customColorEditorExpanded,
-            onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+            customColorEditorExpanded = palette.customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = palette.onCustomColorEditorExpandedChange,
             onToggleEnabled = {
                 val enabled = !state.backgroundEnabled
                 onChange.onBackgroundEnabled(enabled)
@@ -604,18 +881,19 @@ private fun HighlighterStyleControls(
             toggleTestTag = "$testTagPrefix-background-toggle",
         )
         HighlighterStyleColorControl(
-            label = "Fg",
+            label = if (wide) "Text" else "Fg",
+            background = false,
             enabled = state.foregroundColor != null,
             color = state.foregroundColor ?: contrastingTextColor(state.backgroundColor),
             pickerOpen = state.foregroundPickerOpen,
             testTagPrefix = "$testTagPrefix-foreground",
-            customColors = actions.customColors,
-            onSaveCustomColor = actions.onSaveCustomColor,
-            onDeleteCustomColor = actions.onDeleteCustomColor,
+            customColors = palette.customColors,
+            onSaveCustomColor = palette.onSaveCustomColor,
+            onDeleteCustomColor = palette.onDeleteCustomColor,
             onColorChange = { onChange.onForegroundColor(it) },
             onPickerOpenChange = onChange.onForegroundPickerOpen,
-            customColorEditorExpanded = actions.customColorEditorExpanded,
-            onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+            customColorEditorExpanded = palette.customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = palette.onCustomColorEditorExpandedChange,
             onToggleEnabled = {
                 if (state.foregroundColor == null) {
                     onChange.onForegroundColor(contrastingTextColor(state.backgroundColor))
@@ -653,7 +931,7 @@ private fun HighlighterStyleControls(
             defaultLabel = "Log font",
             fallbackFamily = LocalLogFontFamily.current,
             onSelect = onChange.onFontFamily,
-            modifier = Modifier.widthIn(min = 88.dp, max = 112.dp),
+            modifier = if (wide) Modifier.widthIn(min = 160.dp, max = 240.dp) else Modifier.widthIn(min = 88.dp, max = 112.dp),
             testTagPrefix = "$testTagPrefix-font",
             showPreview = false,
         )
@@ -663,7 +941,7 @@ private fun HighlighterStyleControls(
         AppText(
             "Bold ${styleOverrideName(state.bold)} · Italic ${styleOverrideName(state.italic)}",
             color = tc.td,
-            fontSize = 9.sp,
+            fontSize = if (wide) 10.sp else 9.sp,
             modifier = Modifier.testTag("$testTagPrefix-style-state"),
         )
     }
@@ -676,6 +954,7 @@ private fun HighlighterStyleControls(
 )
 private fun HighlighterStyleColorControl(
     label: String,
+    background: Boolean,
     enabled: Boolean,
     color: Color,
     pickerOpen: Boolean,
@@ -695,11 +974,11 @@ private fun HighlighterStyleColorControl(
     val tc = tc()
     val shape = RoundedCornerShape(6.dp)
     var hovered by remember(groupTestTag) { mutableStateOf(false) }
-    val targetName = if (label == "Bg") "Background" else "Text color"
-    val tooltipText = when (label to enabled) {
-        "Bg" to true -> "Background is on. Click chip to turn off; click swatch to choose color."
-        "Bg" to false -> "Background is off. Click chip to turn on; swatch chooses color and turns it on."
-        "Fg" to true -> "Text color is on. Click chip to inherit log color; swatch chooses text color."
+    val targetName = if (background) "Background" else "Text color"
+    val tooltipText = when {
+        background && enabled -> "Background is on. Click chip to turn off; click swatch to choose color."
+        background -> "Background is off. Click chip to turn on; swatch chooses color and turns it on."
+        enabled -> "Text color is on. Click chip to inherit log color; swatch chooses text color."
         else -> "Text color is inherited. Click chip to set it; swatch chooses text color."
     }
     TooltipArea(tooltip = { ToolbarTooltip(tooltipText, maxLines = 3) }) {
@@ -851,7 +1130,7 @@ private fun LargeBackgroundColorPreview(color: Color, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StylePreview(highlighter: Highlighter) {
+private fun StylePreview(highlighter: Highlighter, sampleText: String = "Preview matched text") {
     val tc = tc()
     val previewAlpha = if (highlighter.wholeLine) {
         HL_WHOLE_LINE_BACKGROUND_ALPHA
@@ -872,7 +1151,7 @@ private fun StylePreview(highlighter: Highlighter) {
             .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
         Text(
-            "Preview matched text",
+            sampleText,
             style = TextStyle(
                 color = highlighter.textColor ?: tc.tx,
                 fontFamily = FontCatalog.resolveOrNull(highlighter.fontFamily) ?: LocalLogFontFamily.current,
@@ -1020,7 +1299,7 @@ private fun HighlighterEditor(
                 backgroundPickerOpen = backgroundColorPickerOpen,
                 foregroundPickerOpen = foregroundColorPickerOpen,
             ),
-            actions = actions,
+            palette = actions.stylePaletteActions(),
             onChange = HighlighterStyleControlActions(
                 onBackgroundColor = { draft = draft.copy(color = it) },
                 onBackgroundEnabled = { draft = draft.copy(backgroundEnabled = it) },
@@ -1287,7 +1566,7 @@ private fun HighlighterAddForm(
                 backgroundPickerOpen = sectionState.addColorPickerOpen,
                 foregroundPickerOpen = addForegroundPickerOpen,
             ),
-            actions = actions,
+            palette = actions.stylePaletteActions(),
             onChange = HighlighterStyleControlActions(
                 onBackgroundColor = actions.onSetNewColor,
                 onBackgroundEnabled = { sectionState.addBackgroundEnabled = it },

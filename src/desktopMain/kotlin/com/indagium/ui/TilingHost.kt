@@ -202,6 +202,8 @@ internal class TileSlot(
     val sizing: TileBodySizing = TileBodySizing.FILL,
     val headerParts: ((widthDp: Float) -> TileHeaderParts)? = null,
     val actionsCentered: Boolean = false,
+    /** The body's focusable root represents a panel, so restoring its focus should not reveal its clipped lower edge. */
+    val preserveBodyRootFocus: Boolean = false,
     val body: @Composable (TileBodyInfo) -> Unit,
 )
 
@@ -656,7 +658,13 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     SideEffect { flex.allottedDp = allotted }
     Column(
         modifier
-            .then(if (region != null && rect != null) Modifier.tileScrollRegion(s.drag.scroll, region, rect) else Modifier)
+            .then(
+                if (region != null && rect != null) {
+                    Modifier.tileScrollRegion(s.drag.scroll, region, rect, slot.preserveBodyRootFocus, headerHeight)
+                } else {
+                    Modifier
+                },
+            )
             .alpha(if (s.drag.dragged == id) TILE_DRAGGED_CARD_ALPHA else 1f)
             .clip(shape)
             .background(tc.p)
