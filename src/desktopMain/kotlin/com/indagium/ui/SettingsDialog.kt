@@ -370,7 +370,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                                 SettingsSection.General -> GeneralSettingsSection(state, ::reclaimFocus)
                                 SettingsSection.Appearance -> AppearanceSettingsSection(state)
                                 SettingsSection.Capture -> CaptureSettingsSection(state)
-                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
+                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state, ::reclaimFocus)
                                 SettingsSection.Issues -> IssuesSettingsSection(state)
                                 SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
                                 SettingsSection.Automation -> AutomationSettingsSection(state)
@@ -1236,7 +1236,7 @@ private fun StorageInfoTooltip(text: String) {
 }
 
 @Composable
-private fun EditorBehaviorSettingsSection(state: AppState) {
+private fun EditorBehaviorSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val stylePalette = remember(
         state,
         state.settings.highlighterCustomColors,
@@ -1268,7 +1268,8 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
         // so cells line up as columns and the last column ends on the right content edge.
         // The fourth row groups every Ctrl+F / Find setting. It and the last row reserve an
         // identical two-line label area in every cell so their controls align even though some
-        // labels wrap. "Error rows" opens its style editor in a full-width panel right below the grid.
+        // labels wrap. "Error rows" opens its style editor in a popup under its Style button. The last row holds
+        // the proofreading cells in columns 1 and 2 (an empty cell fills row 5's column 4 first).
         val finalRowLabelAreaHeight = 28.dp
         var errorStyleExpanded by remember { mutableStateOf(false) }
 
@@ -1340,13 +1341,18 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             CompactSettingWithTooltip(
                 label = "Error rows",
                 tooltip = "Tints every Error-level row in every tab. Crash rows, by contrast, colors the rows of an " +
-                    "expanded crash group. A tab can override this style from its Highlighters section.",
+                    "expanded crash group. A tab can override this style from its Highlighters section. " +
+                    "Tabs with their own style ignore this switch until reset.",
             ) {
                 ErrorRowsSettingControl(
                     style = state.settings.errorHighlightStyle,
                     styleExpanded = errorStyleExpanded,
                     onStyleExpandedChange = { errorStyleExpanded = it },
                     onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
+                    palette = stylePalette,
+                    tabOverrideCount = state.errorHighlightOverrideCount,
+                    onResetTabOverrides = state::resetErrorHighlightOverrides,
+                    onStyleClosed = reclaimFocus,
                 )
             }
             CompactSettingWithTooltip(
@@ -1508,15 +1514,8 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
                 )
             }
-        }
-        if (errorStyleExpanded) {
-            ErrorRowsStylePanel(
-                style = state.settings.errorHighlightStyle,
-                palette = stylePalette,
-                onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
-            )
-        }
-        SettingsControlRow {
+            // Fills row 5's fourth column so proofreading starts the next row in column 1.
+            Spacer(Modifier)
             CompactSettingWithTooltip(
                 label = "English proofreading",
                 tooltip = "Suggests English spelling and grammar corrections in notes and captions. " +

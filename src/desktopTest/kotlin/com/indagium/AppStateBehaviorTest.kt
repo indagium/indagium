@@ -16,6 +16,7 @@ import com.indagium.model.CtrlFTarget
 import com.indagium.model.CtxMenuState
 import com.indagium.model.CustomIssueRule
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.HighlightTarget
@@ -149,6 +150,26 @@ class AppStateBehaviorTest {
         assertEquals(null, state.activeTab())
         assertEquals(ThemePreset.LIGHT, state.settings.theme)
         assertFalse(state.settings.openUnfilteredOnCtrlF)
+    }
+
+    @Test
+    fun resetErrorHighlightOverridesClearsEveryTabOverrideAndKeepsTheGlobalStyle() {
+        val state = AppState()
+        val own = ErrorHighlightStyle(enabled = false, color = Color.Magenta)
+        state.updateSettings { it.copy(errorHighlightStyle = ErrorHighlightStyle(color = Color.Green)) }
+        state.tabs = listOf(
+            mkTab("a", "a.log", emptyList()).copy(errorHighlightStyle = own),
+            mkTab("b", "b.log", emptyList()),
+            mkTab("c", "c.log", emptyList()).copy(errorHighlightStyle = ErrorHighlightStyle(bold = true)),
+        )
+        assertEquals(2, state.errorHighlightOverrideCount)
+
+        state.resetErrorHighlightOverrides()
+
+        assertEquals(0, state.errorHighlightOverrideCount)
+        assertTrue(state.tabs.all { it.errorHighlightStyle == null })
+        assertEquals(listOf("a", "b", "c"), state.tabs.map { it.id })
+        assertEquals(Color.Green, state.settings.errorHighlightStyle.color)
     }
 
     @Test

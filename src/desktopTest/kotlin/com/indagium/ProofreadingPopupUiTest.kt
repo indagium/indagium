@@ -8,6 +8,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
@@ -416,17 +417,15 @@ class ProofreadingPopupUiTest {
         val replacement = rule.onNodeWithTag("proofreading-suggestion-option-0")
         replacement.assertIsFocused()
         popup.performKeyInput { pressKey(Key.Tab) }
-        val add = rule.onNodeWithTag("proofreading-add-to-vocabulary")
-        add.assertIsFocused()
-        popup.performKeyInput { pressKey(Key.Tab) }
         val ignore = rule.onNodeWithTag("proofreading-suggestion-ignore")
         ignore.assertIsFocused()
-        popup.performKeyInput { withKeyDown(Key.ShiftLeft) { pressKey(Key.Tab) } }
+        popup.performKeyInput { pressKey(Key.Tab) }
+        val add = rule.onNodeWithTag("proofreading-add-to-vocabulary")
         add.assertIsFocused()
+        popup.performKeyInput { withKeyDown(Key.ShiftLeft) { pressKey(Key.Tab) } }
+        ignore.assertIsFocused()
         popup.performKeyInput { withKeyDown(Key.ShiftLeft) { pressKey(Key.Tab) } }
         replacement.assertIsFocused()
-        popup.performKeyInput { pressKey(Key.Tab) }
-        add.assertIsFocused()
         popup.performKeyInput { pressKey(Key.Tab) }
         ignore.assertIsFocused()
         ignore.performKeyInput { pressKey(Key.Spacebar) }
@@ -468,6 +467,8 @@ class ProofreadingPopupUiTest {
         val replacement = rule.onNodeWithTag("proofreading-suggestion-option-0")
         replacement.assertIsFocused()
         popup.performKeyInput { pressKey(Key.Tab) }
+        rule.onNodeWithTag("proofreading-suggestion-ignore").assertIsFocused()
+        popup.performKeyInput { pressKey(Key.Tab) }
         val add = rule.onNodeWithTag("proofreading-add-to-vocabulary")
         add.assertIsFocused()
         add.performKeyInput { pressKey(Key.Spacebar) }
@@ -505,6 +506,35 @@ class ProofreadingPopupUiTest {
         rule.waitForIdle()
         assertEquals(listOf("speling"), addedWords)
         assertPopupMissing()
+    }
+
+    @Test
+    fun ignoreAndAddToVocabularyShareOneRowWithIgnoreFirst() {
+        val proofreading = proofreadingUi { text ->
+            val start = text.indexOf("speling")
+            if (start < 0) emptyList()
+            else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", listOf("spelling"), "same-row"))
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-actions-same-row",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.letProofreadingSettle()
+        rule.hoverUntilSuggestionOpens(editor)
+
+        val ignore = rule.onNodeWithTag("proofreading-suggestion-ignore").fetchSemanticsNode().boundsInRoot
+        val add = rule.onNodeWithTag("proofreading-add-to-vocabulary").fetchSemanticsNode().boundsInRoot
+        assertEquals(ignore.top, add.top, "Ignore and Add to vocabulary must share a row")
+        assertTrue(ignore.right <= add.left, "Ignore must sit left of Add to vocabulary: $ignore vs $add")
     }
 
     @Test

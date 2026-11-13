@@ -712,42 +712,48 @@ private fun ProofreadingSuggestionPopup(
                     )
                 }
             }
-            if (canAddToVocabulary) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                var ignoreFocused by remember(issue.start) { mutableStateOf(false) }
                 AppButton(
-                    "Add to vocabulary",
-                    onClick = { onAddToVocabulary(issue) },
+                    "Ignore",
+                    onClick = { onIgnore(issue) },
                     variant = ButtonVariant.Ghost,
-                    modifier = Modifier.testTag("proofreading-add-to-vocabulary")
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.then(if (replacements.isEmpty()) Modifier.focusRequester(firstActionFocusRequester) else Modifier)
+                        .onFocusChanged { ignoreFocused = it.isFocused }
+                        .background(if (ignoreFocused) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
+                        .testTag("proofreading-suggestion-ignore")
                         .onPreviewKeyEvent { event ->
                             if (keyboardOpen && isProofreadingActivationKey(event)) {
-                                onAddToVocabulary(issue)
+                                onIgnore(issue)
                                 true
                             } else {
                                 false
                             }
                         },
+                    tooltip = "Ignore this suggestion for this app session",
                 )
+                if (canAddToVocabulary) {
+                    var addFocused by remember(issue.start) { mutableStateOf(false) }
+                    AppButton(
+                        "Add to vocabulary",
+                        onClick = { onAddToVocabulary(issue) },
+                        variant = ButtonVariant.Ghost,
+                        horizontalPadding = 6.dp,
+                        modifier = Modifier.onFocusChanged { addFocused = it.isFocused }
+                            .background(if (addFocused) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
+                            .testTag("proofreading-add-to-vocabulary")
+                            .onPreviewKeyEvent { event ->
+                                if (keyboardOpen && isProofreadingActivationKey(event)) {
+                                    onAddToVocabulary(issue)
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                    )
+                }
             }
-            var ignoreFocused by remember(issue.start) { mutableStateOf(false) }
-            AppButton(
-                "Ignore",
-                onClick = { onIgnore(issue) },
-                variant = ButtonVariant.Ghost,
-                horizontalPadding = 6.dp,
-                modifier = Modifier.then(if (replacements.isEmpty()) Modifier.focusRequester(firstActionFocusRequester) else Modifier)
-                    .onFocusChanged { ignoreFocused = it.isFocused }
-                    .background(if (ignoreFocused) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
-                    .testTag("proofreading-suggestion-ignore")
-                    .onPreviewKeyEvent { event ->
-                        if (keyboardOpen && isProofreadingActivationKey(event)) {
-                            onIgnore(issue)
-                            true
-                        } else {
-                            false
-                        }
-                    },
-                tooltip = "Ignore this suggestion for this app session",
-            )
         }
     }
 }

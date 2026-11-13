@@ -49,6 +49,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -60,8 +61,13 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Filter
@@ -486,32 +492,122 @@ private fun ErrorLevelHighlightRow(
 /** The sample Error row both error-row style editors preview their style on. */
 private const val ERROR_ROW_PREVIEW_SAMPLE = "E AndroidRuntime: FATAL EXCEPTION: main"
 
-/** The Settings › Editor behaviour "Error rows" cell content: the On | Off switch and the Style toggle that opens [ErrorRowsStylePanel]. */
+/**
+ * The Settings › Editor behaviour "Error rows" cell content: the On | Off switch, the Style button that opens
+ * [ErrorRowsStylePanel] in a popup under it, and, while any tab keeps its own style (which wins over this
+ * switch), a line saying so with a button that clears those overrides.
+ */
 @Composable
 internal fun ErrorRowsSettingControl(
     style: ErrorHighlightStyle,
     styleExpanded: Boolean,
     onStyleExpandedChange: (Boolean) -> Unit,
     onChange: (ErrorHighlightStyle) -> Unit,
+    palette: HighlighterStylePaletteActions,
+    tabOverrideCount: Int,
+    onResetTabOverrides: () -> Unit,
+    // Called after the style popup closed, so the owner can take keyboard focus back (a dismissed Popup leaves none).
+    onStyleClosed: () -> Unit = {},
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (style.enabled) 0 else 1),
-            onToggle = { idx -> onChange(style.copy(enabled = idx == 0)) },
-            modifier = Modifier.testTag("error-highlight-global-switch"),
-        )
-        AppButton(
-            if (styleExpanded) "Style ▾" else "Style ▸",
-            onClick = { onStyleExpandedChange(!styleExpanded) },
-            variant = ButtonVariant.Secondary,
-            modifier = Modifier.testTag("error-highlight-global-style-toggle"),
-            leadingContent = { Box(Modifier.size(12.dp).background(style.color, CORNER_SM)) },
-        )
+    val tc = tc()
+    val density = LocalDensity.current
+    val windowSize = LocalWindowInfo.current.containerSize
+    val popupWidth = with(density) { ERROR_ROWS_STYLE_POPUP_WIDTH.coerceAtMost((windowSize.width.toDp() - 24.dp).coerceAtLeast(240.dp)) }
+    var wasOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(styleExpanded) {
+        if (styleExpanded) {
+            wasOpen = true
+        } else if (wasOpen) {
+            wasOpen = false
+            onStyleClosed()
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (style.enabled) 0 else 1),
+                onToggle = { idx -> onChange(style.copy(enabled = idx == 0)) },
+                modifier = Modifier.testTag("error-highlight-global-switch"),
+            )
+            Box {
+                AppButton(
+                    if (styleExpanded) "Style ▾" else "Style ▸",
+                    onClick = { onStyleExpandedChange(!styleExpanded) },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.testTag("error-highlight-global-style-toggle"),
+                    leadingContent = { Box(Modifier.size(12.dp).background(style.color, CORNER_SM)) },
+                )
+                if (styleExpanded) {
+                    // Focusable, so Esc and an outside click reach this layer first; the colour and font popups opened
+                    // inside it are layers above it, so a click inside them is not an outside click here and Esc
+                    // closes the innermost popup first.
+                    Popup(
+                        popupPositionProvider = ErrorRowsStylePopupPosition(with(density) { ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING.roundToPx() }),
+                        onDismissRequest = { onStyleExpandedChange(false) },
+                        properties = PopupProperties(focusable = true),
+                        onPreviewKeyEvent = { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                                onStyleExpandedChange(false)
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                    ) {
+                        // The outer padding leaves room for the shadow, which a popup layer would otherwise clip.
+                        Box(Modifier.width(popupWidth + ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING * 2).padding(ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING)) {
+                            ErrorRowsStylePanel(style = style, palette = palette, onChange = onChange)
+                        }
+                    }
+                }
+            }
+        }
+        if (tabOverrideCount > 0) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                AppText(
+                    if (tabOverrideCount == 1) "1 tab uses its own style" else "$tabOverrideCount tabs use their own style",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    modifier = Modifier.testTag("error-highlight-override-count"),
+                )
+                AppButton(
+                    "Reset tabs",
+                    onClick = onResetTabOverrides,
+                    variant = ButtonVariant.Ghost,
+                    horizontalPadding = 6.dp,
+                    modifier = Modifier.testTag("error-highlight-reset-tabs"),
+                )
+            }
+        }
     }
 }
 
-/** The full-width style editor shown below the Editor behaviour grid while the "Error rows" Style button is open. */
+private val ERROR_ROWS_STYLE_POPUP_WIDTH = 520.dp
+private val ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING = 7.dp
+
+/** Places the style popup's card under the Style button, start edges aligned, kept inside the window (flipped above when there is no room below). */
+internal class ErrorRowsStylePopupPosition(private val shadowPaddingPx: Int) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset = seq3PopoverPosition(
+        // The popup content carries the shadow padding on every side, the visible card does not: place the card.
+        anchor = IntRect(
+            anchorBounds.left - shadowPaddingPx, anchorBounds.top + shadowPaddingPx,
+            anchorBounds.right, anchorBounds.bottom - shadowPaddingPx,
+        ),
+        popup = popupContentSize,
+        window = windowSize,
+        gapPx = ERROR_ROWS_STYLE_POPUP_GAP_PX,
+    )
+}
+
+private const val ERROR_ROWS_STYLE_POPUP_GAP_PX = 4
+
+/** The style editor the "Error rows" Style button opens in a popup: the colour, text, font and preview controls on a menu-style card. */
 @Composable
 internal fun ErrorRowsStylePanel(
     style: ErrorHighlightStyle,
@@ -521,9 +617,9 @@ internal fun ErrorRowsStylePanel(
     val tc = tc()
     var backgroundPickerOpen by remember { mutableStateOf(false) }
     var foregroundPickerOpen by remember { mutableStateOf(false) }
-    val cardShape = RoundedCornerShape(6.dp)
+    val cardShape = RoundedCornerShape(7.dp)
     Column(
-        Modifier.fillMaxWidth().background(tc.p2, cardShape).border(1.dp, tc.br, cardShape)
+        Modifier.fillMaxWidth().shadow(8.dp, cardShape).background(tc.p, cardShape).border(1.dp, tc.br, cardShape)
             .padding(horizontal = 12.dp, vertical = 10.dp).testTag("error-highlight-global-panel"),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
