@@ -713,10 +713,40 @@ internal fun AppearanceSystemFontSelectors(state: AppState) {
     }
 }
 
+/** Test tag of the Shape style control. */
+internal const val SHAPE_STYLE_CONTROL_TAG = "shape-style"
+
+private const val SHAPE_STYLE_HINT = "Corners of tiles, the toolbar and tabs. Theme default keeps each theme's own shapes."
+
+internal fun shapeStyleLabel(style: ShapeStyle): String = when (style) {
+    ShapeStyle.THEME -> "Theme default"
+    ShapeStyle.SQUARE -> "Square"
+    ShapeStyle.SOFT -> "Soft"
+    ShapeStyle.ROUNDED -> "Rounded"
+    ShapeStyle.ROUND -> "Round"
+}
+
+// How round the tiles, the toolbar's button groups and the tabs are, for every theme (ui/UiCorners.kt).
+@Composable
+internal fun ShapeStyleSetting(state: AppState) {
+    val tc = tc()
+    CompactSetting("Shape style") {
+        val styles = ShapeStyle.entries
+        SegmentedControl(
+            options = styles.map(::shapeStyleLabel),
+            selectedIndices = setOf(styles.indexOf(state.settings.shapeStyle)),
+            onToggle = { idx -> state.updateSettings { it.copy(shapeStyle = styles[idx]) } },
+            modifier = Modifier.testTag(SHAPE_STYLE_CONTROL_TAG),
+        )
+        AppText(SHAPE_STYLE_HINT, color = tc.td, fontSize = 10.sp)
+    }
+}
+
 @Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
     ThemeSettingsBlock(state)
+    ShapeStyleSetting(state)
     AppearanceBasicsRow(state)
     AppearanceSystemFontSelectors(state)
     TabsAppearanceSettings(state)

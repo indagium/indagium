@@ -119,6 +119,8 @@ internal data class HolidayLook(
     val colors: ThemeColors,
     val chrome: HolidayChromeColors,
     val effects: HolidayEffects,
+    /** The pack is in `ownTabStylePacks`: its tabs are drawn by the user's tab style, in the pack's colours. */
+    val ownTabStyle: Boolean = false,
 ) {
     val pack: HolidayPack get() = theme.pack
 }
@@ -137,6 +139,7 @@ internal fun resolveHolidayLook(settings: AppSettings, now: LocalDateTime, theme
         colors = theme.palette(dark),
         chrome = theme.chrome(dark),
         effects = resolveHolidayEffects(settings.holiday, theme),
+        ownTabStyle = theme.pack in settings.holiday.ownTabStylePacks,
     )
 }
 
@@ -147,7 +150,12 @@ internal fun effectiveThemeColors(settings: AppSettings, today: LocalDate): Them
 internal fun effectiveThemeColors(settings: AppSettings): ThemeColors =
     resolveHolidayLook(settings, LocalDateTime.now())?.colors ?: themeColors(settings.theme)
 
+/** [this] with [pack] added to (or removed from) the packs whose tabs use the user's own tab style ("My tab style"). */
+internal fun HolidaySettings.withOwnTabStyle(pack: HolidayPack, own: Boolean): HolidaySettings =
+    copy(ownTabStylePacks = if (own) ownTabStylePacks + pack else ownTabStylePacks - pack)
+
 /** [this] with its holiday settings transformed (the one write path for the Settings dialog and the Layout menu). */
+
 fun AppSettings.withHoliday(fn: (HolidaySettings) -> HolidaySettings): AppSettings = copy(holiday = fn(holiday))
 
 /**

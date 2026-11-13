@@ -20,7 +20,7 @@ internal class HolidayToggle(val key: String, val label: String, val read: (Holi
 
 /**
  * The rows of the section for [theme]: one per effect it declares (in its order), then the generic switches for the capabilities it has (no
- * scene row without a tab scene, no picture or animate row without a picture or companion, and so on), then the always-present pause row.
+ * scene row without a tab scene, no picture or animate row without a picture or companion, and so on), then the always-present "My tab style" and pause rows.
  */
 internal fun holidayToggles(theme: HolidayTheme): List<HolidayToggle> = buildList {
     theme.effects.forEach { spec ->
@@ -33,6 +33,7 @@ internal fun holidayToggles(theme: HolidayTheme): List<HolidayToggle> = buildLis
     }
     if (theme.icons != null) add(HolidayToggle("icons", "Picture icons in the toolbar", { it.funIcons }, { it.copy(funIcons = !it.funIcons) }))
     theme.companion?.let { c -> add(HolidayToggle("companion", c.label, { it.notesCompanion }, { it.copy(notesCompanion = !it.notesCompanion) })) }
+    add(HolidayToggle("ownTabs", "My tab style", { theme.pack in it.ownTabStylePacks }, { it.withOwnTabStyle(theme.pack, theme.pack !in it.ownTabStylePacks) }))
     add(HolidayToggle("pause", "Pause while capturing or playing video", { it.pauseWhileBusy }, { it.copy(pauseWhileBusy = !it.pauseWhileBusy) }))
 }
 

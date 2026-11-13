@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.model.AppSettings
 import com.indagium.model.ChromeEdge
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.ShapeStyle
 import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
@@ -57,6 +58,7 @@ class ChromeSettingsCodecTest {
         assertEquals(ToolbarAlign.START, s.toolbarAlign)
         assertEquals(CHROME_VERTICAL_TAB_BAR_DP, s.verticalTabBarWidthDp)
         assertEquals(ToolbarPlacement.WITH_TABS_END, s.toolbarFallbackPlacement)
+        assertEquals(ShapeStyle.THEME, s.shapeStyle)
     }
 
     @Test
@@ -77,6 +79,7 @@ class ChromeSettingsCodecTest {
             toolbarAlign = ToolbarAlign.END,
             verticalTabBarWidthDp = 312.5f,
             toolbarFallbackPlacement = ToolbarPlacement.OWN_EDGE,
+            shapeStyle = ShapeStyle.ROUND,
         )
         val back = decode(custom.settingsJson())
         assertEquals(15, back.fontSize)
@@ -95,6 +98,19 @@ class ChromeSettingsCodecTest {
         assertEquals(ToolbarAlign.END, back.toolbarAlign)
         assertEquals(312.5f, back.verticalTabBarWidthDp)
         assertEquals(ToolbarPlacement.OWN_EDGE, back.toolbarFallbackPlacement)
+        assertEquals(ShapeStyle.ROUND, back.shapeStyle)
+    }
+
+    @Test
+    fun shapeStyleIsStoredByNameEverySurvivesAndUnknownNamesGiveTheThemeDefault() {
+        assertEquals(listOf("THEME", "SQUARE", "SOFT", "ROUNDED", "ROUND"), ShapeStyle.entries.map { it.name })
+        ShapeStyle.entries.forEach { assertEquals(it, decode(AppSettings().copy(shapeStyle = it).settingsJson()).shapeStyle) }
+        assertTrue("\"ROUNDED\"" in AppSettings(shapeStyle = ShapeStyle.ROUNDED).settingsJson())
+
+        val unknown = withKeys(AppSettings(shapeStyle = ShapeStyle.SQUARE)) { it["shapeStyle"] = parse("\"HEXAGON\"") }
+        assertEquals(ShapeStyle.THEME, decode(unknown).shapeStyle)
+        val wrongType = withKeys(AppSettings(shapeStyle = ShapeStyle.SQUARE)) { it["shapeStyle"] = parse("3") }
+        assertEquals(ShapeStyle.THEME, decode(wrongType).shapeStyle)
     }
 
     @Test
@@ -163,7 +179,7 @@ class ChromeSettingsCodecTest {
                     "tabStripStyle", "tabSizeMode", "tabLabelMode", "tabShowTypeBadge", "tabShowSourceStripe",
                     "tabCloseOnEvery", "chromeLocked", "tabStripPosition", "toolbarPlacement", "toolbarEdge",
                     "tabCloseButtonPosition",
-                    "toolbarOuter", "toolbarAlign", "verticalTabBarWidthDp", "toolbarFallbackPlacement",
+                    "toolbarOuter", "toolbarAlign", "verticalTabBarWidthDp", "toolbarFallbackPlacement", "shapeStyle",
                 ).toSet(),
             )
         }

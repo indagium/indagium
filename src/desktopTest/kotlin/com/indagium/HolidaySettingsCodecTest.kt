@@ -48,6 +48,7 @@ class HolidaySettingsCodecTest {
         filterPicture = false,
         animatePicture = false,
         notesCompanion = false,
+        ownTabStylePacks = setOf(HolidayPack.PUMPKIN_PATCH),
     )
 
     @Test
@@ -81,6 +82,30 @@ class HolidaySettingsCodecTest {
             val decoded = decode(AppSettings().copy(holiday = defaults.copy(pack = pack)).settingsJson())
             assertEquals(pack, decoded.holiday.pack)
         }
+    }
+
+    @Test
+    fun ownTabStylePacksRoundTripAndDefaultToEmpty() {
+        assertEquals(emptySet(), defaults.ownTabStylePacks)
+        val all = HolidayPack.entries.toSet()
+        assertEquals(all, decode(AppSettings().copy(holiday = defaults.copy(ownTabStylePacks = all)).settingsJson()).holiday.ownTabStylePacks)
+        HolidayPack.entries.forEach {
+            val back = decode(AppSettings().copy(holiday = defaults.copy(ownTabStylePacks = setOf(it))).settingsJson())
+            assertEquals(setOf(it), back.holiday.ownTabStylePacks)
+        }
+        // An old "holiday" object without the key gives the empty set, the other fields kept.
+        val old = withHolidayObject(AppSettings().copy(holiday = custom)) { it.remove("ownTabStylePacks") }
+        assertEquals(custom.copy(ownTabStylePacks = emptySet()), decode(old).holiday)
+    }
+
+    @Test
+    fun unknownAndMalformedOwnTabStylePackEntriesAreDropped() {
+        val raw = withHolidayObject(AppSettings().copy(holiday = custom)) {
+            it["ownTabStylePacks"] = parse("[\"PUMPKIN_PATCH\",\"EASTER_BUNNY\",3,null,\"pumpkin_patch\"]")
+        }
+        assertEquals(setOf(HolidayPack.PUMPKIN_PATCH), decode(raw).holiday.ownTabStylePacks)
+        val notAnArray = withHolidayObject(AppSettings().copy(holiday = custom)) { it["ownTabStylePacks"] = parse("\"PUMPKIN_PATCH\"") }
+        assertEquals(defaults.ownTabStylePacks, decode(notAnArray).holiday.ownTabStylePacks)
     }
 
     @Test

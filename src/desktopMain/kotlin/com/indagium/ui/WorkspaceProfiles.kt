@@ -123,6 +123,7 @@ private fun appearanceDifferences(a: ProfileAppearance, s: AppSettings): List<St
     differs("Toolbar order on the tab edge", a.toolbarOuter, s.toolbarOuter)
     differs("Toolbar alignment", a.toolbarAlign, s.toolbarAlign)
     differs("Tab bar width", a.verticalTabBarWidthDp, s.verticalTabBarWidthDp)
+    differs("Shape style", a.shapeStyle, s.shapeStyle)
 }
 
 private fun behaviorDifferences(b: ProfileBehavior, s: AppSettings): List<String> = buildList {
@@ -164,6 +165,7 @@ internal fun ProfileAppearance?.orAppDefaults(): ProfileAppearance {
         toolbarOuter = a.toolbarOuter ?: d.toolbarOuter,
         toolbarAlign = a.toolbarAlign ?: d.toolbarAlign,
         verticalTabBarWidthDp = a.verticalTabBarWidthDp ?: d.verticalTabBarWidthDp,
+        shapeStyle = a.shapeStyle ?: d.shapeStyle,
     )
 }
 
@@ -226,6 +228,7 @@ private fun AppSettings.withProfileAppearance(a: ProfileAppearance): AppSettings
         toolbarOuter = a.toolbarOuter ?: toolbarOuter,
         toolbarAlign = a.toolbarAlign ?: toolbarAlign,
         verticalTabBarWidthDp = a.verticalTabBarWidthDp ?: verticalTabBarWidthDp,
+        shapeStyle = a.shapeStyle ?: shapeStyle,
     ).let { next -> a.toolbarPlacement?.let(next::withToolbarPlacement) ?: next }
 
 private fun AppSettings.withProfileBehavior(b: ProfileBehavior): AppSettings =

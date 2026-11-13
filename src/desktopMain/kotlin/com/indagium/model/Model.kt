@@ -1699,6 +1699,9 @@ data class AppSettings(
     val homeDiagramsView: HomeDiagramsView = HomeDiagramsView.LIST,
     // Global default for parsed Error-level rows; per-tab overrides live on LogTab. JSON only.
     val errorHighlightStyle: ErrorHighlightStyle = ErrorHighlightStyle(),
+    // How round the tiles, the toolbar's button groups and the tabs are (ui/UiCorners.kt). JSON-only (ui/ChromeSettingsJson.kt),
+    // appended last: the frozen positional settings decoder must not gain a field.
+    val shapeStyle: ShapeStyle = ShapeStyle.THEME,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1819,6 +1822,27 @@ enum class TabSizeMode { FIXED, FIT }
 enum class TabCloseButtonPosition { LEFT, RIGHT }
 
 /**
+ * How round the tiles, the toolbar's button groups and the tabs are (Settings > Appearance > Shape style). Stored by name, so new values
+ * go last.
+ */
+enum class ShapeStyle {
+    /** Each theme's own shapes: the regular 8 / 7 dp look, or the corners a seasonal pack sets. The default. */
+    THEME,
+
+    /** No rounding at all. */
+    SQUARE,
+
+    /** The regular themes' small radii (tiles 8, toolbar 7, tabs 6 dp), whatever the theme. */
+    SOFT,
+
+    /** Clearly rounded corners (tiles 12, toolbar 10, tabs 10 dp). */
+    ROUNDED,
+
+    /** The roundest: large tile radius, capsule-shaped toolbar groups, tabs 14 dp. */
+    ROUND,
+}
+
+/**
  * What a log tab's label shows: the file name, with the folder (or archive) appended only when two open tabs share that file name
  * ([FILE_SESSION], the default; stored by name, the "session" is the folder), only the folder ([SESSION_ONLY]), only the file name
  * ([FILE_ONLY]), or always `file — folder` ([FILE_FOLDER_ALWAYS]). Stored by name, so new values go last.
@@ -1931,6 +1955,7 @@ data class ProfileAppearance(
     val toolbarOuter: Boolean? = null,
     val toolbarAlign: ToolbarAlign? = null,
     val verticalTabBarWidthDp: Float? = null,
+    val shapeStyle: ShapeStyle? = null,
 )
 
 /**
@@ -2029,6 +2054,9 @@ data class HolidaySettings(
     val filterPicture: Boolean = true,
     val animatePicture: Boolean = true,
     val notesCompanion: Boolean = true,
+    // Packs whose tabs use the user's own Tab style instead of the pack's tab silhouette. JSON-only (ui/holiday/HolidaySettingsJson.kt);
+    // appended last.
+    val ownTabStylePacks: Set<HolidayPack> = emptySet(),
 )
 
 // ── Misc ───────────────────────────────────────────────────────────

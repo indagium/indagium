@@ -63,6 +63,7 @@ internal const val SEASONAL_FUN_ICONS_TAG = "seasonal-fun-icons"
 internal const val SEASONAL_PAUSE_TAG = "seasonal-pause"
 internal const val THEME_TABS_TAG = "theme-tabs"
 internal const val SEASONAL_OFF_TAG = "seasonal-turn-off"
+internal const val SEASONAL_TABS_TAG = "seasonal-tabs"
 internal const val SEASONAL_STATUS_TAG = "seasonal-status"
 
 /** The settings anchors of the rows on the Special themes tab: a search or jump to one of them opens that tab first. */
@@ -72,8 +73,10 @@ internal const val SEASONAL_ANCHOR_LIGHTNESS = "Light or dark"
 internal const val SEASONAL_ANCHOR_EFFECTS = "Effects"
 internal const val SEASONAL_ANCHOR_FUN_ICONS = "Fun icons"
 internal const val SEASONAL_ANCHOR_PAUSE = "Pause effects while capturing or playing video"
+internal const val SEASONAL_ANCHOR_TABS = "Tabs"
 internal val SEASONAL_ANCHORS = setOf(
     SEASONAL_ANCHOR_WHEN, SEASONAL_ANCHOR_PACK, SEASONAL_ANCHOR_LIGHTNESS, SEASONAL_ANCHOR_EFFECTS, SEASONAL_ANCHOR_FUN_ICONS, SEASONAL_ANCHOR_PAUSE,
+    SEASONAL_ANCHOR_TABS,
 )
 
 private const val TAB_THEMES = 0
@@ -86,6 +89,7 @@ private const val DIMMED_ALPHA = 0.5f
 
 private const val GENERIC_EFFECTS_HINT = "Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves."
 private const val FUN_ICONS_HINT = "Toolbar buttons become pictures. Hover one to see its real name."
+private const val OWN_TABS_HINT = "My tab style keeps your Tab style (Settings › Appearance) in the pack's colours."
 private const val FOOTNOTE = "Log levels, sequences and highlighters keep their colours in every pack."
 
 private val DATE_FORMAT = DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)
@@ -174,6 +178,9 @@ private fun SeasonalThemesTab(state: AppState, themes: Map<HolidayPack, HolidayT
                 val hint = selected?.let(::holidayEffectsHint) ?: GENERIC_EFFECTS_HINT
                 EffectsRow(holiday.intensity, hint) { intensity -> update { copy(intensity = intensity) } }
             }
+            if (selected != null) {
+                TabsRow(selected.pack in holiday.ownTabStylePacks, OWN_TABS_HINT) { own -> update { withOwnTabStyle(selected.pack, own) } }
+            }
             if (selected?.icons != null) {
                 SeasonalCheck(SEASONAL_ANCHOR_FUN_ICONS, FUN_ICONS_HINT, holiday.funIcons, SEASONAL_FUN_ICONS_TAG) { update { copy(funIcons = !funIcons) } }
             }
@@ -229,6 +236,21 @@ private fun LightnessRow(lightness: HolidayLightness, onSelect: (HolidayLightnes
             onToggle = { onSelect(all[it]) },
             modifier = Modifier.testTag(SEASONAL_LIGHTNESS_TAG),
         )
+    }
+}
+
+// Theme's tabs (the pack draws them) | My tab style (your Tab style in the pack's colours), for the selected pack only.
+@Composable
+private fun TabsRow(own: Boolean, hint: String, onSelect: (Boolean) -> Unit) {
+    val tc = tc()
+    CompactSetting(SEASONAL_ANCHOR_TABS) {
+        SegmentedControl(
+            options = listOf("Theme's tabs", "My tab style"),
+            selectedIndices = setOf(if (own) 1 else 0),
+            onToggle = { onSelect(it == 1) },
+            modifier = Modifier.testTag(SEASONAL_TABS_TAG),
+        )
+        AppText(hint, color = tc.td, fontSize = 10.sp, modifier = Modifier.width(260.dp))
     }
 }
 

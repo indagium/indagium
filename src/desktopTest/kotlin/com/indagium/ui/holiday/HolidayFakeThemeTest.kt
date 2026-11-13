@@ -68,8 +68,8 @@ class HolidayFakeThemeTest {
 
     @Test
     fun theLayoutMenuRowsAreTheEffectsPlusOnlyTheGenericRowsTheThemeCanHonour() {
-        assertEquals(listOf(FakeSparkles.id, "pause"), holidayToggles(FakeHolidayTheme).map { it.key })
-        assertEquals(listOf("Sparkles", "Pause while capturing or playing video"), holidayToggles(FakeHolidayTheme).map { it.label })
+        assertEquals(listOf(FakeSparkles.id, "ownTabs", "pause"), holidayToggles(FakeHolidayTheme).map { it.key })
+        assertEquals(listOf("Sparkles", "My tab style", "Pause while capturing or playing video"), holidayToggles(FakeHolidayTheme).map { it.label })
     }
 
     @Test
@@ -106,7 +106,7 @@ class HolidayFakeThemeTest {
         val off = settings.withHoliday { it.copy(notesCompanion = false) }
         val look = assertNotNull(resolveHolidayLook(off, day, holidayThemeRegistry(FakeCompanionTheme)))
         assertTrue(holidayBackdropArts(look).isEmpty(), "the user's switch removes it")
-        assertEquals(listOf(FakeSparkles.id, "animate", "companion", "pause"), holidayToggles(FakeCompanionTheme).map { it.key })
+        assertEquals(listOf(FakeSparkles.id, "animate", "companion", "ownTabs", "pause"), holidayToggles(FakeCompanionTheme).map { it.key })
         assertEquals("Little ghost in the Notes corner", holidayToggles(FakeCompanionTheme).first { it.key == "companion" }.label)
     }
 }

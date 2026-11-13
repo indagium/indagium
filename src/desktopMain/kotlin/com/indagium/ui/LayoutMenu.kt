@@ -184,7 +184,7 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
                 wrap -> Modifier.width(36.dp).height(WRAPPED_BUTTON_HEIGHT_DP.dp)
                 else -> Modifier.fillMaxHeight().width(36.dp)
             }.testTag("layout-menu-button"),
-            shape = RoundedCornerShape(toolbarCornerDp().dp),
+            shape = toolbarSoloShape(toolbarCornerDp()),
             contentPadding = if (pack != null) PICTURE_ONLY_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp),
         ) { open = !open }
         if (modified) {

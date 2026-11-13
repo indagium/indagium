@@ -132,6 +132,21 @@ class LayoutMenuHolidayUiTest {
     }
 
     @Test
+    fun myTabStyleRowAddsAndRemovesTheActivePackAndHandsFocusBack() {
+        setup(HolidayMode.ALWAYS)
+        assertTrue(present(layoutMenuHolidayToggleTag("ownTabs")))
+        assertTrue(state.settings.holiday.ownTabStylePacks.isEmpty())
+        val before = reclaims
+        rule.onNodeWithTag(layoutMenuHolidayToggleTag("ownTabs")).performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(HolidayPack.PUMPKIN_PATCH), state.settings.holiday.ownTabStylePacks)
+        assertTrue(reclaims > before, "focus is reclaimed after the click")
+        rule.onNodeWithTag(layoutMenuHolidayToggleTag("ownTabs")).performScrollTo().performClick()
+        rule.waitForIdle()
+        assertTrue(state.settings.holiday.ownTabStylePacks.isEmpty())
+    }
+
+    @Test
     fun theIntensityControlSetsCalmAndOff() {
         setup(HolidayMode.ALWAYS)
         rule.onNode(hasText("Calm") and hasAnyAncestor(hasTestTag(LAYOUT_MENU_HOLIDAY_INTENSITY_TAG))).performScrollTo().performClick()

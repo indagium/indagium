@@ -4,6 +4,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.ChromeEdge
 import com.indagium.model.MAX_VERTICAL_TAB_BAR_DP
 import com.indagium.model.MIN_VERTICAL_TAB_BAR_DP
+import com.indagium.model.ShapeStyle
 import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
@@ -22,7 +23,7 @@ import kotlinx.serialization.json.put
 
 // The window chrome's settings (AppSettings.tabStripStyle, tabSizeMode, tabLabelMode, tabShowTypeBadge, tabShowSourceStripe,
 // tabCloseOnEvery, tabCloseButtonPosition, chromeLocked, tabStripPosition, toolbarPlacement, toolbarEdge, toolbarOuter, toolbarAlign,
-// verticalTabBarWidthDp, toolbarFallbackPlacement), JSON only. They live here, not in
+// verticalTabBarWidthDp, toolbarFallbackPlacement, shapeStyle), JSON only. They live here, not in
 // AutosaveCodec.kt, which is already at detekt's per-file function limit. Enums are stored by name. The decoder never throws:
 // an absent, unknown or wrongly typed value leaves the field at its default (a fresh AppSettings), so an old autosave, a legacy
 // positional token or a hand-edited file all give the long-standing tab strip.
@@ -44,6 +45,7 @@ internal fun JsonObjectBuilder.putChromeSettings(settings: AppSettings) {
     put("toolbarAlign", settings.toolbarAlign.name)
     put("verticalTabBarWidthDp", settings.verticalTabBarWidthDp)
     put("toolbarFallbackPlacement", settings.toolbarFallbackPlacement.name)
+    put("shapeStyle", settings.shapeStyle.name)
 }
 
 private inline fun <reified E : Enum<E>> JsonElement?.enumOrDefault(default: E): E {
@@ -82,4 +84,5 @@ internal fun AppSettings.withChromeSettingsFrom(o: JsonObject): AppSettings = co
     toolbarAlign = o["toolbarAlign"].enumOrDefault<ToolbarAlign>(toolbarAlign),
     verticalTabBarWidthDp = o["verticalTabBarWidthDp"].tabBarWidthOrDefault(verticalTabBarWidthDp),
     toolbarFallbackPlacement = o["toolbarFallbackPlacement"].fallbackPlacementOrDefault(toolbarFallbackPlacement),
+    shapeStyle = o["shapeStyle"].enumOrDefault<ShapeStyle>(shapeStyle),
 )

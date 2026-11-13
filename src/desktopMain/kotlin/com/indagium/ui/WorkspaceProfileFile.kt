@@ -16,6 +16,7 @@ import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.ProfileSpec
 import com.indagium.model.SearchScopeBehavior
+import com.indagium.model.ShapeStyle
 import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
@@ -115,6 +116,7 @@ internal fun currentProfileAppearance(s: AppSettings) = ProfileAppearance(
     toolbarOuter = s.toolbarOuter,
     toolbarAlign = s.toolbarAlign,
     verticalTabBarWidthDp = s.verticalTabBarWidthDp,
+    shapeStyle = s.shapeStyle,
 )
 
 internal fun currentProfileBehavior(s: AppSettings) = ProfileBehavior(
@@ -192,6 +194,7 @@ internal fun profileAppearanceToJson(a: ProfileAppearance): JsonObject = buildJs
     putIfSet("toolbarOuter", a.toolbarOuter)
     putIfSet("toolbarAlign", a.toolbarAlign)
     putIfSet("verticalTabBarWidthDp", a.verticalTabBarWidthDp)
+    putIfSet("shapeStyle", a.shapeStyle)
 }
 
 internal fun profileBehaviorToJson(b: ProfileBehavior): JsonObject = buildJsonObject {
@@ -290,6 +293,7 @@ internal fun profileAppearanceFromJson(o: JsonObject) = ProfileAppearance(
     toolbarOuter = o.bool("toolbarOuter"),
     toolbarAlign = o.enum<ToolbarAlign>("toolbarAlign"),
     verticalTabBarWidthDp = o.float("verticalTabBarWidthDp", MIN_VERTICAL_TAB_BAR_DP..MAX_VERTICAL_TAB_BAR_DP),
+    shapeStyle = o.enum<ShapeStyle>("shapeStyle"),
 )
 
 internal fun profileBehaviorFromJson(o: JsonObject) = ProfileBehavior(

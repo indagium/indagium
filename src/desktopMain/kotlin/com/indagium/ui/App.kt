@@ -197,6 +197,7 @@ fun App(
         resolveHolidayLook(state.settingsForReleaseThemePreview(), holidayNow)
     }
     val theme = holiday?.colors ?: themeColors(state.settings.theme)
+    val uiCorners = remember(state.settings.shapeStyle, holiday) { resolveUiCorners(state.settings.shapeStyle, holiday) }
     val holidayExclusions = remember { HolidayExclusions() }
     val holidayLandingAreas = remember { HolidayLandingAreas() }
     val holidayPaused by remember(state) { derivedStateOf { state.settings.holiday.pauseWhileBusy && state.holidayBusy() } }
@@ -303,6 +304,7 @@ fun App(
     CompositionLocalProvider(
         LocalTheme provides theme,
         LocalHoliday provides holiday,
+        LocalUiCorners provides uiCorners,
         LocalHolidayPaused provides holidayPaused,
         LocalHolidayExclusions provides holidayExclusions,
         LocalHolidayLandingAreas provides holidayLandingAreas,

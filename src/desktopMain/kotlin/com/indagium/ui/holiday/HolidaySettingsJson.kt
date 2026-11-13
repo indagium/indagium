@@ -7,6 +7,7 @@ import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.model.HolidaySettings
 import com.indagium.ui.*
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
@@ -38,6 +39,7 @@ internal fun JsonObjectBuilder.putHolidaySettings(settings: AppSettings) {
             put("filterPicture", h.filterPicture)
             put("animatePicture", h.animatePicture)
             put("notesCompanion", h.notesCompanion)
+            put("ownTabStylePacks", JsonArray(h.ownTabStylePacks.map { it.name }.sorted().map(::JsonPrimitive)))
         },
     )
 }
@@ -54,6 +56,13 @@ private fun JsonElement?.holidayBoolOrDefault(default: Boolean): Boolean =
 private fun JsonObject?.holidayToggles(default: Map<String, Boolean>): Map<String, Boolean> {
     if (this == null) return default
     return entries.mapNotNull { (id, v) -> (v as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull?.let { id to it } }.toMap()
+}
+
+// The packs listed by name: unknown or non-string entries are dropped, an absent (or not-an-array) value leaves the default.
+private fun JsonArray?.holidayPacks(default: Set<HolidayPack>): Set<HolidayPack> {
+    if (this == null) return default
+    val names = mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.contentOrNull }.toSet()
+    return HolidayPack.entries.filterTo(mutableSetOf()) { it.name in names }
 }
 
 /**
@@ -76,6 +85,7 @@ internal fun AppSettings.withHolidaySettingsFrom(o: JsonObject): AppSettings {
             filterPicture = h["filterPicture"].holidayBoolOrDefault(d.filterPicture),
             animatePicture = h["animatePicture"].holidayBoolOrDefault(d.animatePicture),
             notesCompanion = h["notesCompanion"].holidayBoolOrDefault(d.notesCompanion),
+            ownTabStylePacks = (h["ownTabStylePacks"] as? JsonArray).holidayPacks(d.ownTabStylePacks),
         ),
     )
 }

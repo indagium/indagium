@@ -15,6 +15,7 @@ import com.indagium.model.ProfileAppearance
 import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.SearchScopeBehavior
+import com.indagium.model.ShapeStyle
 import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 import com.indagium.model.ThemePreset
@@ -390,6 +391,19 @@ class WorkspaceProfileTest {
         assertEquals(defaults.tabStripStyle, applied.tabStripStyle)
         assertEquals(defaults.ctrlFTarget, applied.ctrlFTarget)
         assertEquals(defaults.filterListRows, applied.filterListRows)
+    }
+
+    @Test
+    fun theShapeStyleIsAppliedComparedAndDefaultsToTheThemeWhenNull() {
+        val live = AppSettings().copy(shapeStyle = ShapeStyle.SQUARE)
+        val round = WorkspaceProfile.CLASSIC.spec.copy(appearance = ProfileAppearance(shapeStyle = ShapeStyle.ROUND))
+        assertEquals(ShapeStyle.ROUND, live.withProfileSpec(round).shapeStyle)
+        assertTrue("Shape style" in profileDifferences(round, live))
+        assertEquals(emptyList(), profileDifferences(round, live.withProfileSpec(round)))
+
+        val unset = WorkspaceProfile.CLASSIC.spec.copy(appearance = ProfileAppearance())
+        assertEquals(ShapeStyle.THEME, live.withProfileSpec(unset).shapeStyle, "a null field is the app default")
+        assertEquals(ShapeStyle.SQUARE, currentProfileAppearance(live).shapeStyle)
     }
 
     @Test

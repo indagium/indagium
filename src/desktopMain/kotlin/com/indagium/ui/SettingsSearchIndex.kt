@@ -127,6 +127,13 @@ private fun appearance() = buildList {
     )
     add(
         entry(
+            SettingsSection.Appearance, "Shape style",
+            "Corners of tiles, the toolbar and tabs: theme default, square, soft, rounded or round.",
+            listOf("shape", "corners", "rounded", "square", "round", "radius", "soft"),
+        ),
+    )
+    add(
+        entry(
             SettingsSection.Appearance,
             "Fallback log family",
             "Default monospace or proportional log text when no system family is selected.",
@@ -173,7 +180,7 @@ private fun appearance() = buildList {
     add(
         entry(
             SettingsSection.Appearance, "Tab style",
-            "How the tab strip looks: current, raised, segmented, typed, compact, source colour, two-line or quiet.",
+            "How the tab strip looks: current, raised, segmented, typed, compact, source colour, two-line, quiet, outlined or pill.",
             listOf("tabs", "tab bar", "appearance", "look", "raised", "compact", "segmented"),
         ),
     )
@@ -258,6 +265,12 @@ private fun seasonalThemes() = listOf(
         "Full: ghosts, fog, bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
         SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "ghosts", "fog", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
         anchor = SEASONAL_ANCHOR_EFFECTS,
+    ),
+    entry(
+        SettingsSection.Appearance, "Special theme tabs",
+        "Tabs: the special theme's own tab shapes, or My tab style, which keeps your Tab style in the pack's colours.",
+        SEASONAL_KEYWORDS + listOf("tab style", "seasonal tabs", "my tab style", "tabs", "shape"),
+        anchor = SEASONAL_ANCHOR_TABS,
     ),
     entry(
         SettingsSection.Appearance, "Fun icons",

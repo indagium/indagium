@@ -397,7 +397,7 @@ internal fun DiagramWorkspaceTilingHost(
                         parked = emptySet(),
                         cardHeightDp = (heightDp * DIAGRAM_STACKED_HEIGHT_SHARE)
                             .coerceIn(DIAGRAM_STACKED_MIN_HEIGHT_DP, DIAGRAM_STACKED_MAX_HEIGHT_DP),
-                        spec = DIAGRAM_WORKSPACE_CHROME_SPEC,
+                        spec = DIAGRAM_WORKSPACE_CHROME_SPEC.withWorkspaceCorners(),
                         callbacks = callbacks,
                         heightOf = { id ->
                             if (id == DiagramWorkspaceSectionId.PREVIEW) {
@@ -419,7 +419,7 @@ internal fun DiagramWorkspaceTilingHost(
                         locked = view.diagramTilesLocked,
                         widthDp = widthDp,
                         heightDp = heightDp,
-                        spec = DIAGRAM_WORKSPACE_CHROME_SPEC,
+                        spec = DIAGRAM_WORKSPACE_CHROME_SPEC.withWorkspaceCorners(),
                         callbacks = callbacks,
                         content = emitTiles,
                     )

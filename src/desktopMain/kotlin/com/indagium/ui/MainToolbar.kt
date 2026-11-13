@@ -60,14 +60,32 @@ internal val PICTURE_ONLY_PADDING = PaddingValues(horizontal = 0.dp, vertical = 
 
 /** The toolbar's button-group corner for the current look. */
 @Composable
-internal fun toolbarCornerDp(): Int = LocalHoliday.current?.theme?.corners?.toolbarDp ?: CORNER_DP
+internal fun toolbarCornerDp(): Int = currentUiCorners().toolbarDp
 
-private class ToolbarShapes(vertical: Boolean, cornerDp: Int = CORNER_DP) {
-    private val corner = cornerDp.dp
-    val lead = if (vertical) RoundedCornerShape(topStart = corner, topEnd = corner) else RoundedCornerShape(topStart = corner, bottomStart = corner)
+/** The one-button group shape for a toolbar corner: a capsule (radius half the thickness) for [UI_CORNER_CAPSULE], else [cornerDp] dp. */
+internal fun toolbarSoloShape(cornerDp: Int): RoundedCornerShape =
+    if (isCapsuleCorner(cornerDp)) RoundedCornerShape(CAPSULE_PERCENT) else RoundedCornerShape(cornerDp.dp)
+
+// A corner of 50% of the shorter side is half the bar's thickness: a capsule end.
+private const val CAPSULE_PERCENT = 50
+
+internal class ToolbarShapes(vertical: Boolean, cornerDp: Int = CORNER_DP) {
+    private val capsule = isCapsuleCorner(cornerDp)
+    private val corner = if (capsule) 0.dp else cornerDp.dp
+    val lead = when {
+        capsule && vertical -> RoundedCornerShape(topStartPercent = CAPSULE_PERCENT, topEndPercent = CAPSULE_PERCENT)
+        capsule -> RoundedCornerShape(topStartPercent = CAPSULE_PERCENT, bottomStartPercent = CAPSULE_PERCENT)
+        vertical -> RoundedCornerShape(topStart = corner, topEnd = corner)
+        else -> RoundedCornerShape(topStart = corner, bottomStart = corner)
+    }
     val middle = RoundedCornerShape(0.dp)
-    val tail = if (vertical) RoundedCornerShape(bottomStart = corner, bottomEnd = corner) else RoundedCornerShape(topEnd = corner, bottomEnd = corner)
-    val solo = RoundedCornerShape(corner)
+    val tail = when {
+        capsule && vertical -> RoundedCornerShape(bottomStartPercent = CAPSULE_PERCENT, bottomEndPercent = CAPSULE_PERCENT)
+        capsule -> RoundedCornerShape(topEndPercent = CAPSULE_PERCENT, bottomEndPercent = CAPSULE_PERCENT)
+        vertical -> RoundedCornerShape(bottomStart = corner, bottomEnd = corner)
+        else -> RoundedCornerShape(topEnd = corner, bottomEnd = corner)
+    }
+    val solo = toolbarSoloShape(cornerDp)
 }
 
 // How the buttons are laid out; see the header comment.

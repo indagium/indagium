@@ -114,7 +114,7 @@ internal fun HomeTilingHost(
                 isVisible = { true },
                 parked = emptySet(),
                 cardHeightDp = homeStackedCardHeight(maxHeight.value),
-                spec = HOME_TILE_SPEC,
+                spec = HOME_TILE_SPEC.withWorkspaceCorners(),
                 callbacks = callbacks,
             ) { HomeTiles(tiles) }
         } else {
@@ -127,7 +127,7 @@ internal fun HomeTilingHost(
                 locked = false,
                 widthDp = maxWidth.value,
                 heightDp = maxHeight.value,
-                spec = HOME_TILE_SPEC,
+                spec = HOME_TILE_SPEC.withWorkspaceCorners(),
                 callbacks = callbacks,
             ) { HomeTiles(tiles) }
         }

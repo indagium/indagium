@@ -108,7 +108,7 @@ internal fun TestsWorkspaceTilingHost(
                             parked = emptySet(),
                             cardHeightDp = (heightDp * TESTS_WORKSPACE_STACKED_HEIGHT_SHARE)
                                 .coerceIn(TESTS_WORKSPACE_STACKED_MIN_DP, TESTS_WORKSPACE_STACKED_MAX_DP),
-                            spec = TESTS_WORKSPACE_CHROME_SPEC,
+                            spec = TESTS_WORKSPACE_CHROME_SPEC.withWorkspaceCorners(),
                             callbacks = callbacks,
                             modifier = Modifier.padding(end = LOG_VIEW_HOST_PAD_DP.dp, bottom = LOG_VIEW_HOST_PAD_DP.dp),
                             content = content,
@@ -123,7 +123,7 @@ internal fun TestsWorkspaceTilingHost(
                             locked = saved.locked,
                             widthDp = widthDp,
                             heightDp = heightDp,
-                            spec = TESTS_WORKSPACE_CHROME_SPEC,
+                            spec = TESTS_WORKSPACE_CHROME_SPEC.withWorkspaceCorners(),
                             callbacks = callbacks,
                             content = content,
                         )

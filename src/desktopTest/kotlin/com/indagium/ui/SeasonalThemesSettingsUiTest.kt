@@ -183,6 +183,30 @@ class SeasonalThemesSettingsUiTest {
     }
 
     @Test
+    fun theTabsChoiceAddsAndRemovesTheSelectedPackFromMyTabStylePacks() {
+        setup()
+        openSeasonalTab()
+        assertTrue(state.settings.holiday.ownTabStylePacks.isEmpty())
+        rule.onNodeWithText("My tab style keeps your Tab style (Settings › Appearance) in the pack's colours.").assertExists()
+        choose(SEASONAL_TABS_TAG, "My tab style")
+        assertEquals(setOf(HolidayPack.PUMPKIN_PATCH), state.settings.holiday.ownTabStylePacks)
+        choose(SEASONAL_TABS_TAG, "Theme's tabs")
+        assertTrue(state.settings.holiday.ownTabStylePacks.isEmpty())
+        // The choice is only the selected pack's: another pack in the set stays.
+        state.updateSettings { s -> s.withHoliday { it.copy(ownTabStylePacks = setOf(HolidayPack.HAUNTED_MANOR)) } }
+        rule.waitForIdle()
+        choose(SEASONAL_TABS_TAG, "My tab style")
+        assertEquals(setOf(HolidayPack.HAUNTED_MANOR, HolidayPack.PUMPKIN_PATCH), state.settings.holiday.ownTabStylePacks)
+        choose(SEASONAL_TABS_TAG, "Theme's tabs")
+        assertEquals(setOf(HolidayPack.HAUNTED_MANOR), state.settings.holiday.ownTabStylePacks)
+    }
+
+    @Test
+    fun theTabsRowIsASeasonalAnchorSoASearchOpensTheSpecialThemesTab() {
+        assertTrue(SEASONAL_ANCHOR_TABS in SEASONAL_ANCHORS)
+    }
+
+    @Test
     fun theCheckboxesFlipTheirFieldsAndTheDimmedRowsStayEditable() {
         setup()
         openSeasonalTab()

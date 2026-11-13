@@ -12,6 +12,7 @@ import com.indagium.model.ProfileAppearance
 import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.SearchScopeBehavior
+import com.indagium.model.ShapeStyle
 import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
@@ -609,6 +610,7 @@ class CustomWorkspaceProfileTest {
         toolbarOuter = true,
         toolbarAlign = ToolbarAlign.CENTER,
         verticalTabBarWidthDp = 210.5f,
+        shapeStyle = ShapeStyle.ROUNDED,
     )
 
     private val fullBehavior = ProfileBehavior(

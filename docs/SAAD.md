@@ -1077,6 +1077,16 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
   alone on its bar sits at its start, centre or end (`toolbarAlign`; left / centre / right on a horizontal bar, top / centre / bottom on a vertical one).
   A vertical tab bar is `verticalTabBarWidthDp` wide (card width = that + 4), a toolbar-only bar 36 dp (horizontal) or 40 dp (vertical, 96 dp while the
   button labels are on, with an ellipsis for a longer label); a toolbar sharing a vertical tab bar leaves the tabs at least 150 dp (it scrolls instead).
+- **Corners (Shape style).** `AppSettings.shapeStyle` (`ShapeStyle`: Theme default, Square, Soft, Rounded, Round; JSON-only, `ui/ChromeSettingsJson.kt`;
+  Settings > Appearance > Shape style; part of a workspace profile's appearance group) is read through one resolver, `resolveUiCorners(style, look)` in
+  `ui/UiCorners.kt`, provided by `App.kt` as `LocalUiCorners` (read with `currentUiCorners()`; a test host that provides nothing resolves Theme default against
+  `LocalHoliday`). `UiCorners` holds the log-view tile and card-bar radius (`tileDp`), the toolbar's button-group radius (`toolbarDp`, `UI_CORNER_CAPSULE` for Round:
+  half the bar's thickness, which `ToolbarShapes` and the Layout menu button draw as 50% corners), the generic seasonal tab's radius (`tabDp`), the New tab,
+  diagram and Tests workspace tile radius (`workspaceTileDp`) and the radius the user's own tab style takes (`ownTabDp`). **Theme default is exactly today's
+  values**: 8 / 7 dp without a pack, the pack's `corners` with one, the workspace tiles 8 dp and every tab style its own radius (`ownTabDp` null); the fixed styles
+  (Square 0, Soft 8 / 7 / 6, Rounded 12 / 10 / 10, Round 16 / capsule / 14) apply under every theme. `tabShape(style, position, cornerDp)` takes the radius for the rounded
+  styles (Raised, Segmented, Outlined; 0 makes them rectangles); Pill keeps its capsule and a pack's own tab silhouette keeps its shape. Segmented controls, fields, chips,
+  menus and dialogs keep their shapes.
 - **Toolbar shapes.** `MainToolbar` has three: the horizontal row (`BAR`), the vertical stack of full-width buttons (`COLUMN`, a bar of its own on a left or
   right edge) and a row that wraps onto further lines (`FLOW`, the toolbar inside a vertical tab bar, at its top or bottom, and a toolbar tile wider than
   tall). The wrapping row draws the groups of the bar (`ui/ToolbarGroupFlow.kt`): chunks of buttons that wrap whole, never inside a group: New; the panel toggles
@@ -5926,6 +5936,12 @@ wrongly typed key keeps its default). Generic keys: `mode`, `pack`, `lightness`,
 `animatePicture`, `notesCompanion`, `pauseWhileBusy`. Per-effect switches are `effects`, an object of effect id to boolean holding only the
 user's explicit choices: an effect with no entry takes its spec's `defaultOn`, so a new effect appears as its author intended and an unknown id
 is ignored. Effect ids are globally unique across themes (a contract test enforces it); the convention is `<theme>.<effect>`.
+
+`HolidaySettings.ownTabStylePacks` (a JSON string array of pack names, unknown names dropped, empty by default) lists the packs whose tabs use the user's
+Tab style ("My tab style"): `resolveHolidayLook` sets `HolidayLook.ownTabStyle`, and `TabShell` then draws the regular `tabShape` / `tabChrome` / `tabOutline` and
+inset in the pack's colours with the pack's label font, size and case, and no texture, inverse fill, cursor or ornament; the tab-bar scene still draws behind the tabs.
+It is set per pack in Settings > Appearance > Special themes (Tabs: Theme's tabs / My tab style) and in the Layout menu's Special effects. The generic rounded pack tab
+takes its radius from `UiCorners.tabDp` (the pack's own under Theme default), see §6.6.
 
 ### 27.4 Flash safety
 

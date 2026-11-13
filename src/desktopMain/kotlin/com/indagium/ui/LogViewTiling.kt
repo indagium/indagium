@@ -106,10 +106,12 @@ private val LOG_VIEW_HOLIDAY_SPECS = java.util.concurrent.ConcurrentHashMap<Int,
 internal fun logViewHolidaySpec(cornerDp: Int): TileChromeSpec<LogViewSectionId> =
     LOG_VIEW_HOLIDAY_SPECS.getOrPut(cornerDp) { LOG_VIEW_CHROME_SPEC.copy(cornerDp = cornerDp) }
 
-/** The log view's tile chrome for the current look: the theme's tile corners while a seasonal pack is active. */
+/** The log view's tile chrome for the current look: the shape style's tile corners (the theme's own under Theme default). */
 @Composable
-internal fun logViewChromeSpec(): TileChromeSpec<LogViewSectionId> =
-    LocalHoliday.current?.let { logViewHolidaySpec(it.theme.corners.tileDp) } ?: LOG_VIEW_CHROME_SPEC
+internal fun logViewChromeSpec(): TileChromeSpec<LogViewSectionId> {
+    val corner = currentUiCorners().tileDp
+    return if (corner == LOG_VIEW_CHROME_SPEC.cornerDp) LOG_VIEW_CHROME_SPEC else logViewHolidaySpec(corner)
+}
 
 /**
  * What FileView hands the host to keep keyboard focus working: the four panels' requesters (the Filters one lands on the first visible

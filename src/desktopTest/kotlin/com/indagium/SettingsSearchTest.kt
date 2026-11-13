@@ -153,6 +153,31 @@ class SettingsSearchTest {
     }
 
     @Test
+    fun shapeStyleIsFoundByItsWords() {
+        for (query in listOf("corners", "shape", "rounded", "square", "radius", "soft")) {
+            assertTrue("Shape style" in labels(query), "$query: ${labels(query)}")
+        }
+        val entry = searchSettings("corners", all).first { it.label == "Shape style" }
+        assertEquals("Shape style", entry.anchor)
+    }
+
+    @Test
+    fun theSeasonalTabsRowIsFoundAndOpensTheSpecialThemesTab() {
+        for (query in listOf("seasonal tabs", "my tab style", "special tab")) {
+            assertTrue("Special theme tabs" in labels(query), "$query: ${labels(query)}")
+        }
+        val entry = searchSettings("seasonal tabs", all).first { it.label == "Special theme tabs" }
+        assertEquals(SEASONAL_ANCHOR_TABS, entry.anchor)
+        assertTrue(entry.anchor in SEASONAL_ANCHORS, "a jump to it opens the Special themes tab")
+    }
+
+    @Test
+    fun theTabStyleHintNamesEveryStyle() {
+        val hint = searchSettings("tab style", all).first { it.label == "Tab style" }.hint
+        assertTrue("outlined" in hint && "pill" in hint, hint)
+    }
+
+    @Test
     fun theSeasonalEffectRowsAreFoundByWhatTheyDo() {
         assertTrue("Special effects" in labels("bats"))
         assertTrue("Special effects" in labels("lightning"))
