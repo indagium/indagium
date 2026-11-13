@@ -50,6 +50,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
 import com.indagium.proofread.EnglishProofreadingService
+import com.indagium.proofread.normalizeProofreadingVocabulary
 import com.indagium.source.SourceCodeView
 import com.indagium.ui.holiday.*
 import com.indagium.utils.ArchiveFormat
@@ -239,7 +240,22 @@ fun App(
     val ignoredProofreadingSuggestions = remember { mutableStateSetOf<String>() }
     DisposableEffect(proofreadingService) { onDispose { proofreadingService.close() } }
     val proofreadingUi = remember(proofreadingService, state.settings.proofreading) {
-        ProofreadingUi(proofreadingService, state.settings.proofreading, ignoredProofreadingSuggestions)
+        ProofreadingUi(
+            proofreadingService,
+            state.settings.proofreading,
+            ignoredProofreadingSuggestions,
+            onAddVocabularyWord = { word ->
+                state.updateSettings { settings ->
+                    settings.copy(
+                        proofreading = settings.proofreading.copy(
+                            vocabulary = normalizeProofreadingVocabulary(
+                                settings.proofreading.vocabulary + word,
+                            ),
+                        ),
+                    )
+                }
+            },
+        )
     }
     // The runtime revision is the single Compose invalidation source for active AI runs. App-level
     // dialogs (such as Add Annotation) sit outside the Notes/AI tiles, so they observe it here too.

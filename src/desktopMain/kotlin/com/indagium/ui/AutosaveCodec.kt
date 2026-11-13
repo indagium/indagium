@@ -5,6 +5,7 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.capture.decodeCaptureSegmentManualAnchors
 import com.indagium.capture.encodeCaptureSegmentManualAnchors
 import com.indagium.model.*
+import com.indagium.proofread.normalizeProofreadingVocabulary
 import com.indagium.ui.holiday.putHolidaySettings
 import com.indagium.ui.holiday.withHolidaySettingsFrom
 import com.indagium.utils.ZipLogCandidate
@@ -653,7 +654,9 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("proofreading", buildJsonObject {
         put("enabled", proofreading.enabled)
         put("language", proofreading.language)
+        put("vocabulary", buildJsonArray { proofreading.vocabulary.forEach(::add) })
     })
+    put("errorHighlightStyle", errorHighlightStyle.toJson())
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
     put("showRowNumbers", showRowNumbers)
@@ -999,8 +1002,12 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ProofreadingSettings(
                 enabled = (proofreading?.get("enabled") as? JsonPrimitive)?.booleanOrNull ?: true,
                 language = language,
+                vocabulary = normalizeProofreadingVocabulary(
+                    proofreading?.stringArray("vocabulary").orEmpty(),
+                ),
             )
         },
+        errorHighlightStyle = o.errorHighlightStyleFromJson("errorHighlightStyle") ?: ErrorHighlightStyle(),
         sourceFolderInfo = o.sourceFolderInfoFromJson("sourceFolderInfo"),
         sourceLogConfigurations = o.sourceLogConfigurationsFromJson("sourceLogConfigurations"),
         sourceFolderConfigurationIds = o.sourceFolderConfigurationIdsFromJson("sourceFolderConfigurationIds"),
@@ -1691,7 +1698,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // restored tab reopens its sourcePath and so shows the whole log.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
-    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath,
+    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1843,6 +1850,9 @@ internal fun LogTab.tabToken(): String {
         // capture has no VideoAttachment to carry captureSourcePath, but its stopped snapshot
         // strip still needs a source after restart.
         captureArchivePath.orEmpty(),
+        // Trailing field (position 16): per-tab Error-row style override. Blank means inherit the
+        // global setting, so legacy tokens keep the default enabled red tint.
+        errorHighlightStyle?.errorHighlightStyleToken().orEmpty(),
     )
 }
 
@@ -1931,6 +1941,8 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             logFormat = p.getOrNull(14)?.let { runCatching { LogFormat.valueOf(it) }.getOrNull() }
                 ?: LogFormat.LOGCAT,
             captureArchivePath = captureArchivePath,
+            // Field index 16 (append-only); missing or invalid means inherit the global setting.
+            errorHighlightStyle = p.getOrNull(16)?.takeIf { it.isNotBlank() }?.errorHighlightStyleFromToken(),
         ),
         source,
     )

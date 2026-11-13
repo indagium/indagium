@@ -1,6 +1,7 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.VideoAttachment
@@ -304,9 +305,10 @@ class AutosaveSchedulerTest {
             base.copy(noteTargetName = "custom_name.md"),
             base.copy(retraceMappingPath = "/tmp/mapping.txt"),
             base.copy(captureArchivePath = "/tmp/capture.zip"),
+            base.copy(errorHighlightStyle = ErrorHighlightStyle(enabled = false)),
         )
 
-        assertEquals(16, base.persistedSnapshot().size)
+        assertEquals(17, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())
@@ -326,11 +328,16 @@ class AutosaveSchedulerTest {
         val dir = createTempDirectory("openlog-note-pin-roundtrip").toFile()
         val logFile = File(dir, "sample.log").apply { writeText("hello\n") }
         val tab = mkTab("tab", "sample.log", emptyList())
-            .copy(sourcePath = logFile.absolutePath, noteTargetName = "sample_analysis_2.md")
+            .copy(
+                sourcePath = logFile.absolutePath,
+                noteTargetName = "sample_analysis_2.md",
+                errorHighlightStyle = ErrorHighlightStyle(enabled = false, color = Color.Magenta, bold = true),
+            )
 
         val restored = tab.tabToken().tabShellFromToken()
 
         assertEquals("sample_analysis_2.md", restored?.tab?.noteTargetName)
+        assertEquals(tab.errorHighlightStyle, restored?.tab?.errorHighlightStyle)
     }
 
     @Test
@@ -338,8 +345,9 @@ class AutosaveSchedulerTest {
         val dir = createTempDirectory("openlog-note-pin-legacy").toFile()
         val logFile = File(dir, "sample.log").apply { writeText("hello\n") }
         val tab = mkTab("tab", "sample.log", emptyList()).copy(sourcePath = logFile.absolutePath)
-        // Simulate a token written before noteTargetName existed: drop the trailing field.
-        val legacyToken = tab.tabToken().substringBeforeLast('|')
+        // Simulate a token written before noteTargetName existed by retaining only its 12 earlier
+        // fields, regardless of newer append-only fields added to the current token.
+        val legacyToken = tab.tabToken().split('|', limit = Int.MAX_VALUE).take(12).joinToString("|")
 
         val restored = legacyToken.tabShellFromToken()
 

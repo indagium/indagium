@@ -91,7 +91,10 @@ internal fun BoundFilterPanel(
     val highlighterCustomColors = customHighlightColors(state.settings.highlighterCustomColors)
     val highlighterPaletteColumns = state.settings.highlighterPaletteColumns
     val customColorEditorExpanded = state.settings.highlighterCustomColorEditorExpanded
-    val highlighterActions = remember(state, tab.id, highlighterCustomColors, highlighterPaletteColumns, customColorEditorExpanded) {
+    val highlighterActions = remember(
+        state, tab.id, highlighterCustomColors, highlighterPaletteColumns, customColorEditorExpanded,
+        tab.errorHighlightStyle, state.settings.errorHighlightStyle,
+    ) {
         HighlighterActions(
             onAdd = { pattern, regex, color, wholeLine, target, tag, backgroundEnabled, textColor, fontFamily, bold, italic ->
                 state.addHl(
@@ -137,6 +140,14 @@ internal fun BoundFilterPanel(
             customColorEditorExpanded = customColorEditorExpanded,
             onCustomColorEditorExpandedChange = { expanded ->
                 state.updateSettings { it.copy(highlighterCustomColorEditorExpanded = expanded) }
+            },
+            errorHighlightStyle = tab.errorHighlightStyle ?: state.settings.errorHighlightStyle,
+            errorHighlightInherited = tab.errorHighlightStyle == null,
+            onChangeErrorHighlightStyle = { style ->
+                state.upTab(tab.id) { it.copy(errorHighlightStyle = style) }
+            },
+            onResetErrorHighlightStyle = {
+                state.upTab(tab.id) { it.copy(errorHighlightStyle = null) }
             },
         )
     }

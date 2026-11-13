@@ -453,6 +453,7 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
             },
             headerParts = { width -> notesHeaderParts(width) },
             actionsCentered = true,
+            preserveBodyRootFocus = true,
             collapsible = collapsible,
             maximizable = true,
             // The note list below the header is the flex part (AnnotationPanel).

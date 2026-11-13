@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -42,6 +43,7 @@ internal const val TILE_SCROLLBAR_GAP_DP = 2f
  * reserved by the scrolling column itself: a column's own scrollbar is drawn in the gap beside the column ([tileScrollbarRect]).
  */
 internal const val TILE_SCROLL_GUTTER_DP = TILE_SCROLLBAR_DP + TILE_SCROLLBAR_GAP_DP
+private const val BODY_ROOT_FOCUS_TOLERANCE_DP = 2f
 
 /** The scroll offsets (dp) of one surface's scrolling columns, keyed by [TileScrollRegion.key]. */
 internal class TileScrollState<K> {
@@ -86,7 +88,13 @@ private data class TileViewportShape(val top: Float, val bottom: Float) : Shape 
  * column's viewport, scrolled by a wheel, and, when something inside it asks to be brought into view (a focused field), scrolling the
  * column just far enough.
  */
-internal fun <K> Modifier.tileScrollRegion(scroll: TileScrollState<K>, region: TileScrollRegion<K>, rect: TileRect): Modifier =
+internal fun <K> Modifier.tileScrollRegion(
+    scroll: TileScrollState<K>,
+    region: TileScrollRegion<K>,
+    rect: TileRect,
+    preserveBodyRootFocus: Boolean = false,
+    bodyTopDp: Float = 0f,
+): Modifier =
     this
         .graphicsLayer {
             clip = true
@@ -96,7 +104,7 @@ internal fun <K> Modifier.tileScrollRegion(scroll: TileScrollState<K>, region: T
             shape = TileViewportShape(top * density, bottom * density)
         }
         .scrollable(scroll.scrollableOf(region.key), Orientation.Vertical, enabled = region.scrolls, reverseDirection = true)
-        .bringIntoViewResponder(TileRegionBringIntoView(scroll, region, rect))
+        .bringIntoViewResponder(TileRegionBringIntoView(scroll, region, rect, preserveBodyRootFocus, bodyTopDp))
 
 /** The trailing splitter is placed at its already-scrolled content position, outside the viewport clip. */
 internal fun <K> Modifier.tileScrollEndHandleRegion(scroll: TileScrollState<K>, region: TileScrollRegion<K>): Modifier =
@@ -108,6 +116,8 @@ private class TileRegionBringIntoView<K>(
     private val scroll: TileScrollState<K>,
     private val region: TileScrollRegion<K>,
     private val rect: TileRect,
+    private val preserveBodyRootFocus: Boolean,
+    private val bodyTopDp: Float,
 ) : BringIntoViewResponder {
     override fun calculateRectForParent(localRect: Rect): Rect = localRect
 
@@ -117,7 +127,19 @@ private class TileRegionBringIntoView<K>(
         val top = rect.y + wanted.top / d - region.viewport.y
         val bottom = rect.y + wanted.bottom / d - region.viewport.y
         val offset = scroll.offsetOf(region)
+        val targetHeight = bottom - top
+        val intersectsViewport = bottom > offset && top < offset + region.viewport.h
+        // Notes opts in because its body root is focusable for panel shortcuts. Restoring that root
+        // after a menu closes must not reveal the clipped bottom of an otherwise visible panel;
+        // child fields and carets have smaller bounds and retain the normal minimum-scroll path.
+        val targetsBodyRoot = preserveBodyRootFocus &&
+            abs(wanted.top / d - bodyTopDp) <= BODY_ROOT_FOCUS_TOLERANCE_DP &&
+            abs(wanted.bottom / d - rect.h) <= BODY_ROOT_FOCUS_TOLERANCE_DP
         when {
+            // Root-focus requesters and other large descendants often cover most of a tall tile.
+            // If such a target already intersects the viewport, scrolling to either edge would
+            // jump the user's content despite the focused control already being visible.
+            (targetHeight >= region.viewport.h || targetsBodyRoot) && intersectsViewport -> Unit
             top < offset -> scroll.scrollTo(region.key, top)
             bottom > offset + region.viewport.h -> scroll.scrollTo(region.key, max(0f, bottom - region.viewport.h))
         }

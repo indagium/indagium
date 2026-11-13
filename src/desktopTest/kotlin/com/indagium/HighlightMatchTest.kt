@@ -1,6 +1,7 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
@@ -70,6 +71,30 @@ class HighlightMatchTest {
         assertFalse(highlighterMatches(hl("a", "Request", on = false), entry, lineText, ctx))
         assertFalse(highlighterMatches(hl("a", " "), entry, lineText, ctx))
         assertTrue(spans(hl("a", "Request", on = false)).spans.isEmpty())
+    }
+
+    @Test
+    fun defaultErrorStyleMatchesOnlyParsedErrorLevelAndKeepsTextSpans() {
+        val error = entry.copy(id = 20, level = LogLevel.E, msg = "word Error")
+        val assertRow = entry.copy(id = 21, level = LogLevel.A, msg = "word Error")
+        val fakeText = entry.copy(id = 22, level = LogLevel.I, msg = "Error word")
+        val normalMatch = hl("word", "word")
+
+        val rendered = resolveLineHighlight(error, visibleLogLineText(error), listOf(normalMatch), ctx, ErrorHighlightStyle())
+        assertEquals(LogLevel.E.defaultColor, rendered.wholeLine?.color)
+        assertEquals(1, rendered.spans.size)
+        assertEquals(LogLevel.E.defaultColor,
+            resolveLineHighlight(error, visibleLogLineText(error), emptyList(), ctx, ErrorHighlightStyle()).wholeLine?.color)
+        assertNull(resolveLineHighlight(assertRow, visibleLogLineText(assertRow), emptyList(), ctx, ErrorHighlightStyle()).wholeLine)
+        assertNull(resolveLineHighlight(fakeText, visibleLogLineText(fakeText), emptyList(), ctx, ErrorHighlightStyle()).wholeLine)
+    }
+
+    @Test
+    fun explicitWholeLineRuleWinsAndDisabledErrorStyleDoesNotTint() {
+        val error = entry.copy(level = LogLevel.E)
+        val explicit = hl("custom", "Request", wholeLine = true)
+        assertEquals("custom", resolveLineHighlight(error, visibleLogLineText(error), listOf(explicit), ctx, ErrorHighlightStyle()).wholeLine?.id)
+        assertNull(resolveLineHighlight(error, visibleLogLineText(error), emptyList(), ctx, ErrorHighlightStyle(enabled = false)).wholeLine)
     }
 
     // ── target / scope ──

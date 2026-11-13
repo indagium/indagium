@@ -391,6 +391,16 @@ private fun editorBehavior() = listOf(
         "Choose American or British English rules for local proofreading suggestions.",
         listOf("proofread", "grammar", "spelling", "en-us", "en-gb", "american", "british"),
     ),
+    entry(
+        SettingsSection.EditorBehavior, "Error rows",
+        "Highlight parsed Error rows by default and choose their background, text color, font, bold and italic style.",
+        listOf("error", "error level", "crash", "highlight", "red", "log row", "bold", "italic", "font"),
+    ),
+    entry(
+        SettingsSection.EditorBehavior, "Personal vocabulary",
+        "Search, add, or remove single words that spelling suggestions should accept in every editor.",
+        listOf("personal", "proofread", "vocabulary", "dictionary", "spelling", "words", "ignore"),
+    ),
 )
 
 private fun exportAnnotations() = listOf(

@@ -5,6 +5,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -30,8 +31,10 @@ class HighlighterStyleRenderingTest {
         rules: List<Highlighter>,
         suppressForeground: Boolean = false,
         search: SearchHighlight? = null,
+        sourceEntry: LogEntry = entry,
+        errorStyle: ErrorHighlightStyle? = null,
     ) = buildLogLineRender(
-        entry = entry,
+        entry = sourceEntry,
         highlighters = rules,
         tsColor = Color.Gray,
         pidColor = Color.Gray,
@@ -41,6 +44,7 @@ class HighlighterStyleRenderingTest {
         regexContext = RegexEvaluationContext(),
         suppressLineTextColor = suppressForeground,
         searchHighlight = search,
+        errorHighlightStyle = errorStyle,
     )
 
     private fun AnnotatedString.styleAt(index: Int): SpanStyle =
@@ -84,6 +88,44 @@ class HighlighterStyleRenderingTest {
                 if (family != null) assertEquals(FontCatalog.resolveOrNull(family), style.fontFamily, "family at $index")
             }
         }
+    }
+
+    @Test
+    fun builtInErrorStyleRendersTypographyAndRespectsSearchAndSelectionPriority() {
+        val family = FontCatalog.families.firstOrNull()
+        val style = ErrorHighlightStyle(
+            color = Color.Red,
+            backgroundEnabled = false,
+            textColor = Color.Magenta,
+            fontFamily = family,
+            bold = true,
+            italic = true,
+        )
+        val errorEntry = entry.copy(level = LogLevel.E)
+        val rendered = render(emptyList(), sourceEntry = errorEntry, errorStyle = style)
+        val owner = rendered.wholeLine
+        assertEquals(Color.Red, owner?.color)
+        assertEquals(false, owner?.backgroundEnabled)
+        val messageAt = rendered.text.text.indexOf("wrapped")
+        val styleAtMessage = rendered.text.styleAt(messageAt)
+        assertEquals(Color.Magenta, styleAtMessage.color)
+        assertEquals(Color.Unspecified, styleAtMessage.background)
+        assertEquals(FontWeight.Bold, styleAtMessage.fontWeight)
+        assertEquals(FontStyle.Italic, styleAtMessage.fontStyle)
+        if (family != null) assertEquals(FontCatalog.resolveOrNull(family), styleAtMessage.fontFamily)
+
+        val selected = render(emptyList(), suppressForeground = true, sourceEntry = errorEntry, errorStyle = style)
+        assertEquals(Color.Black, selected.text.styleAt(selected.text.text.indexOf("wrapped")).color)
+
+        val search = render(
+            emptyList(),
+            search = SearchHighlight("wrapped", false, true, Color.Cyan, Color.Blue),
+            sourceEntry = errorEntry,
+            errorStyle = style,
+        )
+        val searchStyle = search.text.styleAt(search.text.text.indexOf("wrapped"))
+        assertEquals(Color.Blue, searchStyle.background)
+        assertEquals(Color.Magenta, searchStyle.color)
     }
 
     @Test
