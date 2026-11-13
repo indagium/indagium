@@ -2002,6 +2002,7 @@ enum class HolidayPack {
     READY_PROMPT,
     TULIPS,
     COFFEE_BEAR,
+    DIA_DE_MUERTOS,
 }
 
 /** Whether a pack renders its light or dark palette; FOLLOW_PRESET takes the family of the user's own theme preset. */

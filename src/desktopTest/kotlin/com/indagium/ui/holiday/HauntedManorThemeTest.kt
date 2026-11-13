@@ -39,6 +39,7 @@ class HauntedManorThemeTest {
             listOf(
                 HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW,
                 HolidayPack.BEER_TIME_GREEN, HolidayPack.READY_PROMPT, HolidayPack.TULIPS, HolidayPack.COFFEE_BEAR,
+                HolidayPack.DIA_DE_MUERTOS,
             ),
             HOLIDAY_THEMES.keys.toList(),
         )
@@ -47,7 +48,9 @@ class HauntedManorThemeTest {
         assertNull(activeHolidayPack(auto, LocalDate.of(2026, 10, 23)))
         assertEquals(HolidayPack.HAUNTED_MANOR, activeHolidayPack(auto, LocalDate.of(2026, 10, 24)))
         assertEquals(HolidayPack.HAUNTED_MANOR, activeHolidayPack(auto, LocalDate.of(2026, 11, 1)))
-        assertNull(activeHolidayPack(auto, LocalDate.of(2026, 11, 2)))
+        // Nov 2 belongs to Día de Muertos, the next Automatic window; the selected manor's own window has ended.
+        assertEquals(HolidayPack.DIA_DE_MUERTOS, activeHolidayPack(auto, LocalDate.of(2026, 11, 2)))
+        assertNull(activeHolidayPack(auto, LocalDate.of(2026, 11, 3)))
         assertEquals(HolidayPack.PUMPKIN_PATCH, activeHolidayPack(auto.copy(pack = HolidayPack.PUMPKIN_PATCH), LocalDate.of(2026, 10, 31)))
     }
 

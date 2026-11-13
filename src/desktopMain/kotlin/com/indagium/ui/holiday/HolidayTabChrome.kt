@@ -202,6 +202,23 @@ internal fun HolidayDashedDivider(dashes: HolidayDividerDashes) {
     )
 }
 
+/** The theme's block divider ([HolidayDividerBlocks]): its colours repeat as hard blocks from the left edge, the last one cut at the right. */
+@Composable
+internal fun HolidayBlockDivider(blocks: HolidayDividerBlocks) {
+    Box(
+        Modifier.fillMaxWidth().height(blocks.heightDp.dp).drawBehind {
+            val block = blocks.blockDp.dp.toPx()
+            var x = 0f
+            var i = 0
+            while (x < size.width && block > 0f && blocks.colors.isNotEmpty()) {
+                drawRect(blocks.colors[i % blocks.colors.size], Offset(x, 0f), Size(minOf(block, size.width - x), size.height))
+                x += block
+                i++
+            }
+        },
+    )
+}
+
 /** The active tab's wash: the accent at [alpha] on the tab's outer edge fading to transparent over three quarters of its depth. */
 internal fun holidayTabWash(accent: Color, alpha: Float, position: TabStripPosition, size: Size): Brush {
     val colors = listOf(accent.copy(alpha = alpha), Color.Transparent)

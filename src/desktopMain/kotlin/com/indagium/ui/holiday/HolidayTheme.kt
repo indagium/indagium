@@ -36,6 +36,9 @@ internal fun interface HolidayTabOrnament {
 /** A dashed divider: [dash] runs of [dashDp] separated by [gap] runs of [gapDp], [heightDp] tall. */
 internal data class HolidayDividerDashes(val dash: Color, val gap: Color, val dashDp: Float = 18f, val gapDp: Float = 2f, val heightDp: Float = 2f)
 
+/** A divider of repeating hard-edged blocks: each of [colors] in turn, [blockDp] wide, [heightDp] tall (the papel picado stripe). */
+internal data class HolidayDividerBlocks(val colors: List<Color>, val blockDp: Float, val heightDp: Float)
+
 /** Optional pack-specific tab silhouette (for example, a tombstone with a rounded crown and a flat base). */
 internal fun interface HolidayTabShape {
     fun shape(position: TabStripPosition): Shape
@@ -160,6 +163,9 @@ internal interface HolidayTheme {
 
     /** Optional dashed divider under an open tile's header (replaces the plain line; ignored when [tileDividerColors] is given). */
     fun tileDividerDashes(dark: Boolean): HolidayDividerDashes? = null
+
+    /** Optional divider of repeating colour blocks under an open tile's header (ignored when colours, a gradient or dashes are given). */
+    fun tileDividerBlocks(dark: Boolean): HolidayDividerBlocks? = null
 
     /**
      * Optional wash on the active tab: the accent at this alpha at the tab's outer edge, fading to transparent over three quarters of its

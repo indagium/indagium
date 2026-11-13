@@ -50,7 +50,9 @@ class TrickOrTreatThemeTest {
         assertNull(activeHolidayPack(settings, LocalDate.of(2026, 10, 23)))
         assertEquals(HolidayPack.TRICK_OR_TREAT, activeHolidayPack(settings, LocalDate.of(2026, 10, 24)))
         assertEquals(HolidayPack.TRICK_OR_TREAT, activeHolidayPack(settings, LocalDate.of(2026, 11, 1)))
-        assertNull(activeHolidayPack(settings, LocalDate.of(2026, 11, 2)))
+        // Nov 2 belongs to Día de Muertos, the next Automatic window; the selected pack's own window has ended.
+        assertEquals(HolidayPack.DIA_DE_MUERTOS, activeHolidayPack(settings, LocalDate.of(2026, 11, 2)))
+        assertNull(activeHolidayPack(settings, LocalDate.of(2026, 11, 3)))
         assertEquals(HolidayPack.PUMPKIN_PATCH, HolidaySettings().pack)
         for ((mode, palette) in listOf(HolidayLightness.DARK to CANDY_DARK, HolidayLightness.LIGHT to CANDY_LIGHT)) {
             val look = resolveHolidayLook(AppSettings().copy(holiday = settings.copy(mode = HolidayMode.ALWAYS, lightness = mode)), LocalDate.of(2026, 5, 1))

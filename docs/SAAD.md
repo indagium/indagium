@@ -5817,6 +5817,15 @@ the image back at canvas size. They are reproducible with
 `HolidaySceneEffect` lets the northern-lights switch reach the scene painter independently of snowfall; intensity Off keeps selected scenery
 visible at its still frame while stopping moving overlay effects.
 
+Día de Muertos is an Automatic holiday (October 31 to November 2) registered after the Halloween packs: on October 31 and November 1 the
+selected pack wins when it is in its window, else the registry order lets Pumpkin patch win; on November 2 it is the only Automatic window open. Plum-night and marigold-paper palettes carry magenta accents, and the
+pack supplies calavera and ofrenda toolbar icons, a papel picado string of swaying flags in the title bar, an ofrenda picture, a calavera
+companion that blinks, and drifting marigold petals and monarchs. The still art is SVG in `resources/holiday/muertos/` (Skia `SVGDOM`: sky,
+altar, portrait, skull, eyelids, monarch wings); Skia SVG runs no CSS animation and is unreliable with radial gradients, so the warm light, candle
+glows and flames, copal smoke, petals, monarchs, flags and blink are drawn natively on top from the design's keyframes (`MuertosMotion.kt`), each a
+pure function of the clock with `HOLIDAY_STILL_TIME` as a calm pose. Its tile divider uses the new `HolidayTheme.tileDividerBlocks`
+(`HolidayDividerBlocks`: colours repeating as hard blocks of a fixed width), drawn by `HolidayBlockDivider` in `TileCard` like the dashed divider.
+
 A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
 pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
 changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.

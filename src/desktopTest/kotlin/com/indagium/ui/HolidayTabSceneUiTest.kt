@@ -199,6 +199,16 @@ class HolidayTabSceneUiTest {
     }
 
     @Test
+    fun muertosChromeRendersInBothPalettes() {
+        for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
+            if (::state.isInitialized) state.close()
+            setup(look(HolidayPack.DIA_DE_MUERTOS) { it.copy(lightness = lightness) }) { fit(it) }
+            rule.onNodeWithTag("tab-b").assertExists()
+            dump("muertos-${lightness.name.lowercase()}")
+        }
+    }
+
+    @Test
     fun coffeeBearChromeRendersInBothPalettes() {
         for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
             if (::state.isInitialized) state.close()

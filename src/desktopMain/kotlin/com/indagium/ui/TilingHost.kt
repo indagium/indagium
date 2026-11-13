@@ -631,6 +631,10 @@ private fun placeAt(measurable: Measurable, rect: TileRect?, density: Float, reg
 // Card
 // ---------------------------------------------------------------------------------------------------------------
 
+// The height of the line under an open tile's header: the theme's three-dp colour divider, its dashes or blocks, else the plain border.
+private fun tileDividerDp(threeDp: Boolean, dashes: HolidayDividerDashes?, blocks: HolidayDividerBlocks?, borderDp: Float): Float =
+    if (threeDp) 3f else dashes?.heightDp ?: blocks?.heightDp ?: borderDp
+
 @Composable
 private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: Modifier) {
     val tc = tc()
@@ -641,7 +645,8 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     val dividerColors = holiday?.theme?.tileDividerColors(holiday.isDark)
     val dividerGradient = holiday?.theme?.tileDividerGradient(holiday.isDark)?.takeIf { it.size >= 2 }
     val dividerDashes = holiday?.theme?.tileDividerDashes(holiday.isDark)?.takeIf { dividerColors == null && dividerGradient == null }
-    val dividerDp = if (dividerColors != null || dividerGradient != null) 3f else dividerDashes?.heightDp ?: holiday?.theme?.borderWidthDp ?: 1f
+    val dividerBlocks = holiday?.theme?.tileDividerBlocks(holiday.isDark)?.takeIf { dividerColors == null && dividerGradient == null && dividerDashes == null }
+    val dividerDp = tileDividerDp(dividerColors != null || dividerGradient != null, dividerDashes, dividerBlocks, holiday?.theme?.borderWidthDp ?: 1f)
     val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else dividerDp
     val region = s.regionOf(id)
     // A tile in a scrolling column whose slot says so is sized by what its body asks for: the body is measured at its natural height.
@@ -679,6 +684,7 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             if (!collapsed) {
                 when {
                     dividerDashes != null -> HolidayDashedDivider(dividerDashes)
+                    dividerBlocks != null -> HolidayBlockDivider(dividerBlocks)
                     dividerGradient != null ->
                         Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(dividerGradient)))
                     dividerColors == null -> Box(Modifier.fillMaxWidth().height(dividerDp.dp).background(tc.br))
