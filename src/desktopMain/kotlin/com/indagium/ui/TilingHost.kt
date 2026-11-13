@@ -669,13 +669,16 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
         if (!slot.headerless) {
             TileHeader(s, id, slot, rect, collapsed)
             if (!collapsed) {
-                if (dividerDashes != null) HolidayDashedDivider(dividerDashes)
-                else if (dividerGradient != null) Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(dividerGradient)))
-                else if (dividerColors == null) Box(Modifier.fillMaxWidth().height(dividerDp.dp).background(tc.br))
-                else Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(
-                    0f to dividerColors[0], 1f / 3f to dividerColors[0], 1f / 3f to dividerColors[1],
-                    2f / 3f to dividerColors[1], 2f / 3f to dividerColors[2], 1f to dividerColors[2],
-                )))
+                when {
+                    dividerDashes != null -> HolidayDashedDivider(dividerDashes)
+                    dividerGradient != null ->
+                        Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(dividerGradient)))
+                    dividerColors == null -> Box(Modifier.fillMaxWidth().height(dividerDp.dp).background(tc.br))
+                    else -> Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(
+                        0f to dividerColors[0], 1f / 3f to dividerColors[0], 1f / 3f to dividerColors[1],
+                        2f / 3f to dividerColors[1], 2f / 3f to dividerColors[2], 1f to dividerColors[2],
+                    )))
+                }
             }
         }
         // A collapsed tile keeps its body composed (so it keeps its state) but gives it no height.

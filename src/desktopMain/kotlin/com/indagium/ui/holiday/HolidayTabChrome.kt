@@ -77,8 +77,19 @@ internal fun holidayOuterEdgeInset(inset: PaddingValues, position: TabStripPosit
 }
 
 /**
+ * How a pack draws its tabs' edges: the active tab's accent [wash], whether the active tab is [inverse] (accent fill, as on an 8-bit
+ * screen), the outline [borderWidth], and an accent line of [underlineWidth] on the active tab's content edge (none at zero).
+ */
+internal data class HolidayTabEdges(
+    val wash: Float? = null,
+    val inverse: Boolean = false,
+    val borderWidth: Dp = 1.dp,
+    val underlineWidth: Dp = 0.dp,
+)
+
+/**
  * The pack's tab fill: an idle tab is the chrome's tab colour with faint vertical ribs (lit by [hovered]); the active one is the panel
- * colour with an accent border. [tint] is a group member's wash, over the fill.
+ * colour with an accent border. [tint] is a group member's wash, over the fill; [edges] tunes the active tab and the outlines.
  */
 internal fun Modifier.holidayTabChrome(
     active: Boolean,
@@ -90,13 +101,10 @@ internal fun Modifier.holidayTabChrome(
     radius: Dp = HOLIDAY_TAB_RADIUS,
     shape: Shape = holidayTabShape(position, radius),
     texture: HolidayTabTexture = HolidayTabTexture.RIBS,
-    wash: Float? = null,
     idleAlpha: Float = HOLIDAY_IDLE_TAB_ALPHA,
-    inverseActive: Boolean = false,
-    borderWidth: Dp = 1.dp,
-    underlineWidth: Dp = 0.dp,
+    edges: HolidayTabEdges = HolidayTabEdges(),
 ): Modifier {
-    val fill = background(if (active) { if (inverseActive) tc.ac else tc.p } else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = idleAlpha), shape)
+    val fill = background(holidayTabFill(active, edges.inverse, texture, tc, chrome, idleAlpha), shape)
         .drawBehind {
             when (texture) {
                 HolidayTabTexture.RIBS -> if (!active) drawRibs(shape, chrome.rib)
@@ -104,26 +112,48 @@ internal fun Modifier.holidayTabChrome(
                 HolidayTabTexture.PLAIN -> Unit
             }
         }
+    val wash = edges.wash
     return fill
         .then(if (active && wash != null) Modifier.drawBehind { drawWash(shape, tc.ac, wash, position) } else Modifier)
         .then(if (tint == null) Modifier else Modifier.background(tint, shape))
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
-        .then(if (active && underlineWidth > 0.dp) Modifier.drawBehind {
-            val width = underlineWidth.toPx()
-            when (position) {
-                TabStripPosition.TOP -> drawRect(tc.ac, Offset(0f, size.height - width), Size(size.width, width))
-                TabStripPosition.BOTTOM -> drawRect(tc.ac, Offset.Zero, Size(size.width, width))
-                TabStripPosition.LEFT -> drawRect(tc.ac, Offset(size.width - width, 0f), Size(width, size.height))
-                TabStripPosition.RIGHT -> drawRect(tc.ac, Offset.Zero, Size(width, size.height))
-            }
-        } else Modifier)
+        .then(
+            if (active && edges.underlineWidth > 0.dp) {
+                Modifier.drawBehind { drawActiveUnderline(tc.ac, edges.underlineWidth.toPx(), position) }
+            } else {
+                Modifier
+            },
+        )
         .then(
             when {
-                active -> Modifier.border(maxOf(ACTIVE_BORDER, borderWidth), tc.ac, shape)
-                texture != HolidayTabTexture.RIBS -> Modifier.border(borderWidth, tc.br, shape)
+                active -> Modifier.border(maxOf(ACTIVE_BORDER, edges.borderWidth), tc.ac, shape)
+                texture != HolidayTabTexture.RIBS -> Modifier.border(edges.borderWidth, tc.br, shape)
                 else -> Modifier
             },
         )
+}
+
+private fun holidayTabFill(
+    active: Boolean,
+    inverse: Boolean,
+    texture: HolidayTabTexture,
+    tc: ThemeColors,
+    chrome: HolidayChromeColors,
+    idleAlpha: Float,
+): Color = when {
+    active -> if (inverse) tc.ac else tc.p
+    texture == HolidayTabTexture.STONE -> chrome.tabBg
+    else -> chrome.tabBg.copy(alpha = idleAlpha)
+}
+
+// The active tab's accent line on the edge that faces the content.
+private fun DrawScope.drawActiveUnderline(accent: Color, width: Float, position: TabStripPosition) {
+    when (position) {
+        TabStripPosition.TOP -> drawRect(accent, Offset(0f, size.height - width), Size(size.width, width))
+        TabStripPosition.BOTTOM -> drawRect(accent, Offset.Zero, Size(size.width, width))
+        TabStripPosition.LEFT -> drawRect(accent, Offset(size.width - width, 0f), Size(width, size.height))
+        TabStripPosition.RIGHT -> drawRect(accent, Offset.Zero, Size(width, size.height))
+    }
 }
 
 // The active tab's accent wash, cut to the tab's outline (Modifier.background(brush, shape) with the gradient sized to the tab).

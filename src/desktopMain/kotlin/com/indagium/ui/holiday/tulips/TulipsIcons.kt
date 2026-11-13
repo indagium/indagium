@@ -1,4 +1,5 @@
 @file:Suppress("MagicNumber", "MaxLineLength")
+
 package com.indagium.ui.holiday.tulips
 
 import androidx.compose.ui.graphics.Color
@@ -7,12 +8,16 @@ import com.indagium.ui.holiday.*
 /** The reference palette, tulips, and artist's tools. */
 internal object TulipsIcons : HolidayIconSet {
     override fun icons(outline: Color): Map<ToolbarIconId, HolidayIcon> = holidayIconMap(outline, ::tulipIcon)
+
     override fun findIcon(outline: Color): HolidayIcon = icons(outline).getValue(ToolbarIconId.CASES).copy(name = "Find")
 }
 
 private fun tulipIcon(id: ToolbarIconId): IconSpec = when (id) {
     ToolbarIconId.NEW -> IconSpec("New tab", "a fresh palette", 1.4f, listOf(
-        part("M16 4C8.5 4 3.5 9.5 3.5 16S9 28 15 28c2.6 0 3.2-1.6 2.4-3.2-.8-1.8.4-3.3 2.4-3.3H24c3 0 4.5-2.3 4.5-5.2C28.5 9.5 23 4 16 4z", fill = 0xFFe9dcc0L, stroke = OUTLINE),
+        part(
+            "M16 4C8.5 4 3.5 9.5 3.5 16S9 28 15 28c2.6 0 3.2-1.6 2.4-3.2-.8-1.8.4-3.3 2.4-3.3H24c3 0 4.5-2.3 4.5-5.2C28.5 9.5 23 4 16 4z",
+            fill = 0xFFe9dcc0L, stroke = OUTLINE,
+        ),
         part(circlePath(10f, 11f, 2.2f), fill = 0xFF7b2fbfL, stroke = NONE),
         part(circlePath(16f, 8.5f, 2.2f), fill = 0xFFd4252eL, stroke = NONE),
         part(circlePath(22f, 11f, 2.2f), fill = 0xFFf2d21cL, stroke = NONE),

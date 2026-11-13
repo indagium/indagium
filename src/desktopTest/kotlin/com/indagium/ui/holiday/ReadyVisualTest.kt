@@ -1,4 +1,5 @@
 @file:Suppress("MagicNumber")
+
 package com.indagium.ui.holiday
 
 import androidx.compose.ui.geometry.Offset

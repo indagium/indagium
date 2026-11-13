@@ -519,10 +519,12 @@ internal fun TabShell(
                                 isActive, hov || dragging, tc, holiday.chrome, position,
                                 groupTint.takeIf { holiday.theme.tintTabsByGroup },
                                 radius = holiday.theme.corners.tabDp.dp, shape = shape, texture = holiday.theme.tabTexture,
-                                wash = holiday.theme.activeTabWashAlpha(holiday.isDark),
-                                inverseActive = holiday.theme.inverseActiveTab,
-                                borderWidth = holiday.theme.borderWidthDp.dp,
-                                underlineWidth = holiday.theme.activeTabUnderlineDp.dp,
+                                edges = HolidayTabEdges(
+                                    wash = holiday.theme.activeTabWashAlpha(holiday.isDark),
+                                    inverse = holiday.theme.inverseActiveTab,
+                                    borderWidth = holiday.theme.borderWidthDp.dp,
+                                    underlineWidth = holiday.theme.activeTabUnderlineDp.dp,
+                                ),
                                 // Over the scene behind the tab bar an idle tab is opaque, so the picture never shows through a tab.
                                 idleAlpha = if (holidaySceneShown(holiday.effects.tabScene, position)) 1f else HOLIDAY_IDLE_TAB_ALPHA,
                             )

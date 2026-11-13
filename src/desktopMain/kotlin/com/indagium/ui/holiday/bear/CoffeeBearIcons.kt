@@ -1,11 +1,15 @@
 @file:Suppress("MagicNumber", "MaxLineLength")
+
 package com.indagium.ui.holiday.bear
 import androidx.compose.ui.graphics.Color
 import com.indagium.ui.holiday.*
+
 internal object CoffeeBearIcons : HolidayIconSet {
     override fun icons(outline: Color): Map<ToolbarIconId, HolidayIcon> = holidayIconMap(outline, ::bearIcon)
+
     override fun findIcon(outline: Color): HolidayIcon = icons(outline).getValue(ToolbarIconId.CASES).copy(name = "Find")
 }
+
 private fun bearIcon(id: ToolbarIconId): IconSpec = when (id) {
     ToolbarIconId.NEW -> IconSpec("New tab", "a fresh cup", 1.4f, listOf(
         part("M11 2.5c-1.6 2 1.6 3 0 5.2M16.5 1.8c-1.6 2 1.6 3 0 5.2", fill = NONE, stroke = 0xFFbfe3f2L, width = 1.6f),

@@ -1,4 +1,5 @@
 @file:Suppress("MagicNumber")
+
 package com.indagium.ui.holiday
 
 import androidx.compose.ui.geometry.Offset
@@ -59,13 +60,14 @@ class CoffeeBearThemeTest {
         assertFalse(resolveHolidayEffects(settings.copy(effectToggles = mapOf(lights.id to false)), theme).activeEffects.any { it.id == lights.id })
         val scene = assertNotNull(theme.tabScene)
         val layout = scene.layout(Rect(0f, 0f, 1600f, 30f))
+
         fun frame(on: Boolean): ImageBitmap = ImageBitmap(1600, 30).also { bitmap ->
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(bitmap), Size(1600f, 30f)) {
                 scene.drawFrame(this, layout, true, HOLIDAY_STILL_TIME, if (on) setOf(lights.id) else emptySet())
             }
         }
         val on = frame(true).toPixelMap(); val off = frame(false).toPixelMap()
-        assertTrue((0 until 1600).any { x -> (0 until 30).any { y -> on[x,y].toArgb() != off[x,y].toArgb() } }, "the scene honors the northern-lights switch")
+        assertTrue((0 until 1600).any { x -> (0 until 30).any { y -> on[x, y].toArgb() != off[x, y].toArgb() } }, "the scene honors the northern-lights switch")
     }
 
     @Test fun paintingBackdropsRenderInBothPalettes() {

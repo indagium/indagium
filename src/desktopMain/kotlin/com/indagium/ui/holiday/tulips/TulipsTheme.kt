@@ -25,14 +25,18 @@ internal object TulipsTheme : HolidayTheme {
     override val label = "Tulips"
     override val occasion = "Any time"
     override val dates = HolidayDates(MonthDay.of(1, 1), MonthDay.of(12, 31))
+
     override fun automaticAt(now: LocalDateTime) = false
+
     override val supportsAutomatic = false
     override val keywords = listOf("tulip", "flower", "painting", "petal", "butterfly", "spring", "sage")
     override val corners = HolidayCorners(tabDp = 10f, toolbarDp = 10, tileDp = 12)
     override val tabTexture = HolidayTabTexture.PLAIN
     override val tintTabsByGroup = false
     override val activeTabUnderlineDp = 3f
+
     override fun tileDividerGradient(dark: Boolean) = bouquetColors
+
     override val tabScene: HolidayScenePainter = TulipsScene
     override val picture: HolidayPicturePainter = TulipsPicture
     override val companion: HolidayCompanionPainter = TulipsCompanion
@@ -59,12 +63,15 @@ internal object TulipsTheme : HolidayTheme {
 private val bouquetColors = listOf(0xFF7b2fbf, 0xFFd4252e, 0xFFf2d21c, 0xFFe46a9a, 0xFF6fb33f).map(::Color)
 private val sceneFlower = parsePath("M-4 0c0 4 1.6 6.4 4 6.4s4-2.4 4-6.4l-2 2-2-3-2 3z")
 private val sceneLeaf = parsePath("M0 27c-4-1-6-4-6-7 3 1 5 3 6 7z")
+
 private data class Flower(val x: Float, val top: Float, val color: Long)
+
 private val flowers = listOf(
     Flower(970f, 9f, 0xFF7b2fbf), Flower(990f, 11f, 0xFFd4252e), Flower(1012f, 13f, 0xFFf2d21c),
     Flower(1268f, 9f, 0xFFf6f4e6), Flower(1288f, 11f, 0xFFe46a9a), Flower(1310f, 13f, 0xFFd4252e),
     Flower(1440f, 9f, 0xFFa8204f), Flower(1462f, 11f, 0xFFf2d21c), Flower(1486f, 13f, 0xFF7b2fbf),
 )
+
 private object TulipsScene : HolidayScenePainter {
     override val animated = true
     private val parts = listOf(
@@ -72,15 +79,20 @@ private object TulipsScene : HolidayScenePainter {
         HolidayBandPart("middle", Rect(1258f, 3f, 1318f, 30f)),
         HolidayBandPart("right", Rect(1430f, 3f, 1494f, 30f)),
     )
+
     override fun layout(band: Rect): HolidaySceneLayout = HolidayBandLayout(HolidayBandSpace(band), parts)
+
     override fun draw(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean) = drawFrame(scope, layout, dark, HOLIDAY_STILL_TIME)
+
     override fun drawFrame(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean, time: Float) {
         val l = layout as HolidayBandLayout
         l.space.drawElements(scope) {
             val leaf = Color(if (dark) 0xFF7fc24c else 0xFF5a9a32)
             flowers.forEachIndexed { i, flower ->
                 if (!l.has(listOf("left", "middle", "right")[i / 3])) return@forEachIndexed
-                val sway = if (time == HOLIDAY_STILL_TIME) 0f else sin(time * (2f * PI.toFloat() / if (i % 2 == 0) 2.8f else 3.4f) + if (i % 2 == 0) 0f else 1.3f) * 4f
+                val period = if (i % 2 == 0) 2.8f else 3.4f
+                val offset = if (i % 2 == 0) 0f else 1.3f
+                val sway = if (time == HOLIDAY_STILL_TIME) 0f else sin(time * (2f * PI.toFloat() / period) + offset) * 4f
                 withTransform({ rotate(sway, Offset(flower.x, 30f)); translate(flower.x, 0f) }) {
                     drawLine(leaf, Offset(0f, flower.top + 6f), Offset(0f, 30f), strokeWidth = 1.4f)
                     drawPath(sceneLeaf, leaf)
@@ -97,8 +109,11 @@ private val wingBottom = parsePath("M13 11c-3 4-8 8-9 5s5-5 9-5zM13 11c3 4 8 8 9
 private val petalColors = listOf(0xFF7b2fbf, 0xFFd4252e, 0xFFf2d21c, 0xFFe46a9a, 0xFFf6f4e6).map(::Color)
 private val butterflyTop = listOf(0xFFffb84d, 0xFF7b2fbf, 0xFF8fd3ff).map(::Color)
 private val butterflyBottom = listOf(0xFFf2d21c, 0xFFe46a9a, 0xFF9be27a).map(::Color)
+
 private data class Particle(val x: Float, val y: Float, val size: Float, val period: Float, val phase: Float, val angle: Float)
+
 private fun phase(value: Float) = value - floor(value)
+
 private fun randomRange(random: Random, from: Float, to: Float) = from + random.nextFloat() * (to - from)
 
 private object TulipPetals : HolidayParticleEffect {
@@ -106,6 +121,7 @@ private object TulipPetals : HolidayParticleEffect {
     override val label = "Falling petals"
     override val noun = "petals"
     override val defaultOn = true
+
     override fun spawn(seed: Int, countScale: Float, speedScale: Float): HolidayParticleField {
         val rng = Random(seed)
         val particles = List(if (speedScale <= 0f) 0 else (24 * countScale).roundToInt().coerceAtLeast(0)) {
@@ -113,12 +129,17 @@ private object TulipPetals : HolidayParticleEffect {
         }
         return object : HolidayParticleField {
             override val count = particles.size
+
             override fun draw(scope: DrawScope, t: Float, widthDp: Float, heightDp: Float, dark: Boolean) = with(scope) {
                 particles.forEachIndexed { i, p ->
                     val u = phase(t / p.period + p.phase)
                     val x = p.x * widthDp + 18f * sin(u * 4f * PI.toFloat())
                     val y = -p.size + u * (heightDp + 2f * p.size)
-                    withTransform({ translate(x, y); rotate(p.angle + u * 360f, Offset(p.size / 2f, p.size / 2f)); scale(p.size / 12f, p.size / 12f, Offset.Zero) }) {
+                    withTransform({
+                        translate(x, y)
+                        rotate(p.angle + u * 360f, Offset(p.size / 2f, p.size / 2f))
+                        scale(p.size / 12f, p.size / 12f, Offset.Zero)
+                    }) {
                         drawPath(petalPath, petalColors[i % petalColors.size])
                         drawLine(Color.White.copy(alpha = .5f), Offset(6f, 2.5f), Offset(6f, 9.5f), strokeWidth = .8f)
                     }
@@ -127,11 +148,13 @@ private object TulipPetals : HolidayParticleEffect {
         }
     }
 }
+
 private object TulipButterflies : HolidayParticleEffect {
     override val id = "tulips.butterflies"
     override val label = "Butterflies"
     override val noun = "butterflies"
     override val defaultOn = true
+
     override fun spawn(seed: Int, countScale: Float, speedScale: Float): HolidayParticleField {
         val rng = Random(seed)
         val particles = List(if (speedScale <= 0f) 0 else (3 * countScale).roundToInt().coerceAtLeast(0)) {
@@ -139,6 +162,7 @@ private object TulipButterflies : HolidayParticleEffect {
         }
         return object : HolidayParticleField {
             override val count = particles.size
+
             override fun draw(scope: DrawScope, t: Float, widthDp: Float, heightDp: Float, dark: Boolean) = with(scope) {
                 particles.forEachIndexed { i, p ->
                     val u = phase(t / p.period + p.phase)

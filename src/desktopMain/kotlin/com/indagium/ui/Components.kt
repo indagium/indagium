@@ -2,7 +2,6 @@
 
 package com.indagium.ui
 
-import com.indagium.ui.holiday.LocalHoliday
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -88,6 +87,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.LogLevel
+import com.indagium.ui.holiday.LocalHoliday
 import kotlinx.coroutines.delay
 import java.awt.KeyboardFocusManager
 import kotlin.math.abs

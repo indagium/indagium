@@ -5795,7 +5795,9 @@ then applies the reference crops and fades. The painting therefore retains its o
 Coffee bear is a manually selected anytime pack built around the supplied polar-bear painting. Its navy and warm cream palettes use
 red coffee-cup accents; the pack supplies coffee-themed toolbar icons, snowy title-bar scenery, snowfall, and painting-based backdrop
 and Notes companion art. The PNG exported from all six visible layers of `IMG_0011.PSD` preserves the artist’s alpha and layer opacity; native painters crop
-it without a traced silhouette. Both PSD exports retain the full 1668 × 2388 canvas and are reproducible with
+it without a traced silhouette. Both PSD exports keep the whole 1668 × 2388 canvas, scaled to 1000 × 1432 px (about twice the
+largest placement on a 2x screen, so each decoded bitmap is ~5.7 MB instead of ~16 MB); the painters still crop in canvas units and draw
+the image back at canvas size. They are reproducible with
 `scripts/export_holiday_psd.py` (developer-only `psd-tools==1.26.1` dependency).
 `HolidaySceneEffect` lets the northern-lights switch reach the scene painter independently of snowfall; intensity Off keeps selected scenery
 visible at its still frame while stopping moving overlay effects.

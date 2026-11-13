@@ -5,8 +5,8 @@ package com.indagium.ui.holiday.ready
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -27,8 +27,10 @@ internal object ReadyTheme : HolidayTheme {
     override val label = "Ready prompt"
     override val occasion = "Any time"
     override val dates = HolidayDates(MonthDay.of(1, 1), MonthDay.of(12, 31))
+
     // An anytime theme is selected explicitly; it must not displace scheduled holidays.
     override fun automaticAt(now: LocalDateTime) = false
+
     override val supportsAutomatic = false
     override val keywords = listOf("computer", "8-bit", "retro", "pixel", "c64", "scanlines")
     override val corners = HolidayCorners(tabDp = 0f, toolbarDp = 0, tileDp = 0)
@@ -45,6 +47,7 @@ internal object ReadyTheme : HolidayTheme {
     override val tabScene: HolidayScenePainter = ReadyScene
     override val icons = ReadyIcons
     override val effects: List<HolidayEffectSpec> = listOf(ReadyEffect(false), ReadyEffect(true))
+
     override fun palette(dark: Boolean) = if (dark) theme(
         0xFF2a2165, 0xFF352879, 0xFF40318d, 0xFF6a5fc0, 0xFFd6d2ff,
         0xFFa59eff, 0xFF8f87e8, 0xFFa59eff, 0xFFa59eff, 0xFFeeee77, onAc = 0xFF1e1750,
@@ -55,8 +58,9 @@ internal object ReadyTheme : HolidayTheme {
         0xFF40318d, 0xFF5f5790, 0xFF40318d, 0xFF40318d, 0xFFc0483e, hv = Color.Black.copy(alpha = .04f),
     ).copy(abg = Color(0xFF40318d).copy(alpha = .12f), sl = Color(0xFF40318d).copy(alpha = .14f),
         searchMatchBg = Color(0xFFdd8855).copy(alpha = .32f), searchCurrentBg = Color(0xFF40318d).copy(alpha = .3f))
+
     override fun chrome(dark: Boolean) = if (dark) HolidayChromeColors(Color(0xFF2a2165), Color(0xFF352879), Color.Black.copy(alpha = .2f))
-        else HolidayChromeColors(Color(0xFFddd3bb), Color(0xFFd2c6aa), Color.Black.copy(alpha = .1f))
+    else HolidayChromeColors(Color(0xFFddd3bb), Color(0xFFd2c6aa), Color.Black.copy(alpha = .1f))
 }
 
 private fun artSource(name: String): String =
@@ -68,6 +72,7 @@ private object ReadyPicture : HolidayPicturePainter {
     override val designWidthDp = 300f
     override val designHeightDp = 420f
     private val sprite by lazy { art(artSource("sprite")) }
+
     // SVGDOM does not execute CSS animation. Cache the discrete cursor/light frames instead.
     private val frames by lazy {
         val source = artSource("picture")
@@ -78,8 +83,10 @@ private object ReadyPicture : HolidayPicturePainter {
             art(svg)
         }
     }
+
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
         val frame = (if (t % 1f >= .5f) 1 else 0) + (if (t % 1.6f >= .8f) 2 else 0)
+
         // Skia SVG does not reliably resolve the reference's radial gradients.
         fun glow(cx: Float, cy: Float, rx: Float, ry: Float, color: Color) {
             withTransform({ translate(cx, cy); scale(rx, ry, Offset.Zero) }) {
@@ -97,6 +104,7 @@ private object ReadyPicture : HolidayPicturePainter {
         drawIntoCanvas { frames[frame].render(it.skiaCanvas) }
     }
 }
+
 private object ReadyCompanion : HolidayCompanionPainter {
     override val label = "Sprite balloon in the Notes corner"
     override val designWidthDp = 240f
@@ -105,6 +113,7 @@ private object ReadyCompanion : HolidayCompanionPainter {
         val source = artSource("companion")
         listOf(art(source), art(source.replace("class=\"s-blink\"", "transform=\"translate(0 90) scale(1 .12) translate(0 -90)\"")))
     }
+
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
         val blink = t % 4.6f in 4.14f..4.42f
         withTransform({ translate(0f, (cos(t * (2f * Math.PI.toFloat() / 4.2f)) - 1f) * 5f) }) {
@@ -112,9 +121,12 @@ private object ReadyCompanion : HolidayCompanionPainter {
         }
     }
 }
+
 private object ReadyScene : HolidayScenePainter {
     private val parts = listOf(HolidayBandPart("ready", Rect(1250f, 3f, 1500f, 27f)))
+
     override fun layout(band: Rect): HolidaySceneLayout = HolidayBandLayout(HolidayBandSpace(band), parts)
+
     override val animated = true
     private val prompts by lazy {
         val source = artSource("prompt")
@@ -122,6 +134,7 @@ private object ReadyScene : HolidayScenePainter {
     }
 
     override fun draw(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean) = drawFrame(scope, layout, dark, HOLIDAY_STILL_TIME)
+
     override fun drawFrame(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean, time: Float) {
         val l = layout as HolidayBandLayout
         if (!l.has("ready")) return
@@ -136,14 +149,17 @@ private object ReadyScene : HolidayScenePainter {
         }
     }
 }
+
 private class ReadyEffect(private val tape: Boolean) : HolidayParticleEffect {
     override val id = if (tape) "ready.rainbow" else "ready.scanlines"
     override val label = if (tape) "Rainbow tape" else "CRT scanlines"
     override val noun = if (tape) "rainbow tape" else "scanlines"
     override val defaultOn = true
     override val moves get() = tape
+
     override fun spawn(seed: Int, countScale: Float, speedScale: Float): HolidayParticleField = object : HolidayParticleField {
         override val count = 1
+
         override fun draw(scope: DrawScope, t: Float, widthDp: Float, heightDp: Float, dark: Boolean) = with(scope) {
             if (tape) {
                 val colors = listOf(0xFFc0483e, 0xFFdd8855, 0xFFeeee77, 0xFF5cab5e, 0xFF7869c4)

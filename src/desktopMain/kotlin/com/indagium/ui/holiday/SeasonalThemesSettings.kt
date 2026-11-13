@@ -192,7 +192,11 @@ private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, onSelect: (HolidayMo
     CompactSetting(SEASONAL_ANCHOR_WHEN) {
         val modes = if (theme.supportsAutomatic) listOf(HolidayMode.ALWAYS, HolidayMode.AUTOMATIC) else listOf(HolidayMode.ALWAYS)
         SegmentedControl(
-            options = if (theme.supportsAutomatic) listOf("Always", if (theme.automaticLabel == null) "Only during its dates" else "Automatic") else listOf("Always"),
+            options = if (theme.supportsAutomatic) {
+                listOf("Always", if (theme.automaticLabel == null) "Only during its dates" else "Automatic")
+            } else {
+                listOf("Always")
+            },
             selectedIndices = setOfNotNull(modes.indexOf(mode).takeIf { it >= 0 }),
             onToggle = { onSelect(modes[it]) },
             modifier = Modifier.testTag(SEASONAL_MODE_TAG),

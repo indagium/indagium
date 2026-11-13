@@ -8,12 +8,13 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class HolidayPaintingAssetTest {
-    @Test fun psdExportsRetainAuthoredTransparencyAndFullCanvas() {
+    @Test fun psdExportsRetainAuthoredTransparencyAndTheWholeCanvasAtDisplaySize() {
         for (theme in listOf("bear", "tulips")) {
             val bytes = requireNotNull(javaClass.getResourceAsStream("/holiday/$theme/painting.png")).use { it.readBytes() }
             val bitmap = Image.makeFromEncoded(bytes).toComposeImageBitmap()
-            assertEquals(1668, bitmap.width)
-            assertEquals(2388, bitmap.height)
+            // A smaller export of the full 1668 x 2388 canvas: big enough for the largest placement at 2x, a third of the memory.
+            assertEquals(1000, bitmap.width)
+            assertEquals(1432, bitmap.height)
             val pixels = bitmap.toPixelMap()
             assertEquals(0f, pixels[0, 0].alpha, "transparent canvas must not become a white rectangle")
             var feathered = 0
