@@ -128,7 +128,7 @@ private fun appearance() = buildList {
     add(
         entry(
             SettingsSection.Appearance, "Shape style",
-            "Corners of tiles, the toolbar and tabs: theme default, square, soft, rounded or round.",
+            "Corners of tiles and the toolbar: theme default, square, soft, rounded or round.",
             listOf("shape", "corners", "rounded", "square", "round", "radius", "soft"),
         ),
     )

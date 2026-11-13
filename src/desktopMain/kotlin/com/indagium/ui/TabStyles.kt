@@ -151,50 +151,40 @@ internal fun tabStripBackground(style: TabStripStyle, tc: ThemeColors): Color = 
 
 // The raised style's active card: filled like the content beside it and outlined on every side but the one facing the content, so it
 // opens into the content.
-private fun raisedShape(position: TabStripPosition, radius: Dp = RAISED_RADIUS): RoundedCornerShape = when (position) {
-    TabStripPosition.TOP -> RoundedCornerShape(topStart = radius, topEnd = radius)
-    TabStripPosition.BOTTOM -> RoundedCornerShape(bottomStart = radius, bottomEnd = radius)
-    TabStripPosition.LEFT -> RoundedCornerShape(topStart = radius, bottomStart = radius)
-    TabStripPosition.RIGHT -> RoundedCornerShape(topEnd = radius, bottomEnd = radius)
+private fun raisedShape(position: TabStripPosition): RoundedCornerShape = when (position) {
+    TabStripPosition.TOP -> RoundedCornerShape(topStart = RAISED_RADIUS, topEnd = RAISED_RADIUS)
+    TabStripPosition.BOTTOM -> RoundedCornerShape(bottomStart = RAISED_RADIUS, bottomEnd = RAISED_RADIUS)
+    TabStripPosition.LEFT -> RoundedCornerShape(topStart = RAISED_RADIUS, bottomStart = RAISED_RADIUS)
+    TabStripPosition.RIGHT -> RoundedCornerShape(topEnd = RAISED_RADIUS, bottomEnd = RAISED_RADIUS)
 }
-
-// The Shape style's tab corner ([cornerDp], null = the style's own): the raised card's and the segmented / outlined item's radius.
-private fun raisedRadius(cornerDp: Float?): Dp = cornerDp?.dp ?: RAISED_RADIUS
-
-private fun segmentRadius(cornerDp: Float?): Dp = cornerDp?.dp ?: SEGMENT_RADIUS
-
-// A Shape style of Square: the rounded styles become plain rectangles (no clip layer, straight source stripe), the pill stays a capsule.
-private fun squareCorner(cornerDp: Float?): Boolean = cornerDp != null && cornerDp <= 0f
 
 /**
  * The outline of one tab in [style] on a strip at [position]: the raised card's open-sided rounded shape, the segmented or outlined card,
  * the pill, and a plain rectangle for the other styles. Everything that belongs to the tab follows it: its fill and hover highlight,
  * plus the press and focus highlights that [Modifier.clickable] draws, cut to this shape instead of lighting up the whole cell.
- * [cornerDp] is the Shape style's tab corner: the rounded styles use it instead of their own radius (0 makes them rectangles), the pill
- * keeps its capsule and the flat styles stay flat. Null (Theme default) is exactly the style's own shape.
  */
-internal fun tabShape(style: TabStripStyle, position: TabStripPosition, cornerDp: Float? = null): Shape = when (style) {
-    TabStripStyle.RAISED -> if (squareCorner(cornerDp)) RectangleShape else raisedShape(position, raisedRadius(cornerDp))
-    TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED -> if (squareCorner(cornerDp)) RectangleShape else RoundedCornerShape(segmentRadius(cornerDp))
+internal fun tabShape(style: TabStripStyle, position: TabStripPosition): Shape = when (style) {
+    TabStripStyle.RAISED -> raisedShape(position)
+    TabStripStyle.SEGMENTED -> RoundedCornerShape(SEGMENT_RADIUS)
+    TabStripStyle.OUTLINED -> RoundedCornerShape(SEGMENT_RADIUS)
     TabStripStyle.PILL -> RoundedCornerShape(PILL_CORNER_PERCENT)
     else -> RectangleShape
 }
 
-private fun tabCloseButtonShape(style: TabStripStyle, position: TabStripPosition, cornerDp: Float?): Shape = when (style) {
-    TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL -> tabShape(style, position, cornerDp)
+private fun tabCloseButtonShape(style: TabStripStyle, position: TabStripPosition): Shape = when (style) {
+    TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL -> tabShape(style, position)
     else -> CORNER_MD
 }
 
-private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition, tint: Color?, cornerDp: Float?): Modifier {
-    val shape = tabShape(TabStripStyle.RAISED, position, cornerDp)
-    return background(tc.bg, shape).groupTint(tint, shape).drawBehind { drawRaisedOutline(position, tc.br, raisedRadius(cornerDp).toPx()) }
+private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition, tint: Color?): Modifier {
+    val shape = raisedShape(position)
+    return background(tc.bg, shape).groupTint(tint, shape).drawBehind { drawRaisedOutline(position, tc.br) }
 }
 
 // The raised card's outline: a rounded rect that runs past the open side (the one facing the content), which the clip then cuts off.
-private fun DrawScope.drawRaisedOutline(position: TabStripPosition, color: Color, radiusPx: Float = RAISED_RADIUS.toPx()) {
+private fun DrawScope.drawRaisedOutline(position: TabStripPosition, color: Color) {
     val inset = 0.5.dp.toPx()
-    // Past the clip by at least the stroke, so the open side's edge never shows even for a square card.
-    val overshoot = maxOf(radiusPx * 2, 2.dp.toPx())
+    val overshoot = RAISED_RADIUS.toPx() * 2
     val (topLeft, outline) = when (position) {
         TabStripPosition.TOP -> Offset(inset, inset) to Size(size.width - 2 * inset, size.height + overshoot)
         TabStripPosition.BOTTOM -> Offset(inset, -overshoot) to Size(size.width - 2 * inset, size.height + overshoot - inset)
@@ -206,7 +196,7 @@ private fun DrawScope.drawRaisedOutline(position: TabStripPosition, color: Color
             color = color,
             topLeft = topLeft,
             size = outline,
-            cornerRadius = CornerRadius(radiusPx),
+            cornerRadius = CornerRadius(RAISED_RADIUS.toPx()),
             style = Stroke(1.dp.toPx()),
         )
     }
@@ -220,9 +210,9 @@ private fun opposite(position: TabStripPosition): TabStripPosition = when (posit
 }
 
 /** Radius of the tab's two corners along [edge]. Raised cards round only their outer edge; pills scale with their short side. */
-private fun DrawScope.tabEdgeRadius(style: TabStripStyle, position: TabStripPosition, edge: TabStripPosition, cornerDp: Float? = null): Float = when (style) {
-    TabStripStyle.RAISED -> if (edge == position) raisedRadius(cornerDp).toPx() else 0f
-    TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED -> segmentRadius(cornerDp).toPx()
+private fun DrawScope.tabEdgeRadius(style: TabStripStyle, position: TabStripPosition, edge: TabStripPosition): Float = when (style) {
+    TabStripStyle.RAISED -> if (edge == position) RAISED_RADIUS.toPx() else 0f
+    TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED -> SEGMENT_RADIUS.toPx()
     TabStripStyle.PILL -> minOf(size.width, size.height) / 2f
     else -> 0f
 }
@@ -275,9 +265,9 @@ private fun DrawScope.drawEdgeContour(edge: TabStripPosition, thickness: Float, 
 
 // A mark along the side of the tab facing content. Rounded styles bend the line around the two matching corner arcs; rectangular
 // styles retain the original straight drawRect geometry pixel for pixel.
-private fun DrawScope.contentSideMark(style: TabStripStyle, position: TabStripPosition, thickness: Float, color: Color, cornerDp: Float?) {
+private fun DrawScope.contentSideMark(style: TabStripStyle, position: TabStripPosition, thickness: Float, color: Color) {
     val edge = opposite(position)
-    drawEdgeContour(edge, thickness, tabEdgeRadius(style, position, edge, cornerDp), color)
+    drawEdgeContour(edge, thickness, tabEdgeRadius(style, position, edge), color)
 }
 
 // A group member's tint: the group colour (already at its alpha) over the tab's own fill, inside its shape. It sits between the fill and
@@ -293,14 +283,13 @@ private fun Modifier.tabChrome(
     tc: ThemeColors,
     position: TabStripPosition,
     tint: Color? = null,
-    cornerDp: Float? = null,
 ): Modifier {
     val accent = tc.ac
     val lit = hovered || dragging
     return when (style) {
-        TabStripStyle.RAISED -> raisedTabChrome(tc, position, isActive, lit, tint, cornerDp)
-        TabStripStyle.SEGMENTED -> segmentedTabChrome(style, tc, position, isActive, lit, tint, cornerDp)
-        TabStripStyle.OUTLINED -> outlinedTabChrome(style, tc, position, isActive, lit, accent, tint, cornerDp)
+        TabStripStyle.RAISED -> raisedTabChrome(tc, position, isActive, lit, tint)
+        TabStripStyle.SEGMENTED -> segmentedTabChrome(style, tc, position, isActive, lit, tint)
+        TabStripStyle.OUTLINED -> outlinedTabChrome(style, tc, position, isActive, lit, accent, tint)
         TabStripStyle.PILL -> pillTabChrome(style, tc, position, isActive, lit, accent, tint)
         TabStripStyle.QUIET -> quietTabChrome(style, position, isActive, accent, tc.br, tint)
         else -> classicTabChrome(style, tc, position, isActive, lit, accent, tint)
@@ -308,18 +297,11 @@ private fun Modifier.tabChrome(
 }
 
 // The hovered raised tab keeps the card's open-sided shape (open toward the content).
-private fun Modifier.raisedTabChrome(
-    tc: ThemeColors,
-    position: TabStripPosition,
-    isActive: Boolean,
-    lit: Boolean,
-    tint: Color?,
-    cornerDp: Float?,
-): Modifier =
+private fun Modifier.raisedTabChrome(tc: ThemeColors, position: TabStripPosition, isActive: Boolean, lit: Boolean, tint: Color?): Modifier =
     if (isActive) {
-        raisedCard(tc, position, tint, cornerDp)
+        raisedCard(tc, position, tint)
     } else {
-        val shape = tabShape(TabStripStyle.RAISED, position, cornerDp)
+        val shape = tabShape(TabStripStyle.RAISED, position)
         background(if (lit) tc.hv else Color.Transparent, shape).groupTint(tint, shape)
     }
 
@@ -330,9 +312,8 @@ private fun Modifier.segmentedTabChrome(
     isActive: Boolean,
     lit: Boolean,
     tint: Color?,
-    cornerDp: Float?,
 ): Modifier {
-    val shape = tabShape(style, position, cornerDp)
+    val shape = tabShape(style, position)
     return when {
         isActive -> background(tc.p, shape).groupTint(tint, shape).border(0.5.dp, tc.br, shape)
         lit -> background(tc.hv, shape).groupTint(tint, shape)
@@ -348,14 +329,13 @@ private fun Modifier.outlinedTabChrome(
     lit: Boolean,
     accent: Color,
     tint: Color?,
-    cornerDp: Float?,
 ): Modifier {
-    val shape = tabShape(style, position, cornerDp)
+    val shape = tabShape(style, position)
     val border = if (isActive) accent else tc.br
     return background(if (isActive) tc.p else if (lit) tc.hv else Color.Transparent, shape)
         .groupTint(tint, shape)
         .border(BorderStroke(1.dp, border), shape)
-        .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent, cornerDp) }
+        .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 }
 
 private fun Modifier.pillTabChrome(
@@ -373,7 +353,7 @@ private fun Modifier.pillTabChrome(
     return background(backgroundColor, shape)
         .groupTint(tint, shape)
         .border(BorderStroke(1.dp, border), shape)
-        .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent, null) }
+        .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 }
 
 private fun Modifier.quietTabChrome(
@@ -384,7 +364,7 @@ private fun Modifier.quietTabChrome(
     border: Color,
     tint: Color?,
 ): Modifier = groupTint(tint, tabShape(style, position))
-    .drawBehind { contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), if (isActive) accent else border, null) }
+    .drawBehind { contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), if (isActive) accent else border) }
 
 private fun Modifier.classicTabChrome(
     style: TabStripStyle,
@@ -397,19 +377,19 @@ private fun Modifier.classicTabChrome(
 ): Modifier = background(if (isActive) tc.bg else if (lit) tc.p else tc.p2)
     .groupTint(tint, tabShape(style, position))
     .border(BorderStroke(1.dp, tc.br.copy(alpha = 0.95f)))
-    .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent, null) }
+    .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 
 // A 1 dp outline in [color] in the tab's own shape, over its chrome (so it sits before the chrome in the chain: a modifier draws its
 // content, then its own border). The raised card is open toward the content, so its outline is the
 // card's own open-sided one.
-private fun Modifier.tabOutline(style: TabStripStyle, position: TabStripPosition, color: Color, cornerDp: Float?): Modifier =
+private fun Modifier.tabOutline(style: TabStripStyle, position: TabStripPosition, color: Color): Modifier =
     if (style == TabStripStyle.RAISED) {
         drawWithContent {
             drawContent()
-            drawRaisedOutline(position, color, raisedRadius(cornerDp).toPx())
+            drawRaisedOutline(position, color)
         }
     } else {
-        border(1.dp, color, tabShape(style, position, cornerDp))
+        border(1.dp, color, tabShape(style, position))
     }
 
 @Composable
@@ -475,9 +455,8 @@ internal fun TabShell(
     val holiday = LocalHoliday.current
     // "My tab style" for this pack: the user's tab style draws the tabs (shape, chrome, outline, inset, close slot) in the pack's colours,
     // with the pack's label font, size and case; the pack's texture, inverse fill, cursor and ornament are dropped. [packTabs] is the
-    // pack's own drawing, null for a regular theme and for "My tab style".
+    // pack's own drawing, null for a regular theme and for "My tab style". The Shape style setting never reaches the tabs.
     val packTabs = holiday?.takeUnless { it.ownTabStyle }
-    val corners = currentUiCorners()
     val metrics = tabMetrics(style, position)
     // Under a seasonal pack the tab takes the pack's shape, extra outer inset and fill; the user's style is only left unread here.
     val crossInset = packTabs?.theme?.tabCrossAxisInsetDp
@@ -489,13 +468,10 @@ internal fun TabShell(
     } else {
         metrics.inset
     }
-    // The pack's generic rounded tab follows the Shape style's tab corner (the pack's own under Theme default); a pack's own silhouette
-    // keeps its shape. The user's style uses the Shape style's corner only when one is chosen (ownTabDp is null under Theme default).
-    val packRadiusDp: Float = packTabs?.let { if (it.theme.tabShape == null) corners.tabDp ?: it.theme.corners.tabDp else it.theme.corners.tabDp } ?: 0f
     val shape = if (packTabs != null) {
-        packTabs.theme.tabShape?.shape(position) ?: holidayTabShape(position, packRadiusDp.dp)
+        packTabs.theme.tabShape?.shape(position) ?: holidayTabShape(position, packTabs.theme.corners.tabDp.dp)
     } else {
-        tabShape(style, position, corners.ownTabDp)
+        tabShape(style, position)
     }
     val ornament = packTabs?.theme?.tabOrnament?.takeIf { isActive }
     val drawSourceContour = appearance.showStripe && shape != RectangleShape
@@ -522,7 +498,7 @@ internal fun TabShell(
                     val edgeDp = holidayOuterEdgeInset(inset, position)
                     Modifier.testTag("tab-stem-$pointerKey").drawWithContent {
                         drawContent()
-                        ornament.draw(this, position, edgeDp.toPx(), holiday.isDark)
+                        ornament.draw(this, position, edgeDp.toPx(), packTabs.isDark)
                     }
                 } else {
                     Modifier
@@ -538,7 +514,7 @@ internal fun TabShell(
                         when {
                             appearance.outlineColor == null -> Modifier
                             packTabs != null -> Modifier.border(1.dp, appearance.outlineColor, shape)
-                            else -> Modifier.tabOutline(style, position, appearance.outlineColor, corners.ownTabDp)
+                            else -> Modifier.tabOutline(style, position, appearance.outlineColor)
                         },
                     )
                     .then(
@@ -546,7 +522,7 @@ internal fun TabShell(
                             Modifier.holidayTabChrome(
                                 isActive, hov || dragging, tc, packTabs.chrome, position,
                                 groupTint.takeIf { packTabs.theme.tintTabsByGroup },
-                                radius = packRadiusDp.dp, shape = shape, texture = packTabs.theme.tabTexture,
+                                radius = packTabs.theme.corners.tabDp.dp, shape = shape, texture = packTabs.theme.tabTexture,
                                 edges = HolidayTabEdges(
                                     wash = packTabs.theme.activeTabWashAlpha(packTabs.isDark),
                                     inverse = packTabs.theme.inverseActiveTab,
@@ -557,7 +533,7 @@ internal fun TabShell(
                                 idleAlpha = if (holidaySceneShown(packTabs.effects.tabScene, position)) 1f else HOLIDAY_IDLE_TAB_ALPHA,
                             )
                         } else {
-                            Modifier.tabChrome(style, isActive, hov, dragging, tc, position, groupTint, corners.ownTabDp)
+                            Modifier.tabChrome(style, isActive, hov, dragging, tc, position, groupTint)
                         },
                     )
                     // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
@@ -587,11 +563,7 @@ internal fun TabShell(
                                     drawEdgeContour(
                                         position,
                                         STRIPE_HEIGHT.toPx(),
-                                        if (packTabs != null) {
-                                            packRadiusDp.dp.toPx()
-                                        } else {
-                                            tabEdgeRadius(style, position, position, corners.ownTabDp)
-                                        },
+                                        if (packTabs != null) packTabs.theme.corners.tabDp.dp.toPx() else tabEdgeRadius(style, position, position),
                                         sourceColor,
                                     )
                                 }
@@ -610,7 +582,6 @@ internal fun TabShell(
                         visible = appearance.closeAlways || lit || hov,
                         style = style,
                         position = position,
-                        cornerDp = corners.ownTabDp,
                         color = if (isActive && packTabs?.theme?.inverseActiveTab == true) tc.onAc else null,
                         onClose = onClose,
                     )
@@ -643,7 +614,6 @@ internal fun TabShell(
                         visible = appearance.closeAlways || lit || hov,
                         style = style,
                         position = position,
-                        cornerDp = corners.ownTabDp,
                         color = if (isActive && packTabs?.theme?.inverseActiveTab == true) tc.onAc else null,
                         onClose = onClose,
                     )
@@ -676,7 +646,6 @@ private fun TabCloseSlot(
     visible: Boolean,
     style: TabStripStyle,
     position: TabStripPosition,
-    cornerDp: Float?,
     color: Color?,
     onClose: () -> Unit,
 ) {
@@ -685,7 +654,7 @@ private fun TabCloseSlot(
         CloseButton(
             onClick = onClose,
             modifier = Modifier.testTag("tab-close-$pointerKey"),
-            shape = tabCloseButtonShape(style, position, cornerDp),
+            shape = tabCloseButtonShape(style, position),
             color = color,
         )
     } else {

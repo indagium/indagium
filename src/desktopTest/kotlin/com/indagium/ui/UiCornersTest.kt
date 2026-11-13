@@ -37,7 +37,6 @@ import java.time.LocalDate
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** The one corner resolver: Theme default is exactly today's values, each fixed style is its table row. */
@@ -52,7 +51,6 @@ class UiCornersTest {
         val c = resolveUiCorners(ShapeStyle.THEME, null)
         assertEquals(8, c.tileDp)
         assertEquals(7, c.toolbarDp)
-        assertNull(c.tabDp)
         assertEquals(8, c.workspaceTileDp)
         assertEquals(8, LOG_VIEW_CHROME_SPEC.cornerDp, "the regular tile corner is the log view's spec")
     }
@@ -66,7 +64,6 @@ class UiCornersTest {
             val c = resolveUiCorners(ShapeStyle.THEME, look)
             assertEquals(own.tileDp, c.tileDp, "$pack tiles")
             assertEquals(own.toolbarDp, c.toolbarDp, "$pack toolbar")
-            assertEquals(own.tabDp, c.tabDp, "$pack tabs")
             assertEquals(8, c.workspaceTileDp, "$pack: packs never changed the workspace tiles")
         }
     }
@@ -75,10 +72,10 @@ class UiCornersTest {
     fun eachFixedStyleGivesItsRowWithOrWithoutAPackAndTheWorkspaceTilesFollow() {
         val looks = listOf<HolidayLook?>(null) + HOLIDAY_THEMES.keys.map(::lookFor)
         looks.forEach { look ->
-            assertEquals(UiCorners(0, 0, 0f, 0, 0f), resolveUiCorners(ShapeStyle.SQUARE, look))
-            assertEquals(UiCorners(8, 7, 6f, 8, 6f), resolveUiCorners(ShapeStyle.SOFT, look))
-            assertEquals(UiCorners(12, 10, 10f, 12, 10f), resolveUiCorners(ShapeStyle.ROUNDED, look))
-            assertEquals(UiCorners(16, UI_CORNER_CAPSULE, 14f, 16, 14f), resolveUiCorners(ShapeStyle.ROUND, look))
+            assertEquals(UiCorners(0, 0, 0), resolveUiCorners(ShapeStyle.SQUARE, look))
+            assertEquals(UiCorners(8, 7, 8), resolveUiCorners(ShapeStyle.SOFT, look))
+            assertEquals(UiCorners(12, 10, 12), resolveUiCorners(ShapeStyle.ROUNDED, look))
+            assertEquals(UiCorners(16, UI_CORNER_CAPSULE, 16), resolveUiCorners(ShapeStyle.ROUND, look))
         }
     }
 
@@ -227,7 +224,7 @@ class ShapeStyleSettingUiTest {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Box(Modifier.size(700.dp, 200.dp)) { ShapeStyleSetting(state) } }
         }
         rule.waitForIdle()
-        rule.onNodeWithText("Corners of tiles, the toolbar and tabs. Theme default keeps each theme's own shapes.").assertExists()
+        rule.onNodeWithText("Corners of tiles and the toolbar. Theme default keeps each theme's own shapes; tabs follow your Tab style.").assertExists()
         assertEquals(ShapeStyle.THEME, state.settings.shapeStyle)
         val choices = listOf(
             "Square" to ShapeStyle.SQUARE,

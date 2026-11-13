@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
@@ -36,7 +35,6 @@ import java.time.LocalDate
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /** The Shape style's tab corner and "My tab style" under a seasonal pack, on the real [TabShell] and [TabBar]. */
@@ -104,42 +102,14 @@ class ShapeStyleTabsUiTest {
         assertFalse(outside(3f, 3f), "8 dp: the arc is 2.3 dp in on the diagonal")
     }
 
+    // The Shape style never reaches the tabs: every style keeps the corners its Tab style (or pack) draws.
     @Test
-    fun squareMakesRaisedTabsSquareWithNoPack() {
-        render(null, ShapeStyle.SQUARE, TabStripStyle.RAISED)
-        assertFalse(outside(0.5f, 0.5f))
-        assertFalse(outside(1f, 1f))
-    }
-
-    @Test
-    fun roundMakesRaisedTabsFourteenDp() {
-        render(null, ShapeStyle.ROUND, TabStripStyle.RAISED)
-        assertTrue(outside(3f, 3f), "14 dp: the arc is 4.1 dp in on the diagonal")
-        assertFalse(outside(5f, 5f))
-    }
-
-    @Test
-    fun tabShapeTakesTheStyleCornerForRoundedStylesAndLeavesTheOthers() {
-        assertEquals(tabShape(TabStripStyle.RAISED, TabStripPosition.TOP), tabShape(TabStripStyle.RAISED, TabStripPosition.TOP, null))
-        assertEquals(RectangleShape, tabShape(TabStripStyle.RAISED, TabStripPosition.TOP, 0f))
-        assertEquals(RectangleShape, tabShape(TabStripStyle.SEGMENTED, TabStripPosition.LEFT, 0f))
-        assertEquals(RectangleShape, tabShape(TabStripStyle.OUTLINED, TabStripPosition.BOTTOM, 0f))
-        assertNotEquals(tabShape(TabStripStyle.SEGMENTED, TabStripPosition.TOP), tabShape(TabStripStyle.SEGMENTED, TabStripPosition.TOP, 14f))
-        // The pill keeps its capsule and the flat styles stay flat, whatever the corner.
-        listOf(null, 0f, 6f, 14f).forEach { corner ->
-            assertEquals(tabShape(TabStripStyle.PILL, TabStripPosition.TOP), tabShape(TabStripStyle.PILL, TabStripPosition.TOP, corner))
-            listOf(TabStripStyle.CURRENT, TabStripStyle.QUIET, TabStripStyle.COMPACT, TabStripStyle.TYPED).forEach {
-                assertEquals(RectangleShape, tabShape(it, TabStripPosition.TOP, corner), "$it")
-            }
+    fun squareAndRoundLeaveRaisedTabsAtTheirOwnEightDp() {
+        for (style in listOf(ShapeStyle.SQUARE, ShapeStyle.ROUND)) {
+            render(null, style, TabStripStyle.RAISED)
+            assertTrue(outside(1f, 1f), "$style")
+            assertFalse(outside(3f, 3f), "$style: still the raised style's 8 dp")
         }
-    }
-
-    @Test
-    fun theUserCornerOnlyAppliesWhenAShapeStyleIsChosen() {
-        val look = lookFor()
-        assertEquals(null, resolveUiCorners(ShapeStyle.THEME, null).ownTabDp)
-        assertEquals(null, resolveUiCorners(ShapeStyle.THEME, look).ownTabDp, "a pack's own tab radius never reaches the user's tab style")
-        assertEquals(0f, resolveUiCorners(ShapeStyle.SQUARE, look).ownTabDp)
     }
 
     private fun assertPillCapsule(style: ShapeStyle) {
@@ -158,29 +128,17 @@ class ShapeStyleTabsUiTest {
     fun pillIsACapsuleUnderRound() = assertPillCapsule(ShapeStyle.ROUND)
 
     @Test
-    fun aPackTabKeepsThePacksFourteenDpUnderThemeDefaultAndSquareMakesItSquare() {
+    fun aPackTabKeepsThePacksFourteenDpUnderThemeDefault() {
         render(lookFor(), ShapeStyle.THEME, TabStripStyle.CURRENT)
         assertTrue(outside(3f, 3f), "the pumpkin patch's 14 dp tab")
     }
 
     @Test
-    fun squareMakesTheGenericPackTabSquare() {
-        render(lookFor(), ShapeStyle.SQUARE, TabStripStyle.CURRENT)
-        assertFalse(outside(0.5f, 0.5f))
-    }
-
-    @Test
-    fun roundGivesTheGenericPackTabFourteenDpAndSoftSix() {
-        render(lookFor(), ShapeStyle.ROUND, TabStripStyle.CURRENT)
-        assertTrue(outside(3f, 3f))
-        assertFalse(outside(5f, 5f))
-    }
-
-    @Test
-    fun softGivesTheGenericPackTabSixDp() {
-        render(lookFor(), ShapeStyle.SOFT, TabStripStyle.CURRENT)
-        assertTrue(outside(0.5f, 0.5f))
-        assertFalse(outside(3f, 3f), "6 dp: the arc is 1.8 dp in on the diagonal")
+    fun theShapeStyleLeavesThePacksGenericTabAtItsOwnRadius() {
+        for (style in listOf(ShapeStyle.SQUARE, ShapeStyle.SOFT, ShapeStyle.ROUND)) {
+            render(lookFor(), style, TabStripStyle.CURRENT)
+            assertTrue(outside(3f, 3f), "$style: still the pumpkin patch's 14 dp tab")
+        }
     }
 
     @Test
@@ -215,9 +173,10 @@ class ShapeStyleTabsUiTest {
     }
 
     @Test
-    fun squareShapeStyleSquaresMyTabStyleToo() {
+    fun theShapeStyleLeavesMyTabStyleAlone() {
         render(lookFor(own = true), ShapeStyle.SQUARE, TabStripStyle.RAISED)
-        assertFalse(outside(0.5f, 0.5f))
+        assertTrue(outside(1f, 1f))
+        assertFalse(outside(3f, 3f), "still the raised style's 8 dp")
     }
 
     @Test

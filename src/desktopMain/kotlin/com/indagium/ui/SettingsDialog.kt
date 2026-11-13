@@ -716,7 +716,7 @@ internal fun AppearanceSystemFontSelectors(state: AppState) {
 /** Test tag of the Shape style control. */
 internal const val SHAPE_STYLE_CONTROL_TAG = "shape-style"
 
-private const val SHAPE_STYLE_HINT = "Corners of tiles, the toolbar and tabs. Theme default keeps each theme's own shapes."
+private const val SHAPE_STYLE_HINT = "Corners of tiles and the toolbar. Theme default keeps each theme's own shapes; tabs follow your Tab style."
 
 internal fun shapeStyleLabel(style: ShapeStyle): String = when (style) {
     ShapeStyle.THEME -> "Theme default"

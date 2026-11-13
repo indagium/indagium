@@ -7,9 +7,10 @@ import com.indagium.model.ShapeStyle
 import com.indagium.ui.holiday.HolidayLook
 import com.indagium.ui.holiday.LocalHoliday
 
-// The one place that answers "how round is this element": the tiles, the toolbar's button groups and the tabs. The Shape style setting
-// (AppSettings.shapeStyle) and, under THEME, the active seasonal pack's own corners decide. Segmented controls, fields, chips, menus and
-// dialogs keep their own shapes.
+// The one place that answers "how round is this element": the tiles and the toolbar's button groups (and the tab and toolbar bars when
+// they are drawn as cards, which follow the tiles). The Shape style setting (AppSettings.shapeStyle) and, under THEME, the active seasonal
+// pack's own corners decide. Tabs are never reshaped here: they keep the user's Tab style or the pack's own tabs. Segmented controls,
+// fields, chips, menus and dialogs keep their own shapes.
 
 /** The regular themes' tile corner (what [LOG_VIEW_CHROME_SPEC] has always used). */
 private const val REGULAR_TILE_DP = 8
@@ -31,22 +32,19 @@ internal fun isCapsuleCorner(toolbarDp: Int): Boolean = toolbarDp == UI_CORNER_C
  *
  * [tileDp] is the log view's tile and the window chrome's card-bar corner. [workspaceTileDp] is the corner of the New tab, diagram
  * workspace and Tests workspace tiles: packs never changed those, so it is 8 under [ShapeStyle.THEME] (with or without a pack) and
- * follows [tileDp] under every fixed style. [toolbarDp] is the toolbar's button-group corner and may be [UI_CORNER_CAPSULE]. [tabDp] is
- * the tab corner of a seasonal pack's generic tab, or null when the tab style draws its own corners. [ownTabDp] is the corner the user's own
- * tab style (a regular theme's tabs, or a pack's "My tab style") takes: null under [ShapeStyle.THEME] (every style keeps its own radius),
- * the fixed style's tab corner otherwise.
+ * follows [tileDp] under every fixed style. [toolbarDp] is the toolbar's button-group corner and may be [UI_CORNER_CAPSULE].
  */
-internal data class UiCorners(val tileDp: Int, val toolbarDp: Int, val tabDp: Float?, val workspaceTileDp: Int, val ownTabDp: Float? = null)
+internal data class UiCorners(val tileDp: Int, val toolbarDp: Int, val workspaceTileDp: Int)
 
-private val THEME_NO_PACK = UiCorners(REGULAR_TILE_DP, REGULAR_TOOLBAR_DP, null, REGULAR_TILE_DP)
+private val THEME_NO_PACK = UiCorners(REGULAR_TILE_DP, REGULAR_TOOLBAR_DP, REGULAR_TILE_DP)
 
 /** The corners for [style] under [look] (the active seasonal pack's look, or null). [ShapeStyle.THEME] is exactly today's values. */
 internal fun resolveUiCorners(style: ShapeStyle, look: HolidayLook?): UiCorners = when (style) {
-    ShapeStyle.THEME -> look?.theme?.corners?.let { UiCorners(it.tileDp, it.toolbarDp, it.tabDp, REGULAR_TILE_DP) } ?: THEME_NO_PACK
-    ShapeStyle.SQUARE -> UiCorners(0, 0, 0f, 0, 0f)
-    ShapeStyle.SOFT -> UiCorners(8, 7, 6f, 8, 6f)
-    ShapeStyle.ROUNDED -> UiCorners(12, 10, 10f, 12, 10f)
-    ShapeStyle.ROUND -> UiCorners(16, UI_CORNER_CAPSULE, 14f, 16, 14f)
+    ShapeStyle.THEME -> look?.theme?.corners?.let { UiCorners(it.tileDp, it.toolbarDp, REGULAR_TILE_DP) } ?: THEME_NO_PACK
+    ShapeStyle.SQUARE -> UiCorners(0, 0, 0)
+    ShapeStyle.SOFT -> UiCorners(8, 7, 8)
+    ShapeStyle.ROUNDED -> UiCorners(12, 10, 12)
+    ShapeStyle.ROUND -> UiCorners(16, UI_CORNER_CAPSULE, 16)
 }
 
 /**
