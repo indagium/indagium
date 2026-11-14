@@ -1,7 +1,8 @@
 package com.indagium
 
 import com.indagium.ui.SETTINGS_SEARCH_INDEX
-import com.indagium.ui.SettingsSection
+import com.indagium.ui.SettingsGroupKind
+import com.indagium.ui.SettingsPage
 import com.indagium.ui.holiday.*
 import com.indagium.ui.matchRanges
 import com.indagium.ui.searchSettings
@@ -11,10 +12,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SettingsSearchTest {
-    private val all = SettingsSection.entries.toSet()
+    private val all = SettingsPage.entries.toSet()
 
-    private fun labels(query: String, sections: Set<SettingsSection> = all) =
-        searchSettings(query, sections).map { it.label }
+    private fun labels(query: String, pages: Set<SettingsPage> = all) =
+        searchSettings(query, pages).map { it.label }
 
     @Test
     fun entryIdsAreUnique() {
@@ -23,10 +24,42 @@ class SettingsSearchTest {
     }
 
     @Test
-    fun everySectionHasAtLeastOneEntry() {
-        for (section in SettingsSection.entries) {
-            assertTrue(SETTINGS_SEARCH_INDEX.any { it.section == section }, "no entries for ${section.title}")
+    fun everyPageHasAtLeastOneEntry() {
+        for (page in SettingsPage.entries) {
+            assertTrue(SETTINGS_SEARCH_INDEX.any { it.page == page }, "no entries for ${page.title}")
         }
+    }
+
+    @Test
+    fun theEighteenPagesSitInSevenGroupsInTheNavOrder() {
+        val top = SettingsPage.entries.filter { it.parent == null }
+        assertEquals(
+            listOf(
+                "General", "Appearance", "Tabs & toolbar", "Log view", "Search & filters", "Issue categories", "Source code",
+                "Notes & writing", "Copy & export", "Capture & video", "Providers", "Commands", "Voice input",
+                "Test runs", "Issue tracker", "Storage & files", "Integrations", "About",
+            ),
+            top.map { it.title },
+        )
+        assertEquals(
+            listOf("Workspace", "Reading logs", "Notes", "Devices", "AI", "Testing", "System"),
+            SettingsGroupKind.entries.map { it.label },
+        )
+        assertEquals(top.map { it.group }, top.map { it.group }.sortedBy { it.ordinal }, "pages are listed group by group")
+        assertTrue(SettingsPage.entries.all { it.navPage.parent == null })
+    }
+
+    @Test
+    fun theGroupLabelAndPageTitleAreSearchable() {
+        assertTrue("Providers" in labels("providers"), labels("providers").toString())
+        val reading = searchSettings("reading logs", all)
+        assertTrue(reading.isNotEmpty() && reading.all { it.page.group == SettingsGroupKind.ReadingLogs }, reading.toString())
+        assertEquals("Reading logs › Log view", SettingsPage.LogView.breadcrumb)
+    }
+
+    @Test
+    fun everyPageIdIsPrefixedWithItsPageName() {
+        assertTrue(SETTINGS_SEARCH_INDEX.all { it.id.startsWith("${it.page.name}.") })
     }
 
     @Test
@@ -37,8 +70,9 @@ class SettingsSearchTest {
     }
 
     @Test
-    fun folderFindsTheGeneralFolderRows() {
-        val found = searchSettings("folder", all).filter { it.section == SettingsSection.General }.map { it.label }
+    fun folderFindsTheStorageAndTestRunFolderRows() {
+        val found = searchSettings("folder", all)
+            .filter { it.page == SettingsPage.Storage || it.page == SettingsPage.TestRuns }.map { it.label }
         assertTrue(
             found.containsAll(
                 listOf(
@@ -80,12 +114,12 @@ class SettingsSearchTest {
     }
 
     @Test
-    fun hiddenSectionsAreExcluded() {
+    fun hiddenPagesAreExcluded() {
         val withVoice = searchSettings("recognition", all)
-        assertTrue(withVoice.any { it.section == SettingsSection.VoiceInput })
+        assertTrue(withVoice.any { it.page == SettingsPage.VoiceInput })
 
-        val withoutVoice = searchSettings("recognition", all - SettingsSection.VoiceInput)
-        assertTrue(withoutVoice.none { it.section == SettingsSection.VoiceInput })
+        val withoutVoice = searchSettings("recognition", all - SettingsPage.VoiceInput)
+        assertTrue(withoutVoice.none { it.page == SettingsPage.VoiceInput })
     }
 
     @Test
@@ -102,10 +136,11 @@ class SettingsSearchTest {
     }
 
     @Test
-    fun theTestingAndIssueTrackerSectionsAreSearchable() {
-        assertTrue(SettingsSection.Testing in all && SettingsSection.IssueTracker in all)
-        assertEquals("Issue tracker", SettingsSection.IssueTracker.title)
-        assertEquals("Testing", SettingsSection.Testing.title)
+    fun theTestRunsAndIssueTrackerPagesAreSearchable() {
+        assertTrue(SettingsPage.TestRuns in all && SettingsPage.IssueTracker in all)
+        assertEquals("Issue tracker", SettingsPage.IssueTracker.title)
+        assertEquals("Test runs", SettingsPage.TestRuns.title)
+        assertEquals(SettingsGroupKind.Testing, SettingsPage.TestRuns.group)
         assertTrue("Access token" in labels("keychain"), labels("keychain").toString())
         assertTrue("Tracker MCP URL" in labels("mcp url"), labels("mcp url").toString())
         assertTrue("Issue instructions (prompt)" in labels("project key"), labels("project key").toString())
@@ -114,9 +149,9 @@ class SettingsSearchTest {
         assertTrue("Edition" in labels("suites"), labels("suites").toString())
         assertTrue("Keep recording evidence with recorded cases" in labels("recording evidence"), labels("recording evidence").toString())
         assertTrue("Stored recording evidence" in labels("delete disk"), labels("delete disk").toString())
-        assertTrue(searchSettings("token", all - SettingsSection.IssueTracker).none { it.section == SettingsSection.IssueTracker })
-        // The existing crash-detection section keeps its own entry.
-        assertTrue(SETTINGS_SEARCH_INDEX.any { it.section == SettingsSection.Issues && it.label == "Custom issue categories" })
+        assertTrue(searchSettings("token", all - SettingsPage.IssueTracker).none { it.page == SettingsPage.IssueTracker })
+        // The custom issue categories keep their own entry, on the Issue categories page.
+        assertTrue(SETTINGS_SEARCH_INDEX.any { it.page == SettingsPage.IssueCategories && it.label == "Custom issue categories" })
     }
 
     @Test
@@ -196,6 +231,6 @@ class SettingsSearchTest {
         assertTrue("Fun icons" in labels("icons"))
         assertTrue("Pause effects while capturing or playing video" in labels("pause"))
         assertTrue("Special light or dark" in labels("follow preset"))
-        assertTrue(searchSettings("halloween", all).all { it.section == SettingsSection.Appearance })
+        assertTrue(searchSettings("halloween", all).all { it.page == SettingsPage.Appearance })
     }
 }

@@ -69,12 +69,12 @@ class CaptureOptionsDialogUiTest {
     }
 
     @Test
-    fun allCaptureSettingsLinkOpensSettingsOnTheCaptureSectionAndClosesTheDialog() {
+    fun allCaptureSettingsLinkOpensSettingsOnTheCaptureAndVideoPageAndClosesTheDialog() {
         var dismissed = false
         rule.setContent { CaptureOptionsDialogContent(state, "home", deviceSerial = null, onDismiss = { dismissed = true }) }
         rule.onNodeWithTag("capture-all-settings").performClick()
         rule.waitForIdle()
-        assertEquals(SettingsSection.Capture, state.requestedSettingsSection)
+        assertEquals(SettingsPage.CaptureVideo, state.requestedSettingsPage)
         assertTrue(state.settingsOpen)
         assertTrue(dismissed)
     }

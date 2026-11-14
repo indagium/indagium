@@ -144,7 +144,7 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Agent profiles…").performClick()
         rule.waitForIdle()
         assertTrue(state.settingsOpen)
-        assertEquals(com.indagium.ui.SettingsSection.AiProviders, state.requestedSettingsSection)
+        assertEquals(com.indagium.ui.SettingsPage.AiProviders, state.requestedSettingsPage)
     }
 
     @Test

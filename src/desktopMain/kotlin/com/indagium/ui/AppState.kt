@@ -1775,7 +1775,7 @@ internal class MemoryOpenBudget(private var remainingBytes: Long) {
     }
 }
 
-// Update-check status shown next to Settings' "Check now" button (AutomationSettingsSection).
+// Update-check status shown next to Settings' "Check now" button (Settings › General, UpdateCheckSetting).
 // Deliberately has no "an update is available" case of its own — AppState.availableUpdate already
 // carries that (and drives the update dialog), so a caller checks availableUpdate first and only
 // falls back to this for the plain checked-and-current / still-checking / failed states.
@@ -6433,7 +6433,7 @@ class AppState(
     var licenseAgreementOpen by mutableStateOf(false)
 
     /** One-shot Settings destination for contextual controls such as the AI provider picker. */
-    internal var requestedSettingsSection by mutableStateOf<SettingsSection?>(null)
+    internal var requestedSettingsPage by mutableStateOf<SettingsPage?>(null)
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
 
@@ -8029,13 +8029,13 @@ class AppState(
         directoryPicker(title, initialDirectory)
 
     fun openAiProviderSettings() {
-        requestedSettingsSection = SettingsSection.AiProviders
+        requestedSettingsPage = SettingsPage.AiProviders
         settingsOpen = true
     }
 
-    /** Opens Settings on its Capture section (the New tab's "Recording options" dialog links here). */
+    /** Opens Settings on its Capture & video page (the New tab's "Recording options" dialog links here). */
     fun openCaptureSettings() {
-        requestedSettingsSection = SettingsSection.Capture
+        requestedSettingsPage = SettingsPage.CaptureVideo
         settingsOpen = true
     }
 

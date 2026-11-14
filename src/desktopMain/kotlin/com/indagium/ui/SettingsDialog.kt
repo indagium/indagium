@@ -14,21 +14,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Bolt
-import androidx.compose.material.icons.outlined.BugReport
-import androidx.compose.material.icons.outlined.Code
-import androidx.compose.material.icons.outlined.Dashboard
-import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.Mic
-import androidx.compose.material.icons.outlined.Palette
-import androidx.compose.material.icons.outlined.PhoneAndroid
-import androidx.compose.material.icons.outlined.Psychology
-import androidx.compose.material.icons.outlined.Science
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Terminal
-import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,7 +23,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -50,6 +34,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
@@ -58,6 +43,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.ai.CustomAiCommand
@@ -65,12 +51,10 @@ import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.OpenAiCompatibleProvider
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.diagram3.DiagramExportMode
-import com.indagium.generated.BuildInfo
 import com.indagium.model.*
 import com.indagium.proofread.normalizeProofreadingVocabulary
 import com.indagium.proofread.normalizeProofreadingVocabularyWord
 import com.indagium.ui.holiday.*
-import com.indagium.update.PROJECT_REPO_URL
 import com.indagium.voice.VoiceLanguageCatalog
 import com.indagium.voice.VoiceModelCatalog
 import com.indagium.voice.VoiceModelCheckState
@@ -85,14 +69,11 @@ import java.util.UUID
 import kotlin.math.roundToInt
 
 // ── Settings dialog ───────────────────────────────────────────────────
-// Left-hand nav lists every section; only the selected section's content renders on the
-// right, so growing any one section (e.g. AI providers) no longer pushes every other
-// section down a shared scroll. There's no standalone "About" entry — its former content
-// (keyboard shortcuts, version, author) now lives in Editor behavior and the footer.
+// Left-hand nav lists every page in labelled groups; only the selected page's content renders on the
+// right, so growing any one page (e.g. Providers) no longer pushes every other page down a shared
+// scroll. The page model, nav list and footer live in SettingsPages.kt; this file owns the dialog's
+// state and the page bodies. Version, author and the project links sit on the About page.
 
-/** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
- *  section switches and closing the dialog behind an unsaved-changes prompt without hoisting the
- *  section's entire edit-draft state up to the dialog. */
 private const val ANCHOR_WAIT_FRAMES = 30
 
 /** Which name dialog Settings › General has open. */
@@ -114,63 +95,57 @@ private fun Modifier.composedButHidden(): Modifier = this
         layout(0, 0) {}
     }
 
+/** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
+ *  page switches and closing the dialog behind an unsaved-changes prompt without hoisting the
+ *  section's entire edit-draft state up to the dialog. */
 private class AiProviderGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
 
-internal enum class SettingsSection(val title: String, val icon: ImageVector) {
-    General("General", Icons.Outlined.Dashboard),
-    Appearance("Appearance", Icons.Outlined.Palette),
-    EditorBehavior("Editor behavior", Icons.Outlined.Tune),
-    ExportAnnotations("Export & annotations", Icons.Outlined.Description),
-    Capture("Capture", Icons.Outlined.PhoneAndroid),
-    Automation("Automation", Icons.Outlined.Bolt),
-    AiProviders("AI providers", Icons.Outlined.Psychology),
-    VoiceInput("Voice input", Icons.Outlined.Mic),
-    CustomAiCommands("AI commands", Icons.Outlined.Terminal),
-    SourceCode("Source code", Icons.Outlined.Code),
-    Issues("Issues", Icons.Outlined.Bolt),
-    Testing("Testing", Icons.Outlined.Science),
-    IssueTracker("Issue tracker", Icons.Outlined.BugReport),
-}
-
 @Composable
-internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestCloseChanged: (() -> Unit) -> Unit = {}) {
+internal fun SettingsDialog(
+    state: AppState,
+    onDismiss: () -> Unit,
+    onRequestCloseChanged: (() -> Unit) -> Unit = {},
+    // The main window's size in pixels. The dialog is a layer of its own, so it cannot ask its own window; null falls back to
+    // LocalWindowInfo, which is the main window's in tests and where the layer shares the window.
+    windowSize: IntSize? = null,
+) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
-    var selectedSection by remember {
-        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.General)
+    var selectedPage by remember {
+        mutableStateOf(state.requestedSettingsPage ?: SettingsPage.General)
     }
     val voiceInputSupported = true
     LaunchedEffect(Unit) {
-        state.requestedSettingsSection?.let {
-            selectedSection = it
-            state.requestedSettingsSection = null
+        state.requestedSettingsPage?.let {
+            selectedPage = it
+            state.requestedSettingsPage = null
         }
         state.refreshArchiveCacheInfo()
     }
-    // Guards leaving the AI providers section (switching to another section, or closing the
-    // dialog entirely) with unsaved profile edits. Only consulted while that section is actually
-    // selected, so a stale guard value left over from an earlier visit is harmless.
+    // Guards leaving the Providers page (switching to another page, or closing the dialog entirely)
+    // with unsaved profile edits. Only consulted while that page is actually selected, so a stale
+    // guard value left over from an earlier visit is harmless.
     var aiProviderGuard by remember { mutableStateOf<AiProviderGuard?>(null) }
-    var pendingSectionSwitch by remember { mutableStateOf<SettingsSection?>(null) }
+    var pendingPageSwitch by remember { mutableStateOf<SettingsPage?>(null) }
     var pendingClose by remember { mutableStateOf(false) }
     var guardSaveError by remember { mutableStateOf<String?>(null) }
 
     // Returns false when the switch was deferred behind the unsaved-changes prompt.
-    fun requestSectionSwitch(target: SettingsSection): Boolean {
-        if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
+    fun requestPageSwitch(target: SettingsPage): Boolean {
+        if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
             guardSaveError = null
-            pendingSectionSwitch = target
+            pendingPageSwitch = target
             return false
         }
-        selectedSection = target
+        selectedPage = target
         return true
     }
 
     // ── Settings search (ui/SettingsSearchIndex.kt, ui/SettingsSearchUi.kt) ──────────────────
-    val visibleSections = remember { SettingsSection.entries.filter { it != SettingsSection.VoiceInput || voiceInputSupported }.toSet() }
+    val visiblePages = remember { SettingsPage.entries.filter { it != SettingsPage.VoiceInput || voiceInputSupported }.toSet() }
     var query by remember { mutableStateOf("") }
     val searching = query.isNotBlank()
-    val results = remember(query) { searchSettings(query, visibleSections) }
+    val results = remember(query) { searchSettings(query, visiblePages) }
     val anchors = remember { SettingsAnchors() }
     var pendingAnchor by remember { mutableStateOf<String?>(null) }
     val searchFocus = remember { FocusRequester() }
@@ -182,7 +157,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     LaunchedEffect(Unit) { reclaimFocus() }
 
     fun openResult(entry: SettingsSearchEntry) {
-        val reached = entry.section == selectedSection || requestSectionSwitch(entry.section)
+        val reached = entry.page == selectedPage || requestPageSwitch(entry.page)
         // A switch deferred behind the AI-provider prompt keeps the results on screen instead, so
         // the user can simply pick again once they've answered it.
         if (!reached) return
@@ -192,7 +167,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     }
 
     fun requestClose() {
-        if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
+        if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
             guardSaveError = null
             pendingClose = true
         } else {
@@ -206,7 +181,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     SideEffect { anchors.pendingKey = pendingAnchor }
     val contentScroll = rememberScrollState()
     val density = LocalDensity.current
-    // After a result click the section is composed again (and, for another section, for the first
+    // After a result click the page is composed again (and, for another page, for the first
     // time), so give it two frames to lay out before reading the anchor, then scroll and flash.
     LaunchedEffect(pendingAnchor) {
         val key = pendingAnchor ?: return@LaunchedEffect
@@ -232,12 +207,13 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
         pendingAnchor = null
     }
 
+    val windowPx = windowSize ?: LocalWindowInfo.current.containerSize
+    val dialogSize = with(density) { settingsDialogSize(windowPx.width.toDp(), windowPx.height.toDp()) }
     Box(
-        // 200 (sidebar) + 1 (divider) + 693 (content). 693 less the 24dp padding either side and
-        // the 8dp scrollbar gutter leaves 637dp, tuned tight against ThemeGallery's FlowRow math
-        // (118dp cards, 8dp gaps: 5 cards = 622dp) so five fit per row with the scrollbar close
-        // against the 5th card, and the five workspace-profile cards split the same width evenly.
-        Modifier.width(894.dp).height(620.dp)
+        // 216 (nav) + 1 (divider) + 743 (content). 743 less the 24dp and 28dp padding leaves 691dp,
+        // tuned against ThemeGallery's FlowRow math (118dp cards, 8dp gaps: 5 cards = 622dp, a 6th
+        // would need 748dp) so five fit per row and the five workspace-profile cards split the width evenly.
+        Modifier.size(dialogSize.width, dialogSize.height)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape)
@@ -262,18 +238,18 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     ) {
         Column(Modifier.fillMaxSize()) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                Modifier.fillMaxWidth().height(48.dp).padding(start = 20.dp, end = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                AppText("Settings", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 CloseButton(onClick = ::requestClose)
             }
             Divider()
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
-                    Modifier.width(200.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    Modifier.width(216.dp).fillMaxHeight().background(tc.p).padding(vertical = 12.dp, horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     SettingsSearchField(
                         query = query,
@@ -281,103 +257,50 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                         focusRequester = searchFocus,
                         onSubmit = { results.firstOrNull()?.let(::openResult) },
                     )
-                    // Scrolls only if the section list ever outgrows the space between the search
-                    // field and the shortcuts block below.
-                    ScrollColumnWithBar(
-                        Modifier.weight(1f).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        if (searching) {
-                            SettingsMenuItem(
-                                title = "All results",
-                                icon = Icons.Outlined.Search,
-                                selected = true,
-                                onClick = { runCatching { searchFocus.requestFocus() } },
-                                badge = results.size,
-                            )
-                        }
-                        val counts = results.groupingBy { it.section }.eachCount()
-                        SettingsSection.entries.filter { it in visibleSections }.forEach { section ->
-                            SettingsMenuItem(
-                                title = section.title,
-                                icon = section.icon,
-                                selected = !searching && section == selectedSection,
-                                onClick = {
-                                    // Leaving the results for a section is a plain section switch.
-                                    query = ""
-                                    if (section != selectedSection) requestSectionSwitch(section)
-                                    reclaimFocus()
-                                },
-                                badge = if (searching) counts[section] else null,
-                                dimmed = searching && section !in counts,
-                            )
-                        }
-                    }
-                    Column(
-                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        AppText(
-                            "Keyboard shortcuts",
-                            color = tc.td,
-                            fontSize = 10.sp,
-                            fontFamily = UI,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        // Deliberately doesn't close Settings first — stacks on top instead, so closing
-                        // this popup returns you to Settings rather than to the main window.
-                        AppButton(
-                            "Show shortcuts…",
-                            onClick = { state.shortcutsOpen = true },
-                            variant = ButtonVariant.Secondary,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        // Closes Settings first (unlike the shortcuts popup): the assistant is a dialog of
-                        // its own. Unsaved AI-provider edits get the usual close prompt instead.
-                        AppButton(
-                            "Run setup assistant…",
-                            onClick = {
-                                if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
-                                    requestClose()
-                                } else {
-                                    state.rerunSetupAssistant()
-                                }
-                            },
-                            variant = ButtonVariant.Secondary,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
+                    // Scrolls only if the page list ever outgrows the space under the search field.
+                    SettingsNavList(
+                        selected = selectedPage,
+                        visiblePages = visiblePages,
+                        searching = searching,
+                        resultCounts = results.groupingBy { it.page }.eachCount(),
+                        totalResults = results.size,
+                        onAllResults = { runCatching { searchFocus.requestFocus() } },
+                        onPick = { page ->
+                            // Leaving the results for a page is a plain page switch.
+                            query = ""
+                            if (page != selectedPage) requestPageSwitch(page)
+                            reclaimFocus()
+                        },
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                    )
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                Box(Modifier.weight(1f).fillMaxHeight()) {
+                Box(Modifier.weight(1f).fillMaxHeight().background(tc.bg)) {
                     if (searching) SettingsSearchResults(query, results, ::openResult, Modifier.fillMaxSize())
                     CompositionLocalProvider(LocalSettingsAnchors provides anchors) {
                         Column(
                             Modifier.fillMaxSize()
-                                // While results are showing, the selected section stays composed but is
+                                // While results are showing, the selected page stays composed but is
                                 // neither placed nor drawn: leaving it out of the tree would drop its
-                                // unsaved AI-provider edits, which the section-switch guard relies on.
+                                // unsaved AI-provider edits, which the page-switch guard relies on.
                                 .then(if (searching) Modifier.composedButHidden() else Modifier)
                                 .verticalScroll(contentScroll)
                                 .onGloballyPositioned { anchors.content = it }
-                                .padding(24.dp).padding(end = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                                .padding(start = 24.dp, top = 20.dp, end = 28.dp, bottom = 20.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
                         ) {
-                            when (selectedSection) {
-                                SettingsSection.General -> GeneralSettingsSection(state, ::reclaimFocus)
-                                SettingsSection.Appearance -> AppearanceSettingsSection(state)
-                                SettingsSection.Capture -> CaptureSettingsSection(state)
-                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state, ::reclaimFocus)
-                                SettingsSection.Issues -> IssuesSettingsSection(state)
-                                SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
-                                SettingsSection.Automation -> AutomationSettingsSection(state)
-                                SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
-                                SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
-                                SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
-                                SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
-                                SettingsSection.Testing -> TestingSettingsSection(state)
-                                SettingsSection.IssueTracker -> IssueTrackerSettingsSection(state)
+                            selectedPage.parent?.let { parent ->
+                                AccentLink("‹ ${parent.title}", onClick = {
+                                    requestPageSwitch(parent)
+                                    reclaimFocus()
+                                })
                             }
+                            SettingsPageHeader(selectedPage.group.label, selectedPage.title, selectedPage.description)
+                            SettingsPageBody(
+                                state,
+                                selectedPage,
+                                ::reclaimFocus,
+                            ) { aiProviderGuard = it }
                         }
                     }
                     if (!searching) {
@@ -389,77 +312,50 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                     }
                 }
             }
-            Divider()
-            Row(
-                Modifier.fillMaxWidth().padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                // Fixed-width label column (not spacedBy) so "Version"/"Author" — different
-                // lengths in a proportional font — leave their values starting at the same x.
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.width(52.dp)) {
-                            AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                        }
-                        AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
-                        AppText("  |  ", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                        HoverBox(
-                            modifier = Modifier.clip(RoundedCornerShape(4.dp)),
-                            onClick = ::openProjectRepository,
-                        ) {
-                            Box(Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
-                                AppText("GitHub repository ↗", color = tc.ac, fontSize = 10.sp, fontFamily = UI)
-                            }
-                        }
-                        AppText("  |  ", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                        HoverBox(
-                            modifier = Modifier.clip(RoundedCornerShape(4.dp)),
-                            onClick = { state.openSupportDialog() },
-                        ) {
-                            Box(Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
-                                AppText("Support project ♥", color = tc.ac, fontSize = 10.sp, fontFamily = UI)
-                            }
-                        }
+            SettingsFooter(
+                onShortcuts = { state.shortcutsOpen = true },
+                // Closes Settings first (unlike the shortcuts popup): the assistant is a dialog of
+                // its own. Unsaved AI-provider edits get the usual close prompt instead.
+                onSetupAssistant = {
+                    if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
+                        requestClose()
+                    } else {
+                        state.rerunSetupAssistant()
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.width(52.dp)) {
-                            AppText("Author", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                        }
-                        AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AppButton("License…", onClick = { state.licenseAgreementOpen = true }, variant = ButtonVariant.Secondary)
-                    AppButton("Done", onClick = ::requestClose, variant = ButtonVariant.Primary)
-                }
-            }
+                },
+                onVersion = {
+                    query = ""
+                    if (selectedPage != SettingsPage.About) requestPageSwitch(SettingsPage.About)
+                    reclaimFocus()
+                },
+                onDone = ::requestClose,
+            )
         }
     }
 
-    pendingSectionSwitch?.let { target ->
+    pendingPageSwitch?.let { target ->
         SettingsConfirmDialog(
             title = "Save changes to ${aiProviderGuard?.profileName.orEmpty()}?",
-            message = "You changed this provider's settings without saving. Save them before switching sections?",
+            message = "You changed this provider's settings without saving. Save them before switching pages?",
             error = guardSaveError,
-            onDismissRequest = { pendingSectionSwitch = null; guardSaveError = null },
+            onDismissRequest = { pendingPageSwitch = null; guardSaveError = null },
         ) {
             DialogActionButton("Save", active = true) {
                 val err = aiProviderGuard?.save?.invoke()
                 if (err == null) {
-                    pendingSectionSwitch = null
+                    pendingPageSwitch = null
                     guardSaveError = null
-                    selectedSection = target
+                    selectedPage = target
                 } else {
                     guardSaveError = err
                 }
             }
             DialogActionButton("Discard", active = false, danger = true) {
-                pendingSectionSwitch = null
+                pendingPageSwitch = null
                 guardSaveError = null
-                selectedSection = target
+                selectedPage = target
             }
-            DialogActionButton("Cancel", active = false) { pendingSectionSwitch = null; guardSaveError = null }
+            DialogActionButton("Cancel", active = false) { pendingPageSwitch = null; guardSaveError = null }
         }
     }
 
@@ -490,8 +386,34 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     }
 }
 
-private fun openProjectRepository() {
-    openExternalUrl(PROJECT_REPO_URL)
+/** What [page] shows, in the content column under its header. The interim bodies reuse each setting's existing control. */
+@Composable
+private fun SettingsPageBody(
+    state: AppState,
+    page: SettingsPage,
+    reclaimFocus: () -> Unit,
+    onProviderGuard: (AiProviderGuard) -> Unit,
+) {
+    when (page) {
+        SettingsPage.General -> GeneralSettingsSection(state, reclaimFocus)
+        SettingsPage.Appearance -> AppearanceSettingsSection(state)
+        SettingsPage.TabsToolbar -> TabsToolbarSettingsSection(state)
+        SettingsPage.LogView -> LogViewSettingsSection(state, reclaimFocus)
+        SettingsPage.SearchFilters -> SearchFiltersSettingsSection(state)
+        SettingsPage.IssueCategories -> IssuesSettingsSection(state)
+        SettingsPage.SourceCode -> SourceCodeSettingsSection(state)
+        SettingsPage.NotesWriting -> NotesWritingSettingsSection(state)
+        SettingsPage.CopyExport -> CopyExportSettingsSection(state)
+        SettingsPage.CaptureVideo -> CaptureVideoSettingsSection(state)
+        SettingsPage.AiProviders -> AiProviderSettingsSection(state, onProviderGuard)
+        SettingsPage.AiCommands -> CustomAiCommandsSettingsSection(state)
+        SettingsPage.VoiceInput -> VoiceInputSettingsSection(state)
+        SettingsPage.TestRuns -> TestRunsSettingsSection(state)
+        SettingsPage.IssueTracker -> IssueTrackerSettingsSection(state)
+        SettingsPage.Storage -> StorageSettingsSection(state)
+        SettingsPage.Integrations -> IntegrationsSettingsSection(state)
+        SettingsPage.About -> AboutSettingsSection(state)
+    }
 }
 
 /** Shared modal shape for the confirm/discard prompts in this file - title, message, an optional
@@ -525,69 +447,6 @@ internal fun SettingsConfirmDialog(
                 verticalAlignment = Alignment.CenterVertically,
                 content = buttons,
             )
-        }
-    }
-}
-
-@Composable
-private fun SettingsMenuItem(
-    title: String,
-    icon: ImageVector,
-    selected: Boolean,
-    onClick: () -> Unit,
-    // Search-result count for this nav row (shown as a small pill), and dimming for sections with none.
-    badge: Int? = null,
-    dimmed: Boolean = false,
-) {
-    val tc = tc()
-    var hovered by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(8.dp)
-    Row(
-        Modifier.fillMaxWidth()
-            .clip(shape)
-            .background(
-                when {
-                    selected -> tc.ac.copy(alpha = .16f)
-                    hovered -> tc.br.copy(alpha = .5f)
-                    else -> Color.Transparent
-                },
-            )
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = if (selected) tc.ac else tc.td,
-        )
-        AppText(
-            title,
-            color = when {
-                selected -> tc.tx
-                dimmed -> tc.td
-                else -> tc.ts
-            },
-            fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        if (badge != null) {
-            Box(
-                Modifier.background(tc.ac.copy(alpha = .16f), RoundedCornerShape(50)).padding(horizontal = 6.dp, vertical = 1.dp),
-            ) {
-                AppText(badge.toString(), color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-            }
         }
     }
 }
@@ -642,7 +501,7 @@ internal fun AccentLink(label: String, onClick: () -> Unit, modifier: Modifier =
  * line only when the window is too narrow for all four.
  */
 @Composable
-internal fun AppearanceBasicsRow(state: AppState) {
+internal fun AppearanceBasicsRow(state: AppState, showToolbarLabels: Boolean = true) {
     SettingsControlRow {
         CompactSetting("Fallback log family") {
             SegmentedControl(
@@ -665,17 +524,23 @@ internal fun AppearanceBasicsRow(state: AppState) {
                 onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
             )
         }
-        CompactSettingWithTooltip(
-            label = "Toolbar labels",
-            tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
-            horizontalAlignment = Alignment.Start,
-        ) {
-            SegmentedControl(
-                options = listOf("Show", "Icons only"),
-                selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
-                onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
-            )
-        }
+        if (showToolbarLabels) ToolbarLabelsSetting(state)
+    }
+}
+
+/** The main toolbar's text-or-icons-only choice; Settings › Tabs & toolbar shows it on its own, the setup assistant inside [AppearanceBasicsRow]. */
+@Composable
+internal fun ToolbarLabelsSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Toolbar labels",
+        tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
+        horizontalAlignment = Alignment.Start,
+    ) {
+        SegmentedControl(
+            options = listOf("Show", "Icons only"),
+            selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
+            onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
+        )
     }
 }
 
@@ -767,9 +632,8 @@ private fun AppearanceSettingsSection(state: AppState) {
     ThemeSettingsBlock(state)
     ShapeStyleSetting(state)
     ToolbarShapeSetting(state)
-    AppearanceBasicsRow(state)
+    AppearanceBasicsRow(state, showToolbarLabels = false)
     AppearanceSystemFontSelectors(state)
-    TabsAppearanceSettings(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",
@@ -791,6 +655,22 @@ private fun AppearanceSettingsSection(state: AppState) {
             fontSize = 10.sp,
             fontFamily = UI,
         )
+    }
+}
+
+@Composable
+private fun TabsToolbarSettingsSection(state: AppState) {
+    TabsAppearanceSettings(state)
+    SettingsControlRow {
+        CompactSetting("Visible tabs") {
+            val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+            ListStepper(
+                options = tabLimits,
+                value = state.settings.visibleTabLimit,
+                onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
+            )
+        }
+        ToolbarLabelsSetting(state)
     }
 }
 
@@ -998,9 +878,53 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
             }
         }
     }
+    UpdateCheckSetting(state)
+}
+
+/** Check for updates automatically, with Check now and the status of the last check. */
+@Composable
+private fun UpdateCheckSetting(state: AppState) {
+    val tc = tc()
+    CompactSetting("Check for updates automatically") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
+            )
+            AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
+        }
+    }
+    // availableUpdate is checked first: once a release is known, that fact takes priority over
+    // whatever the last raw check status happened to be (e.g. a stale UpToDate from a previous run).
+    val updateStatusText = when {
+        state.availableUpdate != null -> "Update available"
+        else -> when (val s = state.updateCheckStatus) {
+            UpdateStatus.Idle -> null
+            UpdateStatus.Checking -> "Checking…"
+            is UpdateStatus.UpToDate -> "Up to date (v${s.version})"
+            is UpdateStatus.Failed -> "Couldn't reach GitHub"
+        }
+    }
+    updateStatusText?.let { text ->
+        val isError = state.availableUpdate == null && state.updateCheckStatus is UpdateStatus.Failed
+        AppText(text, color = if (isError) DANGER_RED else tc.td, fontSize = 11.sp)
+    }
+}
+
+/** The three AI test folders: Settings › Test runs shows them, Storage & files shows every other save folder. */
+private val TEST_FOLDER_KINDS = listOf(SaveFolderKind.TEST_SUITES, SaveFolderKind.TEST_RUNS, SaveFolderKind.TEST_ISSUES)
+
+@Composable
+private fun StorageSettingsSection(state: AppState) {
+    val tc = tc()
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        SaveFolderKind.entries.forEach { kind -> SaveFolderSetting(state, kind) }
+        SaveFolderKind.entries.filter { it !in TEST_FOLDER_KINDS }.forEach { kind -> SaveFolderSetting(state, kind) }
         state.testStorageStatus?.let { message -> AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
+    }
+    SettingsControlRow {
+        AutoSaveSetting(state)
+        FilterBackupsSetting(state)
     }
     Column(Modifier.settingsAnchor("Storage"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
@@ -1081,18 +1005,15 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     state.autosaveError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
-    val cardShape = RoundedCornerShape(6.dp)
-    Row(
-        Modifier.fillMaxWidth().settingsAnchor("Setup assistant")
-            .background(tc.p2, cardShape).border(1.dp, tc.br, cardShape).padding(horizontal = 12.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            AppText("Setup assistant", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            AppText("Walk through profile, theme, folders and capture again.", color = tc.td, fontSize = 11.sp, maxLines = 2)
-        }
-        AppButton("Run setup again", onClick = { state.rerunSetupAssistant() }, variant = ButtonVariant.Secondary)
+}
+
+/** Test runs: what a new run starts from, then the three AI test folders (kept with the lock hint while a run is active). */
+@Composable
+private fun TestRunsSettingsSection(state: AppState) {
+    TestingSettingsSection(state)
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        TEST_FOLDER_KINDS.forEach { kind -> SaveFolderSetting(state, kind) }
+        state.testStorageStatus?.let { message -> AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
     }
 }
 
@@ -1285,8 +1206,12 @@ private fun StorageInfoTooltip(text: String) {
     }
 }
 
+/**
+ * Settings › Log view. Cells sit on one four-column grid (SettingsGrid): columns are content-sized with equal gaps, so cells line up as
+ * columns and the last column ends on the right content edge. "Error rows" opens its style editor in a popup under its Style button.
+ */
 @Composable
-private fun EditorBehaviorSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
+private fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val stylePalette = remember(
         state,
         state.settings.highlighterCustomColors,
@@ -1313,282 +1238,293 @@ private fun EditorBehaviorSettingsSection(state: AppState, reclaimFocus: () -> U
             },
         )
     }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        // Rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
-        // so cells line up as columns and the last column ends on the right content edge.
-        // The fourth row groups every Ctrl+F / Find setting. It and the last row reserve an
-        // identical two-line label area in every cell so their controls align even though some
-        // labels wrap. "Error rows" opens its style editor in a popup under its Style button. The last row holds
-        // the proofreading cells in columns 1 and 2 (an empty cell fills row 5's column 4 first).
-        val finalRowLabelAreaHeight = 28.dp
-        var errorStyleExpanded by remember { mutableStateOf(false) }
+    var errorStyleExpanded by remember { mutableStateOf(false) }
 
-        SettingsGrid(columns = 4, rowSpacing = 16.dp) {
-            CompactSetting("Visible tabs") {
-                val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-                ListStepper(
-                    options = tabLimits,
-                    value = state.settings.visibleTabLimit,
-                    onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
-                )
-            }
-            CompactSetting("Keyboard scroll margin") {
-                val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
-                ListStepper(
-                    options = scrollMargins,
-                    value = state.settings.navScrollMargin,
-                    onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
-                )
-            }
-            CompactSetting("Most-used tags") {
-                val tagLimits = listOf(0, 3, 5, 10, 20)
-                ListStepper(
-                    options = tagLimits,
-                    value = state.settings.mostUsedTagLimit,
-                    onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
-                )
-            }
-            CompactSetting("Filter list rows") {
-                val rowLimits = listOf(3, 5, 8, 10, 15)
-                ListStepper(
-                    options = rowLimits,
-                    value = state.settings.filterListRows,
-                    onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Row wrapping",
-                // AWT has no horizontal mouse-wheel axis at all (confirmed via
-                // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
-                // equivalent), so Compose Desktop only ever produces a horizontal scroll
-                // delta when Shift is held down (its AWT bridge maps the wheel rotation into
-                // Offset.x specifically for that case). A genuine two-finger trackpad
-                // horizontal swipe never reaches Compose as a horizontal delta at all on
-                // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
-                // targets that gap directly. Shift+wheel works everywhere regardless, hence
-                // the tooltip below.
-                tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
-                    "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
-                    "two-finger trackpad swipe doesn't scroll horizontally.",
-            ) {
-                RowWrapControl(
-                    auto = state.settings.autoLogRowWrap,
-                    wrapChars = state.settings.logRowWrapLimitChars,
-                    onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
-                    onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Crash rows",
-                tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Error rows",
-                tooltip = "Tints every Error-level row in every tab. Crash rows, by contrast, colors the rows of an " +
-                    "expanded crash group. A tab can override this style from its Highlighters section. " +
-                    "Tabs with their own style ignore this switch until reset.",
-            ) {
-                ErrorRowsSettingControl(
-                    style = state.settings.errorHighlightStyle,
-                    styleExpanded = errorStyleExpanded,
-                    onStyleExpandedChange = { errorStyleExpanded = it },
-                    onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
-                    palette = stylePalette,
-                    tabOverrideCount = state.errorHighlightOverrideCount,
-                    onResetTabOverrides = state::resetErrorHighlightOverrides,
-                    onStyleClosed = reclaimFocus,
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Row number",
-                tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
-                    "you filter or fold rows, so it always points back to the same spot in the full log.",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Minimap",
-                tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
-                    "colored by level. Click or drag on it to jump to that part of the file.",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Follow live logs",
-                tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
-                    "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
-                    "scrolling back down to the last line resumes it.",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Regex summary",
-                tooltip = "Shows retained Tags-mode selectors above the Regex field. This summary is informational and does not change filtering.",
-            ) {
-                SegmentedControl(
-                    options = listOf("Off", "On"),
-                    selectedIndices = setOf(if (state.settings.showRegexFilterSummary) 1 else 0),
-                    onToggle = { index -> state.updateSettings { it.copy(showRegexFilterSummary = index == 1) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Original panel",
-                tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Ctrl+F opens",
-                tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
-                    "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                    "non-matching rows. \"Ctrl+F also shows Original\" applies to all three.",
-                modifier = Modifier.width(112.dp),
-                labelMaxLines = 1,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                CtrlFTargetSelector(
-                    selected = state.settings.ctrlFTarget,
-                    onSelected = { target -> state.updateSettings { it.copy(ctrlFTarget = target) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Ctrl+F also shows Original",
-                tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
-                    "of Find bar / Tags / Regex it opens. It only shows the panel: Search scope behavior still " +
-                    "picks the Find field, so with Auto-switch by open view Find then opens Unfiltered. " +
-                    "Single-tab view only — compare mode has no Original/Filtered split to reveal.",
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Search scope behavior",
-                tooltip = "Chooses the mode for a normal Find open. Filtered and Unfiltered open one field; " +
-                    "Two searches opens independent fields. Last search mode restores the last manual choice. " +
-                    "Auto-switch by open view uses Unfiltered while Original is visible and Filtered while it is hidden. " +
-                    "Pressing Ctrl+F again while Find is open only refocuses it. " +
-                    "Ctrl/Cmd+Alt+F always opens the Unfiltered field. Compare mode uses Filtered.",
-                modifier = Modifier.width(178.dp),
-                labelMaxLines = 1,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SearchScopeBehaviorSelector(
-                    selected = state.settings.searchScopeBehavior,
-                    onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Link split selection and Find",
-                tooltip = "This preference applies in every Filtered/Original split view, including single-field and " +
-                    "Two searches modes. When On, clicking a row in Filtered mirrors its selection and scroll position in " +
-                    "Original when that row exists. Find navigation may mirror a match in either direction. " +
-                    "Original row clicks and free scrolling stay local, and queries remain separate. Off " +
-                    "keeps each panel's selection and Find navigation local. " +
-                    "Deliberate annotation, crash and video jumps remain explicit.",
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Video follow readout",
-                tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
-                    "bar, explaining exactly what Follow is doing at the current playhead position.",
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "New video links:\ndouble-click seeks",
-                tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
-                    "independently from its header; this does not affect existing links or Follow.",
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Process names in new tabs",
-                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-                    "different logs with two different sets of processes. Per-tab picks reset every session " +
-                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
-                )
-            }
-            // Fills row 5's fourth column so proofreading starts the next row in column 1.
-            Spacer(Modifier)
-            CompactSettingWithTooltip(
-                label = "English proofreading",
-                tooltip = "Suggests English spelling and grammar corrections in notes and captions. " +
-                    "Text is checked locally; changes are applied when you choose a suggestion.",
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.proofreading.enabled) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(proofreading = it.proofreading.copy(enabled = idx == 0)) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "English variant",
-                tooltip = "Chooses American or British English spelling rules for local suggestions.",
-            ) {
-                SegmentedControl(
-                    options = listOf("US", "UK"),
-                    selectedIndices = setOf(if (state.settings.proofreading.language == "en-GB") 1 else 0),
-                    onToggle = { idx -> state.updateSettings { it.copy(proofreading = it.proofreading.copy(language = if (idx == 0) "en-US" else "en-GB")) } },
-                )
-            }
+    SettingsGrid(columns = 4, rowSpacing = 16.dp) {
+        CompactSettingWithTooltip(
+            label = "Row number",
+            tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
+                "you filter or fold rows, so it always points back to the same spot in the full log.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
+            )
         }
-        ProofreadingVocabularyManager(state)
+        CompactSettingWithTooltip(
+            label = "Row wrapping",
+            // AWT has no horizontal mouse-wheel axis at all (confirmed via
+            // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
+            // equivalent), so Compose Desktop only ever produces a horizontal scroll
+            // delta when Shift is held down (its AWT bridge maps the wheel rotation into
+            // Offset.x specifically for that case). A genuine two-finger trackpad
+            // horizontal swipe never reaches Compose as a horizontal delta at all on
+            // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
+            // targets that gap directly. Shift+wheel works everywhere regardless, hence
+            // the tooltip below.
+            tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
+                "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
+                "two-finger trackpad swipe doesn't scroll horizontally.",
+        ) {
+            RowWrapControl(
+                auto = state.settings.autoLogRowWrap,
+                wrapChars = state.settings.logRowWrapLimitChars,
+                onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
+                onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Process names in new tabs",
+            tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                "different logs with two different sets of processes. Per-tab picks reset every session " +
+                "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Crash rows",
+            tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Error rows",
+            tooltip = "Tints every Error-level row in every tab. Crash rows, by contrast, colors the rows of an " +
+                "expanded crash group. A tab can override this style from its Highlighters section. " +
+                "Tabs with their own style ignore this switch until reset.",
+        ) {
+            ErrorRowsSettingControl(
+                style = state.settings.errorHighlightStyle,
+                styleExpanded = errorStyleExpanded,
+                onStyleExpandedChange = { errorStyleExpanded = it },
+                onChange = { style -> state.updateSettings { it.copy(errorHighlightStyle = style) } },
+                palette = stylePalette,
+                tabOverrideCount = state.errorHighlightOverrideCount,
+                onResetTabOverrides = state::resetErrorHighlightOverrides,
+                onStyleClosed = reclaimFocus,
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Original panel",
+            tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Minimap",
+            tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
+                "colored by level. Click or drag on it to jump to that part of the file.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Follow live logs",
+            tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
+                "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
+                "scrolling back down to the last line resumes it.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
+            )
+        }
+    }
+}
+
+/**
+ * Settings › Search & filters: the Ctrl+F / Find settings in the first grid row, which reserves an identical two-line label area in every
+ * cell so their controls align even though some labels wrap, then the filter panel and keyboard navigation settings.
+ */
+@Composable
+private fun SearchFiltersSettingsSection(state: AppState) {
+    val finalRowLabelAreaHeight = 28.dp
+
+    SettingsGrid(columns = 4, rowSpacing = 16.dp) {
+        CompactSettingWithTooltip(
+            label = "Ctrl+F opens",
+            tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
+                "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
+                "non-matching rows. \"Ctrl+F also shows Original\" applies to all three.",
+            modifier = Modifier.width(112.dp),
+            labelMaxLines = 1,
+            labelAreaHeight = finalRowLabelAreaHeight,
+        ) {
+            CtrlFTargetSelector(
+                selected = state.settings.ctrlFTarget,
+                onSelected = { target -> state.updateSettings { it.copy(ctrlFTarget = target) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Ctrl+F also shows Original",
+            tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
+                "of Find bar / Tags / Regex it opens. It only shows the panel: Search scope behavior still " +
+                "picks the Find field, so with Auto-switch by open view Find then opens Unfiltered. " +
+                "Single-tab view only — compare mode has no Original/Filtered split to reveal.",
+            labelMaxLines = 2,
+            labelAreaHeight = finalRowLabelAreaHeight,
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Search scope behavior",
+            tooltip = "Chooses the mode for a normal Find open. Filtered and Unfiltered open one field; " +
+                "Two searches opens independent fields. Last search mode restores the last manual choice. " +
+                "Auto-switch by open view uses Unfiltered while Original is visible and Filtered while it is hidden. " +
+                "Pressing Ctrl+F again while Find is open only refocuses it. " +
+                "Ctrl/Cmd+Alt+F always opens the Unfiltered field. Compare mode uses Filtered.",
+            modifier = Modifier.width(178.dp),
+            labelMaxLines = 1,
+            labelAreaHeight = finalRowLabelAreaHeight,
+        ) {
+            SearchScopeBehaviorSelector(
+                selected = state.settings.searchScopeBehavior,
+                onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Link split selection and Find",
+            tooltip = "This preference applies in every Filtered/Original split view, including single-field and " +
+                "Two searches modes. When On, clicking a row in Filtered mirrors its selection and scroll position in " +
+                "Original when that row exists. Find navigation may mirror a match in either direction. " +
+                "Original row clicks and free scrolling stay local, and queries remain separate. Off " +
+                "keeps each panel's selection and Find navigation local. " +
+                "Deliberate annotation, crash and video jumps remain explicit.",
+            labelMaxLines = 2,
+            labelAreaHeight = finalRowLabelAreaHeight,
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Regex summary",
+            tooltip = "Shows retained Tags-mode selectors above the Regex field. This summary is informational and does not change filtering.",
+        ) {
+            SegmentedControl(
+                options = listOf("Off", "On"),
+                selectedIndices = setOf(if (state.settings.showRegexFilterSummary) 1 else 0),
+                onToggle = { index -> state.updateSettings { it.copy(showRegexFilterSummary = index == 1) } },
+            )
+        }
+        CompactSetting("Most-used tags") {
+            val tagLimits = listOf(0, 3, 5, 10, 20)
+            ListStepper(
+                options = tagLimits,
+                value = state.settings.mostUsedTagLimit,
+                onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
+            )
+        }
+        CompactSetting("Filter list rows") {
+            val rowLimits = listOf(3, 5, 8, 10, 15)
+            ListStepper(
+                options = rowLimits,
+                value = state.settings.filterListRows,
+                onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
+            )
+        }
+        CompactSetting("Keyboard scroll margin") {
+            val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+            ListStepper(
+                options = scrollMargins,
+                value = state.settings.navScrollMargin,
+                onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
+            )
+        }
+    }
+}
+
+/** Settings › Notes & writing: how note blocks are written, then proofreading with its personal vocabulary. */
+@Composable
+private fun NotesWritingSettingsSection(state: AppState) {
+    SettingsGrid(columns = 4, rowSpacing = 16.dp) {
+        NumberBlocksSetting(state)
+        LogBlocksSetting(state)
+        InlineMarkdownSetting(state)
+        DiagramNoteActionSetting(state)
+        CompactSettingWithTooltip(
+            label = "English proofreading",
+            tooltip = "Suggests English spelling and grammar corrections in notes and captions. " +
+                "Text is checked locally; changes are applied when you choose a suggestion.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.proofreading.enabled) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(proofreading = it.proofreading.copy(enabled = idx == 0)) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "English variant",
+            tooltip = "Chooses American or British English spelling rules for local suggestions.",
+        ) {
+            SegmentedControl(
+                options = listOf("US", "UK"),
+                selectedIndices = setOf(if (state.settings.proofreading.language == "en-GB") 1 else 0),
+                onToggle = { idx -> state.updateSettings { it.copy(proofreading = it.proofreading.copy(language = if (idx == 0) "en-US" else "en-GB")) } },
+            )
+        }
+    }
+    ProofreadingVocabularyManager(state)
+}
+
+/** Settings › Capture & video: the capture settings, then the two video-playback settings that used to sit under Editor behavior. */
+@Composable
+private fun CaptureVideoSettingsSection(state: AppState) {
+    val finalRowLabelAreaHeight = 28.dp
+    CaptureSettingsSection(state)
+    SettingsGrid(columns = 4, rowSpacing = 16.dp) {
+        CompactSettingWithTooltip(
+            label = "Video follow readout",
+            tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
+                "bar, explaining exactly what Follow is doing at the current playhead position.",
+            labelMaxLines = 2,
+            labelAreaHeight = finalRowLabelAreaHeight,
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "New video links:\ndouble-click seeks",
+            tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
+                "independently from its header; this does not affect existing links or Follow.",
+            labelMaxLines = 2,
+            labelAreaHeight = finalRowLabelAreaHeight,
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
+            )
+        }
     }
 }
 
@@ -1854,30 +1790,6 @@ private fun IssuesSettingsSection(state: AppState) {
     }
 }
 
-/**
- * The twelve note and copy settings on one four-column grid (content-sized columns, equal gaps —
- * SettingsGrid). Rows group them by purpose: note behaviour, what copying includes, and the
- * formats. Copy default uses a dropdown so each destination keeps its full label in this compact
- * grid.
- */
-@Composable
-private fun ExportSettingsGrid(state: AppState) {
-    SettingsGrid(columns = 4, rowSpacing = 10.dp) {
-        AutoSaveSetting(state)
-        FilterBackupsSetting(state)
-        InlineMarkdownSetting(state)
-        NumberBlocksSetting(state)
-        PidTidCopySetting(state)
-        PidCopyAsNameSetting(state)
-        RowNumberCopySetting(state)
-        TimeDeltaCopySetting(state)
-        LogBlocksSetting(state)
-        CopyDefaultSetting(state)
-        DiagramNoteActionSetting(state)
-        DiagramExportSetting(state)
-    }
-}
-
 @Composable
 private fun AutoSaveSetting(state: AppState) {
     CompactSettingWithTooltip(
@@ -2070,10 +1982,18 @@ private fun DiagramExportSetting(state: AppState) {
     }
 }
 
+/** Settings › Copy & export: what copying includes and the formats, the annotation file prefix and the words masked on copy. */
 @Composable
-private fun ExportAnnotationsSettingsSection(state: AppState) {
+private fun CopyExportSettingsSection(state: AppState) {
     val tc = tc()
-    ExportSettingsGrid(state)
+    SettingsGrid(columns = 4, rowSpacing = 10.dp) {
+        CopyDefaultSetting(state)
+        PidTidCopySetting(state)
+        PidCopyAsNameSetting(state)
+        RowNumberCopySetting(state)
+        TimeDeltaCopySetting(state)
+        DiagramExportSetting(state)
+    }
     Column(Modifier.settingsAnchor("Annotation file prefix"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Annotation file prefix",
@@ -2170,7 +2090,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
 }
 
 @Composable
-private fun AutomationSettingsSection(state: AppState) {
+private fun IntegrationsSettingsSection(state: AppState) {
     val tc = tc()
     SettingsControlRow {
         CompactSetting("MCP control server") {
@@ -2268,31 +2188,6 @@ private fun AutomationSettingsSection(state: AppState) {
             AppText("Diagnostic logging unavailable: $message", color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
             AppButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
         }
-    }
-    CompactSetting("Check for updates automatically") {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
-            )
-            AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
-        }
-    }
-    // availableUpdate is checked first: once a release is known, that fact takes priority over
-    // whatever the last raw check status happened to be (e.g. a stale UpToDate from a previous run).
-    val updateStatusText = when {
-        state.availableUpdate != null -> "Update available"
-        else -> when (val s = state.updateCheckStatus) {
-            UpdateStatus.Idle -> null
-            UpdateStatus.Checking -> "Checking…"
-            is UpdateStatus.UpToDate -> "Up to date (v${s.version})"
-            is UpdateStatus.Failed -> "Couldn't reach GitHub"
-        }
-    }
-    updateStatusText?.let { text ->
-        val isError = state.availableUpdate == null && state.updateCheckStatus is UpdateStatus.Failed
-        AppText(text, color = if (isError) DANGER_RED else tc.td, fontSize = 11.sp)
     }
 }
 

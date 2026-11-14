@@ -57,7 +57,7 @@ import com.indagium.ui.ImportFilterAction
 import com.indagium.ui.ImportReviewMode
 import com.indagium.ui.ManualCollapseAvailability
 import com.indagium.ui.SEQ_COLORS
-import com.indagium.ui.SettingsSection
+import com.indagium.ui.SettingsPage
 import com.indagium.ui.SplitMode
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.b64
@@ -6610,7 +6610,7 @@ class AppStateBehaviorTest {
             state.openAiProviderSettings()
 
             assertTrue(state.settingsOpen)
-            assertEquals(SettingsSection.AiProviders, state.requestedSettingsSection)
+            assertEquals(SettingsPage.AiProviders, state.requestedSettingsPage)
         } finally {
             state.close()
         }

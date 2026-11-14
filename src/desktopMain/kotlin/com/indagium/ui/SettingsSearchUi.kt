@@ -53,6 +53,9 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.SemanticsPropertyReceiver
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -65,8 +68,8 @@ import androidx.compose.ui.unit.sp
 // UI pieces of Settings search (index: ui/SettingsSearchIndex.kt): the anchor registry that lets a
 // clicked result scroll to and flash its row, the nav search field, and the results list.
 
-/** Where each searchable row currently is, so a result click can scroll the section to it. Only
- *  the composed section's rows are registered; coordinates are read live at scroll time (rather
+/** Where each searchable row currently is, so a result click can scroll the page to it. Only
+ *  the composed page's rows are registered; coordinates are read live at scroll time (rather
  *  than cached as numbers) so they stay right while the content column scrolls or relayouts. */
 internal class SettingsAnchors {
     private val coords = HashMap<String, LayoutCoordinates>()
@@ -104,6 +107,11 @@ internal class SettingsAnchors {
 
 internal val LocalSettingsAnchors = staticCompositionLocalOf<SettingsAnchors?> { null }
 
+/** The anchor key of a row marked by [settingsAnchor]. Only a test reads it (a page's index entries each need a node that has it); it
+ *  is a property of its own rather than a test tag, so it never collides with the control's own tag. */
+internal val SettingsAnchorKey = SemanticsPropertyKey<String>("SettingsAnchor")
+private var SemanticsPropertyReceiver.settingsAnchorKey by SettingsAnchorKey
+
 /** Marks a row as the target for the search result with the matching anchor key (see
  *  SettingsSearchEntry.anchor). A no-op outside the Settings dialog, so shared controls (the
  *  capture options also shown on the New tab) can carry it freely. */
@@ -115,6 +123,7 @@ internal fun Modifier.settingsAnchor(key: String): Modifier {
     DisposableEffect(anchors, key) { onDispose { anchors.unregister(key) } }
     return this
         .onGloballyPositioned { anchors.register(key, it) }
+        .semantics { settingsAnchorKey = key }
         .drawBehind {
             if (anchors.flashKey != key) return@drawBehind
             val strength = anchors.flash.value
@@ -192,7 +201,7 @@ internal fun SettingsSearchField(
     }
 }
 
-/** Results of a settings search, grouped by section. */
+/** Results of a settings search, grouped by page. */
 @Composable
 internal fun SettingsSearchResults(
     query: String,
@@ -223,16 +232,16 @@ internal fun SettingsSearchResults(
                     "${results.size} ${if (results.size == 1) "setting matches" else "settings match"} “$shown”",
                     color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
                 )
-                SettingsSection.entries.forEach { section ->
-                    val inSection = results.filter { it.section == section }
-                    if (inSection.isEmpty()) return@forEach
+                SettingsPage.entries.forEach { page ->
+                    val inPage = results.filter { it.page == page }
+                    if (inPage.isEmpty()) return@forEach
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         AppText(
-                            section.title.uppercase(), color = tc.td, fontSize = 10.sp,
+                            page.title.uppercase(), color = tc.td, fontSize = 10.sp,
                             fontFamily = UI, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(bottom = 2.dp),
                         )
-                        inSection.forEach { entry -> SettingsSearchResultRow(entry, tokens, onOpen) }
+                        inPage.forEach { entry -> SettingsSearchResultRow(entry, tokens, onOpen) }
                     }
                 }
             }
@@ -279,6 +288,6 @@ private fun SettingsSearchResultRow(entry: SettingsSearchEntry, tokens: List<Str
             )
             AppText(entry.hint, color = tc.ts, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        AppText("${entry.section.title} ›", color = tc.td, fontSize = 10.sp, fontFamily = UI, maxLines = 1)
+        AppText("${entry.page.breadcrumb} ›", color = tc.td, fontSize = 10.sp, fontFamily = UI, maxLines = 1)
     }
 }

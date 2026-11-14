@@ -179,9 +179,7 @@ private fun updateEvidence(state: AppState, change: (EvidenceFlags) -> EvidenceF
 
 @Composable
 internal fun TestingSettingsSection(state: AppState) {
-    val tc = tc()
     val testing = state.settings.testing
-    val edition by state.editionService.current.collectAsState()
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionHeading("Testing", "What a new AI test run starts from. You can still change every part in the run dialog.")
         CompactSetting("Default judge") { DefaultJudge(state, testing) }
@@ -196,19 +194,26 @@ internal fun TestingSettingsSection(state: AppState) {
         CompactSetting("Confirmation timeout (minutes)") { ConfirmationTimeout(state, testing) }
         CompactSetting("Keep recording evidence with recorded cases") { KeepRecordingEvidence(state, testing) }
         CompactSetting("Stored recording evidence") { StoredRecordingEvidence(state) }
-        CompactSetting("Edition") {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("Current edition: ${editionSummary(edition)}", color = tc.tx, fontSize = 12.sp)
-                if (state.editionService.devSwitchAllowed()) {
-                    AppText("Development switch (this run only):", color = tc.td, fontSize = 10.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Edition.entries.forEach { candidate ->
-                            AppButton(
-                                candidate.label,
-                                onClick = { state.editionService.setForDev(candidate) },
-                                variant = if (candidate == edition) ButtonVariant.Primary else ButtonVariant.Secondary,
-                            )
-                        }
+    }
+}
+
+/** The edition and its limits (Settings › About), with the development-only switch. */
+@Composable
+internal fun EditionSettingsBlock(state: AppState) {
+    val tc = tc()
+    val edition by state.editionService.current.collectAsState()
+    CompactSetting("Edition") {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText("Current edition: ${editionSummary(edition)}", color = tc.tx, fontSize = 12.sp)
+            if (state.editionService.devSwitchAllowed()) {
+                AppText("Development switch (this run only):", color = tc.td, fontSize = 10.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Edition.entries.forEach { candidate ->
+                        AppButton(
+                            candidate.label,
+                            onClick = { state.editionService.setForDev(candidate) },
+                            variant = if (candidate == edition) ButtonVariant.Primary else ButtonVariant.Secondary,
+                        )
                     }
                 }
             }

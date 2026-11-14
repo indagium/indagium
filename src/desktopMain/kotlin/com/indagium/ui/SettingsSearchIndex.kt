@@ -2,14 +2,14 @@ package com.indagium.ui
 import com.indagium.ui.holiday.*
 
 // Search index behind the Settings dialog's "Search settings" field: one entry per labelled setting
-// row. Labels are copied from the literals the rows render (so a result reads exactly like the row
+// row, keyed to the page that shows it. Labels are copied from the literals the rows render (so a result reads exactly like the row
 // it points at) and each entry's [anchor] is the key the row registers with Modifier.settingsAnchor
 // (ui/SettingsSearchUi.kt) so a clicked result can scroll to it. Add an entry here whenever a
-// labelled row is added to a section.
+// labelled row is added to a page.
 
 internal data class SettingsSearchEntry(
     val id: String,
-    val section: SettingsSection,
+    val page: SettingsPage,
     val label: String,
     val hint: String,
     val keywords: List<String> = emptyList(),
@@ -19,113 +19,108 @@ internal data class SettingsSearchEntry(
 )
 
 private fun entry(
-    section: SettingsSection,
+    page: SettingsPage,
     label: String,
     hint: String,
     keywords: List<String> = emptyList(),
     anchor: String = label,
 ): SettingsSearchEntry {
     val slug = anchor.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
-    return SettingsSearchEntry("${section.name}.$slug", section, label, hint, keywords, anchor)
+    return SettingsSearchEntry("${page.name}.$slug", page, label, hint, keywords, anchor)
 }
 
 private fun general() = listOf(
     entry(
-        SettingsSection.General, "Workspace profile",
+        SettingsPage.General, "Workspace profile",
         "Sets panels, filter placement, theme and font size in one step.",
         listOf("profile", "layout", "classic", "focused", "compare", "minimal", "logcat query", "workspace"),
     ),
     entry(
-        SettingsSection.General, "Inactive tab memory",
+        SettingsPage.General, "Inactive tab memory",
         "Release rows from inactive reloadable log tabs after a configurable number of minutes; Off disables it.",
         listOf("memory", "ram", "unload", "idle", "inactive tabs", "large logs", "timeout", "off"),
     ),
     entry(
-        SettingsSection.General, "Save as new profile",
+        SettingsPage.General, "Save as new profile",
         "Save the current theme, font size and panel layout as your own workspace profile.",
         listOf("workspace", "preset", "layout", "custom", "save profile", "my profile"),
     ),
     entry(
-        SettingsSection.General, "Import profile",
+        SettingsPage.General, "Import profile",
         "Load a workspace profile from a .json file someone shared.",
         listOf("workspace", "preset", "layout", "share", "json", "open"),
     ),
     entry(
-        SettingsSection.General, "Export profile",
+        SettingsPage.General, "Export profile",
         "Save your current setup, or one of your profiles, as a shareable .json file.",
         listOf("workspace", "preset", "layout", "share", "json", "save"),
     ),
     entry(
-        SettingsSection.General, "Default save folder",
+        SettingsPage.Storage, "Default save folder",
         "Parent folder every other save location defaults under. Defaults to your Documents folder.",
         listOf("documents", "root"),
     ),
     entry(
-        SettingsSection.General, "Analysis artifacts folder",
+        SettingsPage.Storage, "Analysis artifacts folder",
         "Where analysis notes, filtered exports and split logs are saved.",
         listOf("notes", "exports", "split logs", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Capture sessions folder",
+        SettingsPage.Storage, "Capture sessions folder",
         "Where new device captures are recorded; applies from the next Start.",
         listOf("recordings", "device", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Snapshots folder",
+        SettingsPage.Storage, "Snapshots folder",
         "Destination for \"Save snapshot\" while a capture is recording.",
         listOf("screenshots", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Saved captures folder (Save ZIP)",
+        SettingsPage.Storage, "Saved captures folder (Save ZIP)",
         "Destination for \"Save ZIP\" on a stopped or retained capture.",
         listOf("zip", "archive", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Test suites folder",
+        SettingsPage.TestRuns, "Test suites folder",
         "Where your AI test suites are kept: library, suites and golden screenshots.",
         listOf("tests", "ai tests", "library", "assets", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Test runs folder",
+        SettingsPage.TestRuns, "Test runs folder",
         "Where each AI test run keeps its evidence: run files, recordings, screenshots and transcripts.",
         listOf("tests", "ai tests", "evidence", "recordings", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Issues folder",
+        SettingsPage.TestRuns, "Issues folder",
         "Where the issues made from failed test steps are kept, with their evidence.",
         listOf("tests", "ai tests", "bugs", "tracker", "save folder"),
     ),
     entry(
-        SettingsSection.General, "Storage",
+        SettingsPage.Storage, "Storage",
         "Where Indagium keeps its data, and the temporary data and app data it holds.",
         listOf("app data", "cache", "disk", "space", "appdata"),
     ),
     entry(
-        SettingsSection.General, "Temporary data",
+        SettingsPage.Storage, "Temporary data",
         "Downloaded archive cache and app-managed notes. Clear temporary data removes these items.",
         listOf("clear", "cache", "delete", "temp"),
     ),
     entry(
-        SettingsSection.General, "App data",
+        SettingsPage.Storage, "App data",
         "Everything Indagium stores: settings, session, saved filters, indexes and diagnostics. Reset app data wipes it.",
         listOf("reset", "wipe", "delete", "clear", "factory"),
-    ),
-    entry(
-        SettingsSection.General, "Setup assistant",
-        "Walk through workspace, look, folders, search and capture again (Run setup again).",
-        listOf("setup", "wizard", "onboarding", "first run", "assistant", "welcome", "run setup"),
     ),
 )
 
 // Settings > Appearance > Shape style and Toolbar shape (ui/UiCorners.kt).
 private fun appearanceShapes() = listOf(
     entry(
-        SettingsSection.Appearance, "Shape style",
+        SettingsPage.Appearance, "Shape style",
         "Corners of the tiles: theme default, square, soft, rounded or round. Tabs and the toolbar have their own settings.",
         listOf("shape", "corners", "rounded", "square", "round", "radius", "soft", "tiles"),
     ),
     entry(
-        SettingsSection.Appearance, "Toolbar shape",
+        SettingsPage.Appearance, "Toolbar shape",
         "Corners of the toolbar's button groups and the Layout menu button: theme default, square, soft, rounded or round (a capsule).",
         listOf("toolbar", "buttons", "menu buttons", "corners", "rounded", "square", "round", "capsule", "pill"),
     ),
@@ -134,14 +129,14 @@ private fun appearanceShapes() = listOf(
 private fun appearance() = buildList {
     add(
         entry(
-            SettingsSection.Appearance, "Theme",
+            SettingsPage.Appearance, "Theme",
             "Color theme of the whole window.",
             listOf("dark", "light", "palette", "colors", "look"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance,
+            SettingsPage.Appearance,
             "Fallback log family",
             "Default monospace or proportional log text when no system family is selected.",
             listOf("typeface", "mono", "font family"),
@@ -149,7 +144,7 @@ private fun appearance() = buildList {
     )
     add(
         entry(
-            SettingsSection.Appearance,
+            SettingsPage.Appearance,
             "Interface font",
             "Search and preview an installed system font for controls and interface text.",
             listOf("typeface", "ui", "font family"),
@@ -157,7 +152,7 @@ private fun appearance() = buildList {
     )
     add(
         entry(
-            SettingsSection.Appearance,
+            SettingsPage.Appearance,
             "Log font",
             "Search and preview an installed system font for log rows and highlighter previews.",
             listOf("typeface", "font family", "monospace"),
@@ -165,42 +160,42 @@ private fun appearance() = buildList {
     )
     add(
         entry(
-            SettingsSection.Appearance, "Log font size",
+            SettingsPage.Appearance, "Log font size",
             "Text size of the log rows.",
             listOf("text size", "zoom", "bigger", "smaller"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Interface scale",
+            SettingsPage.Appearance, "Interface scale",
             "Scales the whole interface, not just the log.",
             listOf("zoom", "dpi", "size", "hidpi"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Toolbar labels",
+            SettingsPage.TabsToolbar, "Toolbar labels",
             "Hides text on the main toolbar buttons, leaving only their icons.",
             listOf("icons only", "buttons"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Tab style",
+            SettingsPage.TabsToolbar, "Tab style",
             "How the tab strip looks: current, raised, segmented, typed, compact, source colour, two-line, quiet, outlined or pill.",
             listOf("tabs", "tab bar", "appearance", "look", "raised", "compact", "segmented"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Tab size",
+            SettingsPage.TabsToolbar, "Tab size",
             "Fixed gives every tab an equal share of the strip; Fit label sizes each tab to its name.",
             listOf("tabs", "width", "tab bar", "fixed", "fit"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Tab label",
+            SettingsPage.TabsToolbar, "Tab label",
             "What a tab shows: the file name (plus its folder when two open tabs share a name), the folder only, " +
                 "the file name only, or always the file and its folder.",
             listOf("tabs", "title", "name", "file", "session", "folder", "same name", "duplicate"),
@@ -208,21 +203,21 @@ private fun appearance() = buildList {
     )
     add(
         entry(
-            SettingsSection.Appearance, "File-type badge",
+            SettingsPage.TabsToolbar, "File-type badge",
             "Adds a LOG, ZIP or IND badge before the tab name.",
             listOf("tabs", "type", "log", "zip", "ind", "capture"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Source colour stripe",
+            SettingsPage.TabsToolbar, "Source colour stripe",
             "Adds a coloured stripe on top of a tab by where it came from: file, live capture, bug report or capture.",
             listOf("tabs", "color", "colour", "source", "stripe", "live"),
         ),
     )
     add(
         entry(
-            SettingsSection.Appearance, "Close button on every tab",
+            SettingsPage.TabsToolbar, "Close button on every tab",
             "Off shows a tab's close button only on the active tab and under the pointer.",
             listOf("tabs", "x", "close", "hover"),
         ),
@@ -232,7 +227,7 @@ private fun appearance() = buildList {
     if (isLinuxOs) {
         add(
             entry(
-                SettingsSection.Appearance, "File picker",
+                SettingsPage.Appearance, "File picker",
                 "Native GTK or Compatibility X11 file dialogs; restart to apply.",
                 listOf("dialog", "linux", "gtk", "x11", "open"),
             ),
@@ -250,42 +245,42 @@ private val SEASONAL_DATES = SEASONAL_THEMES.joinToString("; ") { "${it.label} r
 
 private fun seasonalThemes() = listOf(
     entry(
-        SettingsSection.Appearance, "Special theme",
+        SettingsPage.Appearance, "Special theme",
         "Theme > Special themes: turn a special theme on always or only during its dates. $SEASONAL_DATES and goes back to your theme after.",
         SEASONAL_KEYWORDS + listOf("automatic", "always", "off", "dates", "colours"),
         anchor = SEASONAL_ANCHOR_WHEN,
     ),
     entry(
-        SettingsSection.Appearance, "Special theme pack",
+        SettingsPage.Appearance, "Special theme pack",
         "$SEASONAL_NAMES, each with its own palette, tab shapes, scene behind the tabs and pictures.",
         SEASONAL_KEYWORDS + listOf("tabs", "scene", "cat"),
         anchor = SEASONAL_ANCHOR_PACK,
     ),
     entry(
-        SettingsSection.Appearance, "Special light or dark",
+        SettingsPage.Appearance, "Special light or dark",
         "Whether the special theme uses its light or dark colours, or follows your theme preset.",
         SEASONAL_KEYWORDS + listOf("follow preset", "light", "dark", "mode"),
         anchor = SEASONAL_ANCHOR_LIGHTNESS,
     ),
     entry(
-        SettingsSection.Appearance, "Special effects",
+        SettingsPage.Appearance, "Special effects",
         "Full: ghosts, fog, bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
         SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "ghosts", "fog", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
         anchor = SEASONAL_ANCHOR_EFFECTS,
     ),
     entry(
-        SettingsSection.Appearance, "Special theme tabs",
+        SettingsPage.Appearance, "Special theme tabs",
         "Tabs: the special theme's own tab shapes, or My tab style, which keeps your Tab style in the pack's colours.",
         SEASONAL_KEYWORDS + listOf("tab style", "seasonal tabs", "my tab style", "tabs", "shape"),
         anchor = SEASONAL_ANCHOR_TABS,
     ),
     entry(
-        SettingsSection.Appearance, "Fun icons",
+        SettingsPage.Appearance, "Fun icons",
         "Toolbar buttons become pictures under a special theme. Hover one to see its real name.",
         SEASONAL_KEYWORDS + listOf("icons", "toolbar", "pictures", "tooltip", "cat"),
     ),
     entry(
-        SettingsSection.Appearance, "Pause effects while capturing or playing video",
+        SettingsPage.Appearance, "Pause effects while capturing or playing video",
         "Stops special theme effects and animated pictures while a capture is running or a video plays.",
         SEASONAL_KEYWORDS + listOf("pause", "capture", "video", "effects", "animation", "motion"),
     ),
@@ -294,130 +289,130 @@ private fun seasonalThemes() = listOf(
 // Settings > Appearance > Tabs, the placement half (ui/ChromePlacementSettings.kt).
 private fun chromePlacement() = listOf(
     entry(
-        SettingsSection.Appearance, "Tab position",
+        SettingsPage.TabsToolbar, "Tab position",
         "Which window edge the tab strip sits on: top, left, right or bottom. Left and right stack the tabs vertically.",
         listOf("tabs", "tab bar", "vertical", "side", "edge", "dock", "move"),
     ),
     entry(
-        SettingsSection.Appearance, "Toolbar placement",
+        SettingsPage.TabsToolbar, "Toolbar placement",
         "Where the main toolbar sits: at the start or end of the tab strip, beside a vertical tab strip, on an edge of its own, or as a tile in the log view.",
         listOf("toolbar", "buttons", "dock", "tabs", "beside", "own edge", "vertical", "tile", "layout", "log view"),
     ),
     entry(
-        SettingsSection.Appearance, "Toolbar alignment",
+        SettingsPage.TabsToolbar, "Toolbar alignment",
         "Where the buttons sit along a toolbar that has a bar of its own: at the start, the centre or the end, " +
             "and before or after the tab bar on the tab strip's edge.",
         listOf("toolbar", "align", "start", "end", "center", "before tabs", "after tabs", "right", "left"),
     ),
     entry(
-        SettingsSection.Appearance, "Toolbar edge",
+        SettingsPage.TabsToolbar, "Toolbar edge",
         "The window edge the toolbar is docked to when it has an edge of its own.",
         listOf("toolbar", "dock", "top", "bottom", "left", "right"),
     ),
     entry(
-        SettingsSection.Appearance, "Lock tabs and toolbar",
+        SettingsPage.TabsToolbar, "Lock tabs and toolbar",
         "Hides the grips that drag the tab strip and the toolbar to another edge, so they stay where they are.",
         listOf("tabs", "toolbar", "grip", "lock", "dock", "move", "drag"),
     ),
 )
 
 private fun editorBehavior() = listOf(
-    entry(SettingsSection.EditorBehavior, "Visible tabs", "How many tabs show before the rest collapse into a menu.", listOf("tab bar", "overflow")),
+    entry(SettingsPage.TabsToolbar, "Visible tabs", "How many tabs show before the rest collapse into a menu.", listOf("tab bar", "overflow")),
     entry(
-        SettingsSection.EditorBehavior, "Keyboard scroll margin",
+        SettingsPage.SearchFilters, "Keyboard scroll margin",
         "Rows kept in view around the selection when moving with the keyboard.",
         listOf("arrow keys", "context", "navigation"),
     ),
-    entry(SettingsSection.EditorBehavior, "Most-used tags", "How many frequent tags are offered as quick picks.", listOf("tag list", "filter")),
-    entry(SettingsSection.EditorBehavior, "Filter list rows", "Visible rows of the filter panel's lists.", listOf("sidebar", "height")),
+    entry(SettingsPage.SearchFilters, "Most-used tags", "How many frequent tags are offered as quick picks.", listOf("tag list", "filter")),
+    entry(SettingsPage.SearchFilters, "Filter list rows", "Visible rows of the filter panel's lists.", listOf("sidebar", "height")),
     entry(
-        SettingsSection.EditorBehavior, "Follow live logs",
+        SettingsPage.LogView, "Follow live logs",
         "Keeps the view pinned to the newest line while a tab is live-watching.",
         listOf("tail", "auto scroll", "autoscroll", "live watching"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Regex summary",
+        SettingsPage.SearchFilters, "Regex summary",
         "Shows retained Tags-mode selectors above the Regex field; informational only.",
         listOf("regex", "tags", "filter"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Row wrapping",
+        SettingsPage.LogView, "Row wrapping",
         "Auto wraps long lines to the panel width, or set a fixed wrap column and scroll horizontally.",
         listOf("wrap", "long lines", "horizontal scroll"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Crash rows",
+        SettingsPage.LogView, "Crash rows",
         "Colors every row in an expanded crash/stack-trace group, not just the header.",
         listOf("stack trace", "exception", "highlight", "anr"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Original panel",
+        SettingsPage.LogView, "Original panel",
         "Whether newly opened files start with the unfiltered Original panel visible.",
         listOf("unfiltered", "split", "new files"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Row number",
+        SettingsPage.LogView, "Row number",
         "Shows a left gutter with each row's original row number.",
         listOf("line number", "gutter"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Minimap",
+        SettingsPage.LogView, "Minimap",
         "Replaces the scrollbar with a text minimap colored by level.",
         listOf("scrollbar", "overview"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Ctrl+F opens",
+        SettingsPage.SearchFilters, "Ctrl+F opens",
         "Whether Ctrl/Cmd+F opens the Find bar, or focuses the Tags or Regex filter field.",
         listOf("cmd+f", "find", "search", "shortcut", "keyboard", "find bar"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Ctrl+F also shows Original",
+        SettingsPage.SearchFilters, "Ctrl+F also shows Original",
         "Reveals the Original panel whenever Ctrl/Cmd+F opens; Search scope behavior still picks the Find field.",
         listOf("cmd+f", "find", "shortcut", "keyboard", "unfiltered", "opens original"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Search scope behavior",
+        SettingsPage.SearchFilters, "Search scope behavior",
         "Choose Filtered, Unfiltered, Two searches, Last search mode, or Auto-switch by open view for normal Find opens.",
         listOf("find", "search", "two searches", "dual", "scope", "cmd+f", "ctrl+f", "filtered", "unfiltered", "last used", "auto"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Link split selection and Find",
+        SettingsPage.SearchFilters, "Link split selection and Find",
         "In any Filtered and Original split view, mirror row selection and Find navigation, or keep each panel independent.",
         listOf("find", "search", "original", "filtered", "two searches", "dual", "selection", "scroll", "sync"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Process names in new tabs",
+        SettingsPage.LogView, "Process names in new tabs",
         "Whether new tabs show process names in place of numeric pids.",
         listOf("pid", "proc", "process"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Video follow readout",
+        SettingsPage.CaptureVideo, "Video follow readout",
         "Shows the diagnostic line under the video transport bar explaining what Follow is doing.",
         listOf("video", "sync", "playhead"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "New video links: double-click seeks",
+        SettingsPage.CaptureVideo, "New video links: double-click seeks",
         "Default for newly linked log/video anchors; each link can still be toggled from its header.",
         listOf("video", "anchor", "double click", "seek"),
         anchor = "New video links:\ndouble-click seeks",
     ),
     entry(
-        SettingsSection.EditorBehavior, "English proofreading",
+        SettingsPage.NotesWriting, "English proofreading",
         "Local, optional English spelling and grammar suggestions in editable prose.",
         listOf("proofread", "grammar", "spelling", "language tool", "writing", "suggestions", "english"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "English variant",
+        SettingsPage.NotesWriting, "English variant",
         "Choose American or British English rules for local proofreading suggestions.",
         listOf("proofread", "grammar", "spelling", "en-us", "en-gb", "american", "british"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Error rows",
+        SettingsPage.LogView, "Error rows",
         "Highlight parsed Error rows by default and choose their background, text color, font, bold and italic style.",
         listOf("error", "error level", "crash", "highlight", "red", "log row", "bold", "italic", "font"),
     ),
     entry(
-        SettingsSection.EditorBehavior, "Personal vocabulary",
+        SettingsPage.NotesWriting, "Personal vocabulary",
         "Search, add, or remove single words that spelling suggestions should accept in every editor.",
         listOf("personal", "proofread", "vocabulary", "dictionary", "spelling", "words", "ignore"),
     ),
@@ -425,75 +420,75 @@ private fun editorBehavior() = listOf(
 
 private fun exportAnnotations() = listOf(
     entry(
-        SettingsSection.ExportAnnotations, "Auto-save",
+        SettingsPage.Storage, "Auto-save",
         "Saves note Markdown and its .ann sidecar after note changes.",
         listOf("autosave", "notes", "save", "markdown"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Filter backups",
+        SettingsPage.Storage, "Filter backups",
         "Writes timestamped saved-filter backups after saved-filter changes.",
         listOf("backup", "saved filters", "save"),
     ),
-    entry(SettingsSection.ExportAnnotations, "Number blocks", "Numbers the blocks of a note.", listOf("numbering", "annotation")),
+    entry(SettingsPage.NotesWriting, "Number blocks", "Numbers the blocks of a note.", listOf("numbering", "annotation")),
     entry(
-        SettingsSection.ExportAnnotations, "Log blocks",
+        SettingsPage.NotesWriting, "Log blocks",
         "Format of log excerpts in exported notes: Indented, Wiki or Cloud.",
         listOf("jira", "wiki", "code block", "annotation"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Inline Markdown",
+        SettingsPage.NotesWriting, "Inline Markdown",
         "Shows note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
         listOf("render", "notes", "markdown"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Pid/Tid copy",
+        SettingsPage.CopyExport, "Pid/Tid copy",
         "Includes PID and TID for log rows when copying lines, annotations or filtered exports.",
         listOf("copy", "clipboard", "pid", "tid", "thread"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Pid copy as name",
+        SettingsPage.CopyExport, "Pid copy as name",
         "Uses a process name learned from the log instead of the numeric PID when copying.",
         listOf("copy", "clipboard", "process name"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Row number copy",
+        SettingsPage.CopyExport, "Row number copy",
         "Includes the original log row number when copying and the row-number gutter is visible.",
         listOf("copy", "clipboard", "line number"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Time delta copy",
+        SettingsPage.CopyExport, "Time delta copy",
         "Includes Δt when copying and the Δt column is visible.",
         listOf("copy", "clipboard", "delta", "elapsed"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Copy default",
+        SettingsPage.CopyExport, "Copy default",
         "Format used by the main Copy button: Cloud, Wiki, Markdown or HTML.",
         listOf("copy", "clipboard", "jira", "html", "format"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Diagram note action",
+        SettingsPage.NotesWriting, "Diagram note action",
         "Which half of the sequence-diagram note action is primary: snapshot or linked note.",
         listOf("sequence diagram", "uml", "snapshot", "link"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Diagram export",
+        SettingsPage.CopyExport, "Diagram export",
         "Representation of newly added sequence-diagram notes: image or source.",
         listOf("sequence diagram", "uml", "mermaid", "plantuml", "image"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Annotation file prefix",
+        SettingsPage.CopyExport, "Annotation file prefix",
         "Prefix used in front of the log name in note labels, e.g. \"From app.log\".",
         listOf("note", "label", "name", "from"),
     ),
     entry(
-        SettingsSection.ExportAnnotations, "Mask word on copy",
+        SettingsPage.CopyExport, "Mask word on copy",
         "Replaces listed words with a masked form when copying a note.",
         listOf("redact", "privacy", "censor", "hide", "sensitive", "copy"),
     ),
 )
 
 private fun capture() = buildList {
-    val c = SettingsSection.Capture
+    val c = SettingsPage.CaptureVideo
     add(entry(c, "Tools", "adb and scrcpy executables used for device capture.", listOf("adb", "scrcpy", "android", "device", "path")))
     add(entry(c, "ADB path", "Path to adb; leave blank to auto-detect.", listOf("adb", "android", "device", "phone", "executable")))
     add(
@@ -584,33 +579,33 @@ private fun capture() = buildList {
 
 private fun automation() = listOf(
     entry(
-        SettingsSection.Automation, "MCP control server",
+        SettingsPage.Integrations, "MCP control server",
         "Local server that lets AI clients drive Indagium over MCP.",
         listOf("mcp", "api", "server", "claude", "codex", "automation", "rest"),
     ),
-    entry(SettingsSection.Automation, "Port", "Loopback port of the MCP control server.", listOf("mcp", "server", "8991", "network")),
+    entry(SettingsPage.Integrations, "Port", "Loopback port of the MCP control server.", listOf("mcp", "server", "8991", "network")),
     entry(
-        SettingsSection.Automation, "Allow browser-based MCP clients (CORS)",
+        SettingsPage.Integrations, "Allow browser-based MCP clients (CORS)",
         "Lets a browser-based MCP inspector call the local server; off by default.",
         listOf("cors", "browser", "mcp", "security", "origin"),
     ),
     entry(
-        SettingsSection.Automation, "Connection info",
+        SettingsPage.Integrations, "Connection info",
         "URL, token and config snippets for connecting an MCP client.",
         listOf("mcp", "token", "url", "config", "claude", "codex", "snippet"),
     ),
     entry(
-        SettingsSection.Automation, "Debug logging",
+        SettingsPage.Integrations, "Debug logging",
         "Writes Indagium's own diagnostic log to a file.",
         listOf("diagnostics", "troubleshooting", "log file", "verbose"),
     ),
     entry(
-        SettingsSection.Automation, "Debug log file",
+        SettingsPage.Integrations, "Debug log file",
         "Where the diagnostic log is written; open the current one from here.",
         listOf("path", "diagnostics", "browse", "open current log"),
     ),
     entry(
-        SettingsSection.Automation, "Check for updates automatically",
+        SettingsPage.General, "Check for updates automatically",
         "Checks GitHub Releases for a newer version at startup.",
         listOf("update", "upgrade", "version", "release", "github", "check now"),
     ),
@@ -618,45 +613,45 @@ private fun automation() = listOf(
 
 private fun aiProviders() = listOf(
     entry(
-        SettingsSection.AiProviders, "Providers",
+        SettingsPage.AiProviders, "Providers",
         "Provider profiles used by the AI panel; add, switch or remove profiles here.",
         listOf("profile", "openai", "anthropic", "claude", "codex", "lm studio", "llm", "chatgpt", "gpt"),
     ),
     entry(
-        SettingsSection.AiProviders, "Provider type",
+        SettingsPage.AiProviders, "Provider type",
         "Anthropic, OpenAI-compatible, or a local Codex / Claude Code account.",
         listOf("openai", "anthropic", "claude code", "codex", "account", "cli", "llm"),
     ),
-    entry(SettingsSection.AiProviders, "Profile name", "Display name of this provider profile.", listOf("provider", "rename")),
+    entry(SettingsPage.AiProviders, "Profile name", "Display name of this provider profile.", listOf("provider", "rename")),
     entry(
-        SettingsSection.AiProviders, "Endpoint",
+        SettingsPage.AiProviders, "Endpoint",
         "Base URL of an HTTP AI provider.",
         listOf("url", "api", "server", "lm studio", "local", "host"),
     ),
     entry(
-        SettingsSection.AiProviders, "CLI executable (optional)",
+        SettingsPage.AiProviders, "CLI executable (optional)",
         "Path to the Codex or Claude Code CLI used for account providers.",
         listOf("codex", "claude code", "path", "binary", "account"),
     ),
     entry(
-        SettingsSection.AiProviders, "Model (optional)",
+        SettingsPage.AiProviders, "Model (optional)",
         "Model id to use; detect the models a provider offers.",
         listOf("llm", "gpt", "sonnet", "opus", "haiku", "override", "discover"),
         anchor = "Model",
     ),
     entry(
-        SettingsSection.AiProviders, "Reasoning effort",
+        SettingsPage.AiProviders, "Reasoning effort",
         "Reasoning level for models that support it.",
         listOf("thinking", "llm", "model", "effort"),
     ),
     entry(
-        SettingsSection.AiProviders, "API key — this session only; it is never saved",
+        SettingsPage.AiProviders, "API key — this session only; it is never saved",
         "Key for cloud API providers; kept in memory for this session only.",
         listOf("api key", "token", "secret", "password", "credentials", "openai", "anthropic"),
         anchor = "API key",
     ),
     entry(
-        SettingsSection.AiProviders, "Max MCP tool calls per request",
+        SettingsPage.AiProviders, "Max MCP tool calls per request",
         "Tool-call budget for one AI request before it stops.",
         listOf("rounds", "limit", "budget", "tool calls", "llm", "mcp"),
     ),
@@ -664,22 +659,22 @@ private fun aiProviders() = listOf(
 
 private fun voiceInput() = listOf(
     entry(
-        SettingsSection.VoiceInput, "Recognition engine",
+        SettingsPage.VoiceInput, "Recognition engine",
         "Local Whisper or the operating system's speech recognizer.",
         listOf("dictation", "microphone", "speech", "whisper", "apple", "windows", "voice"),
     ),
     entry(
-        SettingsSection.VoiceInput, "Translate dictated speech to English",
+        SettingsPage.VoiceInput, "Translate dictated speech to English",
         "Outputs an English translation instead of the spoken-language transcript.",
         listOf("whisper", "dictation", "translation", "voice"),
     ),
     entry(
-        SettingsSection.VoiceInput, "Recognition language",
+        SettingsPage.VoiceInput, "Recognition language",
         "Language dictation listens for; Automatic detects it.",
         listOf("dictation", "speech", "ukrainian", "english", "whisper", "voice"),
     ),
     entry(
-        SettingsSection.VoiceInput, "Local model",
+        SettingsPage.VoiceInput, "Local model",
         "Size of the local Whisper model and its download.",
         listOf("whisper", "download", "install", "base", "small", "dictation", "voice"),
     ),
@@ -687,7 +682,7 @@ private fun voiceInput() = listOf(
 
 private fun customAiCommands() = listOf(
     entry(
-        SettingsSection.CustomAiCommands, "Add command",
+        SettingsPage.AiCommands, "Add command",
         "Create a reusable prompt invoked as a button in Actions or by typing /name in the chat box.",
         listOf("slash", "prompt", "template", "macro", "custom", "llm", "shortcut"),
     ),
@@ -695,22 +690,22 @@ private fun customAiCommands() = listOf(
 
 private fun sourceCode() = listOf(
     entry(
-        SettingsSection.SourceCode, "Register source code",
+        SettingsPage.SourceCode, "Register source code",
         "Point Indagium at your project's source folder(s) to enable \"Show in code\".",
         listOf("project", "index", "repository", "folder", "directory", "show in code", "add"),
     ),
     entry(
-        SettingsSection.SourceCode, "Open command",
+        SettingsPage.SourceCode, "Open command",
         "Editor used by \"Show in code\" to open a file at the logged line.",
         listOf("editor", "ide", "vs code", "intellij", "android studio", "cursor", "sublime", "zed", "external"),
     ),
     entry(
-        SettingsSection.SourceCode, "Discover simple custom log wrappers",
+        SettingsPage.SourceCode, "Discover simple custom log wrappers",
         "During reindexing, follows simple wrapper methods that delegate to Log.* or Timber.",
         listOf("timber", "log", "wrapper", "index", "reindex", "auto discovery"),
     ),
     entry(
-        SettingsSection.SourceCode, "Logging configurations",
+        SettingsPage.SourceCode, "Logging configurations",
         "Assign module-specific wrapper rules to registered source folders.",
         listOf("wrapper", "rules", "module", "source", "add configuration"),
     ),
@@ -718,7 +713,7 @@ private fun sourceCode() = listOf(
 
 private fun issues() = listOf(
     entry(
-        SettingsSection.Issues, "Custom issue categories",
+        SettingsPage.IssueCategories, "Custom issue categories",
         "Regexes matched against a log tag or message that add clickable anchors to Issues.",
         listOf("regex", "rules", "anchor", "category", "crash", "anr", "problem"),
     ),
@@ -726,32 +721,32 @@ private fun issues() = listOf(
 
 private fun testing() = listOf(
     entry(
-        SettingsSection.Testing, "Default judge",
+        SettingsPage.TestRuns, "Default judge",
         "Whether a blind AI judge checks the steps of a new test run, and with which AI profile.",
         listOf("test run", "judge", "verdict", "ai", "failed steps only", "every step"),
     ),
     entry(
-        SettingsSection.Testing, "Default evidence to keep",
+        SettingsPage.TestRuns, "Default evidence to keep",
         "Screenshots, logcat, agent transcript and video a new test run keeps.",
         listOf("test run", "screenshots", "logcat", "transcript", "video", "scrcpy"),
     ),
     entry(
-        SettingsSection.Testing, "Confirmation timeout (minutes)",
+        SettingsPage.TestRuns, "Confirmation timeout (minutes)",
         "How long a test agent waits for you to allow an action before it is denied.",
         listOf("test run", "allow", "deny", "confirm", "wait", "timeout"),
     ),
     entry(
-        SettingsSection.Testing, "Keep recording evidence with recorded cases",
+        SettingsPage.TestRuns, "Keep recording evidence with recorded cases",
         "Save the screenshots, screen readings and video of an applied recording beside the case so Rewrite with AI can run on it again.",
         listOf("record", "recording", "rewrite", "reopen", "video", "password", "privacy", "disk", "storage", "evidence"),
     ),
     entry(
-        SettingsSection.Testing, "Stored recording evidence",
+        SettingsPage.TestRuns, "Stored recording evidence",
         "How much disk the stored recordings of the Test suites folder use, and a button that deletes them.",
         listOf("record", "recording", "delete", "disk", "space", "size", "clean", "evidence", "storage"),
     ),
     entry(
-        SettingsSection.Testing, "Edition",
+        SettingsPage.About, "Edition",
         "The edition and its limits on test suites and cases; development builds can switch it.",
         listOf("free", "premium", "unlimited", "limits", "suites", "cases", "friends"),
     ),
@@ -759,42 +754,42 @@ private fun testing() = listOf(
 
 private fun issueTracker() = listOf(
     entry(
-        SettingsSection.IssueTracker, "Use an issue tracker",
+        SettingsPage.IssueTracker, "Use an issue tracker",
         "Turn on sending issues from failed test steps to your own tracker.",
         listOf("jira", "mcp", "issues", "tracker", "ticket", "bug", "send"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Tracker name",
+        SettingsPage.IssueTracker, "Tracker name",
         "How the tracker is called in the issue dialog.",
         listOf("jira", "linear", "github", "name"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Tracker MCP URL",
+        SettingsPage.IssueTracker, "Tracker MCP URL",
         "The address of the tracker's MCP server (http or https).",
         listOf("mcp", "url", "server", "endpoint", "https", "address"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Authentication header",
+        SettingsPage.IssueTracker, "Authentication header",
         "The header that carries the access token, and whether it is sent as a Bearer token.",
         listOf("authorization", "bearer", "header", "auth", "token", "api key"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Access token",
+        SettingsPage.IssueTracker, "Access token",
         "The tracker's access token, kept in your system's secret store (keychain), never in settings.",
         listOf("token", "secret", "keychain", "password", "credential", "save token", "remove token", "api key"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Issue agent profile",
+        SettingsPage.IssueTracker, "Issue agent profile",
         "The AI profile that files the issue by calling the tracker's tools.",
         listOf("ai", "profile", "agent", "claude", "codex", "model"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Issue instructions (prompt)",
+        SettingsPage.IssueTracker, "Issue instructions (prompt)",
         "Tell the agent how to create an issue: project key, issue type, labels and field mapping.",
         listOf("prompt", "project key", "issue type", "labels", "fields", "instructions"),
     ),
     entry(
-        SettingsSection.IssueTracker, "Test connection",
+        SettingsPage.IssueTracker, "Test connection",
         "Connect to the tracker and list the tools it offers.",
         listOf("check", "connect", "tools", "verify", "mcp"),
     ),
@@ -831,24 +826,24 @@ internal fun searchTokens(query: String): List<String> =
     query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
 
 /**
- * Entries of [visibleSections] matching every whitespace-separated token of [query] (case-
- * insensitive substring of the label, hint, keywords or section title, or of any synonym of the
- * token). Label-prefix matches come first, then label-contains, then the rest, each keeping the
- * index's own (section, row) order.
+ * Entries of [visiblePages] matching every whitespace-separated token of [query] (case-
+ * insensitive substring of the label, hint, keywords, page title or page group label, or of any
+ * synonym of the token). Label-prefix matches come first, then label-contains, then the rest, each
+ * keeping the index's own order.
  */
-internal fun searchSettings(query: String, visibleSections: Set<SettingsSection>): List<SettingsSearchEntry> {
+internal fun searchSettings(query: String, visiblePages: Set<SettingsPage>): List<SettingsSearchEntry> {
     val tokens = searchTokens(query)
     if (tokens.isEmpty()) return emptyList()
     val normalizedQuery = tokens.joinToString(" ")
     val synonyms = tokens.map(::synonymsOf)
     return SETTINGS_SEARCH_INDEX
-        .filter { it.section in visibleSections }
+        .filter { it.page in visiblePages }
         .mapNotNull { e ->
             val label = e.label.lowercase().replace('\n', ' ')
             val haystack = buildString {
                 append(label).append('\n').append(e.hint.lowercase()).append('\n')
                 e.keywords.forEach { append(it.lowercase()).append('\n') }
-                append(e.section.title.lowercase())
+                append(e.page.title.lowercase()).append('\n').append(e.page.group.label.lowercase())
             }
             if (synonyms.any { variants -> variants.none { it in haystack } }) return@mapNotNull null
             val rank = when {

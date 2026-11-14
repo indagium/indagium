@@ -2651,6 +2651,8 @@ fun App(
                         state,
                         onDismiss = { state.settingsOpen = false },
                         onRequestCloseChanged = { settingsRequestClose = it },
+                        // The dialog is a layer of its own, so it takes the main window's size from here to leave a margin around itself.
+                        windowSize = mainWindowSize,
                     )
                 }
             }

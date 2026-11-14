@@ -4,7 +4,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.layout.boundsInRoot
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -85,19 +84,20 @@ class SettingsSearchUiTest {
     }
 
     @Test
-    fun clickingAResultOpensItsSectionAndClearsTheQuery() {
+    fun clickingAResultOpensItsPageAndClearsTheQuery() {
         install()
         type("minimap")
         rule.onNodeWithText("Minimap").performClick()
         rule.waitForIdle()
 
         rule.onNodeWithText("All results").assertDoesNotExist()
-        // Editor behavior is now the open section: one of its other rows is on screen.
-        rule.onNodeWithText("Keyboard scroll margin").assertExists()
+        // Log view is now the open page: one of its other rows is on screen, and the page's header names it.
+        rule.onNodeWithText("Row wrapping").assertExists()
+        rule.onNodeWithText("Crash rows").assertExists()
     }
 
     @Test
-    fun personalVocabularyCanBeAddedAndRemovedFromEditorSettings() {
+    fun personalVocabularyCanBeAddedAndRemovedFromNotesSettings() {
         val state = AppState()
         rule.setContent { SettingsDialog(state, onDismiss = {}) }
         type("personal vocabulary")
@@ -142,46 +142,19 @@ class SettingsSearchUiTest {
         rule.runOnIdle { assertEquals(listOf("Indagium"), state.settings.proofreading.vocabulary) }
     }
 
-    private fun openEditorBehavior(state: AppState) {
+    private fun openLogView(state: AppState) {
         rule.setContent { SettingsDialog(state, onDismiss = {}) }
         type("minimap")
         rule.onNodeWithText("Minimap").performClick()
         rule.waitForIdle()
     }
 
-    private fun top(label: String): Float = rule.onNodeWithText(label).fetchSemanticsNode().positionInRoot.y
-
-    private fun left(label: String): Float = rule.onNodeWithText(label).fetchSemanticsNode().positionInRoot.x
-
     private fun panelBounds() = rule.onNodeWithTag("error-highlight-global-panel").fetchSemanticsNode().boundsInRoot
-
-    @Test
-    fun editorBehaviorGridKeepsTheCtrlFCellsOnTheirOwnRow() {
-        openEditorBehavior(AppState())
-
-        fun row(vararg labels: String): Float {
-            val tops = labels.map(::top)
-            assertTrue(tops.all { it == tops.first() }, "${labels.toList()} must share a row, tops=$tops")
-            return tops.first()
-        }
-        val row2 = row("Row wrapping", "Crash rows", "Error rows", "Row number")
-        val row3 = row("Minimap", "Follow live logs", "Regex summary", "Original panel")
-        val row4 = row("Ctrl+F opens", "Ctrl+F also shows Original", "Search scope behavior", "Link split selection and Find")
-        val row5 = row("Video follow readout", "New video links:\ndouble-click seeks", "Process names in new tabs")
-        val row6 = row("English proofreading", "English variant")
-        assertTrue(row2 < row3 && row3 < row4 && row4 < row5 && row5 < row6, "rows out of order: $row2 $row3 $row4 $row5 $row6")
-
-        // The proofreading cells sit in the grid's first two columns, left-aligned with the cells above them.
-        assertEquals(left("Row wrapping"), left("English proofreading"))
-        assertEquals(left("Crash rows"), left("English variant"))
-        assertEquals(left("Video follow readout"), left("English proofreading"))
-        assertEquals(left("New video links:\ndouble-click seeks"), left("English variant"))
-    }
 
     @Test
     fun errorRowsCellSwitchesAndOpensTheStylePanelInAPopupUnderTheButton() {
         val state = AppState()
-        openEditorBehavior(state)
+        openLogView(state)
 
         rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
         rule.onNodeWithText("Style ▸").performClick()
@@ -196,7 +169,8 @@ class SettingsSearchUiTest {
         val button = rule.onNodeWithTag("error-highlight-global-style-toggle").fetchSemanticsNode().boundsInRoot
         val panel = panelBounds()
         assertTrue(button.bottom <= panel.top, "panel $panel must open below the button $button")
-        assertTrue(panel.left <= button.left, "panel $panel must not start right of the button $button")
+        // The tag sits inside the card's 12dp horizontal padding, so the card's own edge is that much further left.
+        assertTrue(panel.left - 12f <= button.left, "panel $panel must not start right of the button $button")
 
         rule.onNodeWithText("Style ▾").performClick()
         rule.waitForIdle()
@@ -211,7 +185,7 @@ class SettingsSearchUiTest {
     @Test
     fun styleEditsInThePopupReachTheGlobalSetting() {
         val state = AppState()
-        openEditorBehavior(state)
+        openLogView(state)
         rule.onNodeWithText("Style ▸").performClick()
         rule.waitForIdle()
 
@@ -277,7 +251,7 @@ class SettingsSearchUiTest {
     @Test
     fun clickingOutsideTheStylePopupDismissesIt() {
         val state = AppState()
-        openEditorBehavior(state)
+        openLogView(state)
         rule.onNodeWithText("Style ▸").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("error-highlight-global-panel").assertExists()
@@ -295,7 +269,7 @@ class SettingsSearchUiTest {
             mkTab("a", "a.log", emptyList()).copy(errorHighlightStyle = ErrorHighlightStyle(color = Color.Magenta)),
             mkTab("b", "b.log", emptyList()),
         )
-        openEditorBehavior(state)
+        openLogView(state)
 
         rule.onNodeWithTag("error-highlight-override-count").assertTextEquals("1 tab uses its own style")
         state.tabs = state.tabs.map { if (it.id == "b") it.copy(errorHighlightStyle = ErrorHighlightStyle(bold = true)) else it }
@@ -313,7 +287,7 @@ class SettingsSearchUiTest {
     fun cellShowsNoOverrideLineWhenNoTabHasItsOwnStyle() {
         val state = AppState()
         state.tabs = listOf(mkTab("a", "a.log", emptyList()))
-        openEditorBehavior(state)
+        openLogView(state)
 
         rule.onNodeWithTag("error-highlight-override-count").assertDoesNotExist()
         rule.onNodeWithTag("error-highlight-reset-tabs").assertDoesNotExist()

@@ -740,7 +740,7 @@ internal fun CaptureStrip(
     val density = LocalDensity.current.density
 
     fun openCaptureSettings() {
-        state.requestedSettingsSection = SettingsSection.Capture
+        state.requestedSettingsPage = SettingsPage.CaptureVideo
         state.settingsOpen = true
         onReturnFocus()
     }
