@@ -745,6 +745,32 @@ class TabStripStyleUiTest {
     }
 
     @Test
+    fun theShowOnTabsChecksShareOneLineWhenWideAndWrapWhenNarrow() {
+        state = newState()
+        val tags = listOf("tab-detail-file-type-badge", "tab-detail-source-colour-stripe", "tab-detail-close-button-on-every-tab")
+        listOf(1100, 700).forEach { width ->
+            rule.setContent {
+                CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                    Column(Modifier.width(width.dp)) { TabsAppearanceSettings(state) }
+                }
+            }
+            rule.waitForIdle()
+            val rects = tags.map { bounds(it, useUnmergedTree = true) }
+            assertTrue(rects.all { it.top == rects.first().top }, "the three checks share a line at $width dp: $rects")
+            assertTrue(rects.zipWithNext().all { (a, b) -> a.right <= b.left }, "the checks do not overlap at $width dp: $rects")
+        }
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Column(Modifier.width(260.dp)) { TabsAppearanceSettings(state) }
+            }
+        }
+        rule.waitForIdle()
+        val narrow = tags.map { bounds(it, useUnmergedTree = true) }
+        assertTrue(narrow.last().top > narrow.first().top, "the checks wrap onto more than one line at 260 dp: $narrow")
+        assertTrue(narrow.all { it.right <= 260.dp }, "every check stays inside the 260 dp column: $narrow")
+    }
+
+    @Test
     fun theTenStylePickerUsesFiveColumnsWheneverTheAvailableWidthAllowsIt() {
         state = newState()
         listOf(700, 480, 1100).forEach { width ->

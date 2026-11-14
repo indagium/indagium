@@ -537,6 +537,8 @@ internal fun BoundedScrollBoxDp(
  * padding reserved only while the content overflows, so a list that fits keeps its exact layout and
  * an overflowing one doesn't run text under the thumb; pass `0.dp` when [contentPadding] already
  * leaves room at the end. [scrollbarTag], when set, tags the scrollbar thumb track only while the content overflows (for tests).
+ * [showBarOnlyWhenScrollable] leaves the scrollbar out of the layout altogether until the content overflows (by default it is always
+ * composed, though its thumb is transparent while the content fits), so a list that fits has no bar track at all.
  */
 @Composable
 internal fun ScrollColumnWithBar(
@@ -547,6 +549,7 @@ internal fun ScrollColumnWithBar(
     verticalArrangement: Arrangement.Vertical = Arrangement.Top,
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
     scrollbarTag: String? = null,
+    showBarOnlyWhenScrollable: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     // ScrollState.maxValue is Int.MAX_VALUE until the first layout; treat that as "not known yet".
@@ -558,9 +561,11 @@ internal fun ScrollColumnWithBar(
             horizontalAlignment = horizontalAlignment,
             content = content,
         )
-        Box(Modifier.matchParentSize()) {
-            val tag = if (scrollbarTag != null && overflowing) Modifier.testTag(scrollbarTag) else Modifier
-            ThinVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight().then(tag))
+        if (overflowing || !showBarOnlyWhenScrollable) {
+            Box(Modifier.matchParentSize()) {
+                val tag = if (scrollbarTag != null && overflowing) Modifier.testTag(scrollbarTag) else Modifier
+                ThinVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight().then(tag))
+            }
         }
     }
 }
@@ -1202,12 +1207,14 @@ fun ScrollableTextArea(
 /** Room for the 16dp × plus its gap when it sits beside an in-field microphone. */
 private val CLEAR_BESIDE_MIC_WIDTH = 18.dp
 
+/** [inline] sizes the row to its content with no side padding, so several fit on one line (in a `FlowRow`); by default it fills the width. */
 @Composable
 fun CheckRow(
     checked: Boolean, onToggle: () -> Unit,
     accentColor: Color = LocalTheme.current.ac,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    inline: Boolean = false,
     content: @Composable RowScope.() -> Unit,
 ) {
     val tc = tc()
@@ -1215,7 +1222,8 @@ fun CheckRow(
     // handler after padding so the complete visual row toggles, not only the checkbox/text bounds.
     DisableSelection {
         Row(
-            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+            modifier
+                .then(if (inline) Modifier.padding(vertical = 3.dp) else Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp))
                 .then(if (enabled) Modifier.clickable(onClick = onToggle) else Modifier),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {

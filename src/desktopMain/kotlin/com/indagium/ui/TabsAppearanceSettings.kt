@@ -203,6 +203,7 @@ private fun DetailCheck(label: String, checked: Boolean, locked: Boolean, onTogg
         checked = checked,
         onToggle = onToggle,
         enabled = !locked,
+        inline = true,
     ) {
         AppText(label, color = tc.tx, fontSize = 11.sp)
         if (locked) AppText("(part of this style)", color = tc.td, fontSize = 10.sp)

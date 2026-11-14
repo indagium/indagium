@@ -221,7 +221,7 @@ internal fun SettingsNavList(
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
-    ScrollColumnWithBar(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    ScrollColumnWithBar(modifier, verticalArrangement = Arrangement.spacedBy(6.dp), showBarOnlyWhenScrollable = true) {
         if (searching) {
             SettingsNavItem(
                 title = "All results",

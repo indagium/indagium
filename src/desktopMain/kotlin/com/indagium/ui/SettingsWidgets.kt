@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -387,37 +388,114 @@ internal fun <T> SettingsDropdown(
     onInteraction: () -> Unit = {},
 ) {
     val tc = tc()
-    val density = LocalDensity.current
     var open by remember { mutableStateOf(false) }
-    var fieldWidth by remember { mutableStateOf(0.dp) }
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    SettingsDropdownField(
+        text = label(selected),
+        open = open,
+        onClick = {
+            if (System.currentTimeMillis() >= suppressToggleUntilMs) {
+                open = !open
+                onInteraction()
+            }
+        },
+        modifier = modifier,
+        minWidth = minWidth,
+        testTag = testTag,
+    ) { fieldWidth, popupOffset ->
+        Popup(
+            alignment = Alignment.TopStart,
+            offset = popupOffset,
+            onDismissRequest = {
+                open = false
+                suppressToggleUntilMs = System.currentTimeMillis() + DROPDOWN_REOPEN_GUARD_MS
+                onInteraction()
+            },
+            properties = PopupProperties(focusable = false),
+        ) {
+            Column(
+                Modifier.widthIn(min = fieldWidth).width(IntrinsicSize.Max)
+                    .heightIn(max = DROPDOWN_POPUP_MAX_HEIGHT)
+                    .shadow(8.dp, DROPDOWN_POPUP_SHAPE)
+                    .background(tc.p, DROPDOWN_POPUP_SHAPE)
+                    .border(1.dp, tc.br, DROPDOWN_POPUP_SHAPE)
+                    .verticalScroll(rememberScrollState())
+                    .padding(4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                options.forEachIndexed { index, option ->
+                    val active = option == selected
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth()
+                            .testTag(optionTag?.invoke(option) ?: "$testTag-option-$index")
+                            .clip(DROPDOWN_OPTION_SHAPE),
+                        baseBg = if (active) tc.abg else Color.Transparent,
+                        onClick = {
+                            open = false
+                            onSelect(option)
+                            onInteraction()
+                        },
+                    ) {
+                        AppText(
+                            label(option),
+                            color = if (active) tc.ac else tc.tx,
+                            fontSize = 11.sp,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The closed field every settings dropdown shares: 26dp, the page background with a 1dp border, [text] in 12sp (in [textFontFamily]
+ * when set, so a font picker can show the selected family) and an expand icon that flips with [open]; a hover tint.
+ * [onClick] toggles the menu. The field is at least [minWidth] wide, or pass `Modifier.fillMaxWidth()` and a small [minWidth] to
+ * stretch it. [testTag], when set, goes on the field.
+ *
+ * While [open] it calls [popup] inside the field, with the field's current width and the offset that puts a popup just below it, so
+ * the caller adds its own `Popup` (its own dismiss handling and focus mode) and content.
+ */
+@Composable
+internal fun SettingsDropdownField(
+    text: String,
+    open: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    minWidth: Dp = 168.dp,
+    testTag: String? = null,
+    textFontFamily: FontFamily? = null,
+    popup: @Composable (fieldWidth: Dp, popupOffset: IntOffset) -> Unit = { _, _ -> },
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var fieldWidth by remember { mutableStateOf(0.dp) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     // propagateMinConstraints hands the field's minimum width on to the content row, so the icon stays at the right edge whether the
     // field is stretched by the caller or only held at [minWidth].
     Box(
         modifier.widthIn(min = minWidth).height(DROPDOWN_FIELD_HEIGHT)
-            .testTag(testTag)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
             .onGloballyPositioned { fieldWidth = with(density) { it.size.width.toDp() } }
             .clip(CORNER_SM)
             .background(tc.bg, CORNER_SM)
             .background(if (hovered) tc.hv else Color.Transparent, CORNER_SM)
             .border(1.dp, tc.br, CORNER_SM)
             .hoverable(interaction)
-            .clickable(interactionSource = interaction, indication = null, role = Role.DropdownList) {
-                if (System.currentTimeMillis() >= suppressToggleUntilMs) {
-                    open = !open
-                    onInteraction()
-                }
-            }
+            .clickable(interactionSource = interaction, indication = null, role = Role.DropdownList, onClick = onClick)
             .padding(start = 8.dp, end = 6.dp),
         propagateMinConstraints = true,
     ) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             AppText(
-                label(selected),
+                text,
                 color = tc.tx,
                 fontSize = 12.sp,
+                fontFamily = textFontFamily ?: LocalUiFontFamily.current,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
@@ -429,52 +507,7 @@ internal fun <T> SettingsDropdown(
                 modifier = Modifier.size(16.dp),
             )
         }
-        if (open) {
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { DROPDOWN_POPUP_OFFSET.roundToPx() }),
-                onDismissRequest = {
-                    open = false
-                    suppressToggleUntilMs = System.currentTimeMillis() + DROPDOWN_REOPEN_GUARD_MS
-                    onInteraction()
-                },
-                properties = PopupProperties(focusable = false),
-            ) {
-                Column(
-                    Modifier.widthIn(min = fieldWidth).width(IntrinsicSize.Max)
-                        .heightIn(max = DROPDOWN_POPUP_MAX_HEIGHT)
-                        .shadow(8.dp, DROPDOWN_POPUP_SHAPE)
-                        .background(tc.p, DROPDOWN_POPUP_SHAPE)
-                        .border(1.dp, tc.br, DROPDOWN_POPUP_SHAPE)
-                        .verticalScroll(rememberScrollState())
-                        .padding(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    options.forEachIndexed { index, option ->
-                        val active = option == selected
-                        HoverBox(
-                            modifier = Modifier.fillMaxWidth()
-                                .testTag(optionTag?.invoke(option) ?: "$testTag-option-$index")
-                                .clip(DROPDOWN_OPTION_SHAPE),
-                            baseBg = if (active) tc.abg else Color.Transparent,
-                            onClick = {
-                                open = false
-                                onSelect(option)
-                                onInteraction()
-                            },
-                        ) {
-                            AppText(
-                                label(option),
-                                color = if (active) tc.ac else tc.tx,
-                                fontSize = 11.sp,
-                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        if (open) popup(fieldWidth, IntOffset(0, with(density) { DROPDOWN_POPUP_OFFSET.roundToPx() }))
     }
 }
 

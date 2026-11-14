@@ -1,14 +1,23 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
 import org.junit.Rule
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -82,5 +91,33 @@ class SettingsDropdownUiTest {
         rule.onNodeWithTag("dd").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("dd-option-0").assertDoesNotExist()
+    }
+
+    @Test
+    fun theFontPickerFieldIsTheSameSizeAsADropdownFieldAndKeepsItsTrigger() {
+        rule.setContent {
+            Column(Modifier.width(300.dp)) {
+                SettingsDropdown(options = choices, selected = "alpha", label = { it }, onSelect = {}, testTag = "dd")
+                SearchableFontDropdown(
+                    label = null,
+                    selectedFamily = null,
+                    defaultLabel = "System default",
+                    fallbackFamily = FontFamily.Default,
+                    onSelect = {},
+                    testTagPrefix = "font",
+                    showPreview = false,
+                )
+            }
+        }
+        val dropdown = rule.onNodeWithTag("dd").getBoundsInRoot()
+        val font = rule.onNodeWithTag("font-trigger").getBoundsInRoot()
+        assertEquals(26.dp, font.height)
+        assertEquals(dropdown.height, font.height)
+        assertEquals(300.dp, font.width)
+        rule.onNodeWithTag("font-trigger").assertTextContains("System default")
+        rule.onNodeWithTag("font-trigger").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("font-popup").assertExists()
+        rule.onNodeWithTag("font-option-default").assertExists()
     }
 }

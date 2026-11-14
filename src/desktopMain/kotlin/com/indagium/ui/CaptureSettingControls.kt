@@ -2,7 +2,6 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,9 +20,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
@@ -48,7 +45,6 @@ import com.indagium.capture.withVideoPreset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.roundToInt
 
 private const val CHECK_LABEL_MAX_LINES = 2
 
@@ -344,34 +340,19 @@ internal fun CaptureMicrophonePicker(
     }
     val colors = tc()
     Box(modifier) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(CORNER_MD)
-                .border(1.dp, colors.br, CORNER_MD)
-                .clickable {
-                    menuExpanded = !menuExpanded
-                    if (menuExpanded) refreshMicrophones()
-                }
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            AppText(
-                if (scanning) "Loading microphones…" else selected,
-                color = colors.tx,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            AppText(if (menuExpanded) "▾" else "▸", color = colors.ts, fontSize = 9.sp)
-        }
-        if (menuExpanded) {
-            val density = androidx.compose.ui.platform.LocalDensity.current.density
+        SettingsDropdownField(
+            text = if (scanning) "Loading microphones…" else selected,
+            open = menuExpanded,
+            onClick = {
+                menuExpanded = !menuExpanded
+                if (menuExpanded) refreshMicrophones()
+            },
+            modifier = Modifier.fillMaxWidth(),
+            minWidth = 0.dp,
+        ) { _, popupOffset ->
             Popup(
                 alignment = Alignment.TopStart,
-                offset = IntOffset(0, (32 * density).roundToInt()),
+                offset = popupOffset,
                 onDismissRequest = { menuExpanded = false; onReclaimFocus() },
                 properties = PopupProperties(focusable = true),
             ) {
