@@ -84,45 +84,44 @@ internal fun IssueCategoriesSettingsSection(state: AppState, reclaimFocus: () ->
                     AppText("Tag or message regex", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1.2f))
                     Spacer(Modifier.width(RULE_ACTIONS_WIDTH))
                 }
-                SettingsScrollableRows {
-                    if (drafts.isEmpty()) {
-                        AppText("No custom issue categories yet.", color = tc.td, fontSize = 11.sp)
-                    }
-                    drafts.forEachIndexed { index, rule ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            InlineField(
-                                rule.name,
-                                { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(name = value) else current } },
-                                "Network timeouts",
-                                Modifier.weight(0.8f),
-                                fontSize = 12.sp,
-                            )
-                            InlineField(
-                                rule.regex,
-                                { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(regex = value) else current } },
-                                "timeout\\\\s+after\\\\s+\\\\d+ms",
-                                Modifier.weight(1.2f),
-                                fontSize = 12.sp,
-                            )
-                            SettingsToggle(
-                                checked = rule.enabled,
-                                label = "Category ${index + 1} enabled",
-                                onChange = { enabled ->
-                                    drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(enabled = enabled) else current }
-                                },
-                                reclaimFocus = reclaimFocus,
-                                testTag = "${SourcePageTags.CATEGORY_SWITCH_PREFIX}$index",
-                            )
-                            AppButton(
-                                "Remove",
-                                onClick = { drafts = drafts.filterIndexed { i, _ -> i != index } },
-                                variant = ButtonVariant.Secondary,
-                                isDanger = true,
-                            )
+                if (drafts.isEmpty()) {
+                    SettingsEmptyState("No custom issue categories yet.")
+                } else {
+                    SettingsScrollableRows {
+                        drafts.forEachIndexed { index, rule ->
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SettingsTextField(
+                                    rule.name,
+                                    { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(name = value) else current } },
+                                    Modifier.weight(0.8f),
+                                    placeholder = "Network timeouts",
+                                )
+                                SettingsTextField(
+                                    rule.regex,
+                                    { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(regex = value) else current } },
+                                    Modifier.weight(1.2f),
+                                    placeholder = "timeout\\\\s+after\\\\s+\\\\d+ms",
+                                )
+                                SettingsToggle(
+                                    checked = rule.enabled,
+                                    label = "Category ${index + 1} enabled",
+                                    onChange = { enabled ->
+                                        drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(enabled = enabled) else current }
+                                    },
+                                    reclaimFocus = reclaimFocus,
+                                    testTag = "${SourcePageTags.CATEGORY_SWITCH_PREFIX}$index",
+                                )
+                                AppButton(
+                                    "Remove",
+                                    onClick = { drafts = drafts.filterIndexed { i, _ -> i != index } },
+                                    variant = ButtonVariant.Secondary,
+                                    isDanger = true,
+                                )
+                            }
                         }
                     }
                 }
@@ -152,7 +151,6 @@ internal fun IssueCategoriesSettingsSection(state: AppState, reclaimFocus: () ->
 /** Settings › Source code: the registered source folders, the editor "Show in code" opens, wrapper discovery and logging configurations. */
 @Composable
 internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
-    val tc = tc()
     // The "N files changed — reindex recommended" hint stats every indexed file, so it is computed off the UI thread
     // (AppState.refreshChangedFileCounts) and only re-checked when this page is shown, never per recomposition: on a
     // network-mounted source folder that froze the dialog.
@@ -173,10 +171,10 @@ internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 AppButton("Register source code", onClick = { state.pickSourceFolder() }, modifier = Modifier.testTag(SourcePageTags.REGISTER_SOURCE))
             }
             Box(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
-                SettingsScrollableRows {
-                    if (state.settings.sourceFolders.isEmpty()) {
-                        AppText("(no folders — register one to enable Show in code)", color = tc.td, fontSize = 11.sp)
-                    } else {
+                if (state.settings.sourceFolders.isEmpty()) {
+                    SettingsEmptyState("No folders registered yet.")
+                } else {
+                    SettingsScrollableRows {
                         state.settings.sourceFolders.forEach { path -> SourceFolderRow(state, path) }
                     }
                 }
@@ -252,12 +250,11 @@ private fun EditorChoiceDetail(state: AppState) {
     val choice = state.settings.editorChoice
     val detected = state.detectedEditors
     when (choice) {
-        "custom" -> InlineField(
+        "custom" -> SettingsTextField(
             state.settings.editorCommand,
             { value -> state.updateSettings { it.copy(editorCommand = value) } },
-            "idea --line {line} {file}",
             Modifier.fillMaxWidth(),
-            fontSize = 12.sp,
+            placeholder = "idea --line {line} {file}",
         )
         "", "auto" -> when {
             detected == null -> AppText("Detecting installed editors…", color = tc.td, fontSize = 10.sp)
@@ -333,7 +330,7 @@ private fun SourceLoggingConfigurations(state: AppState) {
                     onSaved = { editingIsNew = false },
                 )
             } else if (configurations.isEmpty()) {
-                AppText("No custom logging configurations.", color = tc.td, fontSize = 10.sp)
+                SettingsEmptyState("No custom logging configurations.")
             } else {
                 configurations.forEach { configuration ->
                     Row(
@@ -395,12 +392,11 @@ private fun SourceLoggingConfigurationEditor(
             AppText("Edit logging configuration", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             AppButton("Cancel", onClick = onClose)
         }
-        InlineField(
+        SettingsTextField(
             draft.name,
             { draft = draft.copy(name = it) },
-            "Configuration name",
             Modifier.fillMaxWidth(),
-            fontSize = 12.sp,
+            placeholder = "Configuration name",
         )
         AppText("Source folders", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         if (state.settings.sourceFolders.isEmpty()) {
@@ -430,19 +426,17 @@ private fun SourceLoggingConfigurationEditor(
         draft.wrapperRules.forEachIndexed { index, rule ->
             Column(Modifier.fillMaxWidth().border(0.5.dp, tc.br, CORNER_SM).padding(6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    InlineField(
+                    SettingsTextField(
                         rule.ownerType,
                         { value -> draft = draft.replaceWrapperRule(index, rule.copy(ownerType = value)) },
-                        "Owner/type, e.g. com.example.Telemetry or Telemetry",
                         Modifier.weight(1f),
-                        fontSize = 11.sp,
+                        placeholder = "Owner/type, e.g. com.example.Telemetry or Telemetry",
                     )
-                    InlineField(
+                    SettingsTextField(
                         rule.methodName,
                         { value -> draft = draft.replaceWrapperRule(index, rule.copy(methodName = value)) },
-                        "Method",
                         Modifier.width(100.dp),
-                        fontSize = 11.sp,
+                        placeholder = "Method",
                     )
                     AppButton(
                         "Remove",
@@ -451,26 +445,23 @@ private fun SourceLoggingConfigurationEditor(
                     )
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    InlineField(
+                    SettingsTextField(
                         rule.tagArgumentIndex.toString(),
                         { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(tagArgumentIndex = it)) } },
-                        "Tag argument",
                         Modifier.weight(1f),
-                        fontSize = 11.sp,
+                        placeholder = "Tag argument",
                     )
-                    InlineField(
+                    SettingsTextField(
                         rule.messageArgumentIndex.toString(),
                         { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(messageArgumentIndex = it)) } },
-                        "Message argument",
                         Modifier.weight(1f),
-                        fontSize = 11.sp,
+                        placeholder = "Message argument",
                     )
-                    InlineField(
+                    SettingsTextField(
                         rule.throwableArgumentIndex?.toString().orEmpty(),
                         { value -> draft = draft.replaceWrapperRule(index, rule.copy(throwableArgumentIndex = value.toIntOrNull())) },
-                        "Throwable (optional)",
                         Modifier.weight(1f),
-                        fontSize = 11.sp,
+                        placeholder = "Throwable (optional)",
                     )
                 }
             }

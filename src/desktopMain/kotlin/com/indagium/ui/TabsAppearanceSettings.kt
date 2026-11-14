@@ -94,7 +94,7 @@ private const val TAB_STYLE_COLUMNS = 5
 internal fun TabsAppearanceSettings(state: AppState, onInteraction: () -> Unit = {}) {
     TabStyleGroup(state)
     TabsGroup(state, onInteraction, includePlacement = true)
-    ChromePlacementSettings(state)
+    ChromePlacementSettings(state, onInteraction)
 }
 
 /**

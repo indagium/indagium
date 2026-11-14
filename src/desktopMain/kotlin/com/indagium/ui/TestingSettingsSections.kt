@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,7 +46,6 @@ import kotlinx.coroutines.withContext
 
 private val FIELD_WIDTH = 300.dp
 private val SHORT_FIELD_WIDTH = 240.dp
-private val NUMBER_FIELD_WIDTH = 72.dp
 private val JUDGE_FIELD_WIDTH = 168.dp
 private val PROMPT_MIN_HEIGHT = 96.dp
 private val PROMPT_MAX_HEIGHT = 240.dp
@@ -233,19 +233,18 @@ private fun ConfirmationTimeoutRow(state: AppState, testing: TestingSettings) {
             "($MIN_CONFIRMATION_TIMEOUT_MINUTES to $MAX_CONFIRMATION_TIMEOUT_MINUTES minutes).",
         anchor = "Confirmation timeout (minutes)",
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            InlineField(
-                text,
-                { value ->
-                    val digits = value.filter { it.isDigit() }.take(3)
-                    text = digits
-                    digits.toIntOrNull()?.takeIf { it in MIN_CONFIRMATION_TIMEOUT_MINUTES..MAX_CONFIRMATION_TIMEOUT_MINUTES }
-                        ?.let { minutes -> updateTesting(state) { it.copy(confirmationTimeoutMinutes = minutes) } }
-                },
-                "5", Modifier.width(NUMBER_FIELD_WIDTH).testTag(TestingPageTags.CONFIRM_TIMEOUT), fontSize = 12.sp,
-            )
-            AppText("min", color = tc().ts, fontSize = 11.sp)
-        }
+        SettingsNumberField(
+            value = text,
+            onValueChange = { digits ->
+                text = digits
+                digits.toIntOrNull()?.takeIf { it in MIN_CONFIRMATION_TIMEOUT_MINUTES..MAX_CONFIRMATION_TIMEOUT_MINUTES }
+                    ?.let { minutes -> updateTesting(state) { it.copy(confirmationTimeoutMinutes = minutes) } }
+            },
+            unit = "min",
+            maxDigits = 3,
+            placeholder = "5",
+            testTag = TestingPageTags.CONFIRM_TIMEOUT,
+        )
     }
 }
 
@@ -348,16 +347,16 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
             )
         }
         SettingsRow("Tracker name", "How the tracker is called in the issue dialog.", indent = true) {
-            InlineField(
+            SettingsTextField(
                 tracker.name, { value -> updateTracker(state) { it.copy(name = value.take(MAX_NAME_CHARS)) } },
-                "Jira", Modifier.width(SHORT_FIELD_WIDTH).testTag(TestingPageTags.TRACKER_NAME), fontSize = 12.sp,
+                Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Jira", testTag = TestingPageTags.TRACKER_NAME,
             )
         }
         SettingsRow("Tracker MCP URL", "The address of the tracker's MCP server (http or https).", indent = true) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
-                InlineField(
+                SettingsTextField(
                     tracker.mcpUrl, { value -> updateTracker(state) { it.copy(mcpUrl = value.trim()) } },
-                    "https://tracker.example.com/mcp", Modifier.width(FIELD_WIDTH).testTag(TestingPageTags.TRACKER_URL), fontSize = 12.sp,
+                    Modifier.width(FIELD_WIDTH), placeholder = "https://tracker.example.com/mcp", testTag = TestingPageTags.TRACKER_URL,
                 )
                 if (tracker.mcpUrl.isNotBlank()) {
                     (urlCheck.problem ?: urlCheck.warning)?.let {
@@ -373,9 +372,9 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
             "The header that carries the access token. Leave the name empty for a server that needs no authentication.",
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
-                InlineField(
+                SettingsTextField(
                     tracker.authHeaderName, { value -> updateTracker(state) { it.copy(authHeaderName = value.trim()) } },
-                    "Authorization", Modifier.width(SHORT_FIELD_WIDTH).testTag(TestingPageTags.TRACKER_HEADER), fontSize = 12.sp,
+                    Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Authorization", testTag = TestingPageTags.TRACKER_HEADER,
                 )
                 checkAuthHeaderName(tracker.authHeaderName)?.let {
                     AppText(it, color = DANGER_RED, fontSize = 10.sp, modifier = Modifier.width(SHORT_FIELD_WIDTH))
@@ -408,8 +407,9 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
             )
         }
         SettingsStackedRow(
-            "Issue instructions (prompt)",
-            "Tell the agent how to create an issue: the project key, issue type, labels and how the issue's fields map to the tracker's.",
+            "Issue instructions",
+            "The agent's prompt: tell it how to create an issue, with the project key, issue type, labels and how the issue's fields map " +
+                "to the tracker's.",
         ) {
             DictatedTextArea(
                 tracker.prompt, { value -> updateTracker(state) { it.copy(prompt = value.take(MAX_TRACKER_PROMPT_CHARS)) } },
@@ -433,10 +433,9 @@ private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (Str
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(
-                    tokenText, onTokenText, "Paste the token", Modifier.width(SHORT_FIELD_WIDTH).testTag(TestingPageTags.TRACKER_TOKEN),
-                    fontSize = 12.sp,
-                    visualTransformation = PasswordVisualTransformation(),
+                SettingsTextField(
+                    tokenText, onTokenText, Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Paste the token",
+                    visualTransformation = PasswordVisualTransformation(), testTag = TestingPageTags.TRACKER_TOKEN,
                 )
                 AppButton(
                     "Save token", enabled = tokenText.isNotBlank(),
@@ -455,7 +454,11 @@ private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (Str
                     modifier = Modifier.testTag(TestingPageTags.TRACKER_REMOVE_TOKEN),
                 )
             }
-            AppText(state.trackerStatus.tokenLine(), color = tc.ts, fontSize = 11.sp, maxLines = 3)
+            if (state.trackerStatus.tokenPresent == false) {
+                SettingsEmptyState(state.trackerStatus.tokenLine())
+            } else {
+                AppText(state.trackerStatus.tokenLine(), color = tc.ts, fontSize = 11.sp, maxLines = 3)
+            }
             tokenMessage?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
         }
     }
@@ -466,8 +469,9 @@ private fun TestConnectionRow(state: AppState, tracker: TrackerSettings, typedTo
     val scope = rememberCoroutineScope()
     var test by remember { mutableStateOf<TestUi>(TestUi.Idle) }
     val ready = checkTrackerUrl(tracker.mcpUrl).valid && checkAuthHeaderName(tracker.authHeaderName) == null
-    SettingsStackedRow("Test connection", "Connect to the tracker and list the tools it offers.") {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    // The button sits on the right like every action row; the outcome of the last test stays under it.
+    Column(Modifier.fillMaxWidth()) {
+        SettingsRow("Test connection", "Connect to the tracker and list the tools it offers.") {
             AppButton(
                 if (test == TestUi.Running) "Connecting…" else "Test connection",
                 enabled = test != TestUi.Running && ready,
@@ -477,7 +481,15 @@ private fun TestConnectionRow(state: AppState, tracker: TrackerSettings, typedTo
                 },
                 modifier = Modifier.testTag(TestingPageTags.TRACKER_TEST),
             )
-            (test as? TestUi.Done)?.let { AppText(it.message, color = if (it.ok) tc().ts else DANGER_RED, fontSize = 11.sp, maxLines = 6) }
+        }
+        (test as? TestUi.Done)?.let {
+            AppText(
+                it.message,
+                color = if (it.ok) tc().ts else DANGER_RED,
+                fontSize = 11.sp,
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 9.dp),
+            )
         }
     }
 }

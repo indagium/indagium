@@ -489,8 +489,8 @@ private fun capture() = buildList {
     add(entry(tools, "ADB path", "Path to adb; leave blank to auto-detect.", listOf("adb", "android", "device", "phone", "executable")))
     add(
         entry(
-            tools, "scrcpy path (optional — native mirror window only)",
-            "Only used when Device display is set to a scrcpy window.",
+            tools, "scrcpy path",
+            "Optional; only for the native mirror window, used when Device display is set to a scrcpy window.",
             listOf("scrcpy", "mirror", "android", "device", "executable"),
         ),
     )
@@ -635,15 +635,14 @@ private fun aiProviders() = listOf(
         listOf("url", "api", "server", "lm studio", "local", "host"),
     ),
     entry(
-        SettingsPage.AiProviders, "CLI executable (optional)",
+        SettingsPage.AiProviders, "CLI executable",
         "Path to the Codex or Claude Code CLI used for account providers.",
         listOf("codex", "claude code", "path", "binary", "account"),
     ),
     entry(
-        SettingsPage.AiProviders, "Model (optional)",
-        "Model id to use; detect the models a provider offers.",
+        SettingsPage.AiProviders, "Model",
+        "Optional model id to use; detect the models a provider offers.",
         listOf("llm", "gpt", "sonnet", "opus", "haiku", "override", "discover"),
-        anchor = "Model",
     ),
     entry(
         SettingsPage.AiProviders, "Reasoning effort",
@@ -790,8 +789,8 @@ private fun issueTracker() = listOf(
         listOf("ai", "profile", "agent", "claude", "codex", "model"),
     ),
     entry(
-        SettingsPage.IssueTracker, "Issue instructions (prompt)",
-        "Tell the agent how to create an issue: project key, issue type, labels and field mapping.",
+        SettingsPage.IssueTracker, "Issue instructions",
+        "The agent's prompt: how to create an issue, with project key, issue type, labels and field mapping.",
         listOf("prompt", "project key", "issue type", "labels", "fields", "instructions"),
     ),
     entry(

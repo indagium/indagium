@@ -125,6 +125,7 @@ private fun LogFontSizeStepper(state: AppState) {
         options = (10..24).toList(),
         value = state.settings.fontSize,
         onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
+        format = { "$it px" },
     )
 }
 
@@ -134,6 +135,7 @@ private fun InterfaceScaleStepper(state: AppState) {
         options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
         value = state.settings.interfaceScalePercent,
         onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
+        format = { "$it%" },
     )
 }
 

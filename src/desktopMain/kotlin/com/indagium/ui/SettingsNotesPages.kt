@@ -172,11 +172,11 @@ private fun ProofreadingVocabularyManager(state: AppState) {
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(
+                SettingsTextField(
                     query,
                     { query = it },
-                    "Search or add a word",
-                    Modifier.weight(1f).testTag("proofreading-vocabulary-query"),
+                    Modifier.weight(1f),
+                    placeholder = "Search or add a word",
                     onClear = { query = "" },
                     onSubmit = {
                         if (queryKey != null && !duplicate) {
@@ -184,6 +184,7 @@ private fun ProofreadingVocabularyManager(state: AppState) {
                             query = ""
                         }
                     },
+                    testTag = "proofreading-vocabulary-query",
                 )
                 AppButton(
                     "Add",
@@ -195,12 +196,16 @@ private fun ProofreadingVocabularyManager(state: AppState) {
                     modifier = Modifier.testTag("proofreading-vocabulary-add"),
                 )
             }
-            AppText(
-                vocabularyHelperText(query, words),
-                color = if (duplicate) tc.ts else tc.td,
-                fontSize = 10.sp,
-                modifier = Modifier.testTag("proofreading-vocabulary-helper"),
-            )
+            if (words.isEmpty()) {
+                SettingsEmptyState(vocabularyHelperText(query, words), testTag = "proofreading-vocabulary-helper")
+            } else {
+                AppText(
+                    vocabularyHelperText(query, words),
+                    color = if (duplicate) tc.ts else tc.td,
+                    fontSize = 10.sp,
+                    modifier = Modifier.testTag("proofreading-vocabulary-helper"),
+                )
+            }
             if (words.isNotEmpty()) {
                 val scroll = rememberScrollState()
                 Box(
@@ -277,7 +282,8 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 onInteraction = reclaimFocus,
             )
         }
-        SettingsSubLabel("Include in copied log rows")
+    }
+    SettingsGroup("Included in copied rows") {
         SettingsRow(
             "PID and TID",
             "Also in filtered exports. New annotations capture their own field choices.",
@@ -354,23 +360,14 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
             "Preview: ${settings.annotationPrefixLabel.trim().ifBlank { "From" }} app.log",
             anchor = "Annotation file prefix",
         ) {
-            InlineField(
+            SettingsTextField(
                 settings.annotationPrefixLabel,
                 { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
-                "From",
-                Modifier.width(PREFIX_FIELD_WIDTH).testTag(NotesPageTags.PREFIX_FIELD),
-                fontSize = 12.sp,
+                Modifier.width(PREFIX_FIELD_WIDTH),
+                placeholder = "From",
+                testTag = NotesPageTags.PREFIX_FIELD,
             )
         }
-    }
-}
-
-/** A small secondary-colour line that names the rows under it inside a group's card (the heading of a run of related rows). */
-@Composable
-private fun SettingsSubLabel(text: String) {
-    val tc = tc()
-    Box(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 9.dp, bottom = 4.dp)) {
-        AppText(text, color = tc.ts, fontSize = 11.sp)
     }
 }
 
@@ -416,11 +413,12 @@ private fun MaskWordsRows(state: AppState, reclaimFocus: () -> Unit) {
                     AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(MASK_REMOVE_WIDTH))
                 }
-                SettingsScrollableRows {
-                    if (settings.copyMaskRules.isEmpty()) {
-                        AppText("(no pairs yet — add one to mask text when copying a note)", color = tc.td, fontSize = 11.sp)
+                if (settings.copyMaskRules.isEmpty()) {
+                    SettingsEmptyState("No pairs yet. Add one to mask text when copying a note.")
+                } else {
+                    SettingsScrollableRows {
+                        settings.copyMaskRules.forEachIndexed { index, rule -> MaskRuleRow(state, index, rule) }
                     }
-                    settings.copyMaskRules.forEachIndexed { index, rule -> MaskRuleRow(state, index, rule) }
                 }
                 AppText(
                     "Rules replace case-sensitive whole words in the listed order when copying a note — " +
@@ -437,7 +435,7 @@ private fun MaskWordsRows(state: AppState, reclaimFocus: () -> Unit) {
 @Composable
 private fun MaskRuleRow(state: AppState, index: Int, rule: CopyMaskRule) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        InlineField(
+        SettingsTextField(
             rule.target,
             { value ->
                 state.updateSettings { settings ->
@@ -448,11 +446,10 @@ private fun MaskRuleRow(state: AppState, index: Int, rule: CopyMaskRule) {
                     )
                 }
             },
-            "java",
             Modifier.weight(1f),
-            fontSize = 12.sp,
+            placeholder = "java",
         )
-        InlineField(
+        SettingsTextField(
             rule.replacement,
             { value ->
                 state.updateSettings { settings ->
@@ -463,9 +460,8 @@ private fun MaskRuleRow(state: AppState, index: Int, rule: CopyMaskRule) {
                     )
                 }
             },
-            "j*ava",
             Modifier.weight(1f),
-            fontSize = 12.sp,
+            placeholder = "j*ava",
         )
         AppButton(
             "Remove",

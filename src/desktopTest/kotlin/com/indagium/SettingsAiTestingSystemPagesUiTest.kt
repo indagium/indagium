@@ -17,10 +17,12 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import com.indagium.ai.CustomAiCommand
+import com.indagium.model.AiProviderKind
 import com.indagium.model.AppSettings
 import com.indagium.testing.model.JudgeMode
 import com.indagium.ui.AiPageTags
 import com.indagium.ui.AppState
+import com.indagium.ui.SETTINGS_EMPTY_STATE_TAG
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.SettingsPage
 import com.indagium.ui.SystemPageTags
@@ -124,7 +126,7 @@ class SettingsAiTestingSystemPagesUiTest {
 
         pickPage(SettingsPage.AiCommands)
         assertGroups("Commands")
-        rule.onNodeWithText("(none yet — add one to invoke it as a button in Actions or by typing /name in the chat box)").assertExists()
+        rule.onNodeWithText("No commands yet.").assertExists()
 
         pickPage(SettingsPage.VoiceInput)
         assertGroups("Dictation", "Language")
@@ -152,6 +154,41 @@ class SettingsAiTestingSystemPagesUiTest {
         rule.onNode(hasText("Delete") and !hasTestTag(AiPageTags.commandDelete("timeline"))).performClick()
         rule.waitForIdle()
         assertTrue(state.customAiCommands.isEmpty())
+    }
+
+    @Test
+    fun theCommandsPageShowsACompactEmptyStateUntilThereIsACommand() {
+        val state = newState()
+        openPage(state, SettingsPage.AiCommands)
+        rule.onNodeWithTag(SETTINGS_EMPTY_STATE_TAG).assertExists()
+        rule.onNodeWithText("No commands yet.").assertExists()
+        // The Add command row does not say it a second time.
+        rule.onNodeWithText("Reusable prompts for Actions and /name in the chat box.").assertExists()
+
+        assertNull(state.saveCustomAiCommand("timeline", "Build a timeline."))
+        rule.waitForIdle()
+        rule.onNodeWithTag(SETTINGS_EMPTY_STATE_TAG).assertDoesNotExist()
+        rule.onNodeWithText("/timeline").assertExists()
+    }
+
+    @Test
+    fun theProviderTypeDropdownSetsTheProviderKindOfTheDraft() {
+        val state = newState()
+        openPage(state, SettingsPage.AiProviders)
+        assertEquals(AiProviderKind.OPENAI_COMPATIBLE, state.settings.aiProviderProfiles.first { it.selected }.kind)
+        rule.onNodeWithTag(AiPageTags.PROVIDER_TYPE).performScrollTo().assertExists()
+
+        click(AiPageTags.PROVIDER_TYPE)
+        AiProviderKind.entries.forEach { rule.onNodeWithTag("${AiPageTags.PROVIDER_TYPE}-${it.name}").assertExists() }
+        rule.onNodeWithTag("${AiPageTags.PROVIDER_TYPE}-${AiProviderKind.CODEX_ACCOUNT.name}").performClick()
+        rule.waitForIdle()
+
+        // The kind is part of the draft until Save profile writes it, like every other field of the page.
+        assertEquals(AiProviderKind.OPENAI_COMPATIBLE, state.settings.aiProviderProfiles.first { it.selected }.kind)
+        rule.onNodeWithTag(AiPageTags.ENDPOINT).assertDoesNotExist()
+        rule.onNodeWithText("CLI executable").assertExists()
+        click(AiPageTags.SAVE_PROFILE)
+        assertEquals(AiProviderKind.CODEX_ACCOUNT, state.settings.aiProviderProfiles.first { it.selected }.kind)
     }
 
     @Test

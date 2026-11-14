@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -22,6 +23,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -39,6 +43,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -46,9 +51,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -80,6 +91,13 @@ private val DROPDOWN_POPUP_MAX_HEIGHT = 320.dp
 private val DRILL_SUMMARY_MAX_WIDTH = 320.dp
 private val OVERFLOW_TARGET = 22.dp
 private val OVERFLOW_MENU_MIN_WIDTH = 190.dp
+
+/** The width of a [SettingsTextField] whose caller sets none. */
+internal val SETTINGS_TEXT_FIELD_WIDTH = 200.dp
+
+/** The fixed width of the number in a [SettingsNumberField]. */
+internal val SETTINGS_NUMBER_FIELD_WIDTH = 64.dp
+private const val SETTINGS_NUMBER_MAX_DIGITS = 12
 
 /** How long after a dismiss a click on the field is ignored: the popup's outside-click dismiss and the field's own click fire for the same press. */
 private const val DROPDOWN_REOPEN_GUARD_MS = 200L
@@ -371,9 +389,10 @@ internal fun SettingsPageHeader(groupLabel: String, title: String, description: 
  * (and a small [minWidth]) to stretch it instead.
  *
  * [testTag] goes on the field and each option gets `optionTag(option)`, or `"$testTag-option-<index>"` when [optionTag] is null.
- * A click on the field right after a dismiss is ignored for 200 ms, because the popup's outside-click dismiss and the field's own
- * click would otherwise cancel out. [onInteraction] runs after every toggle, dismiss and pick so the host can reclaim keyboard
- * focus that the clicked field or the popup took.
+ * An option for which [isEnabled] is false is dimmed, ignores clicks and exposes the disabled semantics; [optionNote] adds a small
+ * dim note after an option's label (why it is unavailable, or what it means). A click on the field right after a dismiss is ignored
+ * for 200 ms, because the popup's outside-click dismiss and the field's own click would otherwise cancel out. [onInteraction] runs
+ * after every toggle, dismiss and pick so the host can reclaim keyboard focus that the clicked field or the popup took.
  */
 @Composable
 internal fun <T> SettingsDropdown(
@@ -385,6 +404,8 @@ internal fun <T> SettingsDropdown(
     modifier: Modifier = Modifier,
     minWidth: Dp = 168.dp,
     optionTag: ((T) -> String)? = null,
+    isEnabled: (T) -> Boolean = { true },
+    optionNote: (T) -> String? = { null },
     onInteraction: () -> Unit = {},
 ) {
     val tc = tc()
@@ -425,24 +446,42 @@ internal fun <T> SettingsDropdown(
             ) {
                 options.forEachIndexed { index, option ->
                     val active = option == selected
+                    val optionEnabled = isEnabled(option)
+                    val note = optionNote(option)
                     HoverBox(
                         modifier = Modifier.fillMaxWidth()
                             .testTag(optionTag?.invoke(option) ?: "$testTag-option-$index")
-                            .clip(DROPDOWN_OPTION_SHAPE),
+                            .clip(DROPDOWN_OPTION_SHAPE)
+                            .then(if (optionEnabled) Modifier else Modifier.semantics { disabled() }),
                         baseBg = if (active) tc.abg else Color.Transparent,
-                        onClick = {
-                            open = false
-                            onSelect(option)
-                            onInteraction()
+                        hoverEnabled = optionEnabled,
+                        onClick = if (optionEnabled) {
+                            {
+                                open = false
+                                onSelect(option)
+                                onInteraction()
+                            }
+                        } else {
+                            null
                         },
                     ) {
-                        AppText(
-                            label(option),
-                            color = if (active) tc.ac else tc.tx,
-                            fontSize = 11.sp,
-                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        )
+                        Row(
+                            Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            AppText(
+                                label(option),
+                                color = when {
+                                    !optionEnabled -> tc.td
+                                    active -> tc.ac
+                                    else -> tc.tx
+                                },
+                                fontSize = 11.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            if (note != null) AppText(note, color = tc.td, fontSize = 10.sp)
+                        }
                     }
                 }
             }
@@ -452,7 +491,8 @@ internal fun <T> SettingsDropdown(
 
 /**
  * The closed field every settings dropdown shares: 26dp, the page background with a 1dp border, [text] in 12sp (in [textFontFamily]
- * when set, so a font picker can show the selected family) and an expand icon that flips with [open]; a hover tint.
+ * when set, so a font picker can show the selected family; in [textColor] when set, e.g. a placeholder) and an expand icon that flips
+ * with [open]; a hover tint.
  * [onClick] toggles the menu. The field is at least [minWidth] wide, or pass `Modifier.fillMaxWidth()` and a small [minWidth] to
  * stretch it. [testTag], when set, goes on the field.
  *
@@ -468,6 +508,7 @@ internal fun SettingsDropdownField(
     minWidth: Dp = 168.dp,
     testTag: String? = null,
     textFontFamily: FontFamily? = null,
+    textColor: Color? = null,
     popup: @Composable (fieldWidth: Dp, popupOffset: IntOffset) -> Unit = { _, _ -> },
 ) {
     val tc = tc()
@@ -493,7 +534,7 @@ internal fun SettingsDropdownField(
         Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             AppText(
                 text,
-                color = tc.tx,
+                color = textColor ?: tc.tx,
                 fontSize = 12.sp,
                 fontFamily = textFontFamily ?: LocalUiFontFamily.current,
                 maxLines = 1,
@@ -508,6 +549,148 @@ internal fun SettingsDropdownField(
             )
         }
         if (open) popup(fieldWidth, IntOffset(0, with(density) { DROPDOWN_POPUP_OFFSET.roundToPx() }))
+    }
+}
+
+/**
+ * The one single-line text field of the Settings pages, drawn like [SettingsDropdownField]: 26dp tall, the page background with a 1dp
+ * border (the danger colour while [invalid]) and [CORNER_SM] corners, 12sp text with an accent caret, [placeholder] in the dim colour.
+ * [enabled] = false ignores input and dims it to half. [monospace] and [textAlign] serve paths and numbers; [onClear] adds a small x
+ * while there is text; [onSubmit] runs on Enter. The field is [SETTINGS_TEXT_FIELD_WIDTH] wide unless [modifier] says otherwise
+ * (`Modifier.width(..)`, `Modifier.fillMaxWidth()`, `Modifier.weight(..)`). [testTag] goes on the field itself, the node a test types into.
+ */
+@Composable
+internal fun SettingsTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier.width(SETTINGS_TEXT_FIELD_WIDTH),
+    placeholder: String = "",
+    enabled: Boolean = true,
+    invalid: Boolean = false,
+    monospace: Boolean = false,
+    textAlign: TextAlign = TextAlign.Start,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    onSubmit: (() -> Unit)? = null,
+    onClear: (() -> Unit)? = null,
+    testTag: String? = null,
+) {
+    val tc = tc()
+    val focusReporter = textInputFocusReporter()
+    val fontFamily = if (monospace) MONO else LocalUiFontFamily.current
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = fontFamily, textAlign = textAlign),
+        cursorBrush = SolidColor(tc.ac),
+        singleLine = true,
+        visualTransformation = visualTransformation,
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
+        modifier = modifier
+            .then(focusReporter)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+            .alpha(if (enabled) 1f else DISABLED_ALPHA)
+            .height(DROPDOWN_FIELD_HEIGHT)
+            .background(tc.bg, CORNER_SM)
+            .border(1.dp, if (invalid) DANGER_RED else tc.br, CORNER_SM),
+        decorationBox = { inner ->
+            Row(
+                Modifier.fillMaxSize().padding(start = 8.dp, end = if (onClear != null) 3.dp else 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f), contentAlignment = if (textAlign == TextAlign.End) Alignment.CenterEnd else Alignment.CenterStart) {
+                    if (value.isEmpty() && placeholder.isNotEmpty()) {
+                        AppText(placeholder, color = tc.td, fontSize = 12.sp, fontFamily = fontFamily, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    inner()
+                }
+                if (onClear != null && value.isNotEmpty() && enabled) {
+                    SquareIconButton("×", fontSize = 12.sp, onClick = onClear, modifier = Modifier.padding(start = 4.dp), size = 18.dp)
+                }
+            }
+        },
+    )
+}
+
+/**
+ * A [SettingsTextField] for a whole number: digits only (at most [maxDigits]), right-aligned in a fixed [SETTINGS_NUMBER_FIELD_WIDTH]
+ * and followed by [unit] in 11sp secondary text. [unitWidth] holds the unit's column to a fixed width so the fields of several rows
+ * line up whatever their unit. [value] is the text as typed, so a caller can show a number it rejects and flag it with [invalid];
+ * [modifier] applies to the field and unit together, [testTag] to the field.
+ */
+@Composable
+internal fun SettingsNumberField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    unit: String? = null,
+    unitWidth: Dp? = null,
+    placeholder: String = "",
+    maxDigits: Int = SETTINGS_NUMBER_MAX_DIGITS,
+    enabled: Boolean = true,
+    invalid: Boolean = false,
+    testTag: String? = null,
+) {
+    val tc = tc()
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        SettingsTextField(
+            value = value,
+            onValueChange = { typed -> onValueChange(typed.filter(Char::isDigit).take(maxDigits)) },
+            modifier = Modifier.width(SETTINGS_NUMBER_FIELD_WIDTH),
+            placeholder = placeholder,
+            enabled = enabled,
+            invalid = invalid,
+            monospace = true,
+            textAlign = TextAlign.End,
+            keyboardType = KeyboardType.Number,
+            testTag = testTag,
+        )
+        if (unit != null) {
+            AppText(
+                unit,
+                color = tc.ts,
+                fontSize = 11.sp,
+                maxLines = 1,
+                modifier = Modifier.alpha(if (enabled) 1f else DISABLED_ALPHA).then(if (unitWidth != null) Modifier.width(unitWidth) else Modifier),
+            )
+        }
+    }
+}
+
+/** Test tag of every [SettingsEmptyState] unless the caller gives it another. */
+internal const val SETTINGS_EMPTY_STATE_TAG = "settings-empty-state"
+
+/**
+ * What a list shows while it has nothing in it: one compact, centred line of 11sp secondary [text] in a 1dp bordered box with small
+ * corners. [asRow] pads it as a card row of its own (a direct child of a [SettingsGroup]); otherwise it fills the width it is given
+ * (the content of a stacked row, where the list would have been).
+ */
+@Composable
+internal fun SettingsEmptyState(
+    text: String,
+    modifier: Modifier = Modifier,
+    asRow: Boolean = false,
+    testTag: String = SETTINGS_EMPTY_STATE_TAG,
+) {
+    val tc = tc()
+    val line = @Composable {
+        Box(
+            Modifier.fillMaxWidth()
+                .testTag(testTag)
+                .background(tc.bg, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(text, color = tc.ts, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        }
+    }
+    if (asRow) {
+        Box(modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp)) { line() }
+    } else {
+        Box(modifier.fillMaxWidth()) { line() }
     }
 }
 

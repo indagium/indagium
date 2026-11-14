@@ -53,7 +53,6 @@ import java.io.File
 
 private const val RUNNING_POLL_MS = 250L
 private const val RUNNING_POLL_TRIES = 20
-private val PORT_FIELD_WIDTH = 72.dp
 private const val TOKEN_MASK = "••••••••••••••••••••••••"
 private val TOKEN_FIELD_SHAPE = RoundedCornerShape(4.dp)
 private val ABOUT_CARD_SHAPE = RoundedCornerShape(8.dp)
@@ -413,19 +412,18 @@ private fun McpServerGroup(state: AppState, reclaimFocus: () -> Unit) {
         error?.let { message -> SettingsNoteRow(message, error = true) }
         SettingsRow("Port", "Loopback port the server listens on. Changing it restarts a running server.", indent = true) {
             var portText by remember(port) { mutableStateOf(port.toString()) }
-            InlineField(
-                portText,
-                { v ->
-                    val digits = v.filter { it.isDigit() }.take(PORT_DIGITS)
+            SettingsNumberField(
+                value = portText,
+                onValueChange = { digits ->
                     portText = digits
                     digits.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT)?.let { p ->
                         if (state.settings.mcpControlEnabled) state.setMcpControlEnabled(true, p)
                         else state.updateSettings { it.copy(mcpControlPort = p) }
                     }
                 },
-                "8991",
-                Modifier.width(PORT_FIELD_WIDTH).testTag(SystemPageTags.MCP_PORT),
-                fontSize = 12.sp,
+                maxDigits = PORT_DIGITS,
+                placeholder = "8991",
+                testTag = SystemPageTags.MCP_PORT,
             )
         }
         McpConnectionRow(state, port)

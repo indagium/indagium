@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -330,10 +331,11 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
         // run with `app_process`, not this host scrcpy executable - so neither needs this path configured at all. It is only used when
         // Device display is set to "scrcpy window" for a capture.
         CaptureTextRow(
-            label = "scrcpy path (optional — native mirror window only)",
+            label = "scrcpy path",
             value = settings.scrcpyPath,
             onValue = { next -> edit { it.copy(scrcpyPath = next) } },
-            description = "Only used when Device display is set to a scrcpy window; recording and the in-app mirror work without it.",
+            description = "Optional; only for the native mirror window. Used when Device display is set to a scrcpy window; " +
+                "recording and the in-app mirror work without it.",
             onBrowse = state::browseCaptureScrcpy,
             invalid = "scrcpyPath" in invalid,
             invalidMessage = "path does not point to a file",
@@ -345,17 +347,27 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
                 null
             },
         )
-        SettingsStackedRow(
-            "Check tools",
-            "Recheck tools after changing a path. Live-session diagnostics appear on the capture strip.",
-            anchor = "Recheck tools",
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        // The buttons sit on the right like every action row; the tool status the last check printed stays under them.
+        Column(Modifier.fillMaxWidth()) {
+            SettingsRow(
+                "Check tools",
+                "Recheck tools after changing a path. Live-session diagnostics appear on the capture strip.",
+                anchor = "Recheck tools",
+            ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     AppButton("Recheck tools", state::recheckCaptureTools)
                     AppButton("Install guidance", state::openCaptureInstallGuidance, ButtonVariant.Secondary)
                 }
-                state.captureToolStatus?.let { AppText(it, color = tc().ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 4) }
+            }
+            state.captureToolStatus?.let { status ->
+                AppText(
+                    status,
+                    color = tc().ts,
+                    fontSize = 10.sp,
+                    fontFamily = MONO,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 9.dp),
+                )
             }
         }
     }

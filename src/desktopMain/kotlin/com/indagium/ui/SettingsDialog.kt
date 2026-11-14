@@ -448,6 +448,9 @@ internal fun SettingsConfirmDialog(
 
 /** A bounded, scrollable collection used for Settings sections that can grow without bound.
  *
+ * It is as tall as its rows up to [SETTINGS_SCROLLABLE_ROWS_MAX_HEIGHT], then scrolls, so a list holding only a row or two takes no
+ * more room than they need. Draw nothing (or a [SettingsEmptyState]) instead of calling it for an empty list.
+ *
  * Keeping the add/register action outside this viewport makes it available even when a long list
  * is scrolled to the bottom, matching the Theme gallery's compact scrollbar treatment. */
 @Composable
@@ -459,24 +462,28 @@ internal fun SettingsScrollableRows(
     val scrollState = rememberScrollState()
     val shape = RoundedCornerShape(6.dp)
     Box(
-        modifier.fillMaxWidth().height(148.dp)
+        modifier.fillMaxWidth().heightIn(max = SETTINGS_SCROLLABLE_ROWS_MAX_HEIGHT)
             .clip(shape)
             .background(tc.p2)
             .border(1.dp, tc.br, shape)
             .padding(8.dp),
     ) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(scrollState).padding(end = 12.dp),
+            Modifier.fillMaxWidth().verticalScroll(scrollState).padding(end = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             content = content,
         )
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scrollState),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc),
-        )
+        Box(Modifier.matchParentSize(), contentAlignment = Alignment.CenterEnd) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState),
+                modifier = Modifier.fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc),
+            )
+        }
     }
 }
+
+private val SETTINGS_SCROLLABLE_ROWS_MAX_HEIGHT = 148.dp
 
 /** A text link in the accent colour with the hover highlight the footer's "GitHub repository" link uses. */
 @Composable

@@ -80,6 +80,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -768,19 +769,79 @@ private fun AiProviderControls(
 // Same dropdown treatment as AiModelDropdown/CrashCategoryDropdown, for choosing which provider
 // profile is active - consistent with "model choosing" now that both use the same interaction.
 // Also reused by the Settings dialog's AI providers section so profile switching looks and
-// behaves identically in both places.
+// behaves identically in both places. [settingsStyle] draws the closed field as the Settings pages'
+// SettingsDropdownField (page-background fill, expand icon) instead of the sidebar's grey pill with
+// its triangle glyph; the popup and the selection path are the same either way.
 @Composable
 internal fun AiProviderDropdown(
     profiles: List<com.indagium.model.AiProviderProfile>,
     selected: com.indagium.model.AiProviderProfile,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
+    settingsStyle: Boolean = false,
 ) {
     val tc = tc()
     val density = LocalDensity.current
     var open by remember { mutableStateOf(false) }
     var fieldWidth by remember { mutableStateOf(0.dp) }
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    val popup: @Composable (Dp, IntOffset) -> Unit = { width, popupOffset ->
+        Popup(
+            alignment = Alignment.TopStart,
+            offset = popupOffset,
+            onDismissRequest = {
+                open = false
+                suppressToggleUntilMs = System.currentTimeMillis() + 200
+            },
+            properties = PopupProperties(focusable = false),
+        ) {
+            // A Popup's content still registers with the ambient SelectionContainer (Popup
+            // isn't a selection boundary), but its LayoutCoordinates live in a separate root -
+            // starting a text-selection drag anywhere in the panel then throws Compose
+            // Desktop's "layouts are not part of the same hierarchy" when it tries to compare
+            // this popup's selectable text against the panel's. DisableSelection opts this
+            // subtree out of that registrar entirely.
+            DisableSelection {
+                Column(
+                    Modifier.width(width)
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    profiles.forEach { item ->
+                        val active = item.id == selected.id
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            onClick = { open = false; onSelect(item.id) },
+                        ) {
+                            AppText(
+                                item.displayName,
+                                color = if (active) tc.ac else tc.tx,
+                                fontSize = 11.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (settingsStyle) {
+        SettingsDropdownField(
+            text = selected.displayName,
+            open = open,
+            onClick = { if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open },
+            modifier = modifier,
+            minWidth = 0.dp,
+            popup = popup,
+        )
+        return
+    }
     Box(
         modifier.onGloballyPositioned { coords ->
             fieldWidth = with(density) { coords.size.width.toDp() }
@@ -810,59 +871,15 @@ internal fun AiProviderDropdown(
                 AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
             }
         }
-        if (open) {
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 32.dp.roundToPx() }),
-                onDismissRequest = {
-                    open = false
-                    suppressToggleUntilMs = System.currentTimeMillis() + 200
-                },
-                properties = PopupProperties(focusable = false),
-            ) {
-                // A Popup's content still registers with the ambient SelectionContainer (Popup
-                // isn't a selection boundary), but its LayoutCoordinates live in a separate root -
-                // starting a text-selection drag anywhere in the panel then throws Compose
-                // Desktop's "layouts are not part of the same hierarchy" when it tries to compare
-                // this popup's selectable text against the panel's. DisableSelection opts this
-                // subtree out of that registrar entirely.
-                DisableSelection {
-                    Column(
-                        Modifier.width(fieldWidth)
-                            .background(tc.p, RoundedCornerShape(8.dp))
-                            .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                            .padding(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        profiles.forEach { item ->
-                            val active = item.id == selected.id
-                            HoverBox(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                                baseBg = if (active) tc.abg else Color.Transparent,
-                                onClick = { open = false; onSelect(item.id) },
-                            ) {
-                                AppText(
-                                    item.displayName,
-                                    color = if (active) tc.ac else tc.tx,
-                                    fontSize = 11.sp,
-                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        if (open) popup(fieldWidth, IntOffset(0, with(density) { 32.dp.roundToPx() }))
     }
 }
 
 // Mirrors FilterPanel's CrashCategoryDropdown: a clickable field showing the current value that
 // opens a themed option list on click, rather than the app's earlier free-text-field-plus-chips
 // layout. Manual entry remains possible (the profile's manually entered model must stay usable
-// even when discovery is unavailable) via the field at the bottom of the popup.
+// even when discovery is unavailable) via the field at the bottom of the popup. [settingsStyle] draws the closed field as the
+// Settings pages' SettingsDropdownField (see AiProviderDropdown); the popup is the same either way.
 @Composable
 internal fun AiModelDropdown(
     model: String,
@@ -870,6 +887,7 @@ internal fun AiModelDropdown(
     onDiscoverModels: () -> Unit,
     onPickModel: (String) -> Unit,
     modifier: Modifier = Modifier,
+    settingsStyle: Boolean = false,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -880,6 +898,108 @@ internal fun AiModelDropdown(
     // toggle and net out to "stayed open" instead of closing.
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     var manualEntry by remember(open) { mutableStateOf(model) }
+    val popup: @Composable (Dp, IntOffset) -> Unit = { width, popupOffset ->
+        Popup(
+            alignment = Alignment.TopStart,
+            offset = popupOffset,
+            onDismissRequest = {
+                open = false
+                suppressToggleUntilMs = System.currentTimeMillis() + 200
+            },
+            properties = PopupProperties(focusable = false),
+        ) {
+            // See the matching comment in AiProviderDropdown: Popup content stays registered
+            // with the ambient SelectionContainer unless explicitly opted out, which crashes a
+            // text-selection drag anywhere in the panel once this popup is open.
+            DisableSelection {
+                Column(
+                    Modifier.width(width)
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                        onClick = onDiscoverModels,
+                    ) {
+                        AppText(
+                            "↻ Find models",
+                            color = tc.ac,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                    }
+                    when (discovery) {
+                        is ModelDiscoveryResult.Available -> if (discovery.models.isNotEmpty()) {
+                            discovery.models.forEach { item ->
+                                val active = item.id == model
+                                HoverBox(
+                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                    baseBg = if (active) tc.abg else Color.Transparent,
+                                    onClick = { open = false; onPickModel(item.id) },
+                                ) {
+                                    AppText(
+                                        item.displayName,
+                                        color = if (active) tc.ac else tc.tx,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    )
+                                }
+                            }
+                        } else {
+                            AppText(
+                                "No models were returned.",
+                                color = tc.td,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(8.dp),
+                            )
+                        }
+                        is ModelDiscoveryResult.Unavailable -> AppText(
+                            discovery.message,
+                            color = tc.td,
+                            fontSize = 10.sp,
+                            maxLines = 3,
+                            modifier = Modifier.padding(8.dp),
+                        )
+                        null -> AppText("Finding models…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(8.dp))
+                    }
+                    Divider()
+                    Row(
+                        Modifier.fillMaxWidth().padding(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        InlineField(manualEntry, { manualEntry = it }, "Enter a model id", Modifier.weight(1f), fontSize = 11.sp)
+                        AppButton("Use", onClick = { open = false; onPickModel(manualEntry.trim()) }, modifier = Modifier.height(26.dp))
+                    }
+                }
+            }
+        }
+    }
+    val toggle = {
+        if (System.currentTimeMillis() >= suppressToggleUntilMs) {
+            val opening = !open
+            open = opening
+            if (opening && discovery == null) onDiscoverModels()
+        }
+    }
+    if (settingsStyle) {
+        SettingsDropdownField(
+            text = model.ifBlank { "Choose a model" },
+            open = open,
+            onClick = toggle,
+            modifier = modifier,
+            minWidth = 0.dp,
+            textColor = if (model.isBlank()) tc.td else null,
+            popup = popup,
+        )
+        return
+    }
     Box(
         modifier.fillMaxWidth().onGloballyPositioned { coords ->
             fieldWidth = with(density) { coords.size.width.toDp() }
@@ -890,13 +1010,7 @@ internal fun AiModelDropdown(
                 .clip(CORNER_SM)
                 .background(tc.p2, CORNER_SM)
                 .border(1.dp, tc.br, CORNER_SM),
-            onClick = {
-                if (System.currentTimeMillis() >= suppressToggleUntilMs) {
-                    val opening = !open
-                    open = opening
-                    if (opening && discovery == null) onDiscoverModels()
-                }
-            },
+            onClick = { toggle() },
         ) {
             Row(
                 Modifier.fillMaxSize().padding(horizontal = 10.dp),
@@ -915,99 +1029,21 @@ internal fun AiModelDropdown(
                 AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
             }
         }
-        if (open) {
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 32.dp.roundToPx() }),
-                onDismissRequest = {
-                    open = false
-                    suppressToggleUntilMs = System.currentTimeMillis() + 200
-                },
-                properties = PopupProperties(focusable = false),
-            ) {
-                // See the matching comment in AiProviderDropdown: Popup content stays registered
-                // with the ambient SelectionContainer unless explicitly opted out, which crashes a
-                // text-selection drag anywhere in the panel once this popup is open.
-                DisableSelection {
-                    Column(
-                        Modifier.width(fieldWidth)
-                            .background(tc.p, RoundedCornerShape(8.dp))
-                            .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                            .padding(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        HoverBox(
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                            onClick = onDiscoverModels,
-                        ) {
-                            AppText(
-                                "↻ Find models",
-                                color = tc.ac,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            )
-                        }
-                        when (discovery) {
-                            is ModelDiscoveryResult.Available -> if (discovery.models.isNotEmpty()) {
-                                discovery.models.forEach { item ->
-                                    val active = item.id == model
-                                    HoverBox(
-                                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                                        baseBg = if (active) tc.abg else Color.Transparent,
-                                        onClick = { open = false; onPickModel(item.id) },
-                                    ) {
-                                        AppText(
-                                            item.displayName,
-                                            color = if (active) tc.ac else tc.tx,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        )
-                                    }
-                                }
-                            } else {
-                                AppText(
-                                    "No models were returned.",
-                                    color = tc.td,
-                                    fontSize = 10.sp,
-                                    modifier = Modifier.padding(8.dp),
-                                )
-                            }
-                            is ModelDiscoveryResult.Unavailable -> AppText(
-                                discovery.message,
-                                color = tc.td,
-                                fontSize = 10.sp,
-                                maxLines = 3,
-                                modifier = Modifier.padding(8.dp),
-                            )
-                            null -> AppText("Finding models…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(8.dp))
-                        }
-                        Divider()
-                        Row(
-                            Modifier.fillMaxWidth().padding(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            InlineField(manualEntry, { manualEntry = it }, "Enter a model id", Modifier.weight(1f), fontSize = 11.sp)
-                            AppButton("Use", onClick = { open = false; onPickModel(manualEntry.trim()) }, modifier = Modifier.height(26.dp))
-                        }
-                    }
-                }
-            }
-        }
+        if (open) popup(fieldWidth, IntOffset(0, with(density) { 32.dp.roundToPx() }))
     }
 }
 
-/** Compact choice menu for Codex model-provided reasoning efforts. */
+/**
+ * Compact choice menu for Codex model-provided reasoning efforts. [settingsStyle] draws the closed field as the Settings pages'
+ * SettingsDropdownField (see AiProviderDropdown).
+ */
 @Composable
 internal fun AiReasoningEffortDropdown(
     efforts: List<String>,
     selected: String,
     onPick: (String) -> Unit,
     modifier: Modifier = Modifier,
+    settingsStyle: Boolean = false,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -1015,6 +1051,56 @@ internal fun AiReasoningEffortDropdown(
     var fieldWidth by remember { mutableStateOf(0.dp) }
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     val options = listOf("" to "Model default") + efforts.map { it to it.replaceFirstChar(Char::uppercase) }
+    val selectedLabel = options.firstOrNull { it.first == selected }?.second ?: "Model default"
+    val popup: @Composable (Dp, IntOffset) -> Unit = { width, popupOffset ->
+        Popup(
+            alignment = Alignment.TopStart,
+            offset = popupOffset,
+            onDismissRequest = {
+                open = false
+                suppressToggleUntilMs = System.currentTimeMillis() + 200
+            },
+            properties = PopupProperties(focusable = false),
+        ) {
+            DisableSelection {
+                Column(
+                    Modifier.width(width)
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    options.forEach { (value, label) ->
+                        val active = value == selected
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            onClick = { open = false; onPick(value) },
+                        ) {
+                            AppText(
+                                label,
+                                color = if (active) tc.ac else tc.tx,
+                                fontSize = 11.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (settingsStyle) {
+        SettingsDropdownField(
+            text = selectedLabel,
+            open = open,
+            onClick = { if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open },
+            modifier = modifier,
+            minWidth = 0.dp,
+            popup = popup,
+        )
+        return
+    }
     Box(
         modifier.fillMaxWidth().onGloballyPositioned { coords ->
             fieldWidth = with(density) { coords.size.width.toDp() }
@@ -1035,7 +1121,7 @@ internal fun AiReasoningEffortDropdown(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 AppText(
-                    options.firstOrNull { it.first == selected }?.second ?: "Model default",
+                    selectedLabel,
                     color = tc.tx,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
@@ -1045,44 +1131,7 @@ internal fun AiReasoningEffortDropdown(
                 AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
             }
         }
-        if (open) {
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 32.dp.roundToPx() }),
-                onDismissRequest = {
-                    open = false
-                    suppressToggleUntilMs = System.currentTimeMillis() + 200
-                },
-                properties = PopupProperties(focusable = false),
-            ) {
-                DisableSelection {
-                    Column(
-                        Modifier.width(fieldWidth)
-                            .background(tc.p, RoundedCornerShape(8.dp))
-                            .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                            .padding(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        options.forEach { (value, label) ->
-                            val active = value == selected
-                            HoverBox(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                                baseBg = if (active) tc.abg else Color.Transparent,
-                                onClick = { open = false; onPick(value) },
-                            ) {
-                                AppText(
-                                    label,
-                                    color = if (active) tc.ac else tc.tx,
-                                    fontSize = 11.sp,
-                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        if (open) popup(fieldWidth, IntOffset(0, with(density) { 32.dp.roundToPx() }))
     }
 }
 

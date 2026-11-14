@@ -23,6 +23,7 @@ import com.indagium.model.CustomIssueRule
 import com.indagium.ui.AppState
 import com.indagium.ui.LogPageTags
 import com.indagium.ui.NotesPageTags
+import com.indagium.ui.SETTINGS_EMPTY_STATE_TAG
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.SettingsPage
 import com.indagium.ui.SourcePageTags
@@ -180,6 +181,19 @@ class SettingsLogAndNotesPagesUiTest {
         rule.onNodeWithTag(SourcePageTags.SAVE_CATEGORIES).assertIsNotEnabled()
     }
 
+    @Test
+    fun issueCategoriesShowACompactEmptyStateInsteadOfAnEmptyListBox() {
+        val state = AppState()
+        state.updateSettings { it.copy(customIssueRules = emptyList()) }
+        openPage(state, SettingsPage.IssueCategories)
+        rule.onNodeWithTag(SETTINGS_EMPTY_STATE_TAG).performScrollTo().assertExists()
+        rule.onNodeWithText("No custom issue categories yet.").assertExists()
+
+        click(SourcePageTags.ADD_CATEGORY)
+        rule.onNodeWithTag(SETTINGS_EMPTY_STATE_TAG).assertDoesNotExist()
+        rule.onNodeWithTag("${SourcePageTags.CATEGORY_SWITCH_PREFIX}0").assertExists()
+    }
+
     // ---- Source code ----
 
     @Test
@@ -188,7 +202,7 @@ class SettingsLogAndNotesPagesUiTest {
         openPage(state, SettingsPage.SourceCode)
         assertGroups("Source folders", "Opening code", "Log wrappers")
         rule.onNodeWithText("Registered folders").assertExists()
-        rule.onNodeWithText("(no folders — register one to enable Show in code)").assertExists()
+        rule.onNodeWithText("No folders registered yet.").assertExists()
         rule.onNodeWithTag("editor-choice-dropdown").assertExists()
         rule.onNodeWithTag(SourcePageTags.EDITOR_RESCAN).assertExists()
         rule.onNodeWithText("Logging configurations").assertExists()
@@ -264,8 +278,7 @@ class SettingsLogAndNotesPagesUiTest {
     fun theCopyPageShowsItsThreeGroups() {
         val state = AppState()
         openPage(state, SettingsPage.CopyExport)
-        assertGroups("Copying", "Masking", "Exported notes")
-        rule.onNodeWithText("Include in copied log rows").assertExists()
+        assertGroups("Copying", "Included in copied rows", "Masking", "Exported notes")
         rule.onNodeWithText("Note format").assertExists()
         rule.onNodeWithText("Source line label").assertExists()
     }

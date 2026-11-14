@@ -8,12 +8,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
@@ -26,10 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.DEFAULT_INACTIVE_TAB_UNLOAD_MINUTES
@@ -47,7 +42,6 @@ private sealed interface ProfileNameRequest {
 /** Test tag of the "⋯" menu of the Workspace profile group, and the prefix of its entries (`-save`, `-import`, `-export`). */
 internal const val PROFILE_GROUP_MENU_TAG = "profile-group-menu"
 
-private val MINUTES_FIELD_WIDTH = 48.dp
 private const val INACTIVE_MINUTES_DIGITS = 5
 private const val DIMMED_ALPHA = 0.5f
 
@@ -277,34 +271,20 @@ private fun InactiveTabMemoryRow(state: AppState) {
         "Release log rows from reloadable tabs after they have been out of view. The displayed tab and compare panes stay loaded.",
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                Modifier.alpha(if (on) 1f else DIMMED_ALPHA),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AppText("after", color = tc.ts, fontSize = 11.sp)
-                BasicTextField(
-                    value = timeoutText,
-                    onValueChange = { value ->
-                        val digits = value.filter(Char::isDigit).take(INACTIVE_MINUTES_DIGITS)
-                        timeoutText = digits
-                        digits.toIntOrNull()?.takeIf { it > 0 }?.let { next ->
-                            state.updateSettings { it.copy(inactiveTabUnloadMinutes = next) }
-                        }
-                    },
-                    enabled = on,
-                    textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = MONO, textAlign = TextAlign.End),
-                    cursorBrush = SolidColor(tc.ac),
-                    singleLine = true,
-                    modifier = Modifier.width(MINUTES_FIELD_WIDTH).height(26.dp)
-                        .background(tc.bg, CORNER_SM)
-                        .border(1.dp, tc.br, CORNER_SM)
-                        .padding(horizontal = 7.dp)
-                        .testTag("inactive-tab-minutes"),
-                    decorationBox = { inner -> Box(contentAlignment = Alignment.CenterEnd, modifier = Modifier.fillMaxWidth().height(26.dp)) { inner() } },
-                )
-                AppText("min", color = tc.ts, fontSize = 11.sp)
-            }
+            AppText("after", color = tc.ts, fontSize = 11.sp, modifier = Modifier.alpha(if (on) 1f else DIMMED_ALPHA))
+            SettingsNumberField(
+                value = timeoutText,
+                onValueChange = { digits ->
+                    timeoutText = digits
+                    digits.toIntOrNull()?.takeIf { it > 0 }?.let { next ->
+                        state.updateSettings { it.copy(inactiveTabUnloadMinutes = next) }
+                    }
+                },
+                unit = "min",
+                maxDigits = INACTIVE_MINUTES_DIGITS,
+                enabled = on,
+                testTag = "inactive-tab-minutes",
+            )
             Spacer(Modifier.width(2.dp))
             SettingsSwitch(
                 checked = on,

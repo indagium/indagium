@@ -180,6 +180,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                         }
                     },
                     modifier = Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.PROVIDER_PICKER),
+                    settingsStyle = true,
                 )
                 HoverBox(
                     modifier = Modifier.size(ADD_PROVIDER_SIZE).clip(RoundedCornerShape(6.dp))
@@ -190,12 +191,12 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 }
             }
         }
-        SettingsStackedRow("Provider type", "Anthropic, OpenAI-compatible, or a local Codex / Claude Code account.") {
-            SegmentedControl(
-                options = AiProviderKind.entries.map { it.label },
-                selectedIndices = setOf(AiProviderKind.entries.indexOf(kind)),
-                onToggle = { index ->
-                    val selectedKind = AiProviderKind.entries[index]
+        SettingsRow("Provider type", "Anthropic, OpenAI-compatible, or a local Codex / Claude Code account.") {
+            SettingsDropdown(
+                options = AiProviderKind.entries,
+                selected = kind,
+                label = { it.label },
+                onSelect = { selectedKind ->
                     if (selectedKind != kind) {
                         val preset = defaultAiProviderProfile(selectedKind)
                         kind = selectedKind
@@ -207,28 +208,34 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                         ackState = endpoint.trim() to false
                     }
                 },
-                modifier = Modifier.fillMaxWidth().testTag(AiPageTags.PROVIDER_TYPE),
-                fillWidth = true,
-                weightByLabel = true,
+                testTag = AiPageTags.PROVIDER_TYPE,
+                minWidth = PROVIDER_FIELD_WIDTH,
+                optionTag = { "${AiPageTags.PROVIDER_TYPE}-${it.name}" },
             )
         }
         SettingsRow("Profile name", "How this profile is called in the AI panel's provider picker.") {
-            InlineField(name, { name = it }, "LM Studio (local)", Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.PROFILE_NAME), fontSize = 12.sp)
+            SettingsTextField(
+                name,
+                { name = it },
+                Modifier.width(PROVIDER_FIELD_WIDTH),
+                placeholder = "LM Studio (local)",
+                testTag = AiPageTags.PROFILE_NAME,
+            )
         }
         if (kind.usesHttpEndpoint) {
             SettingsRow("Endpoint", "Base URL of an HTTP AI provider.") {
-                InlineField(
+                SettingsTextField(
                     endpoint,
                     { endpoint = it },
-                    "https://api.example.com/v1",
-                    Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.ENDPOINT),
-                    fontSize = 12.sp,
+                    Modifier.width(PROVIDER_FIELD_WIDTH),
+                    placeholder = "https://api.example.com/v1",
+                    testTag = AiPageTags.ENDPOINT,
                 )
             }
         } else {
             SettingsStackedRow(
-                "CLI executable (optional)",
-                "Uses a local CLI account already signed in on this computer.\n" +
+                "CLI executable",
+                "Optional. Uses a local CLI account already signed in on this computer.\n" +
                     if (kind == AiProviderKind.CODEX_ACCOUNT) {
                         "Choose a CLI executable, not an app bundle. On macOS Detect can use ChatGPT's bundled Codex CLI."
                     } else {
@@ -237,12 +244,11 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        InlineField(
+                        SettingsTextField(
                             executablePath,
                             { executablePath = it },
-                            if (kind == AiProviderKind.CODEX_ACCOUNT) "codex" else "claude",
                             Modifier.weight(1f),
-                            fontSize = 12.sp,
+                            placeholder = if (kind == AiProviderKind.CODEX_ACCOUNT) "codex" else "claude",
                         )
                         AppButton(
                             "Detect",
@@ -275,9 +281,8 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             }
         }
         SettingsRow(
-            if (kind.usesHttpEndpoint) "Model (optional)" else "Model (optional override)",
+            "Model",
             modelDescription(kind, discoveredModel != null && reasoningEfforts.isEmpty()),
-            anchor = "Model",
         ) {
             AiModelDropdown(
                 model = model,
@@ -297,6 +302,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                     if (reasoningEffort !in supportedEfforts) reasoningEffort = ""
                 },
                 modifier = Modifier.width(MODEL_FIELD_WIDTH),
+                settingsStyle = true,
             )
         }
         if (showReasoningDropdown) {
@@ -306,18 +312,19 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                     selected = reasoningEffort,
                     onPick = { reasoningEffort = it },
                     modifier = Modifier.width(EFFORT_FIELD_WIDTH),
+                    settingsStyle = true,
                 )
             }
         }
         if (kind.usesApiKey) {
             SettingsRow("API key", "For this session only; it is never saved.") {
-                InlineField(
+                SettingsTextField(
                     apiKey,
                     { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
-                    "Required for cloud API providers",
-                    Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.API_KEY),
-                    fontSize = 12.sp,
+                    Modifier.width(PROVIDER_FIELD_WIDTH),
+                    placeholder = "Required for cloud API providers",
                     visualTransformation = PasswordVisualTransformation(),
+                    testTag = AiPageTags.API_KEY,
                 )
             }
         }
@@ -480,9 +487,9 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
 private fun modelDescription(kind: AiProviderKind, noConfigurableEffort: Boolean): String = buildString {
     append(
         if (kind.usesHttpEndpoint) {
-            "The model this profile asks for. Open the list to detect what the provider offers."
+            "Optional. The model this profile asks for. Open the list to detect what the provider offers."
         } else {
-            "Leave blank to use your account's default model."
+            "Optional override. Leave blank to use your account's default model."
         },
     )
     if (noConfigurableEffort) append("\nThis model does not expose configurable reasoning effort.")
@@ -500,7 +507,7 @@ private fun modelDescription(kind: AiProviderKind, noConfigurableEffort: Boolean
 internal fun CustomAiCommandsSettingsSection(state: AppState) {
     var pendingDeleteCommand by remember { mutableStateOf<CustomAiCommand?>(null) }
     SettingsGroup("Commands") {
-        SettingsRow("Add command", "Create a reusable prompt invoked as a button in Actions or by typing /name in the chat box.") {
+        SettingsRow("Add command", "Reusable prompts for Actions and /name in the chat box.") {
             AppButton(
                 "Add command",
                 onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
@@ -509,7 +516,7 @@ internal fun CustomAiCommandsSettingsSection(state: AppState) {
             )
         }
         if (state.customAiCommands.isEmpty()) {
-            SettingsNoteRow("(none yet — add one to invoke it as a button in Actions or by typing /name in the chat box)")
+            SettingsEmptyState("No commands yet.", asRow = true)
         } else {
             state.customAiCommands.forEach { command ->
                 SettingsRow("/${command.name}", command.promptTemplate.lineSequence().firstOrNull().orEmpty().ifBlank { null }) {
@@ -604,8 +611,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
 
     val engineChoices = VoiceRecognitionEngines.availableChoices()
     SettingsGroup("Dictation") {
-        SettingsNoteRow("Dictate into the AI composer using the default microphone. Audio stays local; AI providers receive only the text you choose to send.")
-        SettingsStackedRow("Recognition engine", VoiceRecognitionEngines.description(voiceSettings.recognitionEngine)) {
+        SettingsRow("Recognition engine", VoiceRecognitionEngines.description(voiceSettings.recognitionEngine)) {
             SegmentedControl(
                 options = engineChoices.map { it.label },
                 selectedIndices = setOf(engineChoices.indexOf(voiceSettings.recognitionEngine).coerceAtLeast(0)),
@@ -614,8 +620,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                         settings.copy(voiceInput = settings.voiceInput.copy(recognitionEngine = engineChoices[index]))
                     }
                 },
-                modifier = Modifier.fillMaxWidth().testTag(AiPageTags.VOICE_ENGINE),
-                fillWidth = engineChoices.size <= 2,
+                modifier = Modifier.testTag(AiPageTags.VOICE_ENGINE),
             )
         }
         if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine, selectedModel)) {
@@ -653,17 +658,18 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
     }
 
     SettingsGroup("Language") {
-        SettingsStackedRow(
-            "Recognition language",
-            if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
-                "Windows Speech needs a matching installed legacy recognizer. For Ukrainian or any unavailable language, choose Local Whisper."
-            } else {
-                "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias."
-            },
-        ) {
-            val addableLanguages = VoiceLanguageCatalog.additional.filter { it.code !in voiceSettings.recognitionLanguageCodes }
-            val removableLanguages = voiceSettings.recognitionLanguageCodes.filter { code -> VoiceLanguageCatalog.defaults.none { it.code == code } }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        val addableLanguages = VoiceLanguageCatalog.additional.filter { it.code !in voiceSettings.recognitionLanguageCodes }
+        val removableLanguages = voiceSettings.recognitionLanguageCodes.filter { code -> VoiceLanguageCatalog.defaults.none { it.code == code } }
+        // One card row: the picker on the right of the name like every other row, and under it the part that adds or removes languages.
+        Column(Modifier.fillMaxWidth()) {
+            SettingsRow(
+                "Recognition language",
+                if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
+                    "Windows Speech needs a matching installed legacy recognizer. For Ukrainian or any unavailable language, choose Local Whisper."
+                } else {
+                    "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias."
+                },
+            ) {
                 SegmentedControl(
                     options = voiceSettings.recognitionLanguageCodes.map(VoiceLanguageCatalog::label),
                     selectedIndices = setOf(voiceSettings.recognitionLanguageCodes.indexOf(voiceSettings.selectedRecognitionLanguageCode).coerceAtLeast(0)),
@@ -673,52 +679,57 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                             settings.copy(voiceInput = settings.voiceInput.copy(selectedRecognitionLanguageCode = code))
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().testTag(AiPageTags.VOICE_LANGUAGE),
-                    fillWidth = voiceSettings.recognitionLanguageCodes.size <= 3,
+                    modifier = Modifier.testTag(AiPageTags.VOICE_LANGUAGE),
                 )
-                if (addableLanguages.isNotEmpty()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        InlineField(
-                            value = languageToAdd,
-                            onValue = { languageToAdd = it.lowercase().filter(Char::isLetter).take(LANGUAGE_CODE_MAX) },
-                            placeholder = "Language code, e.g. ru",
-                            modifier = Modifier.width(LANGUAGE_CODE_FIELD_WIDTH),
+            }
+            if (addableLanguages.isNotEmpty() || removableLanguages.isNotEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (addableLanguages.isNotEmpty()) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            SettingsTextField(
+                                value = languageToAdd,
+                                onValueChange = { languageToAdd = it.lowercase().filter(Char::isLetter).take(LANGUAGE_CODE_MAX) },
+                                modifier = Modifier.width(LANGUAGE_CODE_FIELD_WIDTH),
+                                placeholder = "Language code, e.g. ru",
+                                onSubmit = { addLanguage(addableLanguages) },
+                            )
+                            AppButton(
+                                "Add language",
+                                onClick = { addLanguage(addableLanguages) },
+                                enabled = addableLanguages.any { it.code == languageToAdd },
+                            )
+                        }
+                        AppText(
+                            "Additional supported codes: ${addableLanguages.joinToString { "${it.label} (${it.code})" }}",
+                            color = tc.ts,
                             fontSize = 11.sp,
-                            onSubmit = { addLanguage(addableLanguages) },
-                        )
-                        AppButton(
-                            "Add language",
-                            onClick = { addLanguage(addableLanguages) },
-                            enabled = addableLanguages.any { it.code == languageToAdd },
+                            maxLines = 3,
                         )
                     }
-                    AppText(
-                        "Additional supported codes: ${addableLanguages.joinToString { "${it.label} (${it.code})" }}",
-                        color = tc.ts,
-                        fontSize = 11.sp,
-                        maxLines = 3,
-                    )
-                }
-                if (removableLanguages.isNotEmpty()) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        removableLanguages.forEach { code ->
-                            AppButton(
-                                "Remove ${VoiceLanguageCatalog.label(code)}",
-                                onClick = {
-                                    state.updateSettings { settings ->
-                                        val languages = settings.voiceInput.recognitionLanguageCodes - code
-                                        settings.copy(
-                                            voiceInput = settings.voiceInput.copy(
-                                                recognitionLanguageCodes = languages,
-                                                selectedRecognitionLanguageCode = settings.voiceInput.selectedRecognitionLanguageCode
-                                                    .takeIf { it in languages } ?: "auto",
-                                            ),
-                                        )
-                                    }
-                                },
-                                variant = ButtonVariant.Ghost,
-                                horizontalPadding = 7.dp,
-                            )
+                    if (removableLanguages.isNotEmpty()) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            removableLanguages.forEach { code ->
+                                AppButton(
+                                    "Remove ${VoiceLanguageCatalog.label(code)}",
+                                    onClick = {
+                                        state.updateSettings { settings ->
+                                            val languages = settings.voiceInput.recognitionLanguageCodes - code
+                                            settings.copy(
+                                                voiceInput = settings.voiceInput.copy(
+                                                    recognitionLanguageCodes = languages,
+                                                    selectedRecognitionLanguageCode = settings.voiceInput.selectedRecognitionLanguageCode
+                                                        .takeIf { it in languages } ?: "auto",
+                                                ),
+                                            )
+                                        }
+                                    },
+                                    variant = ButtonVariant.Ghost,
+                                    horizontalPadding = 7.dp,
+                                )
+                            }
                         }
                     }
                 }

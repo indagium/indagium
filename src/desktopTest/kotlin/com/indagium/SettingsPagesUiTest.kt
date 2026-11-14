@@ -43,7 +43,7 @@ class SettingsPagesUiTest {
      * block (a search result opens it, see SettingsSearchUiTest), and the two provider rows that depend on the provider kind and on
      * the models the provider reported (CLI executable replaces Endpoint for account providers).
      */
-    private val stateDependentAnchors = SEASONAL_ANCHORS + setOf("CLI executable (optional)", "Reasoning effort")
+    private val stateDependentAnchors = SEASONAL_ANCHORS + setOf("CLI executable", "Reasoning effort")
 
     /** Opens [page] the way a user does: a nav click, then for a drill-in sub-page the row of its parent that leads to it. */
     private fun openPage(page: SettingsPage) {

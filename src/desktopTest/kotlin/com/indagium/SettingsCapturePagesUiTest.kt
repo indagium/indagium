@@ -254,7 +254,7 @@ class SettingsCapturePagesUiTest {
         openCapturePage(state)
         drillInto(SettingsPage.CaptureTools)
         val shown = anchorsOnScreen()
-        listOf("Tools", "ADB path", "scrcpy path (optional — native mirror window only)", "Recheck tools").forEach {
+        listOf("Tools", "ADB path", "scrcpy path", "Recheck tools").forEach {
             assertTrue(it in shown, "$it on the Tools page")
         }
         rule.onNodeWithText("Recheck tools").assertExists()

@@ -20,6 +20,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.doubleClick
@@ -70,6 +72,9 @@ class ChromeScaffoldUiTest {
     private companion object {
         // Pixel rounding of a dp position in a node's bounds.
         const val NEAR_DP = 1.5f
+
+        // Longer than SettingsDropdown's 200 ms guard against reopening right after a dismiss.
+        const val REOPEN_GUARD_WAIT_MS = 250L
 
         // A card bar: 6 dp margin (the log view's host padding) from the window edge and at both ends, 3 dp padding inside it; its region is 6 + 2 x 2 dp
         // thicker than a flat bar's.
@@ -135,6 +140,24 @@ class ChromeScaffoldUiTest {
     private fun bounds(tag: String): DpRect = rule.onNodeWithTag(tag).getBoundsInRoot()
 
     private fun exists(tag: String): Boolean = rule.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+
+    /** Opens the Placement dropdown of the Settings page and clicks the option for [placement]; a disabled option leaves the list open. */
+    private fun pickPlacement(placement: ToolbarPlacement) {
+        rule.onNodeWithTag(TOOLBAR_PLACEMENT_TAG, useUnmergedTree = true).performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("toolbar-placement-${placement.name}", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+    }
+
+    /** Closes the Placement list again by clicking its field, when an option the click did not choose left it open. */
+    private fun closePlacementList() {
+        if (exists("toolbar-placement-WITH_TABS_END")) {
+            rule.onNodeWithTag(TOOLBAR_PLACEMENT_TAG, useUnmergedTree = true).performClick()
+            rule.waitForIdle()
+            // A click on the field right after a dismiss is ignored for 200 ms (the dropdown's reopen guard); wait it out.
+            Thread.sleep(REOPEN_GUARD_WAIT_MS)
+        }
+    }
 
     private fun assertNear(expected: Float, actual: Float, message: String) = assertEquals(expected, actual, NEAR_DP, message)
 
@@ -744,24 +767,24 @@ class ChromeScaffoldUiTest {
         }
         rule.waitForIdle()
         // Beside tabs needs a vertical strip: with the strip on top a click on it does nothing.
-        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performScrollTo().performClick()
-        rule.waitForIdle()
+        pickPlacement(ToolbarPlacement.BESIDE_TABS)
         assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
+        // The option stays in the list, disabled, with the reason beside it.
+        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).assertIsNotEnabled()
+        rule.onNodeWithText("(needs left or right tabs)").assertExists()
+        closePlacementList()
         // The strip's position, in the order Top, Left, Right, Bottom. Scoped to that control: the
         // Tabs section's "Close button position" also offers a "Left".
         rule.onNode(hasText("Left") and hasAnyAncestor(hasTestTag("tab-position"))).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(TabStripPosition.LEFT, state.settings.tabStripPosition)
-        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performScrollTo().performClick()
-        rule.waitForIdle()
+        pickPlacement(ToolbarPlacement.BESIDE_TABS)
         assertEquals(ToolbarPlacement.BESIDE_TABS, state.settings.toolbarPlacement)
-        rule.onNodeWithTag("toolbar-placement-WITH_TABS_START", useUnmergedTree = true).performScrollTo().performClick()
-        rule.waitForIdle()
+        pickPlacement(ToolbarPlacement.WITH_TABS_START)
         assertEquals(ToolbarPlacement.WITH_TABS_START, state.settings.toolbarPlacement)
         // The edge appears only for Own edge.
         assertFalse(exists("toolbar-edge"))
-        rule.onNodeWithTag("toolbar-placement-OWN_EDGE", useUnmergedTree = true).performScrollTo().performClick()
-        rule.waitForIdle()
+        pickPlacement(ToolbarPlacement.OWN_EDGE)
         assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
         rule.onNodeWithTag("toolbar-edge").assertExists()
         // "Bottom" is both a tab position and an edge choice; the edge's is the second.
@@ -772,6 +795,39 @@ class ChromeScaffoldUiTest {
         rule.onNodeWithTag("chrome-lock", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertTrue(state.settings.chromeLocked)
+    }
+
+    @Test
+    fun theToolbarPlacementDropdownSetsThePlacementAndKeepsBesideTabsDisabledWithItsNoteUntilTheStripIsVertical() {
+        state = newState()
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Column(Modifier.width(700.dp).verticalScroll(rememberScrollState())) { TabsAppearanceSettings(state) }
+            }
+        }
+        rule.waitForIdle()
+        // One field, not a radio per placement: the options exist only while the list is open.
+        assertFalse(exists("toolbar-placement-OWN_EDGE"))
+        rule.onNodeWithText("With tabs · end (default)").assertExists()
+
+        rule.onNodeWithTag(TOOLBAR_PLACEMENT_TAG, useUnmergedTree = true).performScrollTo().performClick()
+        rule.waitForIdle()
+        ToolbarPlacement.entries.forEach { assertTrue(exists("toolbar-placement-${it.name}"), "no option for $it") }
+        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).assertIsNotEnabled()
+        rule.onNodeWithText("(needs left or right tabs)").assertExists()
+        rule.onNodeWithText("(a bar where there are no tiles)").assertExists()
+        rule.onNodeWithTag("toolbar-placement-OWN_EDGE", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
+        rule.onNodeWithText("Own edge").assertExists()
+
+        // With a vertical strip the option is enabled and its note is gone.
+        state.updateSettings { it.copy(tabStripPosition = TabStripPosition.LEFT) }
+        rule.waitForIdle()
+        rule.onNodeWithTag(TOOLBAR_PLACEMENT_TAG, useUnmergedTree = true).performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).assertIsEnabled()
+        rule.onNodeWithText("(needs left or right tabs)").assertDoesNotExist()
     }
 
     @Test
@@ -802,13 +858,11 @@ class ChromeScaffoldUiTest {
         assertFalse(exists("toolbar-order"))
         assertTrue(exists("toolbar-align"))
         // In the log view layout: remembers the placement it replaces; the own-bar controls have nothing to say.
-        rule.onNodeWithTag("toolbar-placement-IN_LAYOUT", useUnmergedTree = true).performScrollTo().performClick()
-        rule.waitForIdle()
+        pickPlacement(ToolbarPlacement.IN_LAYOUT)
         assertEquals(ToolbarPlacement.IN_LAYOUT, state.settings.toolbarPlacement)
         assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarFallbackPlacement)
         assertFalse(exists("toolbar-align"))
-        rule.onNodeWithTag("toolbar-placement-WITH_TABS_END", useUnmergedTree = true).performScrollTo().performClick()
-        rule.waitForIdle()
+        pickPlacement(ToolbarPlacement.WITH_TABS_END)
         assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
     }
 }

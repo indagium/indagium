@@ -1,17 +1,9 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,11 +11,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
@@ -69,7 +57,6 @@ internal fun visibleCaptureBuffers(settings: CaptureSettings): List<String> =
 // fields are flagged, and the row shapes for numeric and path fields. A field the user has typed out of range stays visible as typed, with a
 // red note, and is reported by [invalidCaptureSettings] so a capture refuses to start with it.
 
-private val NUMBER_FIELD_WIDTH = 72.dp
 private const val NUMBER_FIELD_MAX_DIGITS = 12
 
 /** Test tag of the text field of the capture row with search anchor [anchor]. */
@@ -131,27 +118,18 @@ private fun CaptureNumberRowCore(
     valid: Boolean,
     onText: (String) -> Unit,
 ) {
-    val tc = tc()
     SettingsRow(label, description, anchor = anchor) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (!valid) AppText(OUT_OF_RANGE_NOTE, color = DANGER_RED, fontSize = 11.sp)
-            BasicTextField(
+            SettingsNumberField(
                 value = text,
-                onValueChange = { onText(it.filter(Char::isDigit).take(NUMBER_FIELD_MAX_DIGITS)) },
-                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = MONO, textAlign = TextAlign.End),
-                cursorBrush = SolidColor(tc.ac),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.width(NUMBER_FIELD_WIDTH).height(26.dp)
-                    .background(tc.bg, CORNER_SM)
-                    .border(1.dp, if (valid) tc.br else DANGER_RED, CORNER_SM)
-                    .padding(horizontal = 7.dp)
-                    .testTag(captureFieldTag(anchor)),
-                decorationBox = { inner ->
-                    Box(contentAlignment = Alignment.CenterEnd, modifier = Modifier.fillMaxWidth().height(26.dp)) { inner() }
-                },
+                onValueChange = onText,
+                unit = unit,
+                unitWidth = UNIT_COLUMN_WIDTH,
+                maxDigits = NUMBER_FIELD_MAX_DIGITS,
+                invalid = !valid,
+                testTag = captureFieldTag(anchor),
             )
-            AppText(unit, color = tc.ts, fontSize = 11.sp, modifier = Modifier.width(UNIT_COLUMN_WIDTH))
         }
     }
 }
@@ -179,8 +157,14 @@ internal fun CaptureTextRow(
     SettingsStackedRow(label, description, anchor = anchor) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                InlineField(value, onValue, modifier = Modifier.weight(1f).testTag(captureFieldTag(anchor)))
-                onBrowse?.let { AppButton("Browse…", it, ButtonVariant.Secondary) }
+                SettingsTextField(
+                    value,
+                    onValue,
+                    modifier = Modifier.weight(1f),
+                    invalid = invalid,
+                    testTag = captureFieldTag(anchor),
+                )
+                onBrowse?.let { AppButton("Browse", it, ButtonVariant.Secondary) }
             }
             if (invalid) AppText(invalidMessage, color = DANGER_RED, fontSize = 11.sp)
             effectivePath?.let { AppText("Auto-detected: $it", color = tc.ts, fontSize = 10.sp, fontFamily = MONO) }

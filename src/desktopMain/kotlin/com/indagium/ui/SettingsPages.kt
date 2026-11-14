@@ -160,7 +160,7 @@ internal enum class SettingsPage(
     ),
     VoiceInput(
         "Voice input", Icons.Outlined.Mic, SettingsGroupKind.Ai,
-        "Dictation engine, language and local model.",
+        "Dictate into the AI composer using the default microphone. Audio stays local; AI providers receive only the text you choose to send.",
     ),
     TestRuns(
         "Test runs", Icons.Outlined.Science, SettingsGroupKind.Testing,

@@ -8,6 +8,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -79,6 +81,39 @@ class SettingsDropdownUiTest {
         rule.onNodeWithTag("pick-alpha").assertExists()
         rule.onNodeWithTag("pick-gamma").assertExists()
         rule.onNodeWithTag("dd-option-0").assertDoesNotExist()
+    }
+
+    @Test
+    fun aDisabledOptionShowsItsNoteAndCannotBePicked() {
+        val picked = mutableListOf<String>()
+        rule.setContent {
+            SettingsDropdown(
+                options = choices,
+                selected = "alpha",
+                label = { it },
+                onSelect = { picked += it },
+                testTag = "dd",
+                isEnabled = { it != "beta" },
+                optionNote = { if (it == "beta") "(not available)" else null },
+            )
+        }
+        rule.onNodeWithTag("dd").performClick()
+        rule.waitForIdle()
+
+        // Still listed, dimmed, with the reason, and reported as disabled.
+        rule.onNodeWithText("(not available)").assertExists()
+        rule.onNodeWithTag("dd-option-1").assertIsNotEnabled()
+        rule.onNodeWithTag("dd-option-2").assertIsEnabled()
+
+        rule.onNodeWithTag("dd-option-1").performClick()
+        rule.waitForIdle()
+        assertEquals(emptyList(), picked)
+        rule.onNodeWithTag("dd-option-1").assertExists()
+
+        rule.onNodeWithTag("dd-option-2").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("gamma"), picked)
+        rule.onNodeWithTag("dd-option-1").assertDoesNotExist()
     }
 
     @Test

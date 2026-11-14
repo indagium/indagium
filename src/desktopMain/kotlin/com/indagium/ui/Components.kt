@@ -1711,7 +1711,14 @@ internal fun formatByteSize(bytes: Long): String {
 }
 
 @Composable
-internal fun ListStepper(options: List<Int>, value: Int, onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
+internal fun ListStepper(
+    options: List<Int>,
+    value: Int,
+    onChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    /** How the shown value reads, e.g. "12 px"; the bare number by default. */
+    format: (Int) -> String = Int::toString,
+) {
     val tc = tc()
     val index = options.indexOf(value).coerceAtLeast(0)
     Row(
@@ -1723,7 +1730,7 @@ internal fun ListStepper(options: List<Int>, value: Int, onChange: (Int) -> Unit
         StepperButton("−", enabled = index > 0, onClick = { onChange(options[(index - 1).coerceAtLeast(0)]) })
         Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
         Box(Modifier.width(44.dp).height(28.dp), contentAlignment = Alignment.Center) {
-            AppText("$value", color = tc.tx, fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Medium)
+            AppText(format(value), color = tc.tx, fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Medium)
         }
         Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
         StepperButton("+", enabled = index < options.lastIndex, onClick = { onChange(options[(index + 1).coerceAtMost(options.lastIndex)]) })

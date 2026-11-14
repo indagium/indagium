@@ -154,7 +154,7 @@ class SettingsSearchTest {
         assertEquals(SettingsGroupKind.Testing, SettingsPage.TestRuns.group)
         assertTrue("Access token" in labels("keychain"), labels("keychain").toString())
         assertTrue("Tracker MCP URL" in labels("mcp url"), labels("mcp url").toString())
-        assertTrue("Issue instructions (prompt)" in labels("project key"), labels("project key").toString())
+        assertTrue("Issue instructions" in labels("project key"), labels("project key").toString())
         assertTrue("Test connection" in labels("connect"), labels("connect").toString())
         assertTrue("Default judge" in labels("judge"), labels("judge").toString())
         assertTrue("Edition" in labels("suites"), labels("suites").toString())
