@@ -101,6 +101,9 @@ internal fun SettingsDialog(
     var aiProviderGuard by remember { mutableStateOf<AiProviderGuard?>(null) }
     var pendingPageSwitch by remember { mutableStateOf<SettingsPage?>(null) }
     var pendingClose by remember { mutableStateOf(false) }
+    // Set when the close prompt came from the footer's "Setup assistant…": Save or Discard then start the assistant (which closes
+    // Settings itself) instead of only closing Settings. Cancel and every other path clear it.
+    var setupAssistantAfterClose by remember { mutableStateOf(false) }
     var guardSaveError by remember { mutableStateOf<String?>(null) }
 
     // Returns false when the switch was deferred behind the unsaved-changes prompt.
@@ -298,6 +301,7 @@ internal fun SettingsDialog(
                 onSetupAssistant = {
                     if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
                         requestClose()
+                        setupAssistantAfterClose = true
                     } else {
                         state.rerunSetupAssistant()
                     }
@@ -339,28 +343,35 @@ internal fun SettingsDialog(
     }
 
     if (pendingClose) {
+        // Leaves Settings the way the prompt was asked for: the setup assistant when it came from the footer button, else a plain close.
+        fun finishClose() {
+            pendingClose = false
+            guardSaveError = null
+            if (setupAssistantAfterClose) {
+                setupAssistantAfterClose = false
+                state.rerunSetupAssistant()
+            } else {
+                onDismiss()
+            }
+        }
+
+        fun cancelClose() {
+            pendingClose = false
+            guardSaveError = null
+            setupAssistantAfterClose = false
+        }
         SettingsConfirmDialog(
             title = "Save changes to ${aiProviderGuard?.profileName.orEmpty()}?",
             message = "You changed this provider's settings without saving. Save them before closing Settings?",
             error = guardSaveError,
-            onDismissRequest = { pendingClose = false; guardSaveError = null },
+            onDismissRequest = ::cancelClose,
         ) {
             DialogActionButton("Save", active = true) {
                 val err = aiProviderGuard?.save?.invoke()
-                if (err == null) {
-                    pendingClose = false
-                    guardSaveError = null
-                    onDismiss()
-                } else {
-                    guardSaveError = err
-                }
+                if (err == null) finishClose() else guardSaveError = err
             }
-            DialogActionButton("Discard", active = false, danger = true) {
-                pendingClose = false
-                guardSaveError = null
-                onDismiss()
-            }
-            DialogActionButton("Cancel", active = false) { pendingClose = false; guardSaveError = null }
+            DialogActionButton("Discard", active = false, danger = true) { finishClose() }
+            DialogActionButton("Cancel", active = false) { cancelClose() }
         }
     }
 }

@@ -217,6 +217,67 @@ class SettingsAiTestingSystemPagesUiTest {
     }
 
     @Test
+    fun setupAssistantWithADirtyDraftStartsTheAssistantAfterSave() {
+        val state = newState()
+        var dismissed = 0
+        openPage(state, SettingsPage.AiProviders, onDismiss = { dismissed++ })
+        rule.onNodeWithTag(AiPageTags.PROFILE_NAME).performScrollTo().performTextInput("-edited")
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("settings-footer-setup-assistant").performClick()
+        rule.waitForIdle()
+        assertFalse(state.setupAssistantOpen, "the assistant waits for the answer")
+        rule.onNodeWithText("Save").performClick()
+        rule.waitForIdle()
+
+        assertTrue(state.settings.aiProviderProfiles.any { "-edited" in it.displayName })
+        assertTrue(state.setupAssistantOpen)
+        assertFalse(state.settingsOpen)
+        assertEquals(0, dismissed, "the assistant closes Settings itself")
+    }
+
+    @Test
+    fun setupAssistantWithADirtyDraftStartsTheAssistantAfterDiscard() {
+        val state = newState()
+        val namesBefore = state.settings.aiProviderProfiles.map { it.displayName }
+        openPage(state, SettingsPage.AiProviders)
+        rule.onNodeWithTag(AiPageTags.PROFILE_NAME).performScrollTo().performTextInput("-edited")
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("settings-footer-setup-assistant").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Discard").performClick()
+        rule.waitForIdle()
+
+        assertEquals(namesBefore, state.settings.aiProviderProfiles.map { it.displayName })
+        assertTrue(state.setupAssistantOpen)
+    }
+
+    @Test
+    fun cancellingTheSetupAssistantPromptStaysOnProvidersAndALaterDoneOnlyCloses() {
+        val state = newState()
+        var dismissed = 0
+        openPage(state, SettingsPage.AiProviders, onDismiss = { dismissed++ })
+        rule.onNodeWithTag(AiPageTags.PROFILE_NAME).performScrollTo().performTextInput("-edited")
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("settings-footer-setup-assistant").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Cancel").performClick()
+        rule.waitForIdle()
+        assertFalse(state.setupAssistantOpen)
+        rule.onNodeWithTag(AiPageTags.PROFILE_NAME).assertExists()
+
+        // The cancelled request is forgotten: Done's own prompt only closes Settings.
+        rule.onNodeWithTag("settings-done").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Discard").performClick()
+        rule.waitForIdle()
+        assertEquals(1, dismissed)
+        assertFalse(state.setupAssistantOpen)
+    }
+
+    @Test
     fun aCleanProviderPageSwitchesAndClosesWithoutAPrompt() {
         val state = newState()
         var dismissed = 0
