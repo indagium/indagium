@@ -37,7 +37,7 @@ private fun general() = listOf(
     ),
     entry(
         SettingsPage.General, "Inactive tab memory",
-        "Release rows from inactive reloadable log tabs after a configurable number of minutes; Off disables it.",
+        "Release rows from inactive reloadable log tabs after a configurable number of minutes; switch it off to disable it.",
         listOf("memory", "ram", "unload", "idle", "inactive tabs", "large logs", "timeout", "off"),
     ),
     entry(
@@ -121,8 +121,8 @@ private fun appearanceShapes() = listOf(
     ),
     entry(
         SettingsPage.Appearance, "Toolbar shape",
-        "Corners of the toolbar's button groups and the Layout menu button: theme default, square, soft, rounded or round (a capsule).",
-        listOf("toolbar", "buttons", "menu buttons", "corners", "rounded", "square", "round", "capsule", "pill"),
+        "Corners of the toolbar's button groups and the Layout menu button: same as tiles, theme default, square, soft, rounded or round (a capsule).",
+        listOf("toolbar", "buttons", "menu buttons", "corners", "rounded", "square", "round", "capsule", "pill", "same as tiles"),
     ),
 )
 
@@ -137,14 +137,6 @@ private fun appearance() = buildList {
     add(
         entry(
             SettingsPage.Appearance,
-            "Fallback log family",
-            "Default monospace or proportional log text when no system family is selected.",
-            listOf("typeface", "mono", "font family"),
-        ),
-    )
-    add(
-        entry(
-            SettingsPage.Appearance,
             "Interface font",
             "Search and preview an installed system font for controls and interface text.",
             listOf("typeface", "ui", "font family"),
@@ -154,8 +146,8 @@ private fun appearance() = buildList {
         entry(
             SettingsPage.Appearance,
             "Log font",
-            "Search and preview an installed system font for log rows and highlighter previews.",
-            listOf("typeface", "font family", "monospace"),
+            "Monospace or proportional default, or an installed system font, for log rows and highlighter previews.",
+            listOf("typeface", "font family", "monospace", "proportional", "mono", "fallback log family", "default font"),
         ),
     )
     add(

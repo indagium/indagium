@@ -75,6 +75,8 @@ private val DROPDOWN_FIELD_HEIGHT = 26.dp
 private val DROPDOWN_POPUP_OFFSET = 30.dp
 private val DROPDOWN_POPUP_MAX_HEIGHT = 320.dp
 private val DRILL_SUMMARY_MAX_WIDTH = 320.dp
+private val OVERFLOW_TARGET = 22.dp
+private val OVERFLOW_MENU_MIN_WIDTH = 190.dp
 
 /** How long after a dismiss a click on the field is ignored: the popup's outside-click dismiss and the field's own click fire for the same press. */
 private const val DROPDOWN_REOPEN_GUARD_MS = 200L
@@ -131,6 +133,7 @@ internal fun SettingsRow(
     indent: Boolean = false,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    descriptionTag: String? = null,
     control: @Composable () -> Unit,
 ) {
     val tc = tc()
@@ -145,10 +148,131 @@ internal fun SettingsRow(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 AppText(label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (!description.isNullOrBlank()) {
-                    AppText(description, color = tc.ts, fontSize = 11.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                    AppText(
+                        description,
+                        color = tc.ts,
+                        fontSize = 11.sp,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (descriptionTag != null) Modifier.testTag(descriptionTag) else Modifier,
+                    )
                 }
             }
             control()
+        }
+    }
+}
+
+/**
+ * A [SettingsRow] whose control needs the full width: [label] and the optional [description] on top, [content] (a list of choices, a
+ * picker) under them. Same padding, anchor, indent and dimming as [SettingsRow]; [content] must disable its own interaction when
+ * [enabled] is false.
+ */
+@Composable
+internal fun SettingsStackedRow(
+    label: String,
+    description: String? = null,
+    anchor: String = label,
+    indent: Boolean = false,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val tc = tc()
+    Box(modifier.fillMaxWidth().settingsAnchor(anchor)) {
+        Column(
+            Modifier.fillMaxWidth()
+                .alpha(if (enabled) 1f else DISABLED_ALPHA)
+                .padding(start = 12.dp + if (indent) SETTINGS_ROW_INDENT else 0.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                AppText(label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (!description.isNullOrBlank()) {
+                    AppText(description, color = tc.ts, fontSize = 11.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            content()
+        }
+    }
+}
+
+/** One entry of a [SettingsOverflowMenu]: [tag] is its test tag, [danger] draws it in the danger colour. */
+internal data class SettingsMenuItem(val label: String, val tag: String? = null, val danger: Boolean = false, val onClick: () -> Unit)
+
+/**
+ * A small "⋯" button (22dp target, [testTag]) that opens a menu of [items], for a group's rare actions (it sits in
+ * [SettingsGroup]'s `trailing`). Picking an item closes the menu and then runs it. [onInteraction] runs after every toggle, dismiss and
+ * pick, before the item's own action, so the host can reclaim the keyboard focus that the dismissed popup took with it.
+ */
+@Composable
+internal fun SettingsOverflowMenu(
+    items: List<SettingsMenuItem>,
+    contentDescription: String,
+    testTag: String,
+    modifier: Modifier = Modifier,
+    onInteraction: () -> Unit = {},
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    Box(modifier) {
+        Box(
+            Modifier.size(OVERFLOW_TARGET)
+                .testTag(testTag)
+                .clip(CORNER_SM)
+                .background(if (hovered || open) tc.hv else Color.Transparent, CORNER_SM)
+                .hoverable(interaction)
+                .clickable(interactionSource = interaction, indication = null, role = Role.Button) {
+                    open = !open
+                    onInteraction()
+                }
+                .semantics { this.contentDescription = contentDescription },
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText("⋯", color = tc.ts, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, with(density) { (OVERFLOW_TARGET + 4.dp).roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    onInteraction()
+                },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(IntrinsicSize.Max).widthIn(min = OVERFLOW_MENU_MIN_WIDTH)
+                        .shadow(8.dp, DROPDOWN_POPUP_SHAPE)
+                        .background(tc.p, DROPDOWN_POPUP_SHAPE)
+                        .border(1.dp, tc.br, DROPDOWN_POPUP_SHAPE)
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    items.forEach { item ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth()
+                                .then(if (item.tag != null) Modifier.testTag(item.tag) else Modifier)
+                                .clip(DROPDOWN_OPTION_SHAPE),
+                            onClick = {
+                                open = false
+                                onInteraction()
+                                item.onClick()
+                            },
+                        ) {
+                            AppText(
+                                item.label,
+                                color = if (item.danger) DANGER_RED else tc.tx,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

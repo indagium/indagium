@@ -201,7 +201,7 @@ internal fun SetupAssistantDialog(state: AppState) {
                                 state.recordSetupAssistantProfileApplied(imported)
                             },
                         )
-                        SetupStep.Look -> LookStep(state)
+                        SetupStep.Look -> LookStep(state, ::reclaimFocus)
                         SetupStep.Folders -> FoldersStep(state)
                         SetupStep.Search -> SearchStep(state, ::reclaimFocus)
                         SetupStep.Capture -> CaptureStep(state, ::reclaimFocus)
@@ -348,7 +348,7 @@ private fun WorkspaceStep(
 }
 
 @Composable
-private fun LookStep(state: AppState) {
+private fun LookStep(state: AppState, reclaimFocus: () -> Unit) {
     StepHeading("Pick a look", "The theme applies right away, so you can see it behind this window.")
     ThemeGallery(
         settings = state.settings,
@@ -356,8 +356,8 @@ private fun LookStep(state: AppState) {
         onSelect = { preset -> preset?.let { state.updateSettings { s -> s.withRegularTheme(it) } } },
         height = null,
     )
-    AppearanceBasicsRow(state)
-    TabAppearanceControls(state)
+    AppearanceBasicsRow(state, reclaimFocus)
+    TabAppearanceControls(state, reclaimFocus)
 }
 
 @Composable

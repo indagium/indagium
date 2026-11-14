@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -32,6 +34,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
@@ -736,37 +739,37 @@ class ChromeScaffoldUiTest {
         state = newState()
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
-                Column(Modifier.width(700.dp)) { TabsAppearanceSettings(state) }
+                Column(Modifier.width(700.dp).verticalScroll(rememberScrollState())) { TabsAppearanceSettings(state) }
             }
         }
         rule.waitForIdle()
         // Beside tabs needs a vertical strip: with the strip on top a click on it does nothing.
-        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
         // The strip's position, in the order Top, Left, Right, Bottom. Scoped to that control: the
         // Tabs section's "Close button position" also offers a "Left".
-        rule.onNode(hasText("Left") and hasAnyAncestor(hasTestTag("tab-position"))).performClick()
+        rule.onNode(hasText("Left") and hasAnyAncestor(hasTestTag("tab-position"))).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(TabStripPosition.LEFT, state.settings.tabStripPosition)
-        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.BESIDE_TABS, state.settings.toolbarPlacement)
-        rule.onNodeWithTag("toolbar-placement-WITH_TABS_START", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("toolbar-placement-WITH_TABS_START", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.WITH_TABS_START, state.settings.toolbarPlacement)
         // The edge appears only for Own edge.
         assertFalse(exists("toolbar-edge"))
-        rule.onNodeWithTag("toolbar-placement-OWN_EDGE", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("toolbar-placement-OWN_EDGE", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
         rule.onNodeWithTag("toolbar-edge").assertExists()
         // "Bottom" is both a tab position and an edge choice; the edge's is the second.
-        rule.onAllNodesWithText("Bottom")[1].performClick()
+        rule.onAllNodesWithText("Bottom")[1].performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ChromeEdge.BOTTOM, state.settings.toolbarEdge)
         assertFalse(state.settings.chromeLocked)
-        rule.onNodeWithTag("chrome-lock", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("chrome-lock", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertTrue(state.settings.chromeLocked)
     }
@@ -777,34 +780,34 @@ class ChromeScaffoldUiTest {
         state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.OWN_EDGE, toolbarEdge = ChromeEdge.TOP) }
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
-                Column(Modifier.width(700.dp)) { TabsAppearanceSettings(state) }
+                Column(Modifier.width(700.dp).verticalScroll(rememberScrollState())) { TabsAppearanceSettings(state) }
             }
         }
         rule.waitForIdle()
         rule.onNodeWithTag("toolbar-align").assertExists()
-        rule.onNodeWithText("End").performClick()
+        rule.onNodeWithText("End").performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarAlign.END, state.settings.toolbarAlign)
         // The toolbar and the tab strip share the top edge, so the order shows.
         rule.onNodeWithTag("toolbar-order").assertExists()
-        rule.onNodeWithText("Before tabs").performClick()
+        rule.onNodeWithText("Before tabs").performScrollTo().performClick()
         rule.waitForIdle()
         assertTrue(state.settings.toolbarOuter)
-        rule.onNodeWithText("After tabs").performClick()
+        rule.onNodeWithText("After tabs").performScrollTo().performClick()
         rule.waitForIdle()
         assertFalse(state.settings.toolbarOuter)
         // On another edge there is no order to choose.
-        rule.onAllNodesWithText("Bottom")[1].performClick()
+        rule.onAllNodesWithText("Bottom")[1].performScrollTo().performClick()
         rule.waitForIdle()
         assertFalse(exists("toolbar-order"))
         assertTrue(exists("toolbar-align"))
         // In the log view layout: remembers the placement it replaces; the own-bar controls have nothing to say.
-        rule.onNodeWithTag("toolbar-placement-IN_LAYOUT", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("toolbar-placement-IN_LAYOUT", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.IN_LAYOUT, state.settings.toolbarPlacement)
         assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarFallbackPlacement)
         assertFalse(exists("toolbar-align"))
-        rule.onNodeWithTag("toolbar-placement-WITH_TABS_END", useUnmergedTree = true).performClick()
+        rule.onNodeWithTag("toolbar-placement-WITH_TABS_END", useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
     }

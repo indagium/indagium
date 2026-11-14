@@ -1080,7 +1080,9 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
 - **Corners (Shape style, Toolbar shape).** Two independent settings share the `ShapeStyle` enum (Theme default, Square, Soft, Rounded, Round; both JSON-only,
   `ui/ChromeSettingsJson.kt`, both part of a workspace profile's appearance group): `AppSettings.shapeStyle` (Settings > Appearance > Shape style) drives the tiles
   and card bars (`tileDp`, `workspaceTileDp`), `AppSettings.toolbarShapeStyle` (Toolbar shape) drives only the toolbar's button groups and the Layout menu
-  button (`toolbarDp`). Both are read through one resolver, `resolveUiCorners(style, toolbarStyle, look)` in
+  button (`toolbarDp`). While `AppSettings.toolbarShapeFollowsTiles` is true (the default, shown as "Same as tiles"; JSON-only, and a file without the key reads as
+  `toolbarShapeStyle == shapeStyle`, so existing toolbars look the same) the toolbar is drawn with the tiles' style: read the style that applies through
+  `AppSettings.effectiveToolbarShapeStyle`, which `App.kt` passes to the resolver and workspace profile differences compare. Both are read through one resolver, `resolveUiCorners(style, toolbarStyle, look)` in
   `ui/UiCorners.kt`, provided by `App.kt` as `LocalUiCorners` (read with `currentUiCorners()`; a test host that provides nothing resolves Theme default against
   `LocalHoliday`). `UiCorners` holds the log-view tile and card-bar radius (`tileDp`), the toolbar's button-group radius (`toolbarDp`, `UI_CORNER_CAPSULE` for Round:
   half the bar's thickness, which `ToolbarShapes` and the Layout menu button draw as 50% corners) and the New tab, diagram and Tests workspace tile

@@ -14,6 +14,7 @@ import com.indagium.model.TileLeaf
 import com.indagium.model.TileSplit
 import com.indagium.model.ToolbarAlign
 import com.indagium.model.ToolbarPlacement
+import com.indagium.model.effectiveToolbarShapeStyle
 import com.indagium.ui.CHROME_VERTICAL_TAB_BAR_DP
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsFromToken
@@ -102,6 +103,49 @@ class ChromeSettingsCodecTest {
         assertEquals(ToolbarPlacement.OWN_EDGE, back.toolbarFallbackPlacement)
         assertEquals(ShapeStyle.ROUND, back.shapeStyle)
         assertEquals(ShapeStyle.SQUARE, back.toolbarShapeStyle)
+    }
+
+    @Test
+    fun toolbarShapeFollowsTilesRoundTripsAsABooleanKey() {
+        assertTrue(AppSettings().toolbarShapeFollowsTiles, "a fresh install follows the tiles")
+        listOf(true, false).forEach { follows ->
+            val settings = AppSettings(shapeStyle = ShapeStyle.ROUNDED, toolbarShapeStyle = ShapeStyle.SOFT, toolbarShapeFollowsTiles = follows)
+            val raw = settings.settingsJson()
+            assertTrue("\"toolbarShapeFollowsTiles\":$follows" in raw, raw)
+            val back = decode(raw)
+            assertEquals(follows, back.toolbarShapeFollowsTiles)
+            assertEquals(ShapeStyle.SOFT, back.toolbarShapeStyle, "the remembered own style survives either way")
+            assertEquals(if (follows) ShapeStyle.ROUNDED else ShapeStyle.SOFT, back.effectiveToolbarShapeStyle)
+        }
+    }
+
+    @Test
+    fun aFileWithoutTheKeyFollowsTheTilesOnlyWhereTheToolbarAlreadyMatchedThem() {
+        fun legacy(shape: ShapeStyle, toolbar: ShapeStyle) =
+            decode(withKeys(AppSettings(shapeStyle = shape, toolbarShapeStyle = toolbar)) { it.remove("toolbarShapeFollowsTiles") })
+        // Both at the default (a file from before shape styles had no keys at all) is the same as tiles.
+        assertTrue(decode("{}").toolbarShapeFollowsTiles)
+        // The styles matched: it followed, and it still looks the same.
+        val matched = legacy(ShapeStyle.ROUND, ShapeStyle.ROUND)
+        assertTrue(matched.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.ROUND, matched.effectiveToolbarShapeStyle)
+        // The styles differed: the toolbar had its own, and keeps it.
+        val own = legacy(ShapeStyle.ROUND, ShapeStyle.SQUARE)
+        assertFalse(own.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.SQUARE, own.effectiveToolbarShapeStyle)
+        val ownTheme = legacy(ShapeStyle.ROUND, ShapeStyle.THEME)
+        assertFalse(ownTheme.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.THEME, ownTheme.effectiveToolbarShapeStyle, "a toolbar left at the theme default stays there")
+        // A wrongly typed value is not a stored one: the same rule applies.
+        val malformed = decode(withKeys(AppSettings(shapeStyle = ShapeStyle.SOFT, toolbarShapeStyle = ShapeStyle.SQUARE)) {
+            it["toolbarShapeFollowsTiles"] = parse("\"yes\"")
+        })
+        assertFalse(malformed.toolbarShapeFollowsTiles)
+        // A stored value always wins over the styles.
+        val stored = decode(withKeys(AppSettings(shapeStyle = ShapeStyle.SOFT, toolbarShapeStyle = ShapeStyle.SOFT)) {
+            it["toolbarShapeFollowsTiles"] = parse("false")
+        })
+        assertFalse(stored.toolbarShapeFollowsTiles)
     }
 
     @Test
@@ -203,6 +247,7 @@ class ChromeSettingsCodecTest {
                     "tabCloseOnEvery", "chromeLocked", "tabStripPosition", "toolbarPlacement", "toolbarEdge",
                     "tabCloseButtonPosition",
                     "toolbarOuter", "toolbarAlign", "verticalTabBarWidthDp", "toolbarFallbackPlacement", "shapeStyle", "toolbarShapeStyle",
+                    "toolbarShapeFollowsTiles",
                 ).toSet(),
             )
         }

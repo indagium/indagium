@@ -11,10 +11,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
-import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -25,6 +26,7 @@ import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.model.ShapeStyle
 import com.indagium.model.TabStripPosition
+import com.indagium.model.effectiveToolbarShapeStyle
 import com.indagium.ui.holiday.HOLIDAY_THEMES
 import com.indagium.ui.holiday.HolidayLook
 import com.indagium.ui.holiday.LocalHoliday
@@ -227,7 +229,7 @@ class ShapeStyleUiTest {
     }
 }
 
-/** Settings > Appearance > Shape style and Toolbar shape: each control writes its own field. */
+/** Settings > Appearance > Corners: the Tiles picker and the Toolbar dropdown (with "Same as tiles") each write their own fields. */
 @OptIn(ExperimentalTestApi::class)
 class ShapeStyleSettingUiTest {
     @get:Rule
@@ -242,37 +244,46 @@ class ShapeStyleSettingUiTest {
         if (::directory.isInitialized) directory.deleteRecursively()
     }
 
-    private fun choose(tag: String, label: String) {
-        rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(tag))).performClick()
+    private fun newState() = AppState(
+        autosaveFile = File(directory, "state.cache"),
+        notesDir = File(directory, "notes"),
+        archiveCacheDir = File(directory, "archives"),
+        customCommandsDir = File(directory, "commands"),
+        autoExportNotes = false,
+    )
+
+    private fun chooseTile(label: String) {
+        rule.onNode(hasContentDescription(label) and hasAnyAncestor(hasTestTag(SHAPE_STYLE_CONTROL_TAG))).performClick()
+        rule.waitForIdle()
+    }
+
+    private fun chooseToolbar(style: ShapeStyle?) {
+        rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("$TOOLBAR_SHAPE_CONTROL_TAG-option-${style?.name ?: "SAME_AS_TILES"}").performClick()
         rule.waitForIdle()
     }
 
     @Test
-    fun theControlListsTheFiveStylesShowsTheHintAndWritesEachChoice() {
+    fun theTilesPickerShowsTheFiveStylesWithTheirDescriptionAndWritesEachChoice() {
         directory = createTempDirectory("shape-style-setting").toFile()
-        state = AppState(
-            autosaveFile = File(directory, "state.cache"),
-            notesDir = File(directory, "notes"),
-            archiveCacheDir = File(directory, "archives"),
-            customCommandsDir = File(directory, "commands"),
-            autoExportNotes = false,
-        )
+        state = newState()
         rule.setContent {
-            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Box(Modifier.size(700.dp, 200.dp)) {
-                Column {
-                    ShapeStyleSetting(state)
-                    ToolbarShapeSetting(state)
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Box(Modifier.size(700.dp, 200.dp)) {
+                    Column {
+                        ShapeStyleSetting(state)
+                        ToolbarShapeSetting(state)
+                    }
                 }
-            }
             }
         }
         rule.waitForIdle()
-        rule.onNodeWithText(
-            "Corners of the toolbar's button groups and the Layout menu button. Theme default keeps each theme's own shapes.",
-        ).assertExists()
-        rule.onNodeWithText(
-            "Corners of the tiles. Theme default keeps each theme's own shapes; tabs follow your Tab style and the toolbar has its own setting.",
-        ).assertExists()
+        rule.onNodeWithText("How round tiles are. Theme default keeps each theme's own shapes.").assertExists()
+        rule.onNodeWithText("Corners of the toolbar's button groups and the Layout menu button.").assertExists()
+        ShapeStyle.entries.forEach { style ->
+            rule.onNodeWithTag("$SHAPE_STYLE_CONTROL_TAG-${style.name}").assertExists()
+        }
         assertEquals(ShapeStyle.THEME, state.settings.shapeStyle)
         val choices = listOf(
             "Square" to ShapeStyle.SQUARE,
@@ -282,15 +293,55 @@ class ShapeStyleSettingUiTest {
             "Theme default" to ShapeStyle.THEME,
         )
         choices.forEach { (label, style) ->
-            choose(SHAPE_STYLE_CONTROL_TAG, label)
+            chooseTile(label)
             assertEquals(style, state.settings.shapeStyle, label)
-            assertEquals(ShapeStyle.THEME, state.settings.toolbarShapeStyle, "the toolbar's own setting is untouched")
+            assertEquals(ShapeStyle.THEME, state.settings.toolbarShapeStyle, "the toolbar's own style is untouched")
+            assertTrue(state.settings.toolbarShapeFollowsTiles, "a Tiles choice never detaches the toolbar")
+            assertEquals(style, state.settings.effectiveToolbarShapeStyle, "the toolbar follows the tiles")
         }
-        choose(SHAPE_STYLE_CONTROL_TAG, "Theme default")
-        choices.forEach { (label, style) ->
-            choose(TOOLBAR_SHAPE_CONTROL_TAG, label)
-            assertEquals(style, state.settings.toolbarShapeStyle, label)
-            assertEquals(ShapeStyle.THEME, state.settings.shapeStyle, "the tiles' Shape style is untouched")
+    }
+
+    @Test
+    fun theToolbarDropdownStartsAtSameAsTilesAndAnOwnStyleDetachesItUntilSameAsTilesIsPickedAgain() {
+        directory = createTempDirectory("toolbar-shape-setting").toFile()
+        state = newState()
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Box(Modifier.size(700.dp, 320.dp)) { Column { ToolbarShapeSetting(state) } }
+            }
         }
+        rule.waitForIdle()
+        rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).assertTextContains("Same as tiles")
+        rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).performClick()
+        rule.waitForIdle()
+        // "Same as tiles" first, then the five styles.
+        rule.onNodeWithTag("$TOOLBAR_SHAPE_CONTROL_TAG-option-SAME_AS_TILES").assertExists()
+        ShapeStyle.entries.forEach { rule.onNodeWithTag("$TOOLBAR_SHAPE_CONTROL_TAG-option-${it.name}").assertExists() }
+        rule.onNodeWithTag("$TOOLBAR_SHAPE_CONTROL_TAG-option-SAME_AS_TILES").performClick()
+        rule.waitForIdle()
+
+        state.updateSettings { it.copy(shapeStyle = ShapeStyle.SOFT) }
+        ShapeStyle.entries.forEach { style ->
+            chooseToolbar(style)
+            assertEquals(style, state.settings.toolbarShapeStyle, style.name)
+            assertFalse(state.settings.toolbarShapeFollowsTiles, "an own style detaches the toolbar")
+            assertEquals(style, state.settings.effectiveToolbarShapeStyle)
+            assertEquals(ShapeStyle.SOFT, state.settings.shapeStyle, "the tiles' style is untouched")
+            rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).assertTextContains(shapeStyleLabel(style))
+        }
+        chooseToolbar(null)
+        assertTrue(state.settings.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.SOFT, state.settings.effectiveToolbarShapeStyle, "it follows the tiles again")
+        assertEquals(ShapeStyle.ROUND, state.settings.toolbarShapeStyle, "the remembered own style is kept for the next time")
+        rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).assertTextContains("Same as tiles")
+    }
+
+    @Test
+    fun effectiveToolbarShapeStyleIsTheTilesStyleWhileFollowingAndTheOwnStyleOtherwise() {
+        val following = AppSettings(shapeStyle = ShapeStyle.ROUNDED, toolbarShapeStyle = ShapeStyle.SQUARE)
+        assertEquals(ShapeStyle.ROUNDED, following.effectiveToolbarShapeStyle)
+        val own = following.copy(toolbarShapeFollowsTiles = false)
+        assertEquals(ShapeStyle.SQUARE, own.effectiveToolbarShapeStyle)
+        assertEquals(ShapeStyle.THEME, AppSettings().effectiveToolbarShapeStyle, "a fresh install is theme default throughout")
     }
 }

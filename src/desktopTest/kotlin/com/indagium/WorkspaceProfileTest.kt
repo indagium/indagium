@@ -21,6 +21,7 @@ import com.indagium.model.TabStripStyle
 import com.indagium.model.ThemePreset
 import com.indagium.model.ToolbarAlign
 import com.indagium.model.ToolbarPlacement
+import com.indagium.model.effectiveToolbarShapeStyle
 import com.indagium.ui.AppState
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.WorkspaceProfile
@@ -37,6 +38,7 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.profileDifferences
 import com.indagium.ui.profileSpecFromJson
 import com.indagium.ui.resolved
+import com.indagium.ui.resolvedToolbarFollowsTiles
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import com.indagium.ui.themeColors
@@ -420,6 +422,51 @@ class WorkspaceProfileTest {
         val unset = WorkspaceProfile.CLASSIC.spec.copy(appearance = ProfileAppearance())
         assertEquals(ShapeStyle.THEME, live.withProfileSpec(unset).toolbarShapeStyle, "a null field is the app default")
         assertEquals(ShapeStyle.SQUARE, currentProfileAppearance(live).toolbarShapeStyle)
+    }
+
+    @Test
+    fun theToolbarFollowingTheTilesIsCarriedAppliedAndComparedByTheCornersItDraws() {
+        val following = AppSettings().copy(shapeStyle = ShapeStyle.ROUNDED, toolbarShapeStyle = ShapeStyle.SQUARE)
+        assertTrue(following.toolbarShapeFollowsTiles)
+        val saved = currentProfileAppearance(following)
+        assertEquals(true, saved.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.SQUARE, saved.toolbarShapeStyle, "the remembered own style is saved too")
+
+        // Applying a profile that follows the tiles to a toolbar with its own style re-attaches it and draws the profile's tile corner.
+        val own = AppSettings().copy(shapeStyle = ShapeStyle.THEME, toolbarShapeStyle = ShapeStyle.SQUARE, toolbarShapeFollowsTiles = false)
+        val spec = WorkspaceProfile.CLASSIC.spec.copy(appearance = saved)
+        val applied = own.withProfileSpec(spec)
+        assertTrue(applied.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.ROUNDED, applied.effectiveToolbarShapeStyle)
+        assertEquals(emptyList(), profileDifferences(spec, applied))
+        assertTrue("Toolbar shape" in profileDifferences(spec, own), "an own square toolbar is not the toolbar that follows round tiles")
+
+        // The difference is the drawn corner, not the flag: an own style equal to the tiles' style is the same look.
+        val sameLook = applied.copy(toolbarShapeStyle = ShapeStyle.ROUNDED, toolbarShapeFollowsTiles = false)
+        assertEquals(emptyList(), profileDifferences(spec, sameLook))
+        // A profile that sets the toolbar on its own detaches it.
+        val ownSpec = spec.copy(appearance = saved.copy(toolbarShapeStyle = ShapeStyle.ROUND, toolbarShapeFollowsTiles = false))
+        val detached = applied.withProfileSpec(ownSpec)
+        assertFalse(detached.toolbarShapeFollowsTiles)
+        assertEquals(ShapeStyle.ROUND, detached.effectiveToolbarShapeStyle)
+        assertEquals(ShapeStyle.ROUNDED, detached.shapeStyle, "the tiles keep the profile's style")
+    }
+
+    @Test
+    fun aProfileWithoutTheFlagReadsAsWhetherItsToolbarStyleMatchedItsTiles() {
+        fun resolved(shape: ShapeStyle?, toolbar: ShapeStyle?) =
+            ProfileAppearance(shapeStyle = shape, toolbarShapeStyle = toolbar).resolvedToolbarFollowsTiles()
+        assertEquals(null, resolved(null, null), "nothing set: the app default")
+        assertEquals(true, resolved(ShapeStyle.ROUND, ShapeStyle.ROUND))
+        assertEquals(false, resolved(ShapeStyle.ROUND, ShapeStyle.SQUARE))
+        assertEquals(false, resolved(null, ShapeStyle.ROUND), "tiles unset read as theme default")
+        assertEquals(true, resolved(null, ShapeStyle.THEME))
+        val stored = ProfileAppearance(toolbarShapeFollowsTiles = false, shapeStyle = ShapeStyle.ROUND, toolbarShapeStyle = ShapeStyle.ROUND)
+        assertEquals(false, stored.resolvedToolbarFollowsTiles(), "a stored flag wins over the styles")
+        // A built-in profile (all defaults) leaves a fresh install following its tiles.
+        val applied = AppSettings().withProfileSpec(WorkspaceProfile.CLASSIC.spec)
+        assertTrue(applied.toolbarShapeFollowsTiles)
+        assertEquals(emptyList(), profileDifferences(WorkspaceProfile.CLASSIC.spec, applied))
     }
 
     @Test

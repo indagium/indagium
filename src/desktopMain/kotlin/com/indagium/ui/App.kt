@@ -197,8 +197,8 @@ fun App(
         resolveHolidayLook(state.settingsForReleaseThemePreview(), holidayNow)
     }
     val theme = holiday?.colors ?: themeColors(state.settings.theme)
-    val uiCorners = remember(state.settings.shapeStyle, state.settings.toolbarShapeStyle, holiday) {
-        resolveUiCorners(state.settings.shapeStyle, state.settings.toolbarShapeStyle, holiday)
+    val uiCorners = remember(state.settings.shapeStyle, state.settings.effectiveToolbarShapeStyle, holiday) {
+        resolveUiCorners(state.settings.shapeStyle, state.settings.effectiveToolbarShapeStyle, holiday)
     }
     val holidayExclusions = remember { HolidayExclusions() }
     val holidayLandingAreas = remember { HolidayLandingAreas() }

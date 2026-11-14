@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
@@ -725,7 +726,9 @@ class TabStripStyleUiTest {
         rule.onNodeWithText("Fit label").performClick()
         rule.waitForIdle()
         assertEquals(TabSizeMode.FIT, state.settings.tabSizeMode)
-        rule.onNodeWithText("Folder").performClick()
+        rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("$TAB_LABEL_CONTROL_TAG-option-${TabLabelMode.SESSION_ONLY.name}").performClick()
         rule.waitForIdle()
         assertEquals(TabLabelMode.SESSION_ONLY, state.settings.tabLabelMode)
         rule.onNodeWithTag("tab-detail-close-button-on-every-tab", useUnmergedTree = true).performClick()
@@ -864,10 +867,10 @@ class TabStripStyleUiTest {
         }
     }
 
-    // The Tab label control: the four options, the one-line hint under it and every option fully inside the control at the widths of the
-    // settings dialog's content column (about 650 dp) and well below it.
+    // The Label dropdown: the four options by name, the hint beside it, and the closed field, the open list and the hint inside the column at
+    // the widths of the settings dialog's content column (about 650 dp) and well below it.
     @Test
-    fun theTabLabelControlNamesTheFolderOptionsExplainsTheDefaultAndDoesNotClip() {
+    fun theTabLabelDropdownNamesTheFolderOptionsExplainsTheDefaultAndDoesNotClip() {
         listOf(700, 480, 420).forEach { width ->
             state = newState()
             rule.setContent {
@@ -879,22 +882,26 @@ class TabStripStyleUiTest {
             val labels = listOf("File (+ folder if same name)", "Folder", "File only", "File — folder")
             assertEquals(labels, TabLabelMode.entries.map(::tabLabelModeLabel))
             val control = rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).getBoundsInRoot()
-            labels.forEach { label ->
-                val text = rule.onNodeWithText(label).getUnclippedBoundsInRoot()
-                assertTrue(text.left >= control.left && text.right <= control.right, "$label is inside the control at $width dp: $text in $control")
-                assertTrue(text.right <= width.dp, "$label is inside the column at $width dp")
-            }
             assertTrue(control.right <= width.dp, "the control fits a $width dp column: $control")
+            val closed = rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).getUnclippedBoundsInRoot()
+            rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).assertTextContains(labels.first())
+            assertTrue(closed.right <= width.dp)
             val hint = rule.onNodeWithTag(TAB_LABEL_HINT_TAG).getBoundsInRoot()
-            assertTrue(hint.top >= control.bottom, "the hint sits under the control")
             rule.onNodeWithTag(TAB_LABEL_HINT_TAG).assertTextEquals("The folder is added when two open tabs have the same file name.")
-            // Choosing the new option stores it, and the highlight follows.
-            rule.onNodeWithText("File — folder").performClick()
+            assertTrue(hint.right <= control.left, "the hint sits beside the control, not over it: $hint vs $control")
+            // Every option is in the list, and choosing one stores it and shows it on the closed field.
+            rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).performClick()
+            rule.waitForIdle()
+            TabLabelMode.entries.forEach { rule.onNodeWithTag("$TAB_LABEL_CONTROL_TAG-option-${it.name}").assertExists() }
+            rule.onNodeWithTag("$TAB_LABEL_CONTROL_TAG-option-${TabLabelMode.FILE_FOLDER_ALWAYS.name}").performClick()
             rule.waitForIdle()
             assertEquals(TabLabelMode.FILE_FOLDER_ALWAYS, state.settings.tabLabelMode)
-            rule.onNodeWithText("File (+ folder if same name)").performClick()
+            rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).assertTextContains("File — folder")
+            rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).performClick()
             rule.waitForIdle()
-            assertEquals(TabLabelMode.FILE_SESSION, state.settings.tabLabelMode)
+            rule.onNodeWithTag("$TAB_LABEL_CONTROL_TAG-option-${TabLabelMode.SESSION_ONLY.name}").performClick()
+            rule.waitForIdle()
+            assertEquals(TabLabelMode.SESSION_ONLY, state.settings.tabLabelMode)
         }
     }
 

@@ -128,14 +128,15 @@ internal fun holidayEffectsHint(theme: HolidayTheme): String {
  * result that targets a seasonal row opens the Seasonal tab (see [SEASONAL_ANCHORS]).
  */
 @Composable
-internal fun ThemeSettingsBlock(state: AppState, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES) {
+internal fun ThemeSettingsBlock(state: AppState, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES, showHeading: Boolean = true) {
     val tc = tc()
     val holiday = state.settings.holiday
     var tab by remember { mutableStateOf(if (holiday.mode != HolidayMode.OFF) TAB_SEASONAL else TAB_THEMES) }
     val pending = LocalSettingsAnchors.current?.pendingKey
     LaunchedEffect(pending) { if (pending != null && pending in SEASONAL_ANCHORS) tab = TAB_SEASONAL }
     Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        // [showHeading] false when the host already titles the block (Settings › Appearance puts it in a group called Theme).
+        if (showHeading) AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         SegmentedControl(
             options = listOf("Themes", "Special themes"),
             selectedIndices = setOf(tab),

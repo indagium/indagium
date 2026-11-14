@@ -24,6 +24,7 @@ import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.TabStripStyle
 import com.indagium.model.ThemePreset
 import com.indagium.ui.AppState
+import com.indagium.ui.PROFILE_GROUP_MENU_TAG
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.WorkspaceProfile
 import org.junit.Rule
@@ -42,13 +43,20 @@ class WorkspaceProfileUiTest {
         rule.setContent { SettingsDialog(state, onDismiss = {}) }
     }
 
+    // The group's "⋯" menu holds the save, import and export actions.
+    private fun saveCurrentSetupAsProfile() {
+        rule.onNodeWithTag(PROFILE_GROUP_MENU_TAG).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Save current setup as profile…").performClick()
+        rule.waitForIdle()
+    }
+
     @Test
     fun savingThroughTheNameDialogWithEnterAddsAndSelectsAProfile() {
         val state = AppState()
         install(state)
 
-        rule.onNodeWithText("Save current setup as profile…").performClick()
-        rule.waitForIdle()
+        saveCurrentSetupAsProfile()
         rule.onNodeWithTag("profile-name-field").performTextClearance()
         rule.onNodeWithTag("profile-name-field").performTextInput("Evening")
         rule.onNodeWithTag("profile-name-field").performKeyInput { pressKey(Key.Enter) }
@@ -65,8 +73,7 @@ class WorkspaceProfileUiTest {
         val state = AppState()
         install(state)
 
-        rule.onNodeWithText("Save current setup as profile…").performClick()
-        rule.waitForIdle()
+        saveCurrentSetupAsProfile()
         rule.onNodeWithTag("profile-name-field").performTextClearance()
         rule.onNodeWithTag("profile-name-field").performTextInput("focused")
         rule.waitForIdle()

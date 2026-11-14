@@ -23,8 +23,8 @@ import kotlinx.serialization.json.put
 
 // The window chrome's settings (AppSettings.tabStripStyle, tabSizeMode, tabLabelMode, tabShowTypeBadge, tabShowSourceStripe,
 // tabCloseOnEvery, tabCloseButtonPosition, chromeLocked, tabStripPosition, toolbarPlacement, toolbarEdge, toolbarOuter, toolbarAlign,
-// verticalTabBarWidthDp, toolbarFallbackPlacement, shapeStyle, toolbarShapeStyle), JSON only. They live here, not in
-// AutosaveCodec.kt, which is already at detekt's per-file function limit. Enums are stored by name. The decoder never throws:
+// verticalTabBarWidthDp, toolbarFallbackPlacement, shapeStyle, toolbarShapeStyle, toolbarShapeFollowsTiles), JSON only. They live here,
+// not in AutosaveCodec.kt, which is already at detekt's per-file function limit. Enums are stored by name. The decoder never throws:
 // an absent, unknown or wrongly typed value leaves the field at its default (a fresh AppSettings), so an old autosave, a legacy
 // positional token or a hand-edited file all give the long-standing tab strip.
 
@@ -47,6 +47,7 @@ internal fun JsonObjectBuilder.putChromeSettings(settings: AppSettings) {
     put("toolbarFallbackPlacement", settings.toolbarFallbackPlacement.name)
     put("shapeStyle", settings.shapeStyle.name)
     put("toolbarShapeStyle", settings.toolbarShapeStyle.name)
+    put("toolbarShapeFollowsTiles", settings.toolbarShapeFollowsTiles)
 }
 
 private inline fun <reified E : Enum<E>> JsonElement?.enumOrDefault(default: E): E {
@@ -69,22 +70,28 @@ private fun JsonElement?.fallbackPlacementOrDefault(default: ToolbarPlacement): 
  * [this] with the chrome fields read from [o] (the parsed settings object); absent or malformed keys leave this value's own
  * (default) fields. Called from AutosaveCodec.settingsFromJson.
  */
-internal fun AppSettings.withChromeSettingsFrom(o: JsonObject): AppSettings = copy(
-    tabStripStyle = o["tabStripStyle"].enumOrDefault<TabStripStyle>(tabStripStyle),
-    tabSizeMode = o["tabSizeMode"].enumOrDefault<TabSizeMode>(tabSizeMode),
-    tabLabelMode = o["tabLabelMode"].enumOrDefault<TabLabelMode>(tabLabelMode),
-    tabShowTypeBadge = o["tabShowTypeBadge"].boolOrDefault(tabShowTypeBadge),
-    tabShowSourceStripe = o["tabShowSourceStripe"].boolOrDefault(tabShowSourceStripe),
-    tabCloseOnEvery = o["tabCloseOnEvery"].boolOrDefault(tabCloseOnEvery),
-    tabCloseButtonPosition = o["tabCloseButtonPosition"].enumOrDefault<TabCloseButtonPosition>(tabCloseButtonPosition),
-    chromeLocked = o["chromeLocked"].boolOrDefault(chromeLocked),
-    tabStripPosition = o["tabStripPosition"].enumOrDefault<TabStripPosition>(tabStripPosition),
-    toolbarPlacement = o["toolbarPlacement"].enumOrDefault<ToolbarPlacement>(toolbarPlacement),
-    toolbarEdge = o["toolbarEdge"].enumOrDefault<ChromeEdge>(toolbarEdge),
-    toolbarOuter = o["toolbarOuter"].boolOrDefault(toolbarOuter),
-    toolbarAlign = o["toolbarAlign"].enumOrDefault<ToolbarAlign>(toolbarAlign),
-    verticalTabBarWidthDp = o["verticalTabBarWidthDp"].tabBarWidthOrDefault(verticalTabBarWidthDp),
-    toolbarFallbackPlacement = o["toolbarFallbackPlacement"].fallbackPlacementOrDefault(toolbarFallbackPlacement),
-    shapeStyle = o["shapeStyle"].enumOrDefault<ShapeStyle>(shapeStyle),
-    toolbarShapeStyle = o["toolbarShapeStyle"].enumOrDefault<ShapeStyle>(toolbarShapeStyle),
-)
+internal fun AppSettings.withChromeSettingsFrom(o: JsonObject): AppSettings {
+    val shape = o["shapeStyle"].enumOrDefault<ShapeStyle>(shapeStyle)
+    val toolbarShape = o["toolbarShapeStyle"].enumOrDefault<ShapeStyle>(toolbarShapeStyle)
+    return copy(
+        tabStripStyle = o["tabStripStyle"].enumOrDefault<TabStripStyle>(tabStripStyle),
+        tabSizeMode = o["tabSizeMode"].enumOrDefault<TabSizeMode>(tabSizeMode),
+        tabLabelMode = o["tabLabelMode"].enumOrDefault<TabLabelMode>(tabLabelMode),
+        tabShowTypeBadge = o["tabShowTypeBadge"].boolOrDefault(tabShowTypeBadge),
+        tabShowSourceStripe = o["tabShowSourceStripe"].boolOrDefault(tabShowSourceStripe),
+        tabCloseOnEvery = o["tabCloseOnEvery"].boolOrDefault(tabCloseOnEvery),
+        tabCloseButtonPosition = o["tabCloseButtonPosition"].enumOrDefault<TabCloseButtonPosition>(tabCloseButtonPosition),
+        chromeLocked = o["chromeLocked"].boolOrDefault(chromeLocked),
+        tabStripPosition = o["tabStripPosition"].enumOrDefault<TabStripPosition>(tabStripPosition),
+        toolbarPlacement = o["toolbarPlacement"].enumOrDefault<ToolbarPlacement>(toolbarPlacement),
+        toolbarEdge = o["toolbarEdge"].enumOrDefault<ChromeEdge>(toolbarEdge),
+        toolbarOuter = o["toolbarOuter"].boolOrDefault(toolbarOuter),
+        toolbarAlign = o["toolbarAlign"].enumOrDefault<ToolbarAlign>(toolbarAlign),
+        verticalTabBarWidthDp = o["verticalTabBarWidthDp"].tabBarWidthOrDefault(verticalTabBarWidthDp),
+        toolbarFallbackPlacement = o["toolbarFallbackPlacement"].fallbackPlacementOrDefault(toolbarFallbackPlacement),
+        shapeStyle = shape,
+        toolbarShapeStyle = toolbarShape,
+        // A file from before "Same as tiles" has no key: its toolbar followed the tiles only if the two styles matched.
+        toolbarShapeFollowsTiles = o["toolbarShapeFollowsTiles"].boolOrDefault(shape == toolbarShape),
+    )
+}

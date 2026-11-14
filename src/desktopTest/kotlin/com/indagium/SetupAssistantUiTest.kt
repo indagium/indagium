@@ -103,6 +103,23 @@ class SetupAssistantUiTest {
     }
 
     @Test
+    fun lookStepShowsTheMergedLogFontDropdownInsteadOfAFallbackFamilyChoice() {
+        val state = AppState()
+        state.maybeShowSetupAssistantOnStartup()
+        install(state)
+        rule.onNodeWithText("Continue").performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithText("Fallback log family").assertDoesNotExist()
+        rule.onNodeWithTag("settings-log-font-trigger").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-font-option-default-proportional").performClick()
+        rule.waitForIdle()
+        assertFalse(state.settings.fontMono)
+        assertEquals(null, state.settings.logFontFamily)
+    }
+
+    @Test
     fun skipForNowClosesAndMarksItDone() {
         val state = AppState()
         state.maybeShowSetupAssistantOnStartup()

@@ -118,6 +118,7 @@ internal fun currentProfileAppearance(s: AppSettings) = ProfileAppearance(
     verticalTabBarWidthDp = s.verticalTabBarWidthDp,
     shapeStyle = s.shapeStyle,
     toolbarShapeStyle = s.toolbarShapeStyle,
+    toolbarShapeFollowsTiles = s.toolbarShapeFollowsTiles,
 )
 
 internal fun currentProfileBehavior(s: AppSettings) = ProfileBehavior(
@@ -197,6 +198,7 @@ internal fun profileAppearanceToJson(a: ProfileAppearance): JsonObject = buildJs
     putIfSet("verticalTabBarWidthDp", a.verticalTabBarWidthDp)
     putIfSet("shapeStyle", a.shapeStyle)
     putIfSet("toolbarShapeStyle", a.toolbarShapeStyle)
+    putIfSet("toolbarShapeFollowsTiles", a.toolbarShapeFollowsTiles)
 }
 
 internal fun profileBehaviorToJson(b: ProfileBehavior): JsonObject = buildJsonObject {
@@ -297,6 +299,7 @@ internal fun profileAppearanceFromJson(o: JsonObject) = ProfileAppearance(
     verticalTabBarWidthDp = o.float("verticalTabBarWidthDp", MIN_VERTICAL_TAB_BAR_DP..MAX_VERTICAL_TAB_BAR_DP),
     shapeStyle = o.enum<ShapeStyle>("shapeStyle"),
     toolbarShapeStyle = o.enum<ShapeStyle>("toolbarShapeStyle"),
+    toolbarShapeFollowsTiles = o.bool("toolbarShapeFollowsTiles"),
 )
 
 internal fun profileBehaviorFromJson(o: JsonObject) = ProfileBehavior(

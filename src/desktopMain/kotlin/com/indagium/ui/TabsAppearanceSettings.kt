@@ -1,4 +1,5 @@
 // The thumbnail drawing is a few dozen literal geometry numbers (dp-ish units of a 84 x 34 sketch), not tunables.
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @file:Suppress("MagicNumber")
 
 package com.indagium.ui
@@ -8,8 +9,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,16 +34,16 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
+import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 
-// Settings > Appearance > Tabs: the strip's style as a grid of thumbnails, tab size, label and the optional details.
+// Settings > Tabs & toolbar, the tab half: the strip's style as a grid of thumbnails, the optional details, width, label and close button.
 //
 // Details rule: the file-type badge and the source colour stripe are two independent details any style can add. The TYPED style
 // always draws the badge and the SOURCE_STRIPE style always draws the stripe (that is what they are), so while one of those styles is
@@ -76,28 +79,82 @@ internal const val TAB_LABEL_HINT_TAG = "tab-label-hint"
 internal const val TAB_CLOSE_BUTTON_POSITION_CONTROL_TAG = "tab-close-button-position"
 internal const val TAB_STYLE_GRID_TAG = "tab-style-grid"
 
+private val TAB_LABEL_DROPDOWN_WIDTH = 200.dp
+private val VISIBLE_TAB_LIMITS = listOf(4, 6, 8, 10, 12, 16)
 private val THUMB_MIN_WIDTH = 84.dp
 private val THUMB_HEIGHT = 34.dp
 private val TAB_STYLE_GRID_GAP = 8.dp
 private const val TAB_STYLE_COLUMNS = 5
 
+/**
+ * Settings › Tabs & toolbar: the Tab style group, the Tabs group (position, width, label, close button, visible tabs) and the Toolbar
+ * group ([ChromePlacementSettings]). [onInteraction] runs after a dropdown or menu closes so the dialog can reclaim keyboard focus.
+ */
 @Composable
-internal fun TabsAppearanceSettings(state: AppState) {
-    TabAppearanceControls(state)
+internal fun TabsAppearanceSettings(state: AppState, onInteraction: () -> Unit = {}) {
+    TabStyleGroup(state)
+    TabsGroup(state, onInteraction, includePlacement = true)
     ChromePlacementSettings(state)
 }
 
-/** Shared by Settings and setup's Look step; changes go straight through AppState in both places. */
+/**
+ * The tab look shared with the setup assistant's Look step: the Tab style group and the Tabs group without the position and visible-tabs
+ * rows (those are Settings-only). Changes go straight through AppState in both places.
+ */
 @Composable
-internal fun TabAppearanceControls(state: AppState) {
+internal fun TabAppearanceControls(state: AppState, onInteraction: () -> Unit = {}) {
+    TabStyleGroup(state)
+    TabsGroup(state, onInteraction, includePlacement = false)
+}
+
+// The style thumbnails, then the "Show on tabs" line of the three details a style can add.
+@Composable
+private fun TabStyleGroup(state: AppState) {
     val tc = tc()
     val settings = state.settings
-    Column(Modifier.settingsAnchor("Tab style"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText("Tabs", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        TabStyleGrid(settings.tabStripStyle) { style -> state.updateSettings { it.copy(tabStripStyle = style) } }
+    SettingsGroup("Tab style") {
+        Box(Modifier.fillMaxWidth().settingsAnchor("Tab style").padding(12.dp)) {
+            TabStyleGrid(settings.tabStripStyle) { style -> state.updateSettings { it.copy(tabStripStyle = style) } }
+        }
+        FlowRow(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText("Show on tabs", color = tc.ts, fontSize = 11.sp)
+            val typed = settings.tabStripStyle == TabStripStyle.TYPED
+            val striped = settings.tabStripStyle == TabStripStyle.SOURCE_STRIPE
+            DetailCheck("File-type badge", tabBadgeShown(settings), locked = typed) {
+                state.updateSettings { it.copy(tabShowTypeBadge = !it.tabShowTypeBadge) }
+            }
+            DetailCheck("Source colour stripe", tabStripeShown(settings), locked = striped) {
+                state.updateSettings { it.copy(tabShowSourceStripe = !it.tabShowSourceStripe) }
+            }
+            DetailCheck("Close button on every tab", settings.tabCloseOnEvery, locked = false) {
+                state.updateSettings { it.copy(tabCloseOnEvery = !it.tabCloseOnEvery) }
+            }
+        }
     }
-    SettingsControlRow {
-        CompactSetting("Tab size") {
+}
+
+// Rows of tab behaviour. [includePlacement] adds the strip position (first) and the visible-tab count (last), which the setup assistant omits.
+@Composable
+private fun TabsGroup(state: AppState, onInteraction: () -> Unit, includePlacement: Boolean) {
+    val settings = state.settings
+    SettingsGroup("Tabs") {
+        if (includePlacement) {
+            SettingsRow("Position", "Which window edge the tab strip sits on. You can also drag it by its grip.", anchor = "Tab position") {
+                val positions = TabStripPosition.entries
+                SegmentedControl(
+                    options = positions.map(::tabPositionLabel),
+                    selectedIndices = setOf(positions.indexOf(settings.tabStripPosition)),
+                    onToggle = { idx -> state.updateSettings { it.copy(tabStripPosition = positions[idx]) } },
+                    modifier = Modifier.testTag("tab-position"),
+                )
+            }
+        }
+        SettingsRow("Width", "Fixed gives every tab an equal share of the strip; Fit label sizes each tab to its name.", anchor = "Tab size") {
             val modes = TabSizeMode.entries
             SegmentedControl(
                 options = listOf("Fixed", "Fit label"),
@@ -105,19 +162,19 @@ internal fun TabAppearanceControls(state: AppState) {
                 onToggle = { idx -> state.updateSettings { it.copy(tabSizeMode = modes[idx]) } },
             )
         }
-        CompactSetting("Tab label") {
-            val modes = TabLabelMode.entries
-            SegmentedControl(
-                options = modes.map(::tabLabelModeLabel),
-                selectedIndices = setOf(modes.indexOf(settings.tabLabelMode)),
-                onToggle = { idx -> state.updateSettings { it.copy(tabLabelMode = modes[idx]) } },
-                modifier = Modifier.testTag(TAB_LABEL_CONTROL_TAG),
-                segmentFontSize = 11.sp,
-                segmentHorizontalPadding = 8.dp,
+        SettingsRow("Label", TAB_LABEL_HINT, anchor = "Tab label", descriptionTag = TAB_LABEL_HINT_TAG) {
+            SettingsDropdown(
+                options = TabLabelMode.entries,
+                selected = settings.tabLabelMode,
+                label = ::tabLabelModeLabel,
+                onSelect = { mode -> state.updateSettings { it.copy(tabLabelMode = mode) } },
+                testTag = TAB_LABEL_CONTROL_TAG,
+                minWidth = TAB_LABEL_DROPDOWN_WIDTH,
+                optionTag = { mode -> "$TAB_LABEL_CONTROL_TAG-option-${mode.name}" },
+                onInteraction = onInteraction,
             )
-            AppText(TAB_LABEL_HINT, color = tc.td, fontSize = 10.sp, modifier = Modifier.testTag(TAB_LABEL_HINT_TAG))
         }
-        CompactSetting("Close button position") {
+        SettingsRow("Close button position", "Which end of a tab its close button sits on.") {
             val positions = TabCloseButtonPosition.entries
             SegmentedControl(
                 options = listOf("Left", "Right"),
@@ -126,18 +183,14 @@ internal fun TabAppearanceControls(state: AppState) {
                 modifier = Modifier.testTag(TAB_CLOSE_BUTTON_POSITION_CONTROL_TAG),
             )
         }
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
-        val typed = settings.tabStripStyle == TabStripStyle.TYPED
-        val striped = settings.tabStripStyle == TabStripStyle.SOURCE_STRIPE
-        DetailCheck("File-type badge", tabBadgeShown(settings), locked = typed) {
-            state.updateSettings { it.copy(tabShowTypeBadge = !it.tabShowTypeBadge) }
-        }
-        DetailCheck("Source colour stripe", tabStripeShown(settings), locked = striped) {
-            state.updateSettings { it.copy(tabShowSourceStripe = !it.tabShowSourceStripe) }
-        }
-        DetailCheck("Close button on every tab", settings.tabCloseOnEvery, locked = false) {
-            state.updateSettings { it.copy(tabCloseOnEvery = !it.tabCloseOnEvery) }
+        if (includePlacement) {
+            SettingsRow("Visible tabs", "How many tabs show before the rest collapse into a menu.") {
+                ListStepper(
+                    options = VISIBLE_TAB_LIMITS,
+                    value = settings.visibleTabLimit,
+                    onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
+                )
+            }
         }
     }
 }

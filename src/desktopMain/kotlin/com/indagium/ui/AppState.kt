@@ -6434,6 +6434,12 @@ class AppState(
 
     /** One-shot Settings destination for contextual controls such as the AI provider picker. */
     internal var requestedSettingsPage by mutableStateOf<SettingsPage?>(null)
+
+    /**
+     * The last positive "Inactive tab memory" minutes this session saw (0: none yet). Settings › General restores it when the switch is
+     * turned back on. Not persisted: a new session starts again from the default.
+     */
+    internal var lastInactiveTabMinutes: Int = 0
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
 

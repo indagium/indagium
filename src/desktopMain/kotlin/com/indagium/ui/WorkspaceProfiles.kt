@@ -8,7 +8,9 @@ import com.indagium.model.ProfileAppearance
 import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.ProfileSpec
+import com.indagium.model.ShapeStyle
 import com.indagium.model.ThemePreset
+import com.indagium.model.effectiveToolbarShapeStyle
 import com.indagium.ui.holiday.withRegularTheme
 
 // Built-in workspace profiles (Settings → General): one click sets the theme and log typography and
@@ -124,7 +126,8 @@ private fun appearanceDifferences(a: ProfileAppearance, s: AppSettings): List<St
     differs("Toolbar alignment", a.toolbarAlign, s.toolbarAlign)
     differs("Tab bar width", a.verticalTabBarWidthDp, s.verticalTabBarWidthDp)
     differs("Shape style", a.shapeStyle, s.shapeStyle)
-    differs("Toolbar shape", a.toolbarShapeStyle, s.toolbarShapeStyle)
+    // Compared as the corners actually drawn: "Same as tiles" with the tiles at Round equals the toolbar set to Round on its own.
+    differs("Toolbar shape", a.effectiveToolbarShape(), s.effectiveToolbarShapeStyle)
 }
 
 private fun behaviorDifferences(b: ProfileBehavior, s: AppSettings): List<String> = buildList {
@@ -168,12 +171,29 @@ internal fun ProfileAppearance?.orAppDefaults(): ProfileAppearance {
         verticalTabBarWidthDp = a.verticalTabBarWidthDp ?: d.verticalTabBarWidthDp,
         shapeStyle = a.shapeStyle,
         toolbarShapeStyle = a.toolbarShapeStyle,
+        toolbarShapeFollowsTiles = a.resolvedToolbarFollowsTiles(),
     ).withShapeDefaults(d)
 }
 
-// The two corner styles' defaults, apart from [orAppDefaults] to keep that function's branch count in bounds.
+// The corner styles' defaults, apart from [orAppDefaults] to keep that function's branch count in bounds.
 private fun ProfileAppearance.withShapeDefaults(d: ProfileAppearance): ProfileAppearance =
-    copy(shapeStyle = shapeStyle ?: d.shapeStyle, toolbarShapeStyle = toolbarShapeStyle ?: d.toolbarShapeStyle)
+    copy(
+        shapeStyle = shapeStyle ?: d.shapeStyle,
+        toolbarShapeStyle = toolbarShapeStyle ?: d.toolbarShapeStyle,
+        toolbarShapeFollowsTiles = toolbarShapeFollowsTiles ?: d.toolbarShapeFollowsTiles,
+    )
+
+/**
+ * Whether this profile's toolbar corners follow its tiles. A stored value wins. Without one (a profile from before "Same as tiles", or a
+ * spec built with only a toolbar style) a set [ProfileAppearance.toolbarShapeStyle] follows only when it equals the tiles' style, which
+ * is how such a toolbar was drawn; with neither set it is null, the app default.
+ */
+internal fun ProfileAppearance.resolvedToolbarFollowsTiles(): Boolean? =
+    toolbarShapeFollowsTiles ?: toolbarShapeStyle?.let { it == (shapeStyle ?: ShapeStyle.THEME) }
+
+// The toolbar corner style a profile whose fields are all filled in (see [orAppDefaults]) draws.
+private fun ProfileAppearance.effectiveToolbarShape(): ShapeStyle? =
+    if (toolbarShapeFollowsTiles == true) shapeStyle else toolbarShapeStyle
 
 /** See [orAppDefaults] for [ProfileAppearance]. */
 internal fun ProfileBehavior?.orAppDefaults(): ProfileBehavior {
@@ -238,7 +258,11 @@ private fun AppSettings.withProfileAppearance(a: ProfileAppearance): AppSettings
         .let { next -> a.toolbarPlacement?.let(next::withToolbarPlacement) ?: next }
 
 private fun AppSettings.withProfileShapes(a: ProfileAppearance): AppSettings =
-    copy(shapeStyle = a.shapeStyle ?: shapeStyle, toolbarShapeStyle = a.toolbarShapeStyle ?: toolbarShapeStyle)
+    copy(
+        shapeStyle = a.shapeStyle ?: shapeStyle,
+        toolbarShapeStyle = a.toolbarShapeStyle ?: toolbarShapeStyle,
+        toolbarShapeFollowsTiles = a.resolvedToolbarFollowsTiles() ?: toolbarShapeFollowsTiles,
+    )
 
 private fun AppSettings.withProfileBehavior(b: ProfileBehavior): AppSettings =
     copy(

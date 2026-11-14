@@ -10,11 +10,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
@@ -46,7 +48,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 
-/** Shared installed-font chooser for appearance settings and per-rule font overrides. */
+/**
+ * A default that sits above the installed families in [SearchableFontDropdown]'s list, such as "Monospace (default)": [key] names it in
+ * the `-option-<tagSuffix>` test tag and in `selectedPinnedKey`, [family] draws its row.
+ */
+internal data class PinnedFontDefault(val key: String, val label: String, val family: FontFamily)
+
+/**
+ * Shared installed-font chooser for appearance settings and per-rule font overrides.
+ *
+ * With no [pinnedDefaults] the list starts with one "default" row ([defaultLabel], picking it calls `onSelect(null)`). With
+ * [pinnedDefaults] those rows replace it, followed by a divider: [selectedPinnedKey] says which one is current while
+ * [selectedFamily] is null, picking one calls [onSelectPinned], and a named family still calls [onSelect]. [triggerInFont] draws the
+ * closed field's text in the selected font. [onInteraction] runs after every open, close and pick so a host with its own key handling
+ * can reclaim the keyboard focus that the popup took.
+ */
 @Composable
 internal fun SearchableFontDropdown(
     label: String?,
@@ -57,6 +73,11 @@ internal fun SearchableFontDropdown(
     modifier: Modifier = Modifier,
     testTagPrefix: String,
     showPreview: Boolean = true,
+    pinnedDefaults: List<PinnedFontDefault> = emptyList(),
+    selectedPinnedKey: String? = null,
+    onSelectPinned: (PinnedFontDefault) -> Unit = {},
+    triggerInFont: Boolean = false,
+    onInteraction: () -> Unit = {},
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -73,8 +94,9 @@ internal fun SearchableFontDropdown(
         FontCatalog.families.filter { needle.isBlank() || it.contains(needle, ignoreCase = true) }
     }
     val listHeight = (popupHeight - 72.dp).coerceAtLeast(80.dp)
-    val shownName = selectedFamily ?: defaultLabel
-    val previewFamily = FontCatalog.resolve(selectedFamily, fallbackFamily)
+    val pinnedSelected = if (selectedFamily == null) pinnedDefaults.firstOrNull { it.key == selectedPinnedKey } else null
+    val shownName = selectedFamily ?: pinnedSelected?.label ?: defaultLabel
+    val previewFamily = FontCatalog.resolve(selectedFamily, pinnedSelected?.family ?: fallbackFamily)
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
         if (label != null) {
@@ -89,6 +111,7 @@ internal fun SearchableFontDropdown(
                     .clickable {
                         query = ""
                         expanded = !expanded
+                        onInteraction()
                     }
                     .padding(horizontal = 8.dp, vertical = 6.dp)
                     .testTag("$testTagPrefix-trigger"),
@@ -99,6 +122,7 @@ internal fun SearchableFontDropdown(
                     shownName,
                     color = tc.tx,
                     fontSize = 11.sp,
+                    fontFamily = if (triggerInFont) previewFamily else LocalUiFontFamily.current,
                     modifier = Modifier.weight(1f),
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -108,7 +132,10 @@ internal fun SearchableFontDropdown(
                 Popup(
                     alignment = Alignment.TopStart,
                     offset = IntOffset(0, with(density) { 35.dp.roundToPx() }),
-                    onDismissRequest = { expanded = false },
+                    onDismissRequest = {
+                        expanded = false
+                        onInteraction()
+                    },
                     properties = PopupProperties(focusable = true),
                 ) {
                     Column(
@@ -120,6 +147,7 @@ internal fun SearchableFontDropdown(
                             .onPreviewKeyEvent { event ->
                                 if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
                                     expanded = false
+                                    onInteraction()
                                     true
                                 } else {
                                     false
@@ -134,28 +162,58 @@ internal fun SearchableFontDropdown(
                             "Search installed fonts",
                             Modifier.fillMaxWidth().testTag("$testTagPrefix-search"),
                             onClear = { query = "" },
-                            onCancel = { expanded = false },
+                            onCancel = {
+                                expanded = false
+                                onInteraction()
+                            },
                         )
                         Row(Modifier.fillMaxWidth().heightIn(max = listHeight).weight(1f, fill = false)) {
                             LazyColumn(
                                 Modifier.weight(1f).heightIn(max = listHeight).padding(end = 6.dp),
                                 state = fontListState,
                             ) {
-                                item {
-                                    FontChoiceRow(
-                                        name = defaultLabel,
-                                        family = fallbackFamily,
-                                        selected = selectedFamily == null,
-                                        onClick = { onSelect(null); expanded = false },
-                                        testTag = "$testTagPrefix-option-default",
-                                    )
+                                if (pinnedDefaults.isEmpty()) {
+                                    item {
+                                        FontChoiceRow(
+                                            name = defaultLabel,
+                                            family = fallbackFamily,
+                                            selected = selectedFamily == null,
+                                            onClick = {
+                                                onSelect(null)
+                                                expanded = false
+                                                onInteraction()
+                                            },
+                                            testTag = "$testTagPrefix-option-default",
+                                        )
+                                    }
+                                } else {
+                                    items(pinnedDefaults, key = { "pinned-${it.key}" }) { pinned ->
+                                        FontChoiceRow(
+                                            name = pinned.label,
+                                            family = pinned.family,
+                                            selected = selectedFamily == null && pinned.key == selectedPinnedKey,
+                                            onClick = {
+                                                onSelectPinned(pinned)
+                                                expanded = false
+                                                onInteraction()
+                                            },
+                                            testTag = "$testTagPrefix-option-default-${pinned.key}",
+                                        )
+                                    }
+                                    item(key = "pinned-divider") {
+                                        Box(Modifier.fillMaxWidth().padding(vertical = 3.dp).height(1.dp).background(tc.br))
+                                    }
                                 }
                                 itemsIndexed(matches, key = { _, family -> family }) { index, family ->
                                     FontChoiceRow(
                                         name = family,
                                         family = FontCatalog.resolve(family, fallbackFamily),
                                         selected = family.equals(selectedFamily, ignoreCase = true),
-                                        onClick = { onSelect(family); expanded = false },
+                                        onClick = {
+                                            onSelect(family)
+                                            expanded = false
+                                            onInteraction()
+                                        },
                                         testTag = "$testTagPrefix-option-$index",
                                     )
                                 }

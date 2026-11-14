@@ -1705,7 +1705,15 @@ data class AppSettings(
     // How round the toolbar's button groups and the Layout menu button are, separately from the tiles' [shapeStyle]. JSON-only
     // (ui/ChromeSettingsJson.kt), appended last.
     val toolbarShapeStyle: ShapeStyle = ShapeStyle.THEME,
+    // True: the toolbar's corners follow the tiles' [shapeStyle] ("Same as tiles"); false: [toolbarShapeStyle] decides. JSON-only
+    // (ui/ChromeSettingsJson.kt), appended last. A file without the key reads as `toolbarShapeStyle == shapeStyle`, so an existing
+    // toolbar keeps its look. Read the style that applies through [effectiveToolbarShapeStyle].
+    val toolbarShapeFollowsTiles: Boolean = true,
 )
+
+/** The corner style the toolbar is actually drawn with: the tiles' style while it follows them, else its own. */
+val AppSettings.effectiveToolbarShapeStyle: ShapeStyle
+    get() = if (toolbarShapeFollowsTiles) shapeStyle else toolbarShapeStyle
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
 enum class HomeSectionId(val key: String) {
@@ -1960,6 +1968,8 @@ data class ProfileAppearance(
     val verticalTabBarWidthDp: Float? = null,
     val shapeStyle: ShapeStyle? = null,
     val toolbarShapeStyle: ShapeStyle? = null,
+    // Null reads as `toolbarShapeStyle == shapeStyle` when one is set (a profile from before "Same as tiles"), else the app default (follow).
+    val toolbarShapeFollowsTiles: Boolean? = null,
 )
 
 /**
