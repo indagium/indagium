@@ -162,11 +162,18 @@ internal enum class SettingsPage(
         "Voice input", Icons.Outlined.Mic, SettingsGroupKind.Ai,
         "Dictation engine, language and local model.",
     ),
-    TestRuns("Test runs", Icons.Outlined.Science, SettingsGroupKind.Testing),
-    IssueTracker("Issue tracker", Icons.Outlined.BugReport, SettingsGroupKind.Testing),
+    TestRuns(
+        "Test runs", Icons.Outlined.Science, SettingsGroupKind.Testing,
+        "Defaults for new AI test runs, and where suites, runs and issues are kept.",
+    ),
+    IssueTracker(
+        "Issue tracker", Icons.Outlined.BugReport, SettingsGroupKind.Testing,
+        "Send issues from failed test steps to your own tracker, an MCP server. An AI agent files each issue by calling its tools; " +
+            "the issue text and the evidence it uploads are visible to that AI profile and sent to the tracker.",
+    ),
     Storage(
         "Storage & files", Icons.Outlined.Folder, SettingsGroupKind.System,
-        "Where Indagium saves your files, and what it keeps on disk.",
+        "Where Indagium saves your files, and what it keeps on disk. The test suite, run and issue folders are on Test runs.",
     ),
     Integrations(
         "Integrations", Icons.Outlined.Hub, SettingsGroupKind.System,
@@ -356,20 +363,4 @@ internal fun SettingsFooter(
 
 internal fun openProjectRepository() {
     openExternalUrl(PROJECT_REPO_URL)
-}
-
-/** Interim About page: version and author text and the project links that used to live in the dialog's footer, then the edition. */
-@Composable
-internal fun AboutSettingsSection(state: AppState) {
-    val tc = tc()
-    Row(horizontalArrangement = Arrangement.spacedBy(40.dp)) {
-        CompactSetting("Version") { AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 12.sp, fontFamily = MONO) }
-        CompactSetting("Author") { AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 12.sp, fontFamily = MONO) }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        AccentLink("GitHub repository ↗", onClick = ::openProjectRepository)
-        AccentLink("Support project ♥", onClick = { state.openSupportDialog() })
-        AppButton("License…", onClick = { state.licenseAgreementOpen = true }, variant = ButtonVariant.Secondary)
-    }
-    EditionSettingsBlock(state)
 }

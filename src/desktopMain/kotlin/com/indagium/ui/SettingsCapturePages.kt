@@ -87,7 +87,7 @@ private fun captureEdit(state: AppState): CaptureSettingsEdit = { transform ->
  * [CheckRow]; [enabled] = false dims it and ignores clicks.
  */
 @Composable
-private fun CaptureCheckbox(
+internal fun SettingsCheckbox(
     checked: Boolean,
     label: String,
     onChange: (Boolean) -> Unit,
@@ -178,7 +178,7 @@ internal fun CaptureVideoSettingsSection(state: AppState, reclaimFocus: () -> Un
             indent = true,
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                CaptureCheckbox(
+                SettingsCheckbox(
                     checked = settings.audio,
                     label = "Capture audio",
                     onChange = { next ->
@@ -188,7 +188,7 @@ internal fun CaptureVideoSettingsSection(state: AppState, reclaimFocus: () -> Un
                     testTag = CapturePageTags.CAPTURE_AUDIO,
                 )
                 // Dependent on Capture audio: nothing to keep on the device while the sound is not captured.
-                CaptureCheckbox(
+                SettingsCheckbox(
                     checked = settings.keepDeviceAudio,
                     label = "Keep sound on the device (Android 13+)",
                     onChange = { next ->

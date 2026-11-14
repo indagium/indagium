@@ -102,8 +102,8 @@ class SettingsPagesUiTest {
         rule.onNodeWithTag("settings-footer-version").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Workspace profile").assertDoesNotExist()
-        rule.onNodeWithText("GitHub repository ↗").assertExists()
-        rule.onNodeWithText("License…").assertExists()
+        rule.onNodeWithText("GitHub repository").assertExists()
+        rule.onNodeWithText("License agreement").assertExists()
         assertEquals(0, dismissed)
 
         rule.onNodeWithTag("settings-done").performClick()

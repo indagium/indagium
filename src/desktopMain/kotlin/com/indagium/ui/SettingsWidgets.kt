@@ -67,6 +67,8 @@ private val SWITCH_TRACK_HEIGHT = 18.dp
 private val SWITCH_KNOB_ON = 14.dp
 private val SWITCH_KNOB_OFF = 12.dp
 private const val DISABLED_ALPHA = 0.5f
+private const val BADGE_FILL_ALPHA = 0.13f
+private const val BADGE_BORDER_ALPHA = 0.27f
 private val SETTINGS_ROW_INDENT = 28.dp
 private val SETTINGS_CARD_SHAPE = RoundedCornerShape(8.dp)
 private val DROPDOWN_POPUP_SHAPE = RoundedCornerShape(8.dp)
@@ -123,7 +125,7 @@ internal fun SettingsSwitch(
  * One setting: [label] with an optional one-line [description] on the left and [control] right-aligned. It carries
  * [settingsAnchor] for [anchor] (the search index key, default the label) so a search result can scroll to and flash it.
  * [indent] marks a row that depends on the one above. [enabled] = false dims the label and control to half; the control must
- * disable its own interaction as well, the row only draws.
+ * disable its own interaction as well, the row only draws. [danger] draws the label in the danger colour (a destructive action).
  */
 @Composable
 internal fun SettingsRow(
@@ -134,6 +136,7 @@ internal fun SettingsRow(
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
     descriptionTag: String? = null,
+    danger: Boolean = false,
     control: @Composable () -> Unit,
 ) {
     val tc = tc()
@@ -146,7 +149,14 @@ internal fun SettingsRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                AppText(label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                AppText(
+                    label,
+                    color = if (danger) DANGER_RED else tc.tx,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 if (!description.isNullOrBlank()) {
                     AppText(
                         description,
@@ -502,5 +512,41 @@ internal fun SettingsDrillRow(
             }
             Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = tc.ts, modifier = Modifier.size(16.dp))
         }
+    }
+}
+
+/**
+ * A card row that is only a sentence: a note under the rows above it or a status line (an error in the danger colour when [error]).
+ * [anchor], when set, makes it a search target like any row.
+ */
+@Composable
+internal fun SettingsNoteRow(text: String, error: Boolean = false, modifier: Modifier = Modifier, anchor: String? = null) {
+    val tc = tc()
+    Box(modifier.fillMaxWidth().then(if (anchor != null) Modifier.settingsAnchor(anchor) else Modifier)) {
+        AppText(
+            text,
+            color = if (error) DANGER_RED else tc.ts,
+            fontSize = 11.sp,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+        )
+    }
+}
+
+/** A small accent pill with a [text] (a status such as "Running" or an edition name); [dot] adds a leading status dot. */
+@Composable
+internal fun SettingsBadge(text: String, modifier: Modifier = Modifier, dot: Boolean = false) {
+    val tc = tc()
+    val shape = RoundedCornerShape(3.dp)
+    Row(
+        modifier.background(tc.ac.copy(alpha = BADGE_FILL_ALPHA), shape)
+            .border(1.dp, tc.ac.copy(alpha = BADGE_BORDER_ALPHA), shape)
+            .padding(horizontal = 8.dp, vertical = 1.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (dot) Box(Modifier.size(6.dp).background(tc.ac, CircleShape))
+        AppText(text, color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }

@@ -325,22 +325,28 @@ private fun InactiveTabMemoryRow(state: AppState) {
     }
 }
 
+/**
+ * The status line of the update check and whether it is an error: "Update available" once a release is known (that fact takes priority over
+ * whatever the last raw check status happened to be, e.g. a stale UpToDate from a previous run), otherwise the last check's outcome; null
+ * while there is nothing to say.
+ */
+internal fun updateStatusLine(state: AppState): Pair<String, Boolean>? = when {
+    state.availableUpdate != null -> "Update available" to false
+    else -> when (val s = state.updateCheckStatus) {
+        UpdateStatus.Idle -> null
+        UpdateStatus.Checking -> "Checking…" to false
+        is UpdateStatus.UpToDate -> "Up to date (v${s.version})" to false
+        is UpdateStatus.Failed -> "Couldn't reach GitHub" to true
+    }
+}
+
 /** Check for updates automatically, with Check now and the status of the last check. */
 @Composable
 private fun UpdateCheckRow(state: AppState) {
     val tc = tc()
-    // availableUpdate is checked first: once a release is known, that fact takes priority over
-    // whatever the last raw check status happened to be (e.g. a stale UpToDate from a previous run).
-    val updateStatusText = when {
-        state.availableUpdate != null -> "Update available"
-        else -> when (val s = state.updateCheckStatus) {
-            UpdateStatus.Idle -> null
-            UpdateStatus.Checking -> "Checking…"
-            is UpdateStatus.UpToDate -> "Up to date (v${s.version})"
-            is UpdateStatus.Failed -> "Couldn't reach GitHub"
-        }
-    }
-    val isError = state.availableUpdate == null && state.updateCheckStatus is UpdateStatus.Failed
+    val status = updateStatusLine(state)
+    val updateStatusText = status?.first
+    val isError = status?.second == true
     SettingsRow("Check for updates automatically", "Looks for a newer release on GitHub when Indagium starts.") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             updateStatusText?.let { text ->
