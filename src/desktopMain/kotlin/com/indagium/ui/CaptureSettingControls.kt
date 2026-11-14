@@ -169,16 +169,7 @@ private fun CaptureVideoCodecControl(
 ) {
     val colors = tc()
     AppText("Recording codec", color = colors.td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Recording codec"))
-    SegmentedControl(
-        options = CaptureVideoCodec.entries.map { it.label },
-        selectedIndices = setOf(CaptureVideoCodec.entries.indexOf(settings.videoCodec)),
-        onToggle = { index ->
-            edit { it.copy(videoCodec = CaptureVideoCodec.entries[index]) }
-            onReclaimFocus()
-        },
-        modifier = Modifier.fillMaxWidth(),
-        fillWidth = true,
-    )
+    CaptureVideoCodecSegments(settings, edit, onReclaimFocus, Modifier.fillMaxWidth(), fillWidth = true)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         AppText(
             captureVideoCodecSupportText(settings.videoCodec, probeState, deviceSerial),
@@ -196,6 +187,27 @@ private fun CaptureVideoCodecControl(
             )
         }
     }
+}
+
+/** The H.264 / AV1 segments of the recording codec picker, shared by the launcher's panel and the Settings page row. */
+@Composable
+internal fun CaptureVideoCodecSegments(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+    fillWidth: Boolean = false,
+) {
+    SegmentedControl(
+        options = CaptureVideoCodec.entries.map { it.label },
+        selectedIndices = setOf(CaptureVideoCodec.entries.indexOf(settings.videoCodec)),
+        onToggle = { index ->
+            edit { it.copy(videoCodec = CaptureVideoCodec.entries[index]) }
+            onReclaimFocus()
+        },
+        modifier = modifier,
+        fillWidth = fillWidth,
+    )
 }
 
 /**
@@ -254,6 +266,45 @@ private fun CaptureMicrophoneControl(
     edit: CaptureSettingsEdit,
     onReclaimFocus: () -> Unit,
 ) {
+    val colors = tc()
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            Modifier.settingsAnchor("Microphone"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AppText("Microphone", color = colors.td, fontSize = 10.sp)
+            CaptureMicrophonePicker(settings, edit, onReclaimFocus, Modifier.widthIn(max = 250.dp).fillMaxWidth())
+        }
+        AppText(
+            "Records audio from this computer microphone with the screen capture.",
+            color = colors.td,
+            fontSize = 10.sp,
+        )
+    }
+    if (settings.microphoneDeviceId != MICROPHONE_OFF_ID) {
+        AppText(
+            MICROPHONE_PICKUP_NOTE,
+            color = colors.td,
+            fontSize = 10.sp,
+            maxLines = 2,
+        )
+    }
+}
+
+internal const val MICROPHONE_PICKUP_NOTE = "Nearby speaker audio may be picked up; microphone monitoring is off."
+
+/**
+ * The microphone dropdown alone (field and popup, no label or hints): Off, System default, then the host's input devices, listed
+ * when the menu opens. Shared by the launcher's panel and the Settings page row.
+ */
+@Composable
+internal fun CaptureMicrophonePicker(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     var menuExpanded by remember { mutableStateOf(false) }
     var microphones by remember { mutableStateOf<List<DesktopMicrophone>?>(null) }
     var enumerationFailure by remember { mutableStateOf<String?>(null) }
@@ -292,95 +343,73 @@ private fun CaptureMicrophoneControl(
         }
     }
     val colors = tc()
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Box(modifier) {
         Row(
-            Modifier.settingsAnchor("Microphone"),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AppText("Microphone", color = colors.td, fontSize = 10.sp)
-            Box(Modifier.widthIn(max = 250.dp).fillMaxWidth()) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(CORNER_MD)
-                        .border(1.dp, colors.br, CORNER_MD)
-                        .clickable {
-                            menuExpanded = !menuExpanded
-                            if (menuExpanded) refreshMicrophones()
-                        }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    AppText(
-                        if (scanning) "Loading microphones…" else selected,
-                        color = colors.tx,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    AppText(if (menuExpanded) "▾" else "▸", color = colors.ts, fontSize = 9.sp)
+            Modifier
+                .fillMaxWidth()
+                .clip(CORNER_MD)
+                .border(1.dp, colors.br, CORNER_MD)
+                .clickable {
+                    menuExpanded = !menuExpanded
+                    if (menuExpanded) refreshMicrophones()
                 }
-                if (menuExpanded) {
-                    val density = androidx.compose.ui.platform.LocalDensity.current.density
-                    Popup(
-                        alignment = Alignment.TopStart,
-                        offset = IntOffset(0, (32 * density).roundToInt()),
-                        onDismissRequest = { menuExpanded = false; onReclaimFocus() },
-                        properties = PopupProperties(focusable = true),
-                    ) {
-                        Column(
-                            Modifier.widthIn(min = 190.dp, max = 250.dp)
-                                .background(colors.p, RoundedCornerShape(7.dp))
-                                .border(1.dp, colors.br, RoundedCornerShape(7.dp))
-                                .padding(vertical = 4.dp),
-                        ) {
-                            MicrophoneOption("Off", settings.microphoneDeviceId == MICROPHONE_OFF_ID) {
-                                edit { it.copy(microphoneDeviceId = MICROPHONE_OFF_ID) }
-                                menuExpanded = false
-                                onReclaimFocus()
-                            }
-                            MicrophoneOption("System default", settings.microphoneDeviceId == MICROPHONE_DEFAULT_ID) {
-                                edit { it.copy(microphoneDeviceId = MICROPHONE_DEFAULT_ID) }
-                                menuExpanded = false
-                                onReclaimFocus()
-                            }
-                            microphones.orEmpty().forEach { microphone ->
-                                MicrophoneOption(microphone.label, settings.microphoneDeviceId == microphone.id) {
-                                    edit { it.copy(microphoneDeviceId = microphone.id) }
-                                    menuExpanded = false
-                                    onReclaimFocus()
-                                }
-                            }
-                            when {
-                                scanning -> MicrophoneOption("Loading microphones…", active = false, enabled = false)
-                                enumerationFailure != null -> MicrophoneOption(
-                                    enumerationFailure ?: "Microphone list unavailable",
-                                    active = false,
-                                    enabled = false,
-                                )
-                                microphones.isNullOrEmpty() -> MicrophoneOption("No microphones found", active = false, enabled = false)
-                            }
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            AppText(
+                if (scanning) "Loading microphones…" else selected,
+                color = colors.tx,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            AppText(if (menuExpanded) "▾" else "▸", color = colors.ts, fontSize = 9.sp)
+        }
+        if (menuExpanded) {
+            val density = androidx.compose.ui.platform.LocalDensity.current.density
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, (32 * density).roundToInt()),
+                onDismissRequest = { menuExpanded = false; onReclaimFocus() },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.widthIn(min = 190.dp, max = 250.dp)
+                        .background(colors.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, colors.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp),
+                ) {
+                    MicrophoneOption("Off", settings.microphoneDeviceId == MICROPHONE_OFF_ID) {
+                        edit { it.copy(microphoneDeviceId = MICROPHONE_OFF_ID) }
+                        menuExpanded = false
+                        onReclaimFocus()
+                    }
+                    MicrophoneOption("System default", settings.microphoneDeviceId == MICROPHONE_DEFAULT_ID) {
+                        edit { it.copy(microphoneDeviceId = MICROPHONE_DEFAULT_ID) }
+                        menuExpanded = false
+                        onReclaimFocus()
+                    }
+                    microphones.orEmpty().forEach { microphone ->
+                        MicrophoneOption(microphone.label, settings.microphoneDeviceId == microphone.id) {
+                            edit { it.copy(microphoneDeviceId = microphone.id) }
+                            menuExpanded = false
+                            onReclaimFocus()
                         }
+                    }
+                    when {
+                        scanning -> MicrophoneOption("Loading microphones…", active = false, enabled = false)
+                        enumerationFailure != null -> MicrophoneOption(
+                            enumerationFailure ?: "Microphone list unavailable",
+                            active = false,
+                            enabled = false,
+                        )
+                        microphones.isNullOrEmpty() -> MicrophoneOption("No microphones found", active = false, enabled = false)
                     }
                 }
             }
         }
-        AppText(
-            "Records audio from this computer microphone with the screen capture.",
-            color = colors.td,
-            fontSize = 10.sp,
-        )
-    }
-    if (settings.microphoneDeviceId != MICROPHONE_OFF_ID) {
-        AppText(
-            "Nearby speaker audio may be picked up; microphone monitoring is off.",
-            color = colors.td,
-            fontSize = 10.sp,
-            maxLines = 2,
-        )
     }
 }
 
@@ -438,10 +467,14 @@ internal fun RecordVideoToFileCheck(
     }
 }
 
+/** Why recording is unavailable on this system, for the greyed Record video control. */
+internal fun nativeMediaUnsupportedText(nativeMediaSupport: NativeMediaSupport): String =
+    nativeMediaSupport.reason ?: "Video recording isn't available on this system."
+
 @Composable
 private fun NativeMediaUnsupportedHint(nativeMediaSupport: NativeMediaSupport) {
     AppText(
-        nativeMediaSupport.reason ?: "Video recording isn't available on this system.",
+        nativeMediaUnsupportedText(nativeMediaSupport),
         color = tc().td,
         fontSize = 10.sp,
         maxLines = CAPTURE_HINT_MAX_LINES,
@@ -511,11 +544,13 @@ internal fun KeepDeviceAudioCheck(settings: CaptureSettings, edit: CaptureSettin
     }
 }
 
+internal const val DEVICE_AUDIO_MUTING_TEXT = "While audio is captured the phone's speaker is muted (Android 11–12 always; Android 13+ " +
+    "unless \"Keep sound on the device\" is on). Apps can block capture of their sound."
+
 @Composable
 internal fun DeviceAudioMutingNotice() {
     AppText(
-        "While audio is captured the phone's speaker is muted (Android 11–12 always; Android 13+ " +
-            "unless \"Keep sound on the device\" is on). Apps can block capture of their sound.",
+        DEVICE_AUDIO_MUTING_TEXT,
         color = tc().td,
         fontSize = 10.sp,
         maxLines = CAPTURE_HINT_MAX_LINES,
@@ -538,15 +573,46 @@ internal fun IncludeEarlierDeviceLogsCheck(settings: CaptureSettings, edit: Capt
     }
 }
 
+internal const val EARLIER_DEVICE_LOGS_TEXT = "Also copies what the device already holds from before Start " +
+    "(often minutes to hours), not only new lines."
+
 @Composable
 internal fun EarlierDeviceLogsHint() {
     AppText(
-        "Earlier device logs: also copies what the device already holds from before Start " +
-            "(often minutes to hours), not only new lines.",
+        "Earlier device logs: ${EARLIER_DEVICE_LOGS_TEXT.replaceFirstChar { it.lowercase() }}",
         color = tc().td,
         fontSize = 10.sp,
         maxLines = CAPTURE_HINT_MAX_LINES,
     )
+}
+
+/** The device display a launch will really use: the stored choice, except an unavailable in-app mirror, which falls back to scrcpy or Off. */
+internal fun effectiveDeviceDisplayMode(
+    settings: CaptureSettings,
+    nativeMediaSupport: NativeMediaSupport,
+    scrcpyAvailable: Boolean,
+): CaptureMirrorMode {
+    val storedMode = settings.effectiveMirrorMode
+    val embeddedUnsupported = !nativeMediaSupport.available && storedMode == CaptureMirrorMode.EMBEDDED
+    return if (embeddedUnsupported) {
+        if (scrcpyAvailable) CaptureMirrorMode.EXTERNAL else CaptureMirrorMode.DISABLED
+    } else {
+        storedMode
+    }
+}
+
+/** What to tell the user when the stored in-app mirror cannot run on this system; null when nothing is overridden. */
+internal fun deviceDisplayNote(
+    settings: CaptureSettings,
+    nativeMediaSupport: NativeMediaSupport,
+    scrcpyAvailable: Boolean,
+): String? {
+    if (nativeMediaSupport.available || settings.effectiveMirrorMode != CaptureMirrorMode.EMBEDDED) return null
+    return if (scrcpyAvailable) {
+        "In-app mirror isn't available on this system; the scrcpy window is used instead."
+    } else {
+        "In-app mirror isn't available on this system, and scrcpy isn't installed; no device display is shown."
+    }
 }
 
 /**
@@ -565,13 +631,8 @@ internal fun CaptureDeviceDisplayControl(
     nativeMediaSupport: NativeMediaSupport = NativeMediaSupport(available = true),
     scrcpyAvailable: Boolean = true,
 ) {
-    val storedMode = settings.effectiveMirrorMode
-    val embeddedUnsupported = !nativeMediaSupport.available && storedMode == CaptureMirrorMode.EMBEDDED
-    val effectiveMode = if (embeddedUnsupported) {
-        if (scrcpyAvailable) CaptureMirrorMode.EXTERNAL else CaptureMirrorMode.DISABLED
-    } else {
-        storedMode
-    }
+    val effectiveMode = effectiveDeviceDisplayMode(settings, nativeMediaSupport, scrcpyAvailable)
+    val embeddedUnsupported = deviceDisplayNote(settings, nativeMediaSupport, scrcpyAvailable) != null
     AppText("Device display", color = tc().td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Device display"))
     SegmentedControl(
         options = listOf("In-app mirror", "scrcpy window", "Off"),
@@ -588,11 +649,7 @@ internal fun CaptureDeviceDisplayControl(
     )
     if (embeddedUnsupported) {
         AppText(
-            if (scrcpyAvailable) {
-                "In-app mirror isn't available on this system; the scrcpy window is used instead."
-            } else {
-                "In-app mirror isn't available on this system, and scrcpy isn't installed; no device display is shown."
-            },
+            deviceDisplayNote(settings, nativeMediaSupport, scrcpyAvailable).orEmpty(),
             color = tc().td,
             fontSize = 10.sp,
             maxLines = CAPTURE_HINT_MAX_LINES,
@@ -614,8 +671,27 @@ internal fun CaptureVideoQualityControl(
     onReclaimFocus: () -> Unit = {},
 ) {
     val colors = tc()
-    val preset = settings.videoPreset()
     AppText("Video quality", color = colors.td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Video quality"))
+    CaptureVideoQualitySegments(settings, edit, onReclaimFocus, Modifier.fillMaxWidth(), fillWidth = true)
+    AppText(
+        captureVideoQualityCaption(settings),
+        color = colors.td,
+        fontSize = 10.sp,
+        maxLines = 1,
+    )
+    CaptureSizeEstimateLine(settings)
+}
+
+/** The preset segments of the video quality picker, shared by the launcher's panel and the Settings page row. */
+@Composable
+internal fun CaptureVideoQualitySegments(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+    fillWidth: Boolean = false,
+) {
+    val preset = settings.videoPreset()
     SegmentedControl(
         options = CaptureVideoPreset.entries.map { it.label },
         selectedIndices = setOfNotNull(preset?.let { CaptureVideoPreset.entries.indexOf(it) }),
@@ -623,20 +699,19 @@ internal fun CaptureVideoQualityControl(
             edit { it.withVideoPreset(CaptureVideoPreset.entries[index]) }
             onReclaimFocus()
         },
-        modifier = Modifier.fillMaxWidth(),
-        fillWidth = true,
+        modifier = modifier,
+        fillWidth = fillWidth,
     )
-    AppText(
-        if (preset != null) {
-            "${preset.maxSize} px · ${preset.maxFps} fps · ${preset.bitrateMbps} Mbps"
-        } else {
-            "Custom — ${settings.maxSize} px · ${settings.maxFps} fps · ${settings.bitrateMbps} Mbps"
-        },
-        color = colors.td,
-        fontSize = 10.sp,
-        maxLines = 1,
-    )
-    CaptureSizeEstimateLine(settings)
+}
+
+/** "1280 px · 30 fps · 8 Mbps" for a preset, or "Custom — ..." with the stored numbers when they match none. */
+internal fun captureVideoQualityCaption(settings: CaptureSettings): String {
+    val preset = settings.videoPreset()
+    return if (preset != null) {
+        "${preset.maxSize} px · ${preset.maxFps} fps · ${preset.bitrateMbps} Mbps"
+    } else {
+        "Custom — ${settings.maxSize} px · ${settings.maxFps} fps · ${settings.bitrateMbps} Mbps"
+    }
 }
 
 /** One-line "≈ 11 MB/min (up to 23) · 30 min ≈ 340 MB" for the current bitrate and audio choice. */
@@ -655,19 +730,9 @@ internal fun CaptureSizeEstimateLine(settings: CaptureSettings) {
 internal fun CaptureBufferModeControl(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     val colors = tc()
     AppText("Buffer mode", color = colors.td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Buffer mode"))
-    SegmentedControl(
-        options = listOf("Default", "All", "Custom"),
-        selectedIndices = setOf(CaptureBufferMode.entries.indexOf(settings.bufferMode)),
-        onToggle = { index -> edit { it.copy(bufferMode = CaptureBufferMode.entries[index]) } },
-        modifier = Modifier.fillMaxWidth(),
-        fillWidth = true,
-    )
+    CaptureBufferModeSegments(settings, edit, Modifier.fillMaxWidth(), fillWidth = true)
     AppText(
-        when (settings.bufferMode) {
-            CaptureBufferMode.DEFAULT -> "Uses adb's own default buffers (no -b flag)."
-            CaptureBufferMode.ALL -> "Captures every buffer the device exposes (-b all)."
-            CaptureBufferMode.CUSTOM -> "Captures only the buffers ticked below."
-        },
+        captureBufferModeHint(settings),
         color = colors.td,
         fontSize = 10.sp,
         maxLines = CAPTURE_HINT_MAX_LINES,
@@ -675,11 +740,41 @@ internal fun CaptureBufferModeControl(settings: CaptureSettings, edit: CaptureSe
     if (settings.bufferMode == CaptureBufferMode.CUSTOM) CaptureCustomBufferPicker(settings, edit)
 }
 
+/** The Default / All / Custom segments of the buffer mode picker, shared by the launcher's panel and the Settings page row. */
+@Composable
+internal fun CaptureBufferModeSegments(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    modifier: Modifier = Modifier,
+    fillWidth: Boolean = false,
+) {
+    SegmentedControl(
+        options = listOf("Default", "All", "Custom"),
+        selectedIndices = setOf(CaptureBufferMode.entries.indexOf(settings.bufferMode)),
+        onToggle = { index -> edit { it.copy(bufferMode = CaptureBufferMode.entries[index]) } },
+        modifier = modifier,
+        fillWidth = fillWidth,
+    )
+}
+
+/** One line saying what the current buffer mode captures. */
+internal fun captureBufferModeHint(settings: CaptureSettings): String = when (settings.bufferMode) {
+    CaptureBufferMode.DEFAULT -> "Uses adb's own default buffers (no -b flag)."
+    CaptureBufferMode.ALL -> "Captures every buffer the device exposes (-b all)."
+    CaptureBufferMode.CUSTOM -> "Captures only the buffers ticked below."
+}
+
 /** Buffers picked here always apply in Custom mode — `logcatBufferArgs()` ignores
  * `includeBufferedLogs` — hence "Buffers to capture" rather than tying them to that toggle. */
 @Composable
 private fun CaptureCustomBufferPicker(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     AppText("Buffers to capture", color = tc().td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Buffers to capture"))
+    CaptureBufferChecks(settings, edit)
+}
+
+/** The buffer checkboxes (three per row) and the "choose at least one" error; the picker without its label. */
+@Composable
+internal fun CaptureBufferChecks(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     CAPTURE_BUFFER_NAMES.chunked(CAPTURE_BUFFER_GRID_COLUMNS).forEach { rowNames ->
         Row(Modifier.fillMaxWidth()) {
             rowNames.forEach { name ->

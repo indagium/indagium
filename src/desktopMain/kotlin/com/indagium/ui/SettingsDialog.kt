@@ -169,6 +169,9 @@ internal fun SettingsDialog(
     SideEffect { anchors.pendingKey = pendingAnchor }
     val contentScroll = rememberScrollState()
     val density = LocalDensity.current
+    // A page opens at its top, so a drill-in page or the page behind a back link is not left scrolled to the previous page's offset. Declared
+    // before the anchor effect below, which scrolls to its row once the page has laid out.
+    LaunchedEffect(selectedPage) { contentScroll.scrollTo(0) }
     // After a result click the page is composed again (and, for another page, for the first
     // time), so give it two frames to lay out before reading the anchor, then scroll and flash.
     LaunchedEffect(pendingAnchor) {
@@ -250,7 +253,8 @@ internal fun SettingsDialog(
                         selected = selectedPage,
                         visiblePages = visiblePages,
                         searching = searching,
-                        resultCounts = results.groupingBy { it.page }.eachCount(),
+                        // A sub-page's results count on its parent's nav item, the only one the nav shows for it.
+                        resultCounts = results.groupingBy { it.page.navPage }.eachCount(),
                         totalResults = results.size,
                         onAllResults = { runCatching { searchFocus.requestFocus() } },
                         onPick = { page ->
@@ -288,6 +292,8 @@ internal fun SettingsDialog(
                                 state,
                                 selectedPage,
                                 ::reclaimFocus,
+                                // A drill-in row opens its sub-page the way a nav click opens a page.
+                                onOpenPage = { target -> requestPageSwitch(target) },
                             ) { aiProviderGuard = it }
                         }
                     }
@@ -380,6 +386,7 @@ private fun SettingsPageBody(
     state: AppState,
     page: SettingsPage,
     reclaimFocus: () -> Unit,
+    onOpenPage: (SettingsPage) -> Unit,
     onProviderGuard: (AiProviderGuard) -> Unit,
 ) {
     when (page) {
@@ -392,7 +399,11 @@ private fun SettingsPageBody(
         SettingsPage.SourceCode -> SourceCodeSettingsSection(state, reclaimFocus)
         SettingsPage.NotesWriting -> NotesWritingSettingsSection(state, reclaimFocus)
         SettingsPage.CopyExport -> CopyExportSettingsSection(state, reclaimFocus)
-        SettingsPage.CaptureVideo -> CaptureVideoSettingsSection(state)
+        SettingsPage.CaptureVideo -> CaptureVideoSettingsSection(state, reclaimFocus, onOpenPage)
+        SettingsPage.CaptureTools -> CaptureToolsSettingsSection(state, reclaimFocus)
+        SettingsPage.CaptureLimits -> CaptureLimitsSettingsSection(state, reclaimFocus)
+        SettingsPage.CaptureMarkIssue -> CaptureMarkIssueSettingsSection(state, reclaimFocus)
+        SettingsPage.CaptureVideoPlayback -> CaptureVideoPlaybackSettingsSection(state, reclaimFocus)
         SettingsPage.AiProviders -> AiProviderSettingsSection(state, onProviderGuard)
         SettingsPage.AiCommands -> CustomAiCommandsSettingsSection(state)
         SettingsPage.VoiceInput -> VoiceInputSettingsSection(state)
@@ -778,41 +789,6 @@ private fun StorageInfoTooltip(text: String) {
             .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
         AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = 4)
-    }
-}
-
-/** Settings › Capture & video: the capture settings, then the two video-playback settings that used to sit under Editor behavior. */
-@Composable
-private fun CaptureVideoSettingsSection(state: AppState) {
-    val finalRowLabelAreaHeight = 28.dp
-    CaptureSettingsSection(state)
-    SettingsGrid(columns = 4, rowSpacing = 16.dp) {
-        CompactSettingWithTooltip(
-            label = "Video follow readout",
-            tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
-                "bar, explaining exactly what Follow is doing at the current playhead position.",
-            labelMaxLines = 2,
-            labelAreaHeight = finalRowLabelAreaHeight,
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "New video links:\ndouble-click seeks",
-            tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
-                "independently from its header; this does not affect existing links or Follow.",
-            labelMaxLines = 2,
-            labelAreaHeight = finalRowLabelAreaHeight,
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
-            )
-        }
     }
 }
 

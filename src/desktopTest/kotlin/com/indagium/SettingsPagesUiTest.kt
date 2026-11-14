@@ -10,6 +10,7 @@ import androidx.compose.ui.test.performScrollTo
 import com.indagium.capture.CaptureBufferMode
 import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.AppState
+import com.indagium.ui.CapturePageTags
 import com.indagium.ui.SETTINGS_SEARCH_INDEX
 import com.indagium.ui.SettingsAnchorKey
 import com.indagium.ui.SettingsDialog
@@ -22,7 +23,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** Drives the real Settings dialog's shell: the page nav, the deep links, the footer, and that every page shows what the search index says it does. */
+/**
+ * Drives the real Settings dialog's shell: the page nav, the deep links, the footer, and that every page, drill-in sub-pages included,
+ * shows what the search index says it does.
+ */
 @OptIn(ExperimentalTestApi::class)
 class SettingsPagesUiTest {
     @get:Rule
@@ -41,6 +45,18 @@ class SettingsPagesUiTest {
      */
     private val stateDependentAnchors = SEASONAL_ANCHORS + setOf("CLI executable (optional)", "Reasoning effort")
 
+    /** Opens [page] the way a user does: a nav click, then for a drill-in sub-page the row of its parent that leads to it. */
+    private fun openPage(page: SettingsPage) {
+        val parent = page.parent
+        if (parent == null) {
+            rule.onNodeWithTag(settingsNavTag(page)).performScrollTo().performClick()
+        } else {
+            openPage(parent)
+            rule.onNodeWithTag(CapturePageTags.drillRow(page)).performScrollTo().performClick()
+        }
+        rule.waitForIdle()
+    }
+
     @Test
     fun everyPageRendersAnAnchoredRowForEachOfItsSearchEntries() {
         val state = AppState()
@@ -55,8 +71,7 @@ class SettingsPagesUiTest {
 
         val missing = mutableListOf<String>()
         for (page in SettingsPage.entries) {
-            rule.onNodeWithTag(settingsNavTag(page)).performScrollTo().performClick()
-            rule.waitForIdle()
+            openPage(page)
             val shown = anchorsOnScreen()
             SETTINGS_SEARCH_INDEX.filter { it.page == page && it.anchor !in shown && it.anchor !in stateDependentAnchors }
                 .forEach { missing += "${page.title}: ${it.label} (anchor \"${it.anchor.replace('\n', ' ')}\")" }

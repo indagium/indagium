@@ -50,6 +50,17 @@ class SettingsSearchTest {
     }
 
     @Test
+    fun aSubPageEntryIsFoundThroughItsParentTitleAndItsBreadcrumbNamesTheParent() {
+        assertEquals("Devices › Capture & video › Mark issue", SettingsPage.CaptureMarkIssue.breadcrumb)
+        assertEquals("Devices › Capture & video", SettingsPage.CaptureVideo.breadcrumb)
+        val found = searchSettings("capture video bitrate", all)
+        assertTrue(found.any { it.page == SettingsPage.CaptureLimits && it.label == "Bitrate Mbps" }, found.toString())
+        assertEquals(SettingsPage.CaptureVideoPlayback, SETTINGS_SEARCH_INDEX.single { it.label == "Video follow readout" }.page)
+        assertEquals(SettingsPage.CaptureTools, SETTINGS_SEARCH_INDEX.single { it.label == "ADB path" }.page)
+        assertEquals(SettingsPage.CaptureVideo, SETTINGS_SEARCH_INDEX.single { it.label == "Device display" }.page)
+    }
+
+    @Test
     fun theGroupLabelAndPageTitleAreSearchable() {
         assertTrue("Providers" in labels("providers"), labels("providers").toString())
         val reading = searchSettings("reading logs", all)

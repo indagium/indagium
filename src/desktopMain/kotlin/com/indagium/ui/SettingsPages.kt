@@ -19,9 +19,11 @@ import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.automirrored.outlined.ViewList
 import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Info
@@ -32,6 +34,8 @@ import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SmartDisplay
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Tab
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
@@ -50,6 +54,8 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -120,7 +126,30 @@ internal enum class SettingsPage(
         "Copy & export", Icons.Outlined.ContentCopy, SettingsGroupKind.Notes,
         "What copying includes, the words it masks, and how notes and diagrams are exported.",
     ),
-    CaptureVideo("Capture & video", Icons.Outlined.PhoneAndroid, SettingsGroupKind.Devices),
+    CaptureVideo(
+        "Capture & video", Icons.Outlined.PhoneAndroid, SettingsGroupKind.Devices,
+        "Defaults for the New tab's Before start panel. Each capture can still change them before it starts.",
+    ),
+    CaptureTools(
+        "Tools", Icons.Outlined.Build, SettingsGroupKind.Devices,
+        "The adb and scrcpy programs used for device capture, and how the in-app mirror decodes video.",
+        parent = CaptureVideo,
+    ),
+    CaptureLimits(
+        "Limits and snapshots", Icons.Outlined.Storage, SettingsGroupKind.Devices,
+        "Size, frame rate and bitrate of the recording, how big a session may grow, and how saved snapshots are named.",
+        parent = CaptureVideo,
+    ),
+    CaptureMarkIssue(
+        "Mark issue", Icons.Outlined.Flag, SettingsGroupKind.Devices,
+        "The Mark issue button on the capture strip drops a note with the log window around the press and, if enabled, a screenshot.",
+        parent = CaptureVideo,
+    ),
+    CaptureVideoPlayback(
+        "Video playback", Icons.Outlined.SmartDisplay, SettingsGroupKind.Devices,
+        "How playback follows the log, and the volume of the live mirror's sound.",
+        parent = CaptureVideo,
+    ),
     AiProviders(
         "Providers", Icons.Outlined.Psychology, SettingsGroupKind.Ai,
         "The AI provider profiles the AI panel uses.",
@@ -152,8 +181,8 @@ internal enum class SettingsPage(
     /** The page whose nav item stands for this one: itself, or its parent for a sub-page. */
     val navPage: SettingsPage get() = parent ?: this
 
-    /** `Group › Page`, as shown next to a search result. */
-    val breadcrumb: String get() = "${group.label} › $title"
+    /** `Group › Page`, or `Group › Parent › Sub-page`, as shown next to a search result. */
+    val breadcrumb: String get() = listOfNotNull(group.label, parent?.title, title).joinToString(" › ")
 }
 
 private val SETTINGS_DIALOG_WIDTH = 960.dp
@@ -245,6 +274,7 @@ private fun SettingsNavItem(
                 },
             )
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Tab, onClick = onClick)
+            .semantics { this.selected = selected }
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 10.dp),

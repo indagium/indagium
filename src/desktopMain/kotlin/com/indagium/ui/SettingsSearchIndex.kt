@@ -378,12 +378,12 @@ private fun editorBehavior() = listOf(
         listOf("pid", "proc", "process"),
     ),
     entry(
-        SettingsPage.CaptureVideo, "Video follow readout",
+        SettingsPage.CaptureVideoPlayback, "Video follow readout",
         "Shows the diagnostic line under the video transport bar explaining what Follow is doing.",
         listOf("video", "sync", "playhead"),
     ),
     entry(
-        SettingsPage.CaptureVideo, "New video links: double-click seeks",
+        SettingsPage.CaptureVideoPlayback, "New video links: double-click seeks",
         "Default for newly linked log/video anchors; each link can still be toggled from its header.",
         listOf("video", "anchor", "double click", "seek"),
         anchor = "New video links:\ndouble-click seeks",
@@ -481,11 +481,15 @@ private fun exportAnnotations() = listOf(
 
 private fun capture() = buildList {
     val c = SettingsPage.CaptureVideo
-    add(entry(c, "Tools", "adb and scrcpy executables used for device capture.", listOf("adb", "scrcpy", "android", "device", "path")))
-    add(entry(c, "ADB path", "Path to adb; leave blank to auto-detect.", listOf("adb", "android", "device", "phone", "executable")))
+    val tools = SettingsPage.CaptureTools
+    val limits = SettingsPage.CaptureLimits
+    val markIssue = SettingsPage.CaptureMarkIssue
+    val playback = SettingsPage.CaptureVideoPlayback
+    add(entry(tools, "Tools", "adb and scrcpy executables used for device capture.", listOf("adb", "scrcpy", "android", "device", "path")))
+    add(entry(tools, "ADB path", "Path to adb; leave blank to auto-detect.", listOf("adb", "android", "device", "phone", "executable")))
     add(
         entry(
-            c, "scrcpy path (optional — native mirror window only)",
+            tools, "scrcpy path (optional — native mirror window only)",
             "Only used when Device display is set to a scrcpy window.",
             listOf("scrcpy", "mirror", "android", "device", "executable"),
         ),
@@ -515,7 +519,7 @@ private fun capture() = buildList {
     if (!isMacOs) {
         add(
             entry(
-                c, "Hardware-accelerated mirror (experimental)",
+                tools, "Hardware-accelerated mirror (experimental)",
                 "Uses hardware video decoding for the in-app mirror.",
                 listOf("gpu", "decode", "mirror", "android", "device", "experimental"),
             ),
@@ -546,27 +550,37 @@ private fun capture() = buildList {
             listOf("main", "system", "crash", "kernel", "events", "radio", "logcat"),
         ),
     )
-    add(entry(c, "Screen recording", "Size, frame rate, bitrate and format of the screen recording.", listOf("video", "android", "device", "phone")))
-    add(entry(c, "Max size", "Longest side in pixels of the recording; 0 keeps full resolution.", listOf("resolution", "video", "scale", "screen recording")))
-    add(entry(c, "Max FPS", "Frame-rate cap for the screen recording.", listOf("frame rate", "video", "screen recording")))
-    add(entry(c, "Bitrate Mbps", "Video bitrate of the screen recording in Mbps.", listOf("quality", "video", "screen recording")))
-    add(entry(c, "Saved video format", "Container used by Save snapshot / Save ZIP: MP4 or MKV.", listOf("mp4", "mkv", "video", "container", "export")))
-    add(entry(c, "Live audio volume %", "Volume of the embedded mirror's speaker toggle.", listOf("sound", "speaker", "mirror", "audio")))
-    add(entry(c, "Session limit GiB", "Largest size a single capture session may grow to.", listOf("storage", "disk", "size", "limit", "gigabytes")))
-    add(entry(c, "Reserve GiB", "Free disk space left untouched while capturing.", listOf("storage", "disk", "free space", "gigabytes")))
-    add(entry(c, "Snapshot files", "Filename template and label for saved snapshots.", listOf("naming", "export")))
+    add(entry(limits, "Screen recording", "Size, frame rate, bitrate and format of the screen recording.", listOf("video", "android", "device", "phone")))
     add(
         entry(
-            c, "Filename template", "Placeholders: {device}, {start}, {range}, {counter}.",
+            limits, "Max size", "Longest side in pixels of the recording; 0 keeps full resolution.",
+            listOf("resolution", "video", "scale", "screen recording"),
+        ),
+    )
+    add(entry(limits, "Max FPS", "Frame-rate cap for the screen recording.", listOf("frame rate", "video", "screen recording")))
+    add(entry(limits, "Bitrate Mbps", "Video bitrate of the screen recording in Mbps.", listOf("quality", "video", "screen recording")))
+    add(entry(limits, "Saved video format", "Container used by Save snapshot / Save ZIP: MP4 or MKV.", listOf("mp4", "mkv", "video", "container", "export")))
+    add(entry(playback, "Live audio volume %", "Volume of the embedded mirror's speaker toggle.", listOf("sound", "speaker", "mirror", "audio")))
+    add(entry(limits, "Session limit GiB", "Largest size a single capture session may grow to.", listOf("storage", "disk", "size", "limit", "gigabytes")))
+    add(entry(limits, "Reserve GiB", "Free disk space left untouched while capturing.", listOf("storage", "disk", "free space", "gigabytes")))
+    add(entry(limits, "Snapshot files", "Filename template and label for saved snapshots.", listOf("naming", "export")))
+    add(
+        entry(
+            limits, "Filename template", "Placeholders: {device}, {start}, {range}, {counter}.",
             listOf("snapshot", "name", "naming", "export", "save"),
         ),
     )
-    add(entry(c, "Label", "Label stored in the capture archive.", listOf("snapshot", "archive", "name")))
-    add(entry(c, "Mark issue", "The Mark issue button drops a note with the log window around the press.", listOf("marker", "bug", "note", "screenshot")))
-    add(entry(c, "Before, seconds", "Log window kept before pressing Mark issue.", listOf("marker", "pre", "window", "mark issue")))
-    add(entry(c, "After, seconds", "Log window kept after pressing Mark issue.", listOf("marker", "post", "window", "mark issue")))
-    add(entry(c, "Take a screenshot on Mark issue", "Adds a device screenshot to the marker note.", listOf("marker", "image", "mark issue")))
-    add(entry(c, "Include markers in saved snapshots", "Snapshot export does not use this setting yet.", listOf("marker", "notes", "mark issue")))
+    add(entry(limits, "Label", "Label stored in the capture archive.", listOf("snapshot", "archive", "name")))
+    add(
+        entry(
+            markIssue, "Mark issue", "The Mark issue button drops a note with the log window around the press.",
+            listOf("marker", "bug", "note", "screenshot"),
+        ),
+    )
+    add(entry(markIssue, "Before, seconds", "Log window kept before pressing Mark issue.", listOf("marker", "pre", "window", "mark issue")))
+    add(entry(markIssue, "After, seconds", "Log window kept after pressing Mark issue.", listOf("marker", "post", "window", "mark issue")))
+    add(entry(markIssue, "Take a screenshot on Mark issue", "Adds a device screenshot to the marker note.", listOf("marker", "image", "mark issue")))
+    add(entry(markIssue, "Include markers in saved snapshots", "Snapshot export does not use this setting yet.", listOf("marker", "notes", "mark issue")))
 }
 
 private fun automation() = listOf(
@@ -836,6 +850,7 @@ internal fun searchSettings(query: String, visiblePages: Set<SettingsPage>): Lis
                 append(label).append('\n').append(e.hint.lowercase()).append('\n')
                 e.keywords.forEach { append(it.lowercase()).append('\n') }
                 append(e.page.title.lowercase()).append('\n').append(e.page.group.label.lowercase())
+                e.page.parent?.let { append('\n').append(it.title.lowercase()) }
             }
             if (synonyms.any { variants -> variants.none { it in haystack } }) return@mapNotNull null
             val rank = when {

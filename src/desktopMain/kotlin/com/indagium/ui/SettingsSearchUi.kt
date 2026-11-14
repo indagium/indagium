@@ -237,7 +237,8 @@ internal fun SettingsSearchResults(
                     if (inPage.isEmpty()) return@forEach
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         AppText(
-                            page.title.uppercase(), color = tc.td, fontSize = 10.sp,
+                            // A sub-page's heading names its parent too.
+                            (page.parent?.let { "${it.title} › " }.orEmpty() + page.title).uppercase(), color = tc.td, fontSize = 10.sp,
                             fontFamily = UI, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(bottom = 2.dp),
                         )
