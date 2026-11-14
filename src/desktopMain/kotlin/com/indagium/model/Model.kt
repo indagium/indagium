@@ -1552,7 +1552,7 @@ data class AppSettings(
     // same rule as the other settings-JSON-only fields above — the frozen legacy positional
     // settingsFromToken decoder must never gain a field.
     val homeRecentsLayout: HomeRecentsLayout = HomeRecentsLayout.GRID,
-    // ── Save folders (Settings → General → Storage) ────────────────────────────────
+    // ── Save folders (Settings › Storage & files) ────────────────────────────────
     // The parent every folder below defaults under when its own field is unset. Null means "use
     // the platform default" (~/Documents/Indagium — see ui/DesktopStorage.defaultSaveRootDir),
     // never a bare "" so an empty text field can't be mistaken for "configured". JSON form ONLY,
@@ -1569,7 +1569,7 @@ data class AppSettings(
     // "Save ZIP" destination for a stopped/retained capture (AppState.saveRetainedCapture).
     // Defaults to <saveRootDir>/saved-captures. JSON form ONLY.
     val captureZipDir: String? = null,
-    // AI test suites (Settings → General → Storage). "Test suites folder" holds library.json, suites/ and assets/; it
+    // AI test suites (Settings › Test runs). "Test suites folder" holds library.json, suites/ and assets/; it
     // defaults to <saveRootDir>/test-suites. "Test runs folder" holds one folder per run (run.json, lane captures,
     // screenshots, transcripts); it defaults to <saveRootDir>/test-runs. "Issues folder" holds one folder per issue made
     // from a failed step; it defaults to <saveRootDir>/test-issues. Changing one switches the app to that folder without
@@ -1615,7 +1615,7 @@ data class AppSettings(
     val captureMirrorLayouts: Map<String, CaptureMirrorLayout> = emptyMap(),
     val lastCaptureMirrorLayout: CaptureMirrorLayout? = null,
     // The AI test suites' issue tracker (an MCP server URL, how to authenticate, which AI profile files the issue and the
-    // prompt that says how) and the defaults a new test run starts from (Settings → Issue tracker / Testing). JSON-only,
+    // prompt that says how) and the defaults a new test run starts from (Settings › Issue tracker / Test runs). JSON-only,
     // same rule as above. The tracker's access token is NOT a setting: it lives only in the SecretStore.
     val tracker: com.indagium.testing.model.TrackerSettings = com.indagium.testing.model.TrackerSettings(),
     val testing: com.indagium.testing.model.TestingSettings = com.indagium.testing.model.TestingSettings(),
@@ -1821,7 +1821,7 @@ data class CustomLogViewLayout(
     val filterBarVisible: Boolean? = null,
 )
 
-/** How the tab strip is drawn (Settings > Appearance > Tabs): [CURRENT] is the long-standing look and the default.
+/** How the tab strip is drawn (Settings › Tabs & toolbar): [CURRENT] is the long-standing look and the default.
  * Older entries keep their order; new style IDs are appended.
  */
 enum class TabStripStyle { CURRENT, RAISED, SEGMENTED, TYPED, COMPACT, SOURCE_STRIPE, TWO_LINE, QUIET, OUTLINED, PILL }

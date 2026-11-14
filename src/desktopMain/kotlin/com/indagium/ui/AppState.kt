@@ -618,7 +618,7 @@ internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
 
-// The save folders in Settings → General → Storage (see AppState.pickSaveFolder/
+// The save folders in Settings › Storage & files (see AppState.pickSaveFolder/
 // resetSaveFolder and SettingsDialog.kt's SaveFolderRow). ANALYSIS is what used to be the app's
 // only "Default save folder" — the label moved to ROOT when that folder became the shared parent
 // the other ones default under (see AppSettings.saveRootDir's own doc), but the settings key
@@ -2589,7 +2589,7 @@ class AppState(
             recordingId != null -> recordingId
             stored.size == 1 -> stored.single()
             stored.isEmpty() -> return StoreResult.Invalid(
-                "This case has no stored recording evidence. Turn on \"Keep recording evidence with recorded cases\" (Settings > Testing) " +
+                "This case has no stored recording evidence. Turn on \"Keep recording evidence with recorded cases\" (Settings > Test runs) " +
                     "before applying a recording.",
             )
             else -> return StoreResult.Invalid("This case has ${stored.size} stored recordings; choose one of: ${stored.joinToString(", ")}.")
@@ -14929,7 +14929,7 @@ class AppState(
         }
     }
 
-    // ── Save folders (Settings → General → Storage) ─────────────────────────────────
+    // ── Save folders (Settings › Storage & files) ─────────────────────────────────
     // Pure path resolution for the five folders in AppSettings — see that data class's own doc
     // comments for what each field means. Nothing here creates a directory; every write site
     // below calls .mkdirs() itself right before it writes, so a folder that's never been written
@@ -14984,7 +14984,7 @@ class AppState(
     internal fun effectiveCaptureZipDirForDisplay(): File =
         effectiveCaptureZipDir(fallback = File(effectiveSaveRootDir, "saved-captures"))
 
-    // ── AI test folders (Settings → General → Storage) ──────────────────────────────
+    // ── AI test folders (Settings › Test runs) ──────────────────────────────
     // Same resolution as the folders above: the explicit setting, else a subfolder of the save root. With no save root known
     // (a bare test AppState) they fall back to the pre-setting layout under [testingDir], so nothing resolves to a real
     // user folder. The stores use the resolved folders through reconcileTestStorage() below, not these functions directly.
@@ -16287,7 +16287,7 @@ class AppState(
         committed?.let { autoExportAnnotations(it.tab, it.exportTarget) }
     }
 
-    /** Browse for one of the save folders in Settings → General → Storage. Defaults to
+    /** Browse for one of the save folders in Settings › Storage & files. Defaults to
      *  [SaveFolderKind.ANALYSIS], the historical no-arg behavior ("Default save folder" before it
      *  was renamed — see [SaveFolderKind]'s own doc), so every existing call site kept working
      *  unchanged; only the CaptureSnapshotPopover's "Choose folder…" needs its own kind. */

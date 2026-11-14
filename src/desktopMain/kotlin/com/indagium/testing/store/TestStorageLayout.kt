@@ -11,7 +11,7 @@ import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
 
-// Where the AI test-suite data lives. Three user-configurable folders (Settings > General), by default subfolders of the
+// Where the AI test-suite data lives. Three user-configurable folders (Settings › Test runs), by default subfolders of the
 // Default save folder:
 //   <save root>/test-suites   library.json, suites/<id>.json, assets/<suiteId>/        (TestLibraryStore, TestAssets)
 //   <save root>/test-runs     <runId>/run.json, lanes/<laneId>/capture/ ...             (TestRunStore)

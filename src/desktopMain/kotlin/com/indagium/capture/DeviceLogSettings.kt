@@ -308,7 +308,7 @@ fun bufferSizeButtonLabel(sizes: List<LogBufferSize>): String {
 fun logLevelButtonLabel(level: LogTagLevel?): String = level?.label ?: "Default (device)"
 
 /** The collapsed "Device logging" section header's one-line summary (New tab launcher and
- *  Settings → Capture), e.g. `"Device logging · main 4 MB · log.tag D · 2 overrides"` — built only
+ *  Settings › Capture & video), e.g. `"Device logging · main 4 MB · log.tag D · 2 overrides"` — built only
  *  from the last successfully loaded state ([DeviceLogState.loaded]), never from an in-flight read,
  *  so collapsing the section never shows a summary that doesn't match what's actually on the
  *  device. Falls back to the bare title when nothing has loaded yet, or when a loaded device

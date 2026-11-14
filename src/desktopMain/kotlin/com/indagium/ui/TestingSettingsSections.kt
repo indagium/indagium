@@ -90,7 +90,7 @@ internal fun editionSummary(edition: Edition): String {
 
 private fun AiProviderProfile.choiceLabel(): String = "${displayName.ifBlank { kind.label }} · ${kind.label}"
 
-private const val NO_PROFILE_TEXT = "No AI profile configured (Settings > AI providers)"
+private const val NO_PROFILE_TEXT = "No AI profile configured (Settings > AI > Providers)"
 
 /**
  * The AI-profile picker both pages use: the selected profile (or [placeholder] while none is chosen) in a [SettingsDropdown] of every

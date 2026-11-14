@@ -103,7 +103,7 @@ internal data class RunDialogModel(
     val judgeProfileId: String? = null,
     val judgeMode: JudgeMode = JudgeMode.OFF,
     val firstLaneId: String = newLaneId(),
-    /** From Settings > Testing; the dialog has no control for it. */
+    /** From Settings > Test runs; the dialog has no control for it. */
     val confirmationTimeoutMs: Long = DEFAULT_CONFIRMATION_TIMEOUT_MS,
     val rerunOf: String? = null,
     /** The first lane's model / effort overrides ([moreLanes] carry their own). */
@@ -271,7 +271,7 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
 }
 
 /**
- * The state a new run dialog starts from: the evidence, judge and confirmation timeout the user chose in Settings > Testing. A
+ * The state a new run dialog starts from: the evidence, judge and confirmation timeout the user chose in Settings > Test runs. A
  * default judge whose AI profile no longer exists in [profiles] is ignored (the judge starts off).
  */
 internal fun RunDialogModel.withTestingDefaults(testing: TestingSettings, profiles: List<AiProviderProfile>): RunDialogModel {
@@ -287,7 +287,7 @@ internal fun RunDialogModel.withTestingDefaults(testing: TestingSettings, profil
 
 /**
  * The recording a new run dialog starts from: the user's saved capture settings (what a manual live capture would use), with video
- * also on when Settings > Testing keeps video as default evidence. Edits in the dialog change this run only.
+ * also on when Settings > Test runs keeps video as default evidence. Edits in the dialog change this run only.
  */
 internal fun RunDialogModel.withCaptureDefaults(saved: CaptureSettings, testing: TestingSettings): RunDialogModel =
     copy(capture = saved.copy(recordVideo = saved.recordVideo || testing.evidence.video))

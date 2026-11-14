@@ -1003,7 +1003,7 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
 ### 6.5 Tab strip appearance
 
 The tab strip has ten looks (`TabStripStyle`: Current, Raised, Segmented, Typed, Compact, Source colour, Two-line, Quiet, Outline, Pill), chosen in
-Settings > Appearance > Tabs (`ui/TabsAppearanceSettings.kt`: a five-column thumbnail grid, Tab size, Tab label, three detail checkboxes). The same tab appearance controls are available in the setup assistant's Look step and write directly to settings. Current
+Settings > Tabs & toolbar (`ui/TabsAppearanceSettings.kt`: a five-column thumbnail grid, a "Show on tabs" line of detail checks, then the Tabs rows: position, width, label, close button, visible tabs). The same tab appearance controls are available in the setup assistant's Look step and write directly to settings. Current
 is the default and draws exactly what the shell always drew (`TabStripStyleUiTest` compares its pixels with a copy of the old shell).
 
 - **Pure side** (`ui/TabAppearance.kt`, `TabAppearanceTest`): `tabKind` derives LOG / ZIP / IND / CAPTURE / LIVE / HOME from the
@@ -1058,7 +1058,7 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
 
 The tab strip can sit on any window edge and the main toolbar next to it, on an edge of its own, or inside the log view's tiles. The root of
 `App.kt` is `ChromeScaffold` (`ui/ChromeScaffold.kt`); the content (heap banner + the active surface) is its `content` slot. Settings >
-Appearance > Tabs adds Tab position (Top / Left / Right / Bottom), Toolbar placement (With tabs · start, With tabs · end (default), Beside tabs,
+Tabs & toolbar adds Tab position (Top / Left / Right / Bottom), Toolbar placement (With tabs · start, With tabs · end (default), Beside tabs,
 Own edge, In the log view layout), the Toolbar edge for Own edge, the Toolbar alignment (Start / Center / End) and, when the toolbar's bar shares the tab
 strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" (`ui/ChromePlacementSettings.kt`, search entries in
 `SettingsSearchIndex`). All of it is JSON-only settings (§6.5); nothing in the positional settings decoder changed. The second step added
@@ -1078,8 +1078,8 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
   A vertical tab bar is `verticalTabBarWidthDp` wide (card width = that + 4), a toolbar-only bar 36 dp (horizontal) or 40 dp (vertical, 96 dp while the
   button labels are on, with an ellipsis for a longer label); a toolbar sharing a vertical tab bar leaves the tabs at least 150 dp (it scrolls instead).
 - **Corners (Shape style, Toolbar shape).** Two independent settings share the `ShapeStyle` enum (Theme default, Square, Soft, Rounded, Round; both JSON-only,
-  `ui/ChromeSettingsJson.kt`, both part of a workspace profile's appearance group): `AppSettings.shapeStyle` (Settings > Appearance > Shape style) drives the tiles
-  and card bars (`tileDp`, `workspaceTileDp`), `AppSettings.toolbarShapeStyle` (Toolbar shape) drives only the toolbar's button groups and the Layout menu
+  `ui/ChromeSettingsJson.kt`, both part of a workspace profile's appearance group): `AppSettings.shapeStyle` (Settings > Appearance > Corners > Tiles) drives the tiles
+  and card bars (`tileDp`, `workspaceTileDp`), `AppSettings.toolbarShapeStyle` (Corners > Toolbar) drives only the toolbar's button groups and the Layout menu
   button (`toolbarDp`). While `AppSettings.toolbarShapeFollowsTiles` is true (the default, shown as "Same as tiles"; JSON-only, and a file without the key reads as
   `toolbarShapeStyle == shapeStyle`, so existing toolbars look the same) the toolbar is drawn with the tiles' style: read the style that applies through
   `AppSettings.effectiveToolbarShapeStyle`, which `App.kt` passes to the resolver and workspace profile differences compare. Both are read through one resolver, `resolveUiCorners(style, toolbarStyle, look)` in
@@ -1138,6 +1138,37 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
   dragged the drop strips show (each tagged, the one under the pointer highlighted); the release is hit-tested again from the last pointer position and written once through
   `updateSettings`; a release outside every strip changes nothing. `chromeLocked` removes both grips (and the vertical headers' room). The tab strip and the toolbar are never
   hideable; every drag end reclaims root focus.
+
+### 6.7 The Settings dialog
+
+Settings is 18 pages in 7 groups (`SettingsGroupKind`: Workspace, Reading logs, Notes, Devices, AI, Testing, System), modelled by the `SettingsPage` enum
+(`ui/SettingsPages.kt`; it replaced the old flat `SettingsSection`). A page has a title, icon, group, one-line description and an optional `parent`: the four
+Capture sub-pages (`CaptureTools`, `CaptureLimits`, `CaptureMarkIssue`, `CaptureVideoPlayback`) have no nav item, the nav highlights their parent
+(`navPage`), they show a "‹ Capture & video" back link, and `breadcrumb` reads `Group › Parent › Sub-page`. The pages are, in nav order: General, Appearance,
+Tabs & toolbar | Log view, Search & filters, Issue categories, Source code | Notes & writing, Copy & export | Capture & video | Providers, Commands,
+Voice input | Test runs, Issue tracker | Storage & files, Integrations, About.
+
+- **Shell.** `SettingsDialog` (`ui/SettingsDialog.kt`, 960 x 812 dp clamped to the window with a 24 dp margin) is a header, a 216 dp nav with the search field, the
+  scrolling page on the `bg` ground and a 52 dp footer (Keyboard shortcuts, Setup assistant..., "Version [v] · [author]" that opens About, Done).
+  `SettingsPageBody` is the one `when` that maps a page to its body composable. State lives in the dialog: the selected page, the query and the
+  `AiProviderGuard`. Switching page, Done, Esc and "Setup assistant..." go through `requestPageSwitch` / `requestClose`, which ask before dropping unsaved
+  AI-provider edits; the Providers body keeps its own `pendingNavigation` guard. While searching, the pages stay composed but hidden (`composedButHidden`)
+  so a result's anchor can register; Esc clears the query first. `AppState.requestedSettingsPage` is the deep-link request (`openAiProviderSettings()` opens
+  Providers, `openCaptureSettings()` Capture & video); the default page is General.
+- **Page bodies and widgets.** One file per page area (`SettingsGeneralPage.kt`, `SettingsAppearancePage.kt`, `SettingsLogPages.kt`, `SettingsSourcePages.kt`,
+  `SettingsNotesPages.kt`, `SettingsCapturePages.kt`, `SettingsAiPages.kt`, `SettingsSystemPages.kt`; Tabs & toolbar in `TabsAppearanceSettings.kt` and
+  `ChromePlacementSettings.kt`, Test runs and Issue tracker in `TestingSettingsSections.kt`). Each is a few `SettingsGroup` cards of `SettingsRow`s built
+  from `ui/SettingsWidgets.kt`. Every on/off setting is a `SettingsSwitch` (`Role.Switch`); a dependent row is `indent`ed and dims while its parent is off.
+  Settings that are not on/off keep their existing controls (steppers, segmented controls, `SettingsDropdown`).
+- **Search.** `SettingsSearchIndex.kt` has one `SettingsSearchEntry` per labelled row, keyed to a page, with ids `"${page.name}.$slug"`; `searchSettings` also
+  matches the group label. A row registers `Modifier.settingsAnchor(anchor)` (via `SettingsRow`), so a result can scroll to it and flash it. The rule: **every
+  index entry's anchor must render on its page** (`SettingsPagesUiTest` opens each page and checks), so adding a row means adding an entry and keeping the anchor.
+- **Reuse outside the dialog.** The setup assistant renders `AppearanceBasicsRow`, `TabAppearanceControls`, `SearchScopeBehaviorSelector`, `CtrlFTargetSelector`,
+  `SaveFolderSetting` and `CaptureStartOptions` directly, so those keep standalone signatures; its three Search-step on/off preferences are `SettingsSwitch`es.
+- **Log font.** The Log font dropdown (`SearchableFontDropdown` with `pinnedDefaults`) starts with Monospace (default) and Proportional (default): picking one sets
+  `logFontFamily = null` and `fontMono`; a named family sets `logFontFamily` only. This replaced the separate "Fallback log family" control.
+- **Text references.** Strings that tell the user where a setting lives use the "Settings > Page" form with the new names (for example "Settings > AI > Providers",
+  "Settings > Test runs", "Settings > Issue tracker"); a rename of a page means grepping `src/desktopMain` for them.
 
 ---
 
@@ -1844,12 +1875,18 @@ stays local to the text editor; Ctrl+Z/Cmd+Z elsewhere restores the active sessi
 | `LogViewLayout.kt` / `LayoutMenu.kt` / `BoundLogViewer.kt` | UI-free log-view layout model (presets, legacy derivation, visibility, sanitizer, mutators); the tab-strip Layout menu (preset thumbnails, Panels, Lock, Reset, hidden badge); `LogViewer` bound to `AppState` for the tiled and the legacy view |
 | `HomeTestsSection.kt` | The New tab's Run tests section: suites with their latest finished run, Run/View, + New suite, latest-run line, issue counts and the Free usage line. Reads runs through `AppState.latestTestRunSummaries` and never starts the run coordinator (§26.15) |
 | `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | `HomeCaptureSection` (the condensed Capture section: device row, options summary with "Change…", Start, compact sessions; polls devices only while composed), live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
-| `CaptureOptionsDialog.kt` / `UnfinishedSessionsInline.kt` | The Capture section's "Recording options" dialog (hosts `CaptureStartOptions`, links to Settings → Capture via `AppState.openCaptureSettings`) and its inline unfinished-sessions panel (scrolling full list, "Open in window…" dialog) |
+| `CaptureOptionsDialog.kt` / `UnfinishedSessionsInline.kt` | The Capture section's "Recording options" dialog (hosts `CaptureStartOptions`, links to Settings → Capture & video via `AppState.openCaptureSettings`) and its inline unfinished-sessions panel (scrolling full list, "Open in window…" dialog) |
 | `AutosaveCodec.kt` / `AutosaveScheduler.kt` / `FilterCodec.kt` / `DesktopStorage.kt` | Persistence: encoding, scheduling, the saved-filter library format, path resolution |
 | `ControlServerManager.kt` | Control-server lifecycle with a generation-counter race guard |
 | `TailCoordinator.kt` | Per-tab live tailing and debounced re-analysis |
 | `Components.kt` / `Theme.kt` / `Shortcuts.kt` | Shared widgets, 20 theme palettes, the keyboard-shortcut catalogue |
-| `Tests*.kt` / `TestRun*.kt` / `Issue*.kt` / `Testing*.kt` / `TrackerWiring.kt` / `ReorderableColumn.kt` | The AI test-suites surface: Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), run dialog, live view and report, issue dialog, Settings sections, and the wiring that connects `testing/` to `AppState` (§26.2) |
+| `SettingsDialog.kt` / `SettingsPages.kt` | The Settings dialog shell and its model (§6.7): `SettingsDialog` owns the selected page, the search query and the unsaved-AI-provider guard; `SettingsPages.kt` holds the `SettingsPage` / `SettingsGroupKind` enums (18 nav pages in 7 groups plus four Capture sub-pages), the grouped nav list, the footer and the dialog size. `AppState.requestedSettingsPage` is the deep-link request |
+| `SettingsWidgets.kt` | The row vocabulary every page is built from: `SettingsSwitch` (the one on/off control), `SettingsRow` (name + one-line description left, control right, registers the search anchor), `SettingsGroup` (bordered card; draws the dividers between its rows), `SettingsStackedRow`, `SettingsOverflowMenu`, `SettingsNoteRow`, `SettingsBadge`, `SettingsPageHeader`, `SettingsDropdown` (the shared field-plus-popup selector), `SettingsDrillRow` |
+| `SettingsGeneralPage.kt` / `SettingsAppearancePage.kt` | Settings › General (profile cards, inactive-tab memory, update check) and Appearance (theme block, text and scale, Corners); `AppearanceBasicsRow` is shared with the setup assistant's Look step. Tabs & toolbar is `TabsAppearanceSettings.kt` + `ChromePlacementSettings.kt` |
+| `SettingsLogPages.kt` / `SettingsSourcePages.kt` / `SettingsNotesPages.kt` | Settings › Log view, Search & filters; Issue categories, Source code; Notes & writing, Copy & export |
+| `SettingsCapturePages.kt` / `SettingsAiPages.kt` / `SettingsSystemPages.kt` | Settings › Capture & video and its four drill-in sub-pages; Providers, Commands and Voice input; Storage & files, Integrations and About (plus the shared save-folder row). Test runs and Issue tracker are in `TestingSettingsSections.kt` |
+| `SettingsSearchIndex.kt` / `SettingsSearchUi.kt` / `SearchSettingsControls.kt` | The settings search: one index entry per labelled row keyed to its `SettingsPage`, the results list and `Modifier.settingsAnchor`, and the Ctrl+F selectors (built on `SettingsDropdown`) that the setup assistant also uses |
+| `Tests*.kt` / `TestRun*.kt` / `Issue*.kt` / `Testing*.kt` / `TrackerWiring.kt` / `ReorderableColumn.kt` | The AI test-suites surface: Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), run dialog, live view and report, issue dialog, the Test runs and Issue tracker page bodies, and the wiring that connects `testing/` to `AppState` (§26.2) |
 | `TestsSuiteHealth.kt` | The suite screen's Health tab: summary cards, the cases-by-last-12-runs grid, and the latest-failure card (§26.15) |
 
 ### 9.4 `debug` — automation
@@ -3403,7 +3440,7 @@ chosen by how much it should interrupt the user:
 | Reset app data failed | `resetAppDataError` | Inline in the confirm dialog |
 | Update check failed | `updateCheckStatus = Failed` | Text in Settings; **silent** for the automatic startup check |
 | Video decode failed | `VideoPlayerController.error`, `FailedVideoPlayerController` | Message in the video panel |
-| Capture tools/device unavailable | `CaptureService.toolStatus`, `devices`, `error` | Inline in the New capture launcher or Settings → Capture, with recheck/install guidance |
+| Capture tools/device unavailable | `CaptureService.toolStatus`, `devices`, `error` | Inline in the New capture launcher or Settings → Capture & video, with recheck/install guidance |
 | Live recorder/storage/video diagnostic | `RecorderSnapshot.diagnostics` | Capture strip's diagnostics drawer and live capture card beside the embedded mirror |
 | Snapshot export failed/cancelled | `captureExportError` / job cancellation | Snapshot popover; the live recorder remains active and no partial destination is published |
 | Stop/finalization failed | `captureFinalizationStatusByTab` | Same tab's finalization banner; raw log remains visible as a stopped ordinary log |
@@ -3640,8 +3677,8 @@ signing is enabled later, the generated Whisper and Apple Speech libraries must 
 same signing/notarization pass. Windows and Linux likewise package only their host-built bridge.
 
 Note `kotlin.daemon.jvmargs=-Xmx4096m` in `gradle.properties`: the Compose compiler's IR-to-bytecode
-transform runs the Kotlin daemon out of its default heap on `SettingsDialog.kt`'s single large
-composable. That is a build-level symptom of a code-level issue — see
+transform ran the Kotlin daemon out of its default heap on `SettingsDialog.kt`'s single large
+composable (since split into one file per page area, §6.7). The flag stays until the heap need is re-measured — see
 [risk R9](#23-known-architectural-risks-and-technical-debt).
 
 ### 20.2 Native artifact strategy
@@ -3968,11 +4005,12 @@ a parameter to a 90-argument call site.
 
 ### R9 — Single composables large enough to break the compiler's default heap
 
-`SettingsDialog.kt`'s single `SettingsDialog()` composable requires `-Xmx4096m` for the Kotlin daemon
-(`gradle.properties`). That is a code-size signal, not a build-configuration problem.
+`SettingsDialog.kt`'s single `SettingsDialog()` composable once required `-Xmx4096m` for the Kotlin daemon
+(`gradle.properties`). That was a code-size signal, not a build-configuration problem; the Settings redesign split the dialog into
+one composable per page (§6.7), so the flag is probably no longer needed but has not been re-measured.
 
 **Impact:** low (build-time only), but it slows every contributor's first build.
-**Mitigation:** split the dialog into one composable per settings section — a mechanical change.
+**Mitigation:** done for the dialog (one composable per settings page, §6.7); re-measure the heap before lowering the flag.
 
 ### R10 — Duplicated token/base64 helpers across three stores
 
@@ -4075,6 +4113,7 @@ Where to read about a given source file.
 | `utils/AtomicFileWrite.kt` | [13.3](#133-atomicity) |
 | `utils/BugReportZip.kt` | [14.6](#146-archives), [18.7](#187-archive-handling) |
 | `ui/AppState.kt` | [11](#11-state-management), [12](#12-threading-and-concurrency-model), [R1](#r1--appstate-is-a-12214-line-god-object) |
+| `ui/SettingsDialog.kt`, `SettingsPages.kt`, `SettingsWidgets.kt`, `Settings*Page(s).kt` | [6.7](#67-the-settings-dialog), [9.3](#93-ui) |
 | `ui/App.kt`, `FileView.kt`, `CompareView.kt` | [5](#5-high-level-component-architecture), [11.4](#114-the-bound-adapter-pattern) |
 | `ui/AutosaveCodec.kt`, `AutosaveScheduler.kt`, `DesktopStorage.kt` | [13](#13-persistence-architecture), [15.4](#154-autosave-and-session-restore), [22.4](#224-add-a-persisted-setting) |
 | `ui/ControlServerManager.kt`, `TailCoordinator.kt`, `AnnotationManager.kt` | [11.3](#113-delegation-to-coordinators) |
@@ -4257,7 +4296,7 @@ remain readable with their previous defaults.
 untouched). Unset, they default to `<save root>/test-suites`, `/test-runs` and `/test-issues`, where `<save root>` is the
 Default save folder (`AppState.effectiveSaveRootOrNull`, `~/Documents/Indagium` unless `saveRootDir` is set) — resolved by
 `effectiveTestSuitesDir()` / `effectiveTestRunsDir()` / `effectiveTestIssuesDir()` exactly like the other save folders, and
-shown by Settings → General through `SaveFolderKind.TEST_SUITES` / `TEST_RUNS` / `TEST_ISSUES` rows. A bare `AppState` with
+shown by Settings → Test runs through `SaveFolderKind.TEST_SUITES` / `TEST_RUNS` / `TEST_ISSUES` rows. A bare `AppState` with
 no save root (tests) falls back to the injected `testingDir` (`DesktopStorage.testingDir()`, i.e. `<appDataDir>/testing`):
 the library there, `runs/` and `issues/` inside it, so a bare instance never resolves to a real user folder. A debug-control
 process with an isolated app-data directory keeps its save root inside it (`DesktopStorage.processDefaultSaveRootDir()`).
@@ -4521,7 +4560,7 @@ flowchart TB
   or `resume_paused_step`, decides retry / continue / stop. A *manual step* wait is a third, separate suspension (below):
   `resolve_manual_step` answers it.
 - **Confirmation timeout.** `AiRun.confirmationTimeoutMs` is optional and **off by default**; a test
-  run sets it (default 5 min, Settings > Testing, `DEFAULT_CONFIRMATION_TIMEOUT_MS`) so a card nobody
+  run sets it (default 5 min, Settings > Test runs, `DEFAULT_CONFIRMATION_TIMEOUT_MS`) so a card nobody
   answers counts as denied instead of stalling a lane forever
   (`ai/AiToolExecutionCoordinator.kt:140`).
 
@@ -5646,7 +5685,7 @@ background thread.
 say which steps). Deleting a case or suite deletes its recordings; moving a case to another suite moves them; duplicating a case, step or
 suite, and exporting or importing a suite, drop the link (an export names no evidence). `TestLibraryStore.replaceSteps` replaces the
 produced steps in one edit and refuses a block that is not all there, together and in order (`planReplacement`); then *Insert as new
-steps* adds them and unlinks the old ones. Settings > Testing shows the disk used and **Delete stored recording evidence**.
+steps* adds them and unlinks the old ones. Settings > Test runs shows the disk used and **Delete stored recording evidence**.
 
 **Reopen** (`RecordingReopen.kt`): `restoreRecordingSession` builds a stopped `TestStepRecordingSession` (`loadStopped`, worker threads shut
 down, snapshot `reopened`) and opens the video with `RecordedVideoTimeline.openStored`, a read-only timeline whose files are never written
@@ -5942,7 +5981,7 @@ is ignored. Effect ids are globally unique across themes (a contract test enforc
 `HolidaySettings.ownTabStylePacks` (a JSON string array of pack names, unknown names dropped, empty by default) lists the packs whose tabs use the user's
 Tab style ("My tab style"): `resolveHolidayLook` sets `HolidayLook.ownTabStyle`, and `TabShell` then draws the regular `tabShape` / `tabChrome` / `tabOutline` and
 inset in the pack's colours with the pack's label font, size and case, and no texture, inverse fill, cursor or ornament; the tab-bar scene still draws behind the tabs.
-It is set per pack in Settings > Appearance > Special themes (Tabs: Theme's tabs / My tab style) and in the Layout menu's Special effects. The Shape style setting (§6.6)
+It is set per pack in Settings > Appearance > Theme > Special themes (Tabs: Theme's tabs / My tab style) and in the Layout menu's Special effects. The Shape style setting (§6.6)
 never changes tab shapes, with either choice.
 
 ### 27.4 Flash safety

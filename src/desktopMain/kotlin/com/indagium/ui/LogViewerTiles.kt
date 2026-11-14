@@ -58,8 +58,8 @@ internal class LogViewerTiles(
 
     /**
      * The Original tile in the standard tile header: grip, a purple icon, "Original", its line count, then "Follow selection",
-     * maximize and close. [followSelection] / [onToggleFollow] are the Settings > "link Original and Filtered selection and
-     * scroll" switch; [onClose] closes Original (the toolbar's "Hide original"); [onReclaimFocus] gives the log list back the
+     * maximize and close. [followSelection] / [onToggleFollow] are the Settings › Search & filters "Link split selection and Find"
+     * switch; [onClose] closes Original (the toolbar's "Hide original"); [onReclaimFocus] gives the log list back the
      * keyboard focus a click here would take.
      */
     @Composable

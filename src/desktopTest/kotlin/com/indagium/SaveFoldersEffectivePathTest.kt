@@ -7,7 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * Pure resolution for the five save folders in Settings → General → Storage
+ * Pure resolution for the five save folders in Settings › Storage & files
  * (AppState.effectiveSaveRootDir/effectiveAnalysisDirForDisplay/effectiveCaptureSessionsDir/
  * effectiveCaptureSnapshotsDir/effectiveCaptureZipDir*). [AppState]'s `platformDefaultSaveRootDir`
  * constructor parameter stands in for the real `~/Documents/Indagium` default here — see that

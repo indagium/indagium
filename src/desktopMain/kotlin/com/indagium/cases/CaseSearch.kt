@@ -171,7 +171,7 @@ private fun compareVersions(a: String, b: String): Int {
  * bucket-narrow-then-score shape, and [com.indagium.source.SourceIndexer]/
  * [com.indagium.source.SourceIndexStore]'s persist/incrementally-refresh split.
  *
- * [noteDirs] is a supplier (not a fixed list) so a change to Settings → default save dir is
+ * [noteDirs] is a supplier (not a fixed list) so a change to Settings › Storage & files › Analysis artifacts folder is
  * picked up on the next search without reconstructing this class.
  */
 class CaseSearch(

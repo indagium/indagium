@@ -11,7 +11,7 @@ import com.indagium.model.TabStripStyle
 import java.io.File
 import kotlin.math.max
 
-// The pure side of the tab strip's appearance (Settings > Appearance > Tabs): what kind of source a tab shows, its badge and
+// The pure side of the tab strip's appearance (Settings › Tabs & toolbar): what kind of source a tab shows, its badge and
 // source colour, the label parts for each label mode, the strip height per style, and the maths for tabs that are as wide as their
 // label (FIT mode): widths, offsets, how many fit, and which tab a pointer is on / where a dragged tab lands when widths differ.
 // No Compose UI here (ui/TabStyles.kt draws), so all of it is unit-tested directly (TabAppearanceTest).

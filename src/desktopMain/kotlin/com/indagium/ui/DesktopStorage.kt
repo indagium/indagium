@@ -395,7 +395,7 @@ object DesktopStorage {
         File(userHome, ".openlog2/notes")
 
     /**
-     * Platform default parent for every save folder in Settings → General → Storage (the
+     * Platform default parent for every save folder in Settings › Storage & files (the
      * effective root behind [com.indagium.model.AppSettings.defaultSaveDir]/captureSessionsDir/
      * captureSnapshotsDir/captureZipDir) when the user hasn't set
      * [com.indagium.model.AppSettings.saveRootDir] — `~/Documents/Indagium`, or just `~/Indagium`

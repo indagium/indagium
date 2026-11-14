@@ -58,7 +58,7 @@ internal class AiSidebarRuntime(
     private val sessions: AiSessionRegistry,
     private val toolGatewayFactory: () -> IndagiumToolGateway,
     // Read fresh per run rather than captured once, so a mid-launch Settings change (Settings ->
-    // AI providers -> Max MCP tool calls) applies to the next request without restarting the app.
+    // AI -> Providers -> Max MCP tool calls) applies to the next request without restarting the app.
     private val maxToolRounds: () -> Int = { com.indagium.model.DEFAULT_AI_MAX_TOOL_ROUNDS },
     private val providerFactory: AiProviderFactory = defaultAiProviderFactory,
     private val accountAgentRunnerFactory: (() -> AccountAgentRunner)? = null,

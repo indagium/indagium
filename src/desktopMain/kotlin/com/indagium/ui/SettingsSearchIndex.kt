@@ -278,7 +278,7 @@ private fun seasonalThemes() = listOf(
     ),
 )
 
-// Settings > Appearance > Tabs, the placement half (ui/ChromePlacementSettings.kt).
+// Settings › Tabs & toolbar, the placement half (ui/ChromePlacementSettings.kt).
 private fun chromePlacement() = listOf(
     entry(
         SettingsPage.TabsToolbar, "Tab position",

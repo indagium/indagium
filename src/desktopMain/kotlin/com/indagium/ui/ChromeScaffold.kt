@@ -37,7 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.indagium.ui.holiday.*
 import kotlin.math.roundToInt
 
-// The window chrome: the tab strip and the main toolbar on whichever window edges Settings > Appearance > Tabs says (or the toolbar as a
+// The window chrome: the tab strip and the main toolbar on whichever window edges Settings › Tabs & toolbar says (or the toolbar as a
 // tile of the log view, ToolbarTile.kt), with the app's content in what is left. The arrangement maths is the pure ChromeLayout.kt /
 // ChromeDock.kt; this file lays it out and wires the grips (ChromeGrips.kt) that move the two parts.
 //

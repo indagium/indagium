@@ -54,7 +54,7 @@ private const val CHECK_LABEL_MAX_LINES = 2
 
 /**
  * The capture controls that appear both on the New tab's "Before start" panel (a per-launch draft)
- * and in Settings → Capture (the saved defaults), so the two always read and behave the same.
+ * and in Settings › Capture & video (the saved defaults), so the two always read and behave the same.
  * Each takes [edit], a settings transform: the launcher applies it to its draft
  * (`updateCaptureLaunchSettings`), Settings to the saved settings.
  */

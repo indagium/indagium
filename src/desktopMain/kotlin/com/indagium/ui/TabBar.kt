@@ -127,8 +127,8 @@ internal fun TabBar(state: AppState, onReclaimFocus: () -> Unit = {}) {
 }
 
 /**
- * The tabs: log tabs, diagram workspaces and the Tests tab in one strip with overflow, drag reorder and the style from Settings >
- * Appearance > Tabs. Horizontal tabs share the strip's width (or fit their label); vertical tabs stack, one style-height each. It draws
+ * The tabs: log tabs, diagram workspaces and the Tests tab in one strip with overflow, drag reorder and the style from Settings ›
+ * Tabs & toolbar. Horizontal tabs share the strip's width (or fit their label); vertical tabs stack, one style-height each. It draws
  * no bar of its own: the bar (background, border) belongs to [ChromeScaffold] / [TabBar].
  */
 @Composable

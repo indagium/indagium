@@ -41,7 +41,7 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 - **[Sequence-diagram workspaces](https://indagium.com/sequence-diagrams/)** — turn a selected log range into an interactive, themed component-flow diagram; merge raw tags into named components, add mirrored actors, inspect evidence, save drafts, and attach an image or editable source to a note. The walkthrough reuses the user guide's 20-second animation as a video.
 - **Export filtered log** — write the current filtered set to TXT or CSV
 - **Merge and split** — interleave several logs by timestamp, or split one huge file into parts
-- **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber, plus custom wrappers); also exposed to AI assistants via the `resolve_log_source` MCP tool
+- **Show in code** — register your project's source folder(s) in Settings → Source code, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber, plus custom wrappers); also exposed to AI assistants via the `resolve_log_source` MCP tool
 
 **Extras**
 
@@ -251,7 +251,7 @@ DISPLAY=:1.0 flatpak run com.indagium.Indagium
 #### File picker troubleshooting
 
 If opening or saving files hangs, fails to appear, or behaves incorrectly under your Linux desktop,
-open **Settings → Appearance → File picker**, choose **Compatibility X11**, and restart Indagium.
+open **Settings → Appearance → File picker** (in Text and scale), choose **Compatibility X11**, and restart Indagium.
 For an immediate one-launch workaround without changing Settings, run:
 
 ```bash
@@ -283,8 +283,8 @@ in a collapsible, independently scrollable **Investigation** section between you
 final answer — expanded while it's running, collapsed once it finishes (click to reopen). Chat text
 is selectable/copyable, and **Reset** clears the current tab's conversation to start over.
 
-The built-in `LM Studio (local)` profile uses `http://127.0.0.1:1234/v1`. **Settings → AI
-providers** also offers explicit **OpenAI API** and **Anthropic API** profiles, alongside the
+The built-in `LM Studio (local)` profile uses `http://127.0.0.1:1234/v1`. **Settings → AI →
+Providers** also offers explicit **OpenAI API** and **Anthropic API** profiles, alongside the
 existing generic OpenAI-compatible option. API keys are memory-only for the current app launch;
 they are not written to autosave, settings, notes, or exports and must be entered again after
 restart.
@@ -318,7 +318,7 @@ the selected chat provider on macOS, Windows, and Linux. The app builds its own 
 pinned whisper.cpp 1.9.5; audio stays on the device and there is no remote speech-recognition
 provider. macOS uses embedded Metal with CPU fallback, while Windows and Linux use portable CPU
 kernels. Inference is serialized to limit simultaneous model memory use, and model-file checks run
-in the background so opening the microphone does not hash a multi-gigabyte file. **Settings → Voice
+in the background so opening the microphone does not hash a multi-gigabyte file. **Settings → AI → Voice
 input** also offers an opt-in native engine where available: strictly on-device Apple Speech on
 macOS or an installed offline Windows Speech language pack on Windows. The downloaded Whisper
 model lives in the app-data `voice-models` folder; audio recordings and transcripts are never
@@ -336,7 +336,7 @@ Loopback endpoints (`127.0.0.1`, `localhost`, and equivalent local addresses) ar
 local. A non-local provider (HTTP or HTTPS — some local-network LM Studio setups only ever serve
 HTTP) is blocked until you acknowledge in Settings that the request can disclose log text,
 selected context, source-code paths and snippets, and tool results to that provider. Use **Test
-connection** in Settings → AI providers to check whether an endpoint is reachable before or after
+connection** in Settings → AI → Providers to check whether an endpoint is reachable before or after
 saving; it only probes the endpoint and never saves or otherwise affects the profile.
 
 The assistant can automatically read log/source context and apply filter, selection, folding, and
@@ -351,8 +351,8 @@ shows that tab's separate session; relaunching Indagium clears all AI sessions. 
 Escape while a run is active) to cancel the active request. **Retry** resends the last request in
 that tab after a provider error or cancellation.
 
-A single request is capped at a configurable number of MCP analysis/operational calls (Settings →
-AI providers → **Max MCP tool calls per request**, default 100) so an investigation can't run
+A single request is capped at a configurable number of MCP analysis/operational calls (Settings → AI →
+Providers → **Max MCP tool calls per request**, default 100) so an investigation can't run
 forever. The budget is shared by every provider, including managed Codex and Claude Code sessions.
 Notes and annotation reads/writes are unlimited and do not consume it, so an agent can always
 inspect, revise, and save durable Notes output. The trace shows analysis/operational usage, Notes
@@ -365,7 +365,7 @@ automatic budget guidance and a footer only when 5, 3, or 1 analysis/operational
   exposed by your provider.
 - **Connection or stream error** — confirm the endpoint is reachable, that LM Studio's server is
   running, and that the endpoint includes its required API version path (the default ends in
-  `/v1`). Use **Test connection** in Settings → AI providers to check reachability directly.
+  `/v1`). Use **Test connection** in Settings → AI → Providers to check reachability directly.
 - **No models returned** — model discovery is optional; enter the model id manually.
 - **Codex or Claude Code cannot start** — use **Detect** or **Browse** in the account profile to
   select its CLI executable, then sign in to that CLI. The account profile does not accept or
@@ -373,8 +373,8 @@ automatic budget guidance and a footer only when 5, 3, or 1 analysis/operational
 - **Remote provider blocked** — save the profile after acknowledging the remote data disclosure
   in Settings (HTTP and HTTPS are both allowed once acknowledged).
 - **"MCP ... budget exhausted"** — the analysis/operational allowance is spent. Notes and
-  annotation operations remain available; raise **Max MCP tool calls per request** in Settings →
-  AI providers if more log/source investigation is needed.
+  annotation operations remain available; raise **Max MCP tool calls per request** in Settings → AI →
+  Providers if more log/source investigation is needed.
 - **An investigation waits** — inspect the tool trace and choose **Allow** or **Deny** on its
   confirmation card. Use **Stop** if the action is no longer wanted.
 

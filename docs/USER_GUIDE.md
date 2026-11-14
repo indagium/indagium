@@ -261,10 +261,10 @@ right-click options popup.
 | **Select all visible** | `⌘A` / `Ctrl+A` |
 | **Add annotation** | `⌘⇧N` / `Ctrl+Shift+N` annotates the selected rows (or the cursor row), like the context menu's first item |
 | **Time delta (Δt)** | Toggle in the log toolbar. Shows the gap between adjacent rows, or the offset from the first selected row when you have a selection — the fastest way to spot a stall |
-| **Wrapping** | Long messages wrap above a configurable character count; automatic wrapping can be turned off in Settings |
+| **Wrapping** | Long messages wrap above a configurable character count; automatic wrapping can be turned off in Settings → Log view |
 | **Original / Filtered split** | The **Unfiltered** toolbar button splits the view vertically so you can see the same log with and without your filter |
 
-**Copy masking.** Settings → Export & annotations lets you define replacement rules applied when
+**Copy masking.** Settings → Copy & export lets you define replacement rules applied when
 copying rows — useful for stripping customer identifiers before pasting into a ticket.
 
 ---
@@ -282,7 +282,7 @@ Toggle **V / D / I / W / E / A** individually. (`A` is Assert — Android's high
 
 Click a tag to include it; there is a separate exclude list. Indagium also groups tags by package
 prefix, so you can include or exclude `com.example.network.*` in one action. The panel shows the most
-frequent tags first; the count is configurable in Settings.
+frequent tags first; the count is configurable in Settings → Search & filters.
 
 In either Tags search dropdown (the sidebar or filter bar), hover a tag or package result and click
 **pid** to choose its processes. A package lists processes that logged any tag under that package
@@ -366,7 +366,7 @@ those colours with your existing palette.
 
 The **Error level** row is a built-in whole-row highlight for entries parsed as level **E**. It is
 enabled by default with a red background. Edit its background, text colour, font, bold and italic
-style in the Highlighters section. Settings → Editor behavior sets the global style; each tab follows
+style in the Highlighters section. Settings → Log view sets the global style; each tab follows
 that style until you edit its Error row, then **Use global** clears the tab override. Compare tabs
 keep their own Error style while you change which filter the other side displays.
 
@@ -426,7 +426,7 @@ on/off toggle. They survive a restart.
 
 ## 10. Finding text
 
-`⌘F` / `Ctrl+F` opens Find using **Settings → Editor behavior → Search scope behavior**. Pressing it
+`⌘F` / `Ctrl+F` opens Find using **Settings → Search & filters → Find searches** (Search scope behavior). Pressing it
 again while Find is open only puts the cursor back in the field you were using; it never changes the
 mode. The toolbar Find button opens Find, or closes it when it is already open. The Find bar's
 dropdown offers **Filtered**, **Unfiltered**, and **Two searches**:
@@ -466,7 +466,7 @@ in either direction. Original row clicks and free scrolling stay local, and the 
 separate. Off keeps each panel's selection and Find navigation local. Explicit annotation,
 crash, and video jumps still go to their requested row.
 
-Settings → Editor behavior groups the Ctrl+F settings in one row. **Ctrl+F opens** can retarget
+Settings → Search & filters groups the Ctrl+F settings in one card. **Ctrl+F opens** can retarget
 `⌘F` to the tag filter or the keyword/regex filter box instead of Find. **Ctrl+F also shows
 Original** reveals the Original panel whenever `⌘F` opens; it does not pick the Find field, so with
 Auto-switch Find then opens Unfiltered.
@@ -501,7 +501,7 @@ It also detects:
 These are grouped into categories (All / Crashes / ANRs / Fatal exceptions / Exceptions / Others) you
 can jump between.
 
-**Custom issue rules.** Settings → Issues lets you add your own named regex rules. Each one becomes
+**Custom issue rules.** Settings → Issue categories lets you add your own named regex rules. Each one becomes
 its own navigable category — useful for a project-specific error marker that is not an exception.
 
 ---
@@ -574,7 +574,7 @@ Beyond blocks, a note has:
 
 Notes editors can show local English spelling and grammar suggestions. Put the caret on a marked
 word and press **Alt+Enter** (Option+Return on macOS) to open its choices. **Add to vocabulary**
-accepts a single spelling word across all existing editors; Settings → Editor behavior → **Personal
+accepts a single spelling word across all existing editors; Settings → Notes & writing → **Personal
 vocabulary** lets you search, add or remove saved words. Vocabulary suppresses spelling suggestions
 for that complete word in both English variants, while grammar and style suggestions remain. **Ignore**
 still dismisses a suggestion for the current app session only.
@@ -596,11 +596,11 @@ bytes, and log references that plain Markdown cannot carry. Keep the two files t
 Teams, Jira Cloud, Jira wiki, Markdown, or HTML. Teams copy preserves formatted notes and log code
 blocks, with a plain-text fallback. Images and diagrams are represented by captions and export
 filenames; use **Export frames** to attach those files separately. Choosing a format for one copy
-does not change the default selected in the **Copy default** dropdown under Settings → Export &
-annotations. **Copy rich preview** copies HTML with inline
+does not change the default selected in the **Copy default** dropdown under Settings → Copy &
+export. **Copy rich preview** copies HTML with inline
 images so one paste can reproduce the note and its pictures in a rich-text editor. Ordered
 text-replacement rules in Settings
-→ Export & annotations apply to copied notes (including rich preview), so you can mask identifiers
+→ Copy & export apply to copied notes (including rich preview), so you can mask identifiers
 before sharing. The rules affect copied output; they do not rewrite the stored note. The optional
 block-numbering setting is reflected in the rendered note and its copied/exported representation.
 `Ctrl+Enter` adds a text block below the selected block, `Alt+↑` / `Alt+↓` reorders blocks, and
@@ -741,7 +741,7 @@ the diagram PNG (for example, `!diagram-01.png!`) as well as the image file. Cho
 when Mermaid or PlantUML text is the useful review artifact. Changing a title, caption, or export
 format updates metadata only; it does not rebuild the diagram.
 
-**Formatting options** (Settings → Export & annotations): Markdown indented style or **Jira**
+**Formatting options** (Settings → Notes & writing, Copy & export and Storage & files): Markdown indented style or **Jira**
 style (log blocks wrapped in `{code:java}`, images as `!frame-01.jpg!` wiki anchors), automatic block
 numbering, a custom prefix label, and auto-export on every edit.
 
@@ -766,7 +766,7 @@ records the enclosing method. Indexing is incremental — only changed files are
 
 **Use.** Right-click a log row → **Show code** opens a popup with the resolved method's source, its
 path, and its line range. **Open file** launches your editor instead (auto-detected, or configure the
-command in Settings).
+command in Settings → Source code).
 
 **Custom log wrappers.** If your project logs through its own helper rather than `Log.d` directly,
 Settings → Source code lets you define wrapper rules: the owner type, the method name, and which
@@ -868,7 +868,7 @@ Windows, and Linux.
 
 The **EN** control beside the microphone toggles local English translation.
 
-**Native engines** (Settings → Voice input) are an opt-in alternative: on-device Apple Speech on
+**Native engines** (Settings → AI → Voice input) are an opt-in alternative: on-device Apple Speech on
 macOS, or an installed offline Windows Speech language pack on Windows. Neither ever falls back to a
 cloud service. They transcribe in the spoken language; only Whisper offers translation.
 
@@ -883,7 +883,7 @@ folding, source resolution, notes.
 
 ### Choosing a provider
 
-Settings → AI providers. Five kinds:
+Settings → AI → Providers. Five kinds:
 
 | Kind | Auth | Notes |
 |---|---|---|
@@ -906,7 +906,7 @@ Type a question, or use a quick action: **Log line**, **Check error**, **Find ro
 timeline**, **Investigate issue**. Right-click any log row → **Ask AI** to send it with that row as
 context. Type `/` in the composer for the same actions as slash commands.
 
-**Custom commands.** Settings → AI commands lets you save your own prompts as named `/commands` —
+**Custom commands.** Settings → AI → Commands lets you save your own prompts as named `/commands` —
 your team's standard triage questions, one keystroke away.
 
 ### What you see back
@@ -947,7 +947,7 @@ application-workspace access — all evidence reaches them through Indagium's to
 Indagium has a Model Context Protocol server **built into the app**. Any MCP client — LM Studio,
 Claude Code, Codex, or your own tooling — can drive it over a URL, with nothing to install.
 
-It is **off by default**. Turn it on in Settings → Automation, then click **Connection info…** for
+It is **off by default**. Turn it on in Settings → Integrations, then click **Connection info…** for
 the URL, the bearer token, and a copyable client configuration.
 
 Full instructions: [mcp/README.md](mcp/README.md).
@@ -958,44 +958,63 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 
 ## 24. Settings
 
-| Section | Covers |
-|---|---|
-| **General** | Workspace profile, first-run/setup assistant, and the default parent plus separate analysis, capture-session, snapshot, and saved-ZIP folders |
-| **Capture** | adb and optional scrcpy paths, log buffers, mirror mode, recording/audio options, video limits, naming, storage guard, and capture troubleshooting |
-| **Appearance** | Theme (20 built in), independent interface and log fonts, log font size, interface scale, row numbers, minimap, icon-only toolbar |
-| **Editor behavior** | Search scope behavior, what `⌘F` opens, whether it also shows Original, whether new files open with Original, split selection/Find linking, row wrapping limits, navigation scroll margin, tag list sizes, Error-row style, personal proofreading vocabulary |
-| **Export & annotations** | Default save directory, Markdown vs Jira log-block style, block numbering, prefix label, auto-export, copy-masking rules |
-| **Automation** | MCP control server on/off, port, allow browser clients, regenerate token, connection info, diagnostic logging |
-| **AI providers** | Provider profiles, models, reasoning effort, API keys, remote-disclosure acknowledgement, max tool calls per request, connection test |
-| **Voice input** | Engine, languages, translation, Whisper model download and removal |
-| **AI commands** | Custom `/command` prompt library |
-| **Source code** | Source folders, log wrapper rules, auto-discovery, index status and reindex, editor command |
-| **Issues** | Custom issue rules (name + regex) |
-| **Testing** | What a new AI test run starts from (judge, evidence, how long an unanswered confirmation waits) and the edition; see [30. AI test suites](#30-ai-test-suites) |
-| **Issue tracker** | The tracker an AI test issue can be filed in: MCP URL, authentication header, access token, filing profile and prompt, connection test |
+Settings has **18 pages in 7 groups**. The left list shows the groups, the right side shows the selected
+page, and a footer keeps **Keyboard shortcuts**, **Setup assistant…**, the version and author (a link to
+About) and **Done** in view on every page. Each setting is a row: its name and a one-line description on
+the left, its control on the right, in a bordered card with the other settings of the same topic. Every
+on/off setting is a switch; settings that depend on another one (for example Pid copy as name, which needs
+PID and TID copying) sit indented under it and dim while it is off.
+
+| Group | Page | Covers |
+|---|---|---|
+| **Workspace** | **General** | Workspace profile cards (import, export and **Save current setup as profile…** are in the group's **⋯** menu), the Customized banner, the profile's layout, memory for inactive tabs (a switch plus minutes), and automatic update checks with **Check now** |
+| | **Appearance** | Theme (20 built in, plus Special themes), interface and log fonts, log font size, interface scale, the Linux file picker, and **Corners**: Tiles (five shapes) and Toolbar (**Same as tiles** or its own shape) |
+| | **Tabs & toolbar** | Tab style and what a tab shows, tab position, width, label and close button, visible tabs, toolbar placement (edge, alignment, order), button labels, and locking the layout |
+| **Reading logs** | **Log view** | Row numbers, row wrapping, process names in new tabs, Crash and Error row highlights, opening files with Original, the minimap, following live logs |
+| | **Search & filters** | Search scope behavior, what `⌘F` opens, whether it also shows Original, split selection/Find linking, most-used tags, filter list height, the regex summary, navigation scroll margin |
+| | **Issue categories** | Custom issue rules (name + regex) |
+| | **Source code** | Source folders, the editor that opens code, log wrapper rules, auto-discovery, index status and reindex |
+| **Notes** | **Notes & writing** | Block numbering, Markdown vs Jira log blocks, inline Markdown, the diagram note action, English proofreading and the personal vocabulary |
+| | **Copy & export** | Copy default, PID and TID, row number and time delta, copy-masking rules, diagram export format, the annotation file prefix |
+| **Devices** | **Capture & video** | The New tab's *Before start* defaults (recording, quality, sound, device display, logcat buffers), device availability, and four sub-pages: **Tools** (adb, scrcpy, hardware mirror), **Limits and snapshots**, **Mark issue**, **Video playback** |
+| **AI** | **Providers** | Provider profiles, models, reasoning effort, API keys, remote-disclosure acknowledgement, max tool calls per request, connection test |
+| | **Commands** | Custom `/command` prompt library |
+| | **Voice input** | Engine, languages, translation, Whisper model download and removal |
+| **Testing** | **Test runs** | What a new AI test run starts from (judge, evidence, how long an unanswered confirmation waits), recorded-case evidence and the three test folders; see [30. AI test suites](#30-ai-test-suites) |
+| | **Issue tracker** | The tracker an AI test issue can be filed in: MCP URL, authentication header, access token, filing profile and prompt, connection test |
+| **System** | **Storage & files** | The default parent plus separate analysis, capture-session, snapshot and saved-ZIP folders, auto-save and filter backups, disk use, clear temporary data and reset app data |
+| | **Integrations** | MCP control server on/off, port, allow browser clients, regenerate token, connection info, diagnostic logging |
+| | **About** | Version, author, update check, edition, the GitHub repository, support and the license |
 
 **Interface font** and **Log font** are separate searchable dropdowns in Appearance. Opening a
 dropdown shows available installed families with the current choice marked; use its search field
-to narrow the list. A highlighter inherits the log font unless you
-override it for that rule. If a selected family is unavailable on another computer, Indagium uses
-the corresponding default while retaining the selected name.
+to narrow the list. The Log font dropdown starts with **Monospace (default)** and **Proportional
+(default)**: picking one uses the app's own fallback family of that kind instead of a named font,
+which replaces the former separate "Fallback log family" setting. A highlighter inherits the log font
+unless you override it for that rule. If a selected family is unavailable on another computer,
+Indagium uses the corresponding default while retaining the selected name.
 
-Use the Settings search field to find a setting by name or task; activate a result to jump to its
-section and control. `⌘F` / `Ctrl+F` focuses the Settings search while Settings is open. Workspace
+**Same as tiles** (Appearance › Corners › Toolbar) makes the toolbar's button groups follow the Tiles
+shape; choosing one of the five shapes there gives the toolbar its own. An existing setup whose toolbar
+already differed from its tiles keeps that look.
+
+Use the Settings search field to find a setting by name or task; results are grouped by page and show
+"Group › Page", and activating one jumps to its page and control. `⌘F` / `Ctrl+F` focuses the Settings
+search while Settings is open and `Esc` clears the query first. Workspace
 profiles can be applied, customized and saved under a new name, renamed, updated from the current
 layout, or exported/imported as JSON. The setup assistant offers five steps—Workspace, Look, Folders,
 Search, and Capture. Its Search step contains five preferences: **Search scope behavior**, **Ctrl+F opens**,
-**Ctrl+F also shows Original**, **Original panel for new files**, and **Link split selection and Find**.
-They are prefilled with current values and take effect as you edit them.
+**Ctrl+F also shows Original**, **Original panel for new files**, and **Link split selection and Find**;
+the last three are switches. They are prefilled with current values and take effect as you edit them.
 Users who completed the earlier wizard are shown the new Search step once, with their current workspace
 profile kept. Finish, Skip, Escape, or closing the window acknowledges the current wizard revision; use
-**Run setup again** in Settings → General to start from Workspace.
+**Setup assistant…** in the Settings footer to start from Workspace.
 
-Save folders are independent: the default parent folder, analysis artifacts, retained capture sessions,
+On **Storage & files** the save folders are independent: the default parent folder, analysis artifacts, retained capture sessions,
 live snapshots, and portable ZIP exports. Changing the capture-session folder affects new sessions;
 existing session data stays in its original location.
 
-Also here: **clear temporary data** (archive cache and similar) and **reset all app data**, which
+Also on that page: **clear temporary data** (archive cache and similar) and **reset all app data**, which
 returns Indagium to a first-run state.
 
 ---
@@ -1098,7 +1117,7 @@ One directory holds everything Indagium stores:
 | `control-token` | Bearer token for the MCP control server |
 | `indagium-debug.log` | Diagnostic log — only when you turn it on |
 
-AI test suites, test runs and issues are **not** here: they live in your save folders (*Settings → General*), by
+AI test suites, test runs and issues are **not** here: they live in your save folders (*Settings → Test runs*), by
 default `<Default save folder>/test-suites`, `/test-runs` and `/test-issues` (`~/Documents/Indagium` unless you chose
 another Default save folder). Each can be moved to a folder of your choice; see [30. AI test suites](#30-ai-test-suites).
 Older versions kept the suites and issues in a `testing/` folder here; the first start of a newer version moves them.
@@ -1124,11 +1143,11 @@ with several huge files still opens fast.
 *Close all tabs*, *Clear cache*, and *Keep waiting*. For genuinely huge files, accept the split
 prompt when opening instead.
 
-**"Port already in use" when enabling the MCP server.** Change the port in Settings → Automation.
+**"Port already in use" when enabling the MCP server.** Change the port in Settings → Integrations.
 If the server fails to start from a saved setting, Indagium turns the toggle back off rather than
 retrying on every launch.
 
-**AI provider unreachable.** Use **Test connection** in Settings → AI providers. Check the endpoint
+**AI provider unreachable.** Use **Test connection** in Settings → AI → Providers. Check the endpoint
 includes its version path (most end in `/v1`), and that a local server such as LM Studio is running.
 
 **"Choose or enter a model".** Model discovery is optional — type the exact model id your provider
@@ -1138,7 +1157,7 @@ exposes.
 the profile. HTTP and HTTPS are both allowed once acknowledged.
 
 **"MCP … budget exhausted".** The analysis allowance for that request is spent. Notes operations
-still work. Raise **Max MCP tool calls per request** in Settings → AI providers.
+still work. Raise **Max MCP tool calls per request** in Settings → AI → Providers.
 
 **Codex or Claude Code will not start.** Use **Detect** or **Browse** in the account profile to
 select the CLI executable, then sign in to that CLI itself. Account profiles never accept API keys.
@@ -1270,7 +1289,7 @@ connection or start a new capture for that address. Capture keeps waiting rather
 replacement from its model or name. Existing session metadata does not carry a verified hardware
 identity for automatically following changed endpoints.
 
-At the bottom of Settings → Capture, **Device availability** offers **Write device availability
+At the bottom of Settings → Capture & video, **Device availability** offers **Write device availability
 markers to the log** and **Show unavailable device periods in playback and exported video**, both
 enabled by default for new captures. The marker wording is fixed. Transition rows describe the loss and return
 without adding a row for every retry. Playback and exported video retain the full offline duration
@@ -1432,7 +1451,7 @@ limit applies to the longest side of the screen, so 1280 px on a portrait phone 
 These are estimates: the real size depends on screen activity (a static screen records smaller, a
 scrolling or video-heavy one approaches the bitrate ceiling of twice the typical figure), and audio
 adds about 1 MB/min. Settings shows **Custom** when the Max size, Max FPS and Bitrate fields under
-Screen recording match no preset; a value saved before presets existed stays as it was.
+Settings → Capture & video → Limits and snapshots match no preset; a value saved before presets existed stays as it was.
 
 **Recording codec (experimental).** H.264 remains the default. H.265 and AV1 request encoding on
 the Android device while recording, so a supported device can produce compact video before export.
@@ -1459,14 +1478,14 @@ show that recording begins later than the log. Capture starts with an estimated 
 known moment, then right-click the corresponding log row and choose **Video: Link to \<time\>** to set
 or correct the synchronization anchor (see [§20](#20-video-sync)).
 
-Settings changed under Capture configure the next recording: video, buffers, device audio, microphone,
+Settings changed under Capture & video configure the next recording: video, buffers, device audio, microphone,
 encoding limits and saved-video format are read when a capture starts. They persist as
 you edit them, but changing them does not reconfigure an active recorder. Use the running mirror's
 display interaction and playback controls while the session is live.
 
 The storage guard stops capture before disk use exceeds its configured limit or reserved free space.
 Capture sessions, live snapshots, and Save ZIP exports can each use their own folder in Settings →
-General → Storage. Live capture itself is not resumed after restart. If Indagium closes unexpectedly,
+Storage & files. Live capture itself is not resumed after restart. If Indagium closes unexpectedly,
 the New capture launcher lists the interrupted session so you can recover or export its files. A
 stopped capture tab remains a normal tab and can be restored from its descriptor.
 
@@ -1502,7 +1521,7 @@ and [step-authoring screenshot](../site/assets/media/posters/ai-tests-authoring.
 
 ### Quick start
 
-For AI drafting or agent-driven steps, configure an AI provider profile in *Settings → AI providers*. Connect an authorized
+For AI drafting or agent-driven steps, configure an AI provider profile in *Settings → AI → Providers*. Connect an authorized
 Android device or emulator that Indagium can see through `adb`; choose a judge profile only if you want judged results or
 use a *Screen judge* or *Ask the judge* check.
 
@@ -1516,7 +1535,7 @@ use a *Screen judge* or *Ask the judge* check.
 5. Follow the live lane view, then inspect the saved result matrix and evidence. Compare or rerun work, export a report,
    or create an issue for follow-up.
 
-**Where the test data is kept.** Three folders in *Settings → General*, each with *Browse* (and *Reset* once you chose
+**Where the test data is kept.** Three folders in *Settings → Test runs*, each with *Browse* (and *Reset* once you chose
 your own), by default subfolders of your *Default save folder* (for example `…/Documents/Indagium/test-suites  (default)`):
 
 | Setting | Default | Holds |
@@ -1868,7 +1887,7 @@ The cases, recording and *More* rows show a one-line summary; **Change ▸** ope
 
 - **Cases** — tick the cases to run.
 - **Lanes** — a lane is one device driven by one agent. Choose what drives it (a Claude Code, Codex or API
-  profile from *Settings → AI providers*, or *External (MCP)* if a developer's AI client will drive it) and
+  profile from *Settings → AI → Providers*, or *External (MCP)* if a developer's AI client will drive it) and
   which connected device it uses. Add several lanes: lanes on **different devices run at the same time** (up to
   four devices at once; the others wait), lanes that share a device run one after another. A device with an active
   step-authoring recording cannot be used until you stop and review it. A matching manual live capture is offered as a
@@ -1933,7 +1952,7 @@ the lane caps `wait_for_ui` at two calls. Skip only a visible skippable ad, then
 environmental prerequisite remains unavailable, the agent reports **Blocked**; it cannot replace the content or weaken the expected result.
 A manual step shows a **Waiting for you** card with **Done**, **Failed** and **Skip** and a bar for the time left.
 A script that needs permission appears as a card — **Allow once** or **Deny** — and an unanswered card is
-denied after the confirmation timeout (5 minutes by default, *Settings → Testing*). A step set to *Pause for
+denied after the confirmation timeout (5 minutes by default, *Settings → Test runs*). A step set to *Pause for
 me* shows **Retry**, **Continue** and **Stop**. Cancelling still runs teardown scripts.
 
 Automatic case retries repeat only a failed case, after its teardown and with its setup and steps run again; suite setup
@@ -2069,7 +2088,7 @@ unless you ask for another one.
 ### Keeping a recording's evidence
 
 By default a recording's screenshots, screen readings and video are temporary: applying the steps deletes them. Turn on
-**Settings → Testing → Keep recording evidence with recorded cases** and applying a recording also saves that evidence in
+**Settings → Test runs → Keep recording evidence with recorded cases** and applying a recording also saves that evidence in
 the **Test suites folder** (under `assets/<suite>/recordings/`), so the full **Rewrite with AI** can be run again later.
 
 - **Reopen:** on a case with saved evidence, press **Rewrite with AI from saved recording** (several saved recordings are
@@ -2081,7 +2100,7 @@ the **Test suites folder** (under `assets/<suite>/recordings/`), so the full **R
   a password could be on screen are left out (the file says so, and the review shows a note). The typed text itself is always hidden.
 - **Size:** one recording takes at most 200 MB. Over that, the video is left out first (with a warning), then the screenshots.
 - **Copies and exports:** duplicating a case or suite, and exporting or importing a suite, never carry the evidence; deleting a
-  case or suite deletes its saved recordings. Settings shows the disk the saved recordings use and **Delete stored recording
+  case or suite deletes its saved recordings. Settings → Test runs shows the disk the saved recordings use and **Delete stored recording
   evidence** (after a confirmation) removes them all.
 
 ### Editions and limits
@@ -2091,7 +2110,7 @@ The **Free** edition allows **1 suite with 5 cases**. Everything past the limit 
 active — but not edit, run or duplicate it, and nothing is ever deleted. Importing a suite with more than 5
 cases works; the extra cases arrive locked. Premium and Friends & Family have no limits, and so does a
 default build. To try the Free limits on your own build, start it with `-Dindagium.edition=free` (or the
-environment variable `INDAGIUM_EDITION=free`); *Settings → Testing* can switch the edition at runtime in an
+environment variable `INDAGIUM_EDITION=free`); *Settings → About* can switch the edition at runtime in an
 unpackaged build or with `-Dindagium.dev=true`.
 
 ### From an MCP client

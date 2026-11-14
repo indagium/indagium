@@ -369,7 +369,7 @@ private fun FoldersStep(state: AppState) {
             SaveFolderSetting(state, kind)
         }
     }
-    AppText("More folders in Settings › General", color = tc.td, fontSize = 10.sp)
+    AppText("More folders in Settings › Storage & files", color = tc.td, fontSize = 10.sp)
 }
 
 @Composable
@@ -397,58 +397,37 @@ private fun SearchStep(state: AppState, reclaimFocus: () -> Unit) {
                 onInteraction = reclaimFocus,
             )
         }
-        SearchSettingCard(
+        SearchSwitchCard(
             title = "Ctrl+F also shows Original",
             description = "Reveal unfiltered rows whenever Ctrl+F opens.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
-                onToggle = { index ->
-                    state.updateSettings { it.copy(openUnfilteredOnCtrlF = index == 0) }
-                    reclaimFocus()
-                },
-                modifier = Modifier.fillMaxWidth().testTag("setup-search-open-unfiltered-on-ctrl-f"),
-                fillWidth = true,
-                segmentHeight = 25.dp,
-                segmentFontSize = 10.sp,
-            )
-        }
-        SearchSettingCard(
+            checked = state.settings.openUnfilteredOnCtrlF,
+            onCheckedChange = { value ->
+                state.updateSettings { it.copy(openUnfilteredOnCtrlF = value) }
+                reclaimFocus()
+            },
+            testTag = "setup-search-open-unfiltered-on-ctrl-f",
+        )
+        SearchSwitchCard(
             title = "Original panel for new files",
             description = "Choose whether new files open with unfiltered rows visible.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
-                onToggle = { index ->
-                    state.updateSettings { it.copy(openNewFilesWithUnfiltered = index == 0) }
-                    reclaimFocus()
-                },
-                modifier = Modifier.fillMaxWidth().testTag("setup-search-open-new-files-unfiltered"),
-                fillWidth = true,
-                segmentHeight = 25.dp,
-                segmentFontSize = 10.sp,
-            )
-        }
-        SearchSettingCard(
+            checked = state.settings.openNewFilesWithUnfiltered,
+            onCheckedChange = { value ->
+                state.updateSettings { it.copy(openNewFilesWithUnfiltered = value) }
+                reclaimFocus()
+            },
+            testTag = "setup-search-open-new-files-unfiltered",
+        )
+        SearchSwitchCard(
             title = "Link split selection and Find",
             description = "Filtered row selection mirrors to Original; Find navigation may mirror either way. " +
                 "Queries stay separate.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
-                onToggle = { index ->
-                    state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = index == 0) }
-                    reclaimFocus()
-                },
-                modifier = Modifier.fillMaxWidth().testTag("setup-search-link-split-selection-and-find"),
-                fillWidth = true,
-                segmentHeight = 25.dp,
-                segmentFontSize = 10.sp,
-            )
-        }
+            checked = state.settings.syncSplitPanelSelectionAndScroll,
+            onCheckedChange = { value ->
+                state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = value) }
+                reclaimFocus()
+            },
+            testTag = "setup-search-link-split-selection-and-find",
+        )
     }
 }
 
@@ -463,6 +442,30 @@ private fun SearchSettingCard(title: String, description: String, control: @Comp
         AppText(title, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         AppText(description, color = tc.td, fontSize = 10.sp, maxLines = 2)
         control()
+    }
+}
+
+/** A [SearchSettingCard] whose control is one on/off switch beside the title, so a card reads like a Settings page row. */
+@Composable
+private fun SearchSwitchCard(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(6.dp)
+    Row(
+        Modifier.fillMaxWidth().background(tc.p2, shape).border(1.dp, tc.br, shape).padding(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            AppText(title, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            AppText(description, color = tc.td, fontSize = 10.sp, maxLines = 2)
+        }
+        SettingsSwitch(checked = checked, onCheckedChange = onCheckedChange, label = title, testTag = testTag)
     }
 }
 

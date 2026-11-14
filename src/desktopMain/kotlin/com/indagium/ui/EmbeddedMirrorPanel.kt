@@ -744,7 +744,7 @@ internal fun shouldUseMacNativeMirror(osName: String = System.getProperty("os.na
 
 /** [enabled] is the persisted `CaptureSettings.hardwareMirror` opt-in (default false — see that
  * field's doc): neither the D3D11 nor the VAAPI/EGL path has proven itself on real hardware yet, so
- * Windows/Linux only take this route when a user has explicitly turned it on in Settings → Capture. */
+ * Windows/Linux only take this route when a user has explicitly turned it on in Settings › Capture & video › Tools. */
 internal fun shouldUseDesktopGpuMirror(
     osName: String = System.getProperty("os.name").orEmpty(),
     enabled: Boolean,

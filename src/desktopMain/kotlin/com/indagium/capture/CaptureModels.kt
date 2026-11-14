@@ -105,7 +105,7 @@ data class CaptureSettings(
      *  matching this class's own convention comment above. Off by default: neither path has proven
      *  itself on real hardware yet (see EmbeddedMirrorPanel.kt's `shouldUseDesktopGpuMirror`), so
      *  Windows/Linux default to the Compose/JavaCV mirror until a user explicitly turns this on in
-     *  Settings → Capture. Irrelevant on macOS, which always uses its own VideoToolbox/Metal path. */
+     *  Settings › Capture & video. Irrelevant on macOS, which always uses its own VideoToolbox/Metal path. */
     val hardwareMirror: Boolean = false,
     /** Emit one indexed transition row when the selected device becomes unavailable or returns. */
     val writeDeviceAvailabilityMarkers: Boolean = true,

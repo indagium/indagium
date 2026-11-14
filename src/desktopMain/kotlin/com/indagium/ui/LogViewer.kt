@@ -3528,7 +3528,7 @@ private fun LogRow(
     // gutter after this one — starts exactly where the overlay expects it to. See LogViewer.kt's
     // tidMapSpineX for the other half of this contract.
     hasTidMap: Boolean = false,
-    // The standing preference (Settings → Appearance, the log toolbar's options popup) —
+    // The standing preference (Settings › Log view, the log toolbar's options popup) —
     // OFF (the default) never reads tab.analysis.processNames/manualProcessNamePicks at all below,
     // which is what guarantees this row renders pixel-identical to before this feature existed.
     processNameMode: ProcessNameMode = ProcessNameMode.OFF,
@@ -4788,7 +4788,7 @@ private fun ToolbarOptionsPopup(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 )
             }
-            // Second entry point for the mode (Settings → Appearance carries the full three-way
+            // Second entry point for the mode (Settings › Log view carries the full three-way
             // choice — see SettingsDialog.kt's EditorBehaviorSettingsSection). This one is a plain
             // two-state toggle, styled exactly like Show/Hide row numbers and Show/Hide minimap
             // above: OFF shows names (sets ALL), and ALL or MANUAL hides them (sets OFF). MANUAL is

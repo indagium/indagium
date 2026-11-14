@@ -425,7 +425,7 @@ or recording is a separate confirmation-required call.
   `useScreenshotAsExpected` remains the explicit opt-in for an expected screenshot. Recorded paths preserve sample times
   and the hold before release. Replay requires a matching screen shape and perform-action intent without a condition or
   precondition; text, rotation and password-withheld input cannot be replayed.
-  `reopen_test_recording` (caseId, optional recordingId) reopens the evidence saved with a case (Settings > Testing > "Keep recording
+  `reopen_test_recording` (caseId, optional recordingId) reopens the evidence saved with a case (Settings > Test runs > "Keep recording
   evidence with recorded cases") as a stopped recording and returns its `sessionId`: the stored rows, screen readings, screenshots and
   video (a recording in which a password was typed has no video and no screens from that time) are restored without a device, so
   `get_test_recording`, `update_test_recording`, `rewrite_test_recording` and the other recording tools work unchanged. It needs the case's
@@ -590,7 +590,7 @@ deterministic failures and retains ordered evidence paths; capture timestamps ar
   confirmation inside the AI panel.
 - `resolve_test_confirmation` (`runId`, `confirmationId`, `allow`) — answers a confirmation card an in-app
   agent waits on (an `ASK` script); the ids are in `get_test_run_status`. A card nobody answers within the run's
-  confirmation timeout (5 minutes for a run started over MCP; Settings > Testing sets it for runs started in the
+  confirmation timeout (5 minutes for a run started over MCP; Settings > Test runs sets it for runs started in the
   app) counts as denied.
 - `resume_paused_step` (`runId`, `laneId`, `decision` `retry`|`continue`|`stop`) — what a lane does after a
   `PAUSE_FOR_USER` step failed.

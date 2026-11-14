@@ -323,7 +323,7 @@ val CORNER_MD = RoundedCornerShape(4.dp)   // buttons (PillBtn, ToolbarBtn), not
 val INDENT_STEP   = 18.dp   // per-level nesting indent
 val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
 val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows
-val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings → Row number)
+val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings › Log view › Row numbers)
 
 // Character budget the process-name-in-place-of-pid field's middle-ellipsis truncation
 // (ui/LogViewer.kt's middleEllipsis, used from appendTsPidTid) targets — the upper bound

@@ -7,7 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
-// The save-folder fields (the five folders plus the three AI test folders) (Settings → General → Storage — see AppSettings' own doc comments)
+// The save-folder fields (the five folders plus the three AI test folders) (Settings › Storage & files — see AppSettings' own doc comments)
 // are JSON-only, appended last, same rule as every other settings-JSON-only field. Shaped after
 // HomeRecentsLayoutSettingCodecTest.
 class SaveFoldersSettingCodecTest {

@@ -70,7 +70,7 @@ import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 import com.indagium.ui.holiday.*
 
-// How each tab strip style (Settings > Appearance > Tabs) draws one tab. The shell keeps one structure for every style (a stripe
+// How each tab strip style (Settings › Tabs & toolbar) draws one tab. The shell keeps one structure for every style (a stripe
 // overlay and a Row of [close?] [live dot] [badge] [label] [close?]) and only the metrics, the chrome behind the Row and the label's type
 // change, so a behaviour (click, right-click menu, tooltip, drag, close) is the same in every style. CURRENT is the long-standing
 // look and produces exactly the modifiers the shell had before styles existed. A strip on another window edge (TabAppearance.position)

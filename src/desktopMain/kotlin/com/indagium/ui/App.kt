@@ -498,7 +498,7 @@ fun App(
                     showLoadingOverlay = false
                 }
             }
-            // The tab strip and the toolbar sit on the edges Settings > Appearance > Tabs chooses; everything else is the content.
+            // The tab strip and the toolbar sit on the edges Settings › Tabs & toolbar chooses; everything else is the content.
             CompositionLocalProvider(LocalOpenTabGroupEditor provides { request -> editingTabGroup = request }) {
                 ChromeScaffold(
                     state = state,

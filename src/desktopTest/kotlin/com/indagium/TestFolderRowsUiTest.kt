@@ -16,7 +16,7 @@ import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 
-/** The three AI test folder rows as Settings → General shows them: label, the "(default)" path under the save folder, Browse and Reset. */
+/** The three AI test folder rows as Settings › Test runs shows them: label, the "(default)" path under the save folder, Browse and Reset. */
 @OptIn(ExperimentalTestApi::class)
 class TestFolderRowsUiTest {
     @get:Rule

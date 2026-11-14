@@ -8,7 +8,7 @@ with just a URL. There is nothing to install: no Node.js, no `npm`, no repo chec
 
 The server is off by default and never runs in a packaged build unless you turn it on.
 
-- **Installed app:** Settings → Automation → *MCP control server* → **On**. The default port is
+- **Installed app:** Settings → Integrations → *MCP control server* → **On**. The default port is
   8991 (configurable). Click *Connection info…* for the exact URL and a copyable client config.
 - **Dev run:** `INDAGIUM_DEBUG_CONTROL=8991 ./gradlew desktopRun` (or `-Dindagium.debugControl=8991`;
   the legacy `OPENLOG_DEBUG_CONTROL` / `-Dopenlog.debugControl` spelling still works too).

@@ -52,7 +52,7 @@ import kotlinx.coroutines.withContext
 //   Where  - lane rows (what drives each lane, with which model and reasoning effort, and on which device; add, remove and
 //            reorder them). Lanes on different devices run at the same time, lanes that share a device one after another (the
 //            dialog says so);
-//   Judge  - the judge mode as a segmented control (like Settings > Testing), then its profile, model and effort;
+//   Judge  - the judge mode as a segmented control (like Settings > Test runs), then its profile, model and effort;
 //   Record - a one-line summary of the recording every lane does that opens the same "Before start" controls as a manual
 //            live capture;
 //   More   - a one-line summary of retries, repeat, tool-call limit, evidence and manual steps that opens those controls.
@@ -397,7 +397,7 @@ private fun LaneRow(
 }
 
 /**
- * The judge: when it judges (a segmented control, as in Settings > Testing), then which AI profile. Any profile kind works
+ * The judge: when it judges (a segmented control, as in Settings > Test runs), then which AI profile. Any profile kind works
  * (Claude Code and Codex too); the judge never sees what an agent claimed.
  */
 @Composable
@@ -468,7 +468,7 @@ private fun JudgeRow(
                 modifier = Modifier.width(LANE_FIELD_WIDTH),
                 menuWidth = MENU_WIDTH,
                 isSelected = { it.profileId == model.judgeProfileId },
-                emptyText = "No AI profile configured (Settings > AI providers)",
+                emptyText = "No AI profile configured (Settings > AI > Providers)",
                 filled = true,
             )
             profiles.firstOrNull { it.id == model.judgeProfileId }?.let { judgeProfile ->

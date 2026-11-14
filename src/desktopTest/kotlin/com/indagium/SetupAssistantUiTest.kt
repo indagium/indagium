@@ -1,9 +1,7 @@
 package com.indagium
 
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.click
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -12,7 +10,6 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.width
 import com.indagium.model.CtrlFTarget
@@ -29,10 +26,6 @@ import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-
-private const val FIRST_SEGMENT_CLICK_FRACTION = 0.25f
-private const val SECOND_SEGMENT_CLICK_FRACTION = 0.75f
-private const val SEGMENT_VERTICAL_CENTER_FRACTION = 0.5f
 
 /** Drives the real assistant. It stops before the Capture step, which starts a real adb lookup. */
 @OptIn(ExperimentalTestApi::class)
@@ -242,9 +235,12 @@ class SetupAssistantUiTest {
         rule.waitForIdle()
         assertEquals(CtrlFTarget.TAGS, state.settings.ctrlFTarget)
 
-        clickSegment("setup-search-open-unfiltered-on-ctrl-f", 0)
-        clickSegment("setup-search-open-new-files-unfiltered", 0)
-        clickSegment("setup-search-link-split-selection-and-find", 1)
+        assertFalse(state.settings.openUnfilteredOnCtrlF)
+        assertFalse(state.settings.openNewFilesWithUnfiltered)
+        assertTrue(state.settings.syncSplitPanelSelectionAndScroll)
+        clickSwitch("setup-search-open-unfiltered-on-ctrl-f")
+        clickSwitch("setup-search-open-new-files-unfiltered")
+        clickSwitch("setup-search-link-split-selection-and-find")
         rule.waitForIdle()
         assertTrue(state.settings.openUnfilteredOnCtrlF)
         assertTrue(state.settings.openNewFilesWithUnfiltered)
@@ -288,17 +284,13 @@ class SetupAssistantUiTest {
 
         rule.onNodeWithText("Choose how search works").assertExists()
         assertEquals(SearchScopeBehavior.UNFILTERED, state.settings.searchScopeBehavior)
-        clickSegment("setup-search-open-unfiltered-on-ctrl-f", 0)
+        clickSwitch("setup-search-open-unfiltered-on-ctrl-f")
         rule.onRoot().performKeyInput { pressKey(Key.Escape) }
         rule.waitForIdle()
         assertFalse(state.setupAssistantOpen, "Escape still works after the Search toggle")
     }
 
-    private fun clickSegment(tag: String, index: Int) {
-        val node = rule.onNodeWithTag(tag)
-        node.performScrollTo()
-        val size = node.fetchSemanticsNode().size
-        val x = size.width * if (index == 0) FIRST_SEGMENT_CLICK_FRACTION else SECOND_SEGMENT_CLICK_FRACTION
-        node.performTouchInput { click(Offset(x, size.height * SEGMENT_VERTICAL_CENTER_FRACTION)) }
+    private fun clickSwitch(tag: String) {
+        rule.onNodeWithTag(tag).performScrollTo().performClick()
     }
 }

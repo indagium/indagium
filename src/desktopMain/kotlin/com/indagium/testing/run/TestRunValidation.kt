@@ -57,7 +57,7 @@ internal fun profileProblems(label: String, profile: AiProviderProfile, apiKey: 
         !validation.isValid -> listOf("$label: ${validation.problem!!.message}")
         profile.kind.usesHttpEndpoint && profile.model.isBlank() -> listOf("$label: choose a model for the profile '${profile.displayName}'.")
         profileNeedsApiKey(profile) && apiKey(profile.id).isBlank() ->
-            listOf("$label: the profile '${profile.displayName}' needs an API key (enter it in Settings > AI providers).")
+            listOf("$label: the profile '${profile.displayName}' needs an API key (enter it in Settings > AI > Providers).")
         else -> emptyList()
     }
 }
