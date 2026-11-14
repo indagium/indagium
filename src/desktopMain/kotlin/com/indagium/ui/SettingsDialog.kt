@@ -34,7 +34,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -59,10 +58,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.PopupProperties
 import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.OpenAiCompatibleProvider
@@ -2414,103 +2411,20 @@ private fun editorChoiceLabel(choice: String): String = when (choice) {
     else -> EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "Automatic (first installed)"
 }
 
-// Hand-rolled dropdown for settings.editorChoice, modeled on FilterPanel.kt's
-// CrashCategoryDropdown: a clickable field showing the current choice that opens a themed option
-// list on click, with the popup width measured from the field itself so it lines up exactly.
+// The settings.editorChoice dropdown: "auto" (also stored as ""), every detected editor's preset id, then "custom".
 @Composable
 private fun EditorChoiceDropdown(state: AppState) {
-    val tc = tc()
-    val density = LocalDensity.current
-    var open by remember { mutableStateOf(false) }
-    var fieldWidth by remember { mutableStateOf(0.dp) }
-    // See CrashCategoryDropdown's identical guard: the Popup's own dismissOnClickOutside also fires
-    // for a click back on the field itself, so without suppressing the toggle briefly after a
-    // dismiss, that dismiss and the field's own onClick can both fire for the same press and net out
-    // to "stayed open" instead of closing.
-    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     val choice = state.settings.editorChoice
-    val detected = state.detectedEditors
-    Box(
-        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
-            fieldWidth = with(density) { coords.size.width.toDp() }
-        },
-    ) {
-        HoverBox(
-            modifier = Modifier.fillMaxWidth().height(26.dp)
-                .clip(CORNER_SM)
-                .background(tc.p2, CORNER_SM)
-                .border(1.dp, tc.br, CORNER_SM),
-            onClick = {
-                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
-            },
-        ) {
-            Row(
-                Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                AppText(editorChoiceLabel(choice), color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
-            }
-        }
-        if (open) {
-            Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
-                onDismissRequest = {
-                    open = false
-                    suppressToggleUntilMs = System.currentTimeMillis() + 200
-                },
-                properties = PopupProperties(focusable = false),
-            ) {
-                Column(
-                    Modifier.width(fieldWidth)
-                        .shadow(8.dp, RoundedCornerShape(8.dp))
-                        .background(tc.p, RoundedCornerShape(8.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                        .padding(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    EditorChoiceOptionRow(
-                        label = "Automatic (first installed)",
-                        active = choice == "" || choice == "auto",
-                        onClick = { open = false; state.updateSettings { it.copy(editorChoice = "auto") } },
-                    )
-                    detected?.forEach { (preset, _) ->
-                        EditorChoiceOptionRow(
-                            label = preset.displayName,
-                            active = choice == preset.id,
-                            onClick = { open = false; state.updateSettings { it.copy(editorChoice = preset.id) } },
-                        )
-                    }
-                    EditorChoiceOptionRow(
-                        label = "Custom command…",
-                        active = choice == "custom",
-                        onClick = { open = false; state.updateSettings { it.copy(editorChoice = "custom") } },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EditorChoiceOptionRow(label: String, active: Boolean, onClick: () -> Unit) {
-    val tc = tc()
-    HoverBox(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-        baseBg = if (active) tc.abg else Color.Transparent,
-        onClick = onClick,
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
-            AppText(
-                label,
-                color = if (active) tc.ac else tc.tx,
-                fontSize = 11.sp,
-                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-            )
-        }
-    }
+    val options = listOf("auto") + (state.detectedEditors?.map { it.first.id } ?: emptyList()) + "custom"
+    SettingsDropdown(
+        options = options,
+        selected = if (choice == "") "auto" else choice,
+        label = ::editorChoiceLabel,
+        onSelect = { picked -> state.updateSettings { it.copy(editorChoice = picked) } },
+        testTag = "editor-choice-dropdown",
+        modifier = Modifier.fillMaxWidth(),
+        minWidth = 0.dp,
+    )
 }
 
 // Below the dropdown: the custom-command field when "Custom command…" is chosen, or a read-only
