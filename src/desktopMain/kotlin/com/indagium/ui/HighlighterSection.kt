@@ -493,7 +493,7 @@ private fun ErrorLevelHighlightRow(
 private const val ERROR_ROW_PREVIEW_SAMPLE = "E AndroidRuntime: FATAL EXCEPTION: main"
 
 /**
- * The Settings › Editor behaviour "Error rows" cell content: the On | Off switch, the Style button that opens
+ * The Settings › Log view "Error rows" row's control: the on/off switch, the Style button that opens
  * [ErrorRowsStylePanel] in a popup under it, and, while any tab keeps its own style (which wins over this
  * switch), a line saying so with a button that clears those overrides.
  */
@@ -522,13 +522,13 @@ internal fun ErrorRowsSettingControl(
             onStyleClosed()
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (style.enabled) 0 else 1),
-                onToggle = { idx -> onChange(style.copy(enabled = idx == 0)) },
-                modifier = Modifier.testTag("error-highlight-global-switch"),
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp), horizontalAlignment = Alignment.End) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            SettingsSwitch(
+                checked = style.enabled,
+                onCheckedChange = { enabled -> onChange(style.copy(enabled = enabled)) },
+                label = "Error rows",
+                testTag = "error-highlight-global-switch",
             )
             Box {
                 AppButton(

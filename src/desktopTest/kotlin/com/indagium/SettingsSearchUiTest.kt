@@ -9,9 +9,6 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.click
-import androidx.compose.ui.test.hasAnyAncestor
-import androidx.compose.ui.test.hasTestTag
-import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onFirst
@@ -178,7 +175,7 @@ class SettingsSearchUiTest {
         rule.onNodeWithText("Style ▸").assertExists()
 
         rule.runOnIdle { assertTrue(state.settings.errorHighlightStyle.enabled) }
-        rule.onNode(hasText("Off") and hasAnyAncestor(hasTestTag("error-highlight-global-switch"))).performClick()
+        rule.onNodeWithTag("error-highlight-global-switch").performClick()
         rule.runOnIdle { assertFalse(state.settings.errorHighlightStyle.enabled) }
     }
 

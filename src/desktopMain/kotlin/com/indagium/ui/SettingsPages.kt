@@ -104,7 +104,10 @@ internal enum class SettingsPage(
         "Search & filters", Icons.AutoMirrored.Outlined.ManageSearch, SettingsGroupKind.ReadingLogs,
         "What Ctrl/Cmd+F does, and how the filter panel and keyboard navigation behave.",
     ),
-    IssueCategories("Issue categories", Icons.Outlined.Category, SettingsGroupKind.ReadingLogs),
+    IssueCategories(
+        "Issue categories", Icons.Outlined.Category, SettingsGroupKind.ReadingLogs,
+        "Your own regex categories for the Issues list.",
+    ),
     SourceCode(
         "Source code", Icons.Outlined.Code, SettingsGroupKind.ReadingLogs,
         "Register your project's source folders to enable Show in code.",
