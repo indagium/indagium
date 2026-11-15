@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -22,7 +21,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -94,7 +92,9 @@ private const val LOCKED_DETAIL_HINT = "Always on with this tab style."
 internal val TAB_SIZE_OPTIONS = listOf("Share the strip", "Fit the label")
 private val VISIBLE_TAB_LIMITS = listOf(4, 6, 8, 10, 12, 16)
 private val THUMB_MIN_WIDTH = 84.dp
-private val THUMB_HEIGHT = 34.dp
+private val THUMB_HEIGHT = 26.dp
+private val STYLE_CARD_PADDING = 5.dp
+private val STYLE_CARD_GAP = 4.dp
 private val TAB_STYLE_GRID_GAP = 8.dp
 private const val TAB_STYLE_COLUMNS = 5
 
@@ -236,28 +236,27 @@ private fun TabStyleGrid(selected: TabStripStyle, onSelect: (TabStripStyle) -> U
     }
 }
 
+// One style card, built like the theme, pack and profile cards: the picture on top and the name inside the same card, both in the one
+// selected-state rule (settingsPickerSurface / settingsPickerCaptionColor). The whole card is the click target and carries the tag.
 @Composable
 private fun TabStyleThumb(style: TabStripStyle, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val tc = tc()
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .height(THUMB_HEIGHT)
-                .settingsPickerSurface(active, hovered, CORNER_MD, tc)
-                .testTag("tab-style-${style.name}")
-                .semantics {
-                    contentDescription = tabStyleLabel(style)
-                    selected = active
-                }
-                .hoverable(interaction)
-                .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
-                .padding(4.dp),
-        ) {
-            Canvas(Modifier.fillMaxSize()) { drawTabThumb(style, tc, active) }
-        }
+    Column(
+        modifier
+            .settingsPickerSurface(active, hovered, CORNER_MD, tc)
+            .testTag("tab-style-${style.name}")
+            .semantics {
+                contentDescription = tabStyleLabel(style)
+                selected = active
+            }
+            .hoverable(interaction)
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+            .padding(STYLE_CARD_PADDING),
+        verticalArrangement = Arrangement.spacedBy(STYLE_CARD_GAP),
+    ) {
+        Canvas(Modifier.fillMaxWidth().height(THUMB_HEIGHT)) { drawTabThumb(style, tc, active) }
         AppText(
             tabStyleLabel(style),
             color = settingsPickerCaptionColor(active, tc),
@@ -265,7 +264,7 @@ private fun TabStyleThumb(style: TabStripStyle, active: Boolean, modifier: Modif
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().testTag("tab-style-label-${style.name}"),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp).testTag("tab-style-label-${style.name}"),
         )
     }
 }

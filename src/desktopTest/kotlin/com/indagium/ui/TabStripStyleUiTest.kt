@@ -797,7 +797,7 @@ class TabStripStyleUiTest {
             assertEquals(10, styles.size)
             val firstRow = styles.take(5).map { bounds("tab-style-${it.name}") }
             val secondRow = styles.drop(5).map { bounds("tab-style-${it.name}") }
-            val firstRowLabels = styles.take(5).map { bounds("tab-style-label-${it.name}") }
+            val firstRowLabels = styles.take(5).map { bounds("tab-style-label-${it.name}", useUnmergedTree = true) }
             val grid = bounds(TAB_STYLE_GRID_TAG)
             assertTrue(firstRow.all { it.top == firstRow.first().top }, "first five share a row at $width dp: $firstRow")
             assertTrue(secondRow.all { it.top == secondRow.first().top }, "last five share a row at $width dp: $secondRow")
@@ -805,8 +805,10 @@ class TabStripStyleUiTest {
             assertTrue(firstRow.zipWithNext().all { (left, right) -> left.left < right.left })
             assertEquals(grid.left, firstRow.first().left, "first preview reaches the left grid edge at $width dp")
             assertEquals(grid.right, firstRow.last().right, "fifth preview reaches the right grid edge at $width dp")
-            firstRow.zip(firstRowLabels).forEach { (preview, label) ->
-                assertEquals(preview.width, label.width, "preview and caption use equal full-width columns at $width dp")
+            // The name sits inside its card, like the theme, pack and profile cards: within the card's bounds, near its bottom.
+            firstRow.zip(firstRowLabels).forEach { (card, label) ->
+                assertTrue(label.left >= card.left && label.right <= card.right, "caption is inside its card's width at $width dp: $card $label")
+                assertTrue(label.top >= card.top && label.bottom <= card.bottom, "caption is inside its card's height at $width dp: $card $label")
             }
         }
 
@@ -825,11 +827,11 @@ class TabStripStyleUiTest {
         val firstCellWidth = fitsFour.first().width
         TabStripStyle.entries.forEach { style ->
             assertEquals(firstCellWidth, bounds("tab-style-${style.name}").width, "$style keeps the same narrow-grid column width")
-            assertEquals(
-                firstCellWidth,
-                bounds("tab-style-label-${style.name}").width,
-                "$style caption spans the same narrow-grid column",
-            )
+            val card = bounds("tab-style-${style.name}")
+            val label = bounds("tab-style-label-${style.name}", useUnmergedTree = true)
+            assertTrue(label.left >= card.left && label.right <= card.right, "$style caption stays inside its narrow-grid card")
+            val currentLabel = bounds("tab-style-label-${TabStripStyle.CURRENT.name}", useUnmergedTree = true)
+            assertEquals(currentLabel.width, label.width, "$style caption has the same narrow-grid width")
         }
     }
 

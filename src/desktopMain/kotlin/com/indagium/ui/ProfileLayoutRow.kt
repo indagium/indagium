@@ -1,29 +1,37 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.indagium.model.CustomLogViewLayout
 import com.indagium.model.LogViewScope
 import com.indagium.model.ProfileLayoutRef
 
 // Settings › General's "Layout" row under the profile cards: the layout the selected profile points at, as a small thumbnail and its
 // name. A custom profile's layout is changed from a dropdown (presets, saved layouts, "Keep current layout"); a built-in profile's is
-// fixed, so its name is the row's description.
+// fixed, so its name is its read-only value beside the thumbnail.
 
 private const val LAYOUT_THUMB_WIDTH_DP = 28
 private const val LAYOUT_THUMB_HEIGHT_DP = 16
 
 /** The row's description for a profile whose layout can be changed. */
 internal const val PROFILE_LAYOUT_DESCRIPTION = "The panel layout this profile applies."
+
+/** The row's description for a built-in profile, whose layout is fixed: its name is the row's value. */
+internal const val BUILT_IN_PROFILE_LAYOUT_DESCRIPTION = "The panel layout this built-in profile applies. It cannot be changed."
 
 /** One entry of the layout dropdown. */
 private data class ProfileLayoutOption(val key: String, val label: String, val ref: ProfileLayoutRef?)
@@ -73,6 +81,19 @@ internal fun ProfileLayoutRow(state: AppState, profile: ResolvedProfile, onInter
             )
         }
     } else {
-        SettingsRow("Layout", profileLayoutName(ref, saved), modifier = rowModifier, descriptionTag = "profile-layout-readonly") { thumbnail() }
+        // Read-only text, not a field: the thumbnail sits beside the layout name so it cannot be taken for an icon button.
+        SettingsRow("Layout", BUILT_IN_PROFILE_LAYOUT_DESCRIPTION, modifier = rowModifier) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                thumbnail()
+                AppText(
+                    profileLayoutName(ref, saved),
+                    color = tc.tx,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("profile-layout-readonly"),
+                )
+            }
+        }
     }
 }

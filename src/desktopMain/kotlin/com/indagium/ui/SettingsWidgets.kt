@@ -1269,8 +1269,8 @@ private const val PICKER_SELECTED_BORDER_DP = 1.5f
 /**
  * The surface of a picture picker's card (a theme, a tab style, a pack, a profile): the accent wash with a 1.5dp accent border when
  * [selected], else the page fill with a 1dp outline. [hovered] adds only the hover tint, never an accent border. [remembered] (a picker
- * with no choice made that would use this card) is a neutral 1.5dp outline. Draw its caption in
- * [settingsPickerCaptionColor]. [colors] are the ones to draw with (a pack card draws in its own palette).
+ * with no choice made that would use this card) is a neutral 1.5dp outline in the dim text colour, clearly weaker than the accent one.
+ * Draw its caption in [settingsPickerCaptionColor]. [colors] are the ones to draw with (a pack card draws in its own palette).
  */
 internal fun Modifier.settingsPickerSurface(
     selected: Boolean,
@@ -1286,7 +1286,7 @@ internal fun Modifier.settingsPickerSurface(
             if (selected || remembered) PICKER_SELECTED_BORDER_DP.dp else 1.dp,
             when {
                 selected -> colors.ac
-                remembered -> colors.ts
+                remembered -> colors.td
                 else -> colors.br
             },
             shape,

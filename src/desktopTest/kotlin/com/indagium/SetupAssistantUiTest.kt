@@ -11,7 +11,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.pressKey
-import androidx.compose.ui.unit.width
 import com.indagium.model.CtrlFTarget
 import com.indagium.model.SearchScopeBehavior
 import com.indagium.model.TabSizeMode
@@ -88,7 +87,9 @@ class SetupAssistantUiTest {
         val fifthPreview = rule.onNodeWithTag("tab-style-COMPACT").getBoundsInRoot()
         assertEquals(grid.left, firstPreview.left)
         assertEquals(grid.right, fifthPreview.right)
-        assertEquals(firstPreview.width, rule.onNodeWithTag("tab-style-label-CURRENT").getBoundsInRoot().width)
+        // The name sits inside the style's card.
+        val firstLabel = rule.onNodeWithTag("tab-style-label-CURRENT", useUnmergedTree = true).getBoundsInRoot()
+        assertTrue(firstLabel.left >= firstPreview.left && firstLabel.right <= firstPreview.right)
 
         rule.onNodeWithText("Fit the label").performScrollTo().performClick()
         rule.waitForIdle()
