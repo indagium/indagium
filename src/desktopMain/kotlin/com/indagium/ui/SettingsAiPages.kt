@@ -250,7 +250,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                             Modifier.weight(1f),
                             placeholder = if (kind == AiProviderKind.CODEX_ACCOUNT) "codex" else "claude",
                         )
-                        AppButton(
+                        SettingsButton(
                             "Detect",
                             onClick = {
                                 val detected = LocalAccountCli.detectExecutable(kind)
@@ -271,7 +271,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                             },
                             variant = ButtonVariant.Secondary,
                         )
-                        AppButton(
+                        SettingsButton(
                             "Browse",
                             onClick = { state.pickAccountCliExecutable()?.let { executablePath = it } },
                             variant = ButtonVariant.Secondary,
@@ -330,17 +330,17 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
         }
         val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
         if (kind.usesHttpEndpoint && endpoint.isNotBlank() && !isLoopbackHost(endpointHost)) {
-            Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                CheckRow(acknowledged, { ackState = endpoint.trim() to !acknowledged }) {
-                    // Screen images from device capture tools are sent to this provider when used.
-                    AppText(
-                        "I understand logs, source code, paths, device screen images, and tool results may leave this " +
-                            "device, and that a plain HTTP (non-HTTPS) endpoint also sends my API key unencrypted.",
-                        color = tc.ts,
-                        fontSize = 11.sp,
-                        maxLines = 3,
-                    )
-                }
+            // Screen images from device capture tools are sent to this provider when used.
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp)) {
+                SettingsCheckbox(
+                    checked = acknowledged,
+                    label = "I understand logs, source code, paths, device screen images, and tool results may leave this " +
+                        "device, and that a plain HTTP (non-HTTPS) endpoint also sends my API key unencrypted.",
+                    onChange = { ackState = endpoint.trim() to !acknowledged },
+                    maxLines = 3,
+                    labelColor = tc.ts,
+                    fontSize = 11.sp,
+                )
             }
         }
         if (validationError != null || connectionTest != null || accountCliCheck != null) {
@@ -376,7 +376,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
         ) {
             // Secondary, not Primary — elsewhere in Settings, Primary is reserved for the
             // dialog's own "Done" action, not per-section actions like this one.
-            AppButton(
+            SettingsButton(
                 "Save profile",
                 onClick = { validationError = state.updateAiProviderProfile(draft) },
                 modifier = Modifier.testTag(AiPageTags.SAVE_PROFILE),
@@ -384,7 +384,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             // Reachability is a pure network probe against the current form fields: it never
             // saves, validates, or otherwise touches the stored profile, so it works whether or
             // not the endpoint would currently pass Save (e.g. an unacknowledged remote endpoint).
-            AppButton(
+            SettingsButton(
                 if (testingConnection) "Checking…" else if (kind.usesHttpEndpoint) "Test connection" else "Check local CLI",
                 onClick = {
                     val testProfile = draft
@@ -413,7 +413,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 enabled = !testingConnection && (!kind.usesHttpEndpoint || endpoint.isNotBlank()),
             )
             if (profiles.size > 1) {
-                AppButton(
+                SettingsButton(
                     "Remove",
                     onClick = { pendingDeleteProfileId = profile.id },
                     variant = ButtonVariant.Secondary,
@@ -431,7 +431,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 "unlimited; only analysis and operational calls consume this budget.",
         ) {
             val roundLimits = listOf(12, 25, 50, 100, 200, 500)
-            ListStepper(
+            SettingsStepper(
                 options = roundLimits,
                 value = state.settings.aiMaxToolRounds,
                 onChange = { v -> state.updateSettings { it.copy(aiMaxToolRounds = v) } },
@@ -444,7 +444,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
         val targetName = profiles.firstOrNull { it.id == id }?.displayName ?: "this provider"
         SettingsConfirmDialog(
             title = "Remove provider profile?",
-            message = "Delete \"$targetName\" from AI providers. This can't be undone.",
+            message = "Delete “$targetName” from AI providers. This can't be undone.",
             onDismissRequest = { pendingDeleteProfileId = null },
         ) {
             DialogActionButton("Delete", active = true, danger = true) {
@@ -508,7 +508,7 @@ internal fun CustomAiCommandsSettingsSection(state: AppState) {
     var pendingDeleteCommand by remember { mutableStateOf<CustomAiCommand?>(null) }
     SettingsGroup("Commands") {
         SettingsRow("Add command", "Reusable prompts for Actions and /name in the chat box.") {
-            AppButton(
+            SettingsButton(
                 "Add command",
                 onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
                 variant = ButtonVariant.Secondary,
@@ -521,13 +521,13 @@ internal fun CustomAiCommandsSettingsSection(state: AppState) {
             state.customAiCommands.forEach { command ->
                 SettingsRow("/${command.name}", command.promptTemplate.lineSequence().firstOrNull().orEmpty().ifBlank { null }) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        AppButton(
+                        SettingsButton(
                             "Edit",
                             onClick = { state.customCommandEditorTarget = command },
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.testTag(AiPageTags.commandEdit(command.name)),
                         )
-                        AppButton(
+                        SettingsButton(
                             "Delete",
                             onClick = { pendingDeleteCommand = command },
                             variant = ButtonVariant.Secondary,
@@ -612,7 +612,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
     val engineChoices = VoiceRecognitionEngines.availableChoices()
     SettingsGroup("Dictation") {
         SettingsRow("Recognition engine", VoiceRecognitionEngines.description(voiceSettings.recognitionEngine)) {
-            SegmentedControl(
+            SettingsSegmented(
                 options = engineChoices.map { it.label },
                 selectedIndices = setOf(engineChoices.indexOf(voiceSettings.recognitionEngine).coerceAtLeast(0)),
                 onToggle = { index ->
@@ -651,7 +651,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                     "Large v3 Turbo supports transcription only. Your saved English translation preference " +
                         "will apply again when you select a model that supports translation."
                 } else {
-                    "This OS engine returns the recognized spoken language only; English translation remains available with Whisper."
+                    "This OS engine returns the recognised spoken language only; English translation remains available with Whisper."
                 },
             )
         }
@@ -665,12 +665,12 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
             SettingsRow(
                 "Recognition language",
                 if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
-                    "Windows Speech needs a matching installed legacy recognizer. For Ukrainian or any unavailable language, choose Local Whisper."
+                    "Windows Speech needs a matching installed legacy recogniser. For Ukrainian or any unavailable language, choose Local Whisper."
                 } else {
                     "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias."
                 },
             ) {
-                SegmentedControl(
+                SettingsSegmented(
                     options = voiceSettings.recognitionLanguageCodes.map(VoiceLanguageCatalog::label),
                     selectedIndices = setOf(voiceSettings.recognitionLanguageCodes.indexOf(voiceSettings.selectedRecognitionLanguageCode).coerceAtLeast(0)),
                     onToggle = { index ->
@@ -696,7 +696,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                                 placeholder = "Language code, e.g. ru",
                                 onSubmit = { addLanguage(addableLanguages) },
                             )
-                            AppButton(
+                            SettingsButton(
                                 "Add language",
                                 onClick = { addLanguage(addableLanguages) },
                                 enabled = addableLanguages.any { it.code == languageToAdd },
@@ -712,7 +712,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                     if (removableLanguages.isNotEmpty()) {
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             removableLanguages.forEach { code ->
-                                AppButton(
+                                SettingsButton(
                                     "Remove ${VoiceLanguageCatalog.label(code)}",
                                     onClick = {
                                         state.updateSettings { settings ->
@@ -771,7 +771,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (installed) {
-                        AppButton(
+                        SettingsButton(
                             "Remove model",
                             onClick = {
                                 statusMessage = if (installer.remove()) "Local voice model removed." else "Could not remove the local voice model."
@@ -780,7 +780,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                             isDanger = true,
                             enabled = !installing,
                         )
-                        AppButton(
+                        SettingsButton(
                             "Reinstall",
                             onClick = {
                                 installer.remove()
@@ -790,7 +790,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                             enabled = !installing,
                         )
                     } else {
-                        AppButton(
+                        SettingsButton(
                             if (installing) "Downloading…" else "Download local model",
                             onClick = ::installModel,
                             variant = ButtonVariant.Primary,
@@ -808,8 +808,8 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                         "language has no on-device Apple model, Indagium refuses to send audio and " +
                         "you can switch back to Whisper."
                 } else {
-                    "Windows Speech uses a matching installed legacy recognizer. Language availability is narrower than Whisper; " +
-                        "if there is no recognizer for the selected language, Indagium shows the reason and you can switch back to Whisper."
+                    "Windows Speech uses a matching installed legacy recogniser. Language availability is narrower than Whisper; " +
+                        "if there is no recogniser for the selected language, Indagium shows the reason and you can switch back to Whisper."
                 },
             )
         }

@@ -771,7 +771,7 @@ class ChromeScaffoldUiTest {
         assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
         // The option stays in the list, disabled, with the reason beside it.
         rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).assertIsNotEnabled()
-        rule.onNodeWithText("(needs left or right tabs)").assertExists()
+        rule.onNodeWithText("needs left or right tabs").assertExists()
         closePlacementList()
         // The strip's position, in the order Top, Left, Right, Bottom. Scoped to that control: the
         // Tabs section's "Close button position" also offers a "Left".
@@ -808,14 +808,14 @@ class ChromeScaffoldUiTest {
         rule.waitForIdle()
         // One field, not a radio per placement: the options exist only while the list is open.
         assertFalse(exists("toolbar-placement-OWN_EDGE"))
-        rule.onNodeWithText("With tabs · end (default)").assertExists()
+        rule.onNodeWithText("With tabs · end · default").assertExists()
 
         rule.onNodeWithTag(TOOLBAR_PLACEMENT_TAG, useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         ToolbarPlacement.entries.forEach { assertTrue(exists("toolbar-placement-${it.name}"), "no option for $it") }
         rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).assertIsNotEnabled()
-        rule.onNodeWithText("(needs left or right tabs)").assertExists()
-        rule.onNodeWithText("(a bar where there are no tiles)").assertExists()
+        rule.onNodeWithText("needs left or right tabs").assertExists()
+        rule.onNodeWithText("a bar where there are no tiles").assertExists()
         rule.onNodeWithTag("toolbar-placement-OWN_EDGE", useUnmergedTree = true).performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
@@ -827,7 +827,7 @@ class ChromeScaffoldUiTest {
         rule.onNodeWithTag(TOOLBAR_PLACEMENT_TAG, useUnmergedTree = true).performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).assertIsEnabled()
-        rule.onNodeWithText("(needs left or right tabs)").assertDoesNotExist()
+        rule.onNodeWithText("needs left or right tabs").assertDoesNotExist()
     }
 
     @Test

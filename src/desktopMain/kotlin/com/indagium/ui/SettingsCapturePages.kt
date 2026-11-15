@@ -5,18 +5,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.text.selection.DisableSelection
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
@@ -36,8 +29,6 @@ import com.indagium.capture.withMirrorMode
 
 private val MICROPHONE_FIELD_WIDTH = 220.dp
 private val DISPLAY_FIELD_WIDTH = 168.dp
-private const val CHECKBOX_LABEL_SIZE = 12
-private const val DISABLED_ALPHA = 0.5f
 
 /** Test tags of the Capture & video pages' controls that have no tag of their own. */
 internal object CapturePageTags {
@@ -81,44 +72,6 @@ private const val NEEDS_ATTENTION = "Needs attention"
 
 private fun captureEdit(state: AppState): CaptureSettingsEdit = { transform ->
     state.updateSettings { it.copy(captureSettings = transform(it.captureSettings)) }
-}
-
-/**
- * A checkbox with its label, for a row that holds several. One toggleable node (so it reads as checked or not) in the same colours as
- * [CheckRow]; [enabled] = false dims it and ignores clicks.
- */
-@Composable
-internal fun SettingsCheckbox(
-    checked: Boolean,
-    label: String,
-    onChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
-    testTag: String? = null,
-    modifier: Modifier = Modifier,
-    anchor: String? = null,
-) {
-    val tc = tc()
-    DisableSelection {
-        Row(
-            modifier
-                .then(if (anchor != null) Modifier.settingsAnchor(anchor) else Modifier)
-                .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
-                .alpha(if (enabled) 1f else DISABLED_ALPHA)
-                .toggleable(value = checked, enabled = enabled, role = Role.Checkbox, onValueChange = onChange)
-                .padding(vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Checkbox(
-                checked = checked,
-                onCheckedChange = null,
-                enabled = enabled,
-                colors = CheckboxDefaults.colors(checkedColor = tc.ac, uncheckedColor = tc.td, checkmarkColor = tc.bg),
-                modifier = Modifier.size(16.dp),
-            )
-            AppText(label, color = if (enabled) tc.tx else tc.td, fontSize = CHECKBOX_LABEL_SIZE.sp)
-        }
-    }
 }
 
 /**
@@ -355,8 +308,8 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
                 anchor = "Recheck tools",
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AppButton("Recheck tools", state::recheckCaptureTools)
-                    AppButton("Install guidance", state::openCaptureInstallGuidance, ButtonVariant.Secondary)
+                    SettingsButton("Recheck tools", state::recheckCaptureTools)
+                    SettingsButton("Install guidance", state::openCaptureInstallGuidance, ButtonVariant.Secondary)
                 }
             }
             state.captureToolStatus?.let { status ->
@@ -422,7 +375,7 @@ internal fun CaptureLimitsSettingsSection(state: AppState, reclaimFocus: () -> U
             "Saved video format",
             "Applies to Save snapshot / Save ZIP, not the live recording. MP4 opens more widely; capturing with audio still exports as MKV.",
         ) {
-            SegmentedControl(
+            SettingsSegmented(
                 options = listOf("MP4", "MKV"),
                 selectedIndices = setOf(CaptureVideoContainer.entries.indexOf(settings.videoContainer)),
                 onToggle = { index ->
@@ -521,7 +474,7 @@ internal fun CaptureVideoPlaybackSettingsSection(state: AppState, reclaimFocus: 
     SettingsGroup("Playback") {
         SettingsRow(
             "Video follow readout",
-            "Shows the \"video → log → holding at ...\" diagnostic line under the video transport bar, explaining exactly what Follow is " +
+            "Shows the “video → log → holding at …” diagnostic line under the video transport bar, explaining exactly what Follow is " +
                 "doing at the current playhead position.",
         ) {
             SettingsToggle(

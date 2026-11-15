@@ -90,7 +90,7 @@ class SetupAssistantUiTest {
         assertEquals(grid.right, fifthPreview.right)
         assertEquals(firstPreview.width, rule.onNodeWithTag("tab-style-label-CURRENT").getBoundsInRoot().width)
 
-        rule.onNodeWithText("Fit label").performScrollTo().performClick()
+        rule.onNodeWithText("Fit the label").performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(TabSizeMode.FIT, state.settings.tabSizeMode)
     }

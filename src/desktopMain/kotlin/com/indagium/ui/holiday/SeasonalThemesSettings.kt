@@ -5,14 +5,16 @@ package com.indagium.ui.holiday
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,7 +27,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -54,7 +55,7 @@ import java.util.Locale
 // Settings > Appearance > Theme: ONE block with two tabs, Themes (the regular gallery) and Special themes (a card per registered theme, when it
 // applies, light or dark, how much it moves, the fun toolbar icons). Picking a regular theme turns the seasonal one off; picking a seasonal card
 // turns it on. The user's own theme and tab style are never touched by a special theme; every change goes through AppState.updateSettings. The
-// rows after the cards only look dimmed while no special theme is on: they stay editable so a choice can be made before switching it on.
+// rows after the cards stay editable while no special theme is on, so a choice can be made before switching it on.
 
 internal const val SEASONAL_MODE_TAG = "seasonal-mode"
 internal const val SEASONAL_LIGHTNESS_TAG = "seasonal-lightness"
@@ -62,7 +63,6 @@ internal const val SEASONAL_INTENSITY_TAG = "seasonal-intensity"
 internal const val SEASONAL_FUN_ICONS_TAG = "seasonal-fun-icons"
 internal const val SEASONAL_PAUSE_TAG = "seasonal-pause"
 internal const val THEME_TABS_TAG = "theme-tabs"
-internal const val SEASONAL_OFF_TAG = "seasonal-turn-off"
 internal const val SEASONAL_TABS_TAG = "seasonal-tabs"
 internal const val SEASONAL_STATUS_TAG = "seasonal-status"
 
@@ -83,13 +83,20 @@ private const val TAB_THEMES = 0
 private const val TAB_SEASONAL = 1
 private val PACK_CARD_WIDTH = 306.dp
 
+/** Below this width the pack cards stack in one column instead of two. */
+private val TWO_PACK_COLUMNS_MIN_WIDTH = 520.dp
+
 internal fun seasonalPackTag(pack: HolidayPack): String = "seasonal-pack-${pack.name.lowercase()}"
 
-private const val DIMMED_ALPHA = 0.5f
-
 private const val GENERIC_EFFECTS_HINT = "Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves."
-private const val FUN_ICONS_HINT = "Toolbar buttons become pictures. Hover one to see its real name."
-private const val OWN_TABS_HINT = "My tab style keeps your Tab style (Settings › Appearance) in the pack's colours."
+
+/** The descriptions of the Special themes rows, shared with their search entries. */
+internal const val SEASONAL_PACK_HINT = "A pack brings its own palette, tab shapes, scene behind the tabs and pictures."
+internal const val SEASONAL_LIGHTNESS_HINT = "Whether the pack uses its light or dark colours, or follows your theme preset."
+internal const val FUN_ICONS_HINT = "Toolbar buttons become pictures. Hover one to see its real name."
+internal const val SEASONAL_PAUSE_HINT = "Stops the effects and animated pictures while a capture runs or a video plays."
+internal const val SEASONAL_THEME_KIND_HINT = "Regular themes, or special ones that can switch on by date."
+internal const val OWN_TABS_HINT = "My tab style keeps your Tab style (Settings › Tabs & toolbar) in the pack's colours."
 private const val FOOTNOTE = "Log levels, sequences and highlighters keep their colours in every pack."
 
 private val DATE_FORMAT = DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)
@@ -123,27 +130,36 @@ internal fun holidayEffectsHint(theme: HolidayTheme): String {
 }
 
 /**
- * The "Theme" block of Settings > Appearance: a Themes | Special themes switcher over the regular gallery or the seasonal cards. It opens on the
+ * The "Theme" block of Settings > Appearance: a Themes | Special themes switcher over the regular gallery or the seasonal rows. It opens on the
  * tab that is active (Seasonal while a special theme is on); switching tabs changes nothing by itself, and the choice is not persisted. A search
- * result that targets a seasonal row opens the Seasonal tab (see [SEASONAL_ANCHORS]).
+ * result that targets a seasonal row opens the Seasonal tab (see [SEASONAL_ANCHORS]). The rows go straight into a host's [SettingsGroup]
+ * ([showHeading] false, Settings › Appearance) or into a group of their own called Theme.
  */
 @Composable
 internal fun ThemeSettingsBlock(state: AppState, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES, showHeading: Boolean = true) {
-    val tc = tc()
+    if (showHeading) {
+        SettingsGroup("Theme") { ThemeSettingsRows(state, themes) }
+    } else {
+        ThemeSettingsRows(state, themes)
+    }
+}
+
+@Composable
+private fun ThemeSettingsRows(state: AppState, themes: Map<HolidayPack, HolidayTheme>) {
     val holiday = state.settings.holiday
     var tab by remember { mutableStateOf(if (holiday.mode != HolidayMode.OFF) TAB_SEASONAL else TAB_THEMES) }
     val pending = LocalSettingsAnchors.current?.pendingKey
     LaunchedEffect(pending) { if (pending != null && pending in SEASONAL_ANCHORS) tab = TAB_SEASONAL }
-    Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        // [showHeading] false when the host already titles the block (Settings › Appearance puts it in a group called Theme).
-        if (showHeading) AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        SegmentedControl(
+    SettingsRow("Choose from", SEASONAL_THEME_KIND_HINT, anchor = "Theme") {
+        SettingsSegmented(
             options = listOf("Themes", "Special themes"),
             selectedIndices = setOf(tab),
             onToggle = { tab = it },
             modifier = Modifier.testTag(THEME_TABS_TAG),
         )
-        if (tab == TAB_THEMES) {
+    }
+    if (tab == TAB_THEMES) {
+        Box(Modifier.fillMaxWidth().padding(12.dp)) {
             ThemeGallery(
                 settings = state.settings,
                 // No regular theme shows as selected while a seasonal one is on.
@@ -151,143 +167,116 @@ internal fun ThemeSettingsBlock(state: AppState, themes: Map<HolidayPack, Holida
                 onSelect = { preset -> preset?.let { state.updateSettings { s -> s.withRegularTheme(it) } } },
                 height = null,
             )
-        } else {
-            SeasonalThemesTab(state, themes)
         }
+    } else {
+        SeasonalThemeRows(state, themes)
     }
 }
 
+// The rows of the Special themes tab: the pack, when it applies (Off turns it off), light or dark, effects, tabs, the two switches, a note.
+// With no special theme on the rows after the pack stay editable, so a choice can be made before switching it on.
 @Composable
-private fun SeasonalThemesTab(state: AppState, themes: Map<HolidayPack, HolidayTheme>) {
-    val tc = tc()
+private fun SeasonalThemeRows(state: AppState, themes: Map<HolidayPack, HolidayTheme>) {
     val holiday = state.settings.holiday
     val on = holiday.mode != HolidayMode.OFF
     val selected = themes[holiday.pack] ?: themes.values.firstOrNull()
     val update: (HolidaySettings.() -> HolidaySettings) -> Unit = { edit ->
         state.updateSettings { s -> s.withHoliday { it.edit() } }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    SettingsStackedRow(SEASONAL_ANCHOR_PACK, SEASONAL_PACK_HINT) {
         PackCards(themes, holiday.pack.takeIf { on }) { pack -> update { withPackOn(pack) } }
-        if (selected != null) {
-            WhenRow(selected, holiday.mode) { mode -> update { copy(mode = mode, pack = selected.pack) } }
-            AutomaticStatus(state, selected, holiday)
-        }
-        if (on) AccentLink("Turn off special theme", onClick = { update { copy(mode = HolidayMode.OFF) } }, modifier = Modifier.testTag(SEASONAL_OFF_TAG))
-        Column(Modifier.alpha(if (on) 1f else DIMMED_ALPHA), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            SettingsControlRow {
-                LightnessRow(holiday.lightness) { lightness -> update { copy(lightness = lightness) } }
-                val hint = selected?.let(::holidayEffectsHint) ?: GENERIC_EFFECTS_HINT
-                EffectsRow(holiday.intensity, hint) { intensity -> update { copy(intensity = intensity) } }
-            }
-            if (selected != null) {
-                TabsRow(selected.pack in holiday.ownTabStylePacks, OWN_TABS_HINT) { own -> update { withOwnTabStyle(selected.pack, own) } }
-            }
-            if (selected?.icons != null) {
-                SeasonalCheck(SEASONAL_ANCHOR_FUN_ICONS, FUN_ICONS_HINT, holiday.funIcons, SEASONAL_FUN_ICONS_TAG) { update { copy(funIcons = !funIcons) } }
-            }
-            SeasonalCheck(SEASONAL_ANCHOR_PAUSE, null, holiday.pauseWhileBusy, SEASONAL_PAUSE_TAG) {
-                update { copy(pauseWhileBusy = !pauseWhileBusy) }
-            }
-            AppText(FOOTNOTE, color = tc.td, fontSize = 10.sp)
+    }
+    if (selected != null) WhenRow(selected, holiday.mode, state.settings.theme.label) { mode -> update { copy(mode = mode, pack = selected.pack) } }
+    SettingsRow(SEASONAL_ANCHOR_LIGHTNESS, SEASONAL_LIGHTNESS_HINT) {
+        val all = HolidayLightness.entries
+        SettingsSegmented(
+            options = all.map(::lightnessLabel),
+            selectedIndices = setOf(all.indexOf(holiday.lightness)),
+            onToggle = { update { copy(lightness = all[it]) } },
+            modifier = Modifier.testTag(SEASONAL_LIGHTNESS_TAG),
+        )
+    }
+    SettingsRow(SEASONAL_ANCHOR_EFFECTS, selected?.let(::holidayEffectsHint) ?: GENERIC_EFFECTS_HINT) {
+        val all = HolidayIntensity.entries
+        SettingsSegmented(
+            options = all.map(::intensityLabel),
+            selectedIndices = setOf(all.indexOf(holiday.intensity)),
+            onToggle = { update { copy(intensity = all[it]) } },
+            modifier = Modifier.testTag(SEASONAL_INTENSITY_TAG),
+        )
+    }
+    if (selected != null) {
+        SettingsRow(SEASONAL_ANCHOR_TABS, OWN_TABS_HINT) {
+            val own = selected.pack in holiday.ownTabStylePacks
+            SettingsSegmented(
+                options = listOf("Theme's tabs", "My tab style"),
+                selectedIndices = setOf(if (own) 1 else 0),
+                onToggle = { update { withOwnTabStyle(selected.pack, it == 1) } },
+                modifier = Modifier.testTag(SEASONAL_TABS_TAG),
+            )
         }
     }
+    if (selected?.icons != null) {
+        SeasonalSwitchRow(SEASONAL_ANCHOR_FUN_ICONS, FUN_ICONS_HINT, holiday.funIcons, SEASONAL_FUN_ICONS_TAG) { update { copy(funIcons = !funIcons) } }
+    }
+    SeasonalSwitchRow(SEASONAL_ANCHOR_PAUSE, SEASONAL_PAUSE_HINT, holiday.pauseWhileBusy, SEASONAL_PAUSE_TAG) {
+        update { copy(pauseWhileBusy = !pauseWhileBusy) }
+    }
+    SettingsNoteRow(FOOTNOTE)
 }
 
-// Always | Only during its dates. With no special theme on neither is selected; picking one turns the selected theme on.
+// Off | Always | Only during its dates (Automatic for a theme with its own schedule). Picking Always or the dates turns the selected theme on;
+// Off keeps the pack and your other choices and switches the special theme off. Under Automatic outside the dates the description says when
+// it turns on and what shows until then.
 @Composable
-private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, onSelect: (HolidayMode) -> Unit) {
-    val tc = tc()
-    CompactSetting(SEASONAL_ANCHOR_WHEN) {
-        val modes = if (theme.supportsAutomatic) listOf(HolidayMode.ALWAYS, HolidayMode.AUTOMATIC) else listOf(HolidayMode.ALWAYS)
-        SegmentedControl(
-            options = if (theme.supportsAutomatic) {
-                listOf("Always", if (theme.automaticLabel == null) "Only during its dates" else "Automatic")
-            } else {
-                listOf("Always")
+private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, themeLabel: String, onSelect: (HolidayMode) -> Unit) {
+    val now by rememberHolidayNow()
+    val modes = buildList {
+        add(HolidayMode.OFF)
+        add(HolidayMode.ALWAYS)
+        if (theme.supportsAutomatic) add(HolidayMode.AUTOMATIC)
+    }
+    val waiting = theme.supportsAutomatic && mode == HolidayMode.AUTOMATIC && !theme.automaticAt(now)
+    val description = when {
+        waiting -> "${theme.label} turns on ${holidayDatesLabel(theme).substringBefore(" – ")}; until then your theme is $themeLabel."
+        theme.supportsAutomatic -> "${theme.label}: ${holidayDatesLabel(theme)}."
+        else -> "${theme.label} is on all year while chosen."
+    }
+    SettingsRow(SEASONAL_ANCHOR_WHEN, description, descriptionTag = if (waiting) SEASONAL_STATUS_TAG else null) {
+        SettingsSegmented(
+            options = modes.map { m ->
+                when (m) {
+                    HolidayMode.OFF -> "Off"
+                    HolidayMode.ALWAYS -> "Always"
+                    HolidayMode.AUTOMATIC -> if (theme.automaticLabel == null) "Only during its dates" else "Automatic"
+                }
             },
             selectedIndices = setOfNotNull(modes.indexOf(mode).takeIf { it >= 0 }),
             onToggle = { onSelect(modes[it]) },
             modifier = Modifier.testTag(SEASONAL_MODE_TAG),
         )
-        AppText("${theme.label}: ${holidayDatesLabel(theme)}", color = tc.td, fontSize = 10.sp)
-    }
-}
-
-// Under Automatic outside the dates the theme is waiting: say when it turns on and what shows until then.
-@Composable
-private fun AutomaticStatus(state: AppState, theme: HolidayTheme, holiday: HolidaySettings) {
-    val now by rememberHolidayNow()
-    if (!theme.supportsAutomatic || holiday.mode != HolidayMode.AUTOMATIC || theme.automaticAt(now)) return
-    val tc = tc()
-    AppText(
-        "${theme.label} turns on ${holidayDatesLabel(theme).substringBefore(" – ")}; until then your theme is ${state.settings.theme.label}",
-        color = tc.td,
-        fontSize = 10.sp,
-        modifier = Modifier.testTag(SEASONAL_STATUS_TAG),
-    )
-}
-
-@Composable
-private fun LightnessRow(lightness: HolidayLightness, onSelect: (HolidayLightness) -> Unit) {
-    CompactSetting(SEASONAL_ANCHOR_LIGHTNESS) {
-        val all = HolidayLightness.entries
-        SegmentedControl(
-            options = all.map(::lightnessLabel),
-            selectedIndices = setOf(all.indexOf(lightness)),
-            onToggle = { onSelect(all[it]) },
-            modifier = Modifier.testTag(SEASONAL_LIGHTNESS_TAG),
-        )
-    }
-}
-
-// Theme's tabs (the pack draws them) | My tab style (your Tab style in the pack's colours), for the selected pack only.
-@Composable
-private fun TabsRow(own: Boolean, hint: String, onSelect: (Boolean) -> Unit) {
-    val tc = tc()
-    CompactSetting(SEASONAL_ANCHOR_TABS) {
-        SegmentedControl(
-            options = listOf("Theme's tabs", "My tab style"),
-            selectedIndices = setOf(if (own) 1 else 0),
-            onToggle = { onSelect(it == 1) },
-            modifier = Modifier.testTag(SEASONAL_TABS_TAG),
-        )
-        AppText(hint, color = tc.td, fontSize = 10.sp, modifier = Modifier.width(260.dp))
     }
 }
 
 @Composable
-private fun EffectsRow(intensity: HolidayIntensity, hint: String, onSelect: (HolidayIntensity) -> Unit) {
-    val tc = tc()
-    CompactSetting(SEASONAL_ANCHOR_EFFECTS) {
-        val all = HolidayIntensity.entries
-        SegmentedControl(
-            options = all.map(::intensityLabel),
-            selectedIndices = setOf(all.indexOf(intensity)),
-            onToggle = { onSelect(all[it]) },
-            modifier = Modifier.testTag(SEASONAL_INTENSITY_TAG),
-        )
-        AppText(hint, color = tc.td, fontSize = 10.sp, modifier = Modifier.width(260.dp))
+private fun SeasonalSwitchRow(label: String, hint: String, checked: Boolean, tag: String, onToggle: () -> Unit) {
+    SettingsRow(label, hint) {
+        SettingsSwitch(checked = checked, onCheckedChange = { onToggle() }, label = label, testTag = tag)
     }
 }
 
-@Composable
-private fun SeasonalCheck(label: String, hint: String?, checked: Boolean, tag: String, onToggle: () -> Unit) {
-    val tc = tc()
-    CheckRow(modifier = Modifier.settingsAnchor(label).testTag(tag), checked = checked, onToggle = onToggle) {
-        Column {
-            AppText(label, color = tc.tx, fontSize = 11.sp)
-            if (hint != null) AppText(hint, color = tc.td, fontSize = 10.sp)
-        }
-    }
-}
-
-// One selectable card per registered theme: a small thumbnail of its tab-strip scene with some of its icons, its name and dates.
+// One selectable card per registered theme: a small thumbnail of its tab-strip scene with some of its icons, its name and dates. Two equal
+// columns that fill the row, one column in a narrow window.
 @Composable
 private fun PackCards(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayPack?, onSelect: (HolidayPack) -> Unit) {
-    CompactSetting(SEASONAL_ANCHOR_PACK) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            themes.values.forEach { theme -> PackCard(theme, theme.pack == selected, onClick = { onSelect(theme.pack) }) }
-        }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        WorkspaceCardGrid(
+            cards = themes.values.map { theme ->
+                { cardModifier: Modifier -> PackCard(theme, theme.pack == selected, modifier = cardModifier, onClick = { onSelect(theme.pack) }) }
+            },
+            columns = if (maxWidth >= TWO_PACK_COLUMNS_MIN_WIDTH) 2 else 1,
+            spacing = 8.dp,
+        )
     }
 }
 
@@ -297,27 +286,34 @@ internal fun seasonalPackModeTag(pack: HolidayPack, dark: Boolean): String = sea
 /**
  * A theme card. [dark] null follows the current theme (the Settings tab); true / false draws the card in the theme's OWN dark / light palette
  * (`theme.palette(dark)` for background, border and text, `theme.chrome(dark)` for the thumbnail), whatever the app shows now (the release
- * announcement's two columns). A fixed-mode card carries [seasonalPackModeTag] and a "Pumpkin patch, light" content description.
+ * announcement's two columns). A fixed-mode card carries [seasonalPackModeTag] and a "Pumpkin patch, light" content description. A picture
+ * picker, so it follows the one selected-state rule. [modifier] sets the size; the default is a fixed 306dp card.
  */
 @Composable
-internal fun PackCard(theme: HolidayTheme, selected: Boolean, dark: Boolean? = null, onClick: () -> Unit) {
+internal fun PackCard(
+    theme: HolidayTheme,
+    selected: Boolean,
+    dark: Boolean? = null,
+    modifier: Modifier = Modifier.width(PACK_CARD_WIDTH),
+    onClick: () -> Unit,
+) {
     val current = tc()
     val tc = if (dark == null) current else remember(theme, dark) { theme.palette(dark) }
     val tag = if (dark == null) seasonalPackTag(theme.pack) else seasonalPackModeTag(theme.pack, dark)
     val description = if (dark == null) null else "${theme.label}, ${if (dark) "dark" else "light"}"
     val shape = RoundedCornerShape(8.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
     Row(
-        Modifier
-            .width(PACK_CARD_WIDTH)
-            .clip(shape)
-            .border(if (selected) 1.5.dp else 1.dp, if (selected) tc.ac else tc.br, shape)
-            .background(if (selected) tc.abg else tc.p2)
+        modifier
+            .settingsPickerSurface(selected, hovered, shape, tc)
+            .hoverable(interaction)
             .semantics {
                 role = Role.Button
                 this.selected = selected
                 if (description != null) contentDescription = description
             }
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
             .padding(8.dp)
             .testTag(tag),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -325,8 +321,10 @@ internal fun PackCard(theme: HolidayTheme, selected: Boolean, dark: Boolean? = n
     ) {
         PackPreview(theme, tc, dark ?: !tc.isLight())
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            AppText(theme.label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            AppText("${theme.occasion} · ${holidayDatesLabel(theme)}", color = tc.td, fontSize = 10.sp)
+            AppText(theme.label, color = if (selected) tc.ac else tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            // An any-time pack has no dates of its own to show.
+            val dates = if (theme.supportsAutomatic) " · ${holidayDatesLabel(theme)}" else ""
+            AppText("${theme.occasion}$dates", color = tc.ts, fontSize = 10.sp, maxLines = 2)
         }
     }
 }

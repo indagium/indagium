@@ -143,7 +143,7 @@ class SettingsSearchTest {
     @Test
     fun synonymsBridgeThemeAndColor() {
         assertTrue("Theme" in labels("colour"))
-        assertTrue("Ctrl+F opens" in labels("shortcut"))
+        assertTrue("Ctrl/Cmd+F opens" in labels("shortcut"))
     }
 
     @Test
@@ -216,7 +216,7 @@ class SettingsSearchTest {
         val entry = searchSettings("toolbar shape", all).first { it.label == "Toolbar shape" }
         assertEquals("Toolbar shape", entry.anchor)
         val shape = searchSettings("corners", all).first { it.label == "Shape style" }
-        assertTrue(shape.hint.startsWith("Corners of the tiles"), shape.hint)
+        assertTrue(shape.hint.startsWith("How round tiles are"), shape.hint)
     }
 
     @Test

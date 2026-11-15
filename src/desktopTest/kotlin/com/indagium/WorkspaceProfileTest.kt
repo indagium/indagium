@@ -481,7 +481,7 @@ class WorkspaceProfileTest {
         assertEquals(currentProfileBehavior(defaults), currentProfileBehavior(applied))
         assertEquals(emptyList(), profileDifferences(spec, applied))
         assertTrue("Tab style" in profileDifferences(spec, live), "the live QUIET style differs from the default a missing group means")
-        assertTrue("Ctrl+F opens" in profileDifferences(spec, live))
+        assertTrue("Ctrl/Cmd+F opens" in profileDifferences(spec, live))
     }
 
     @Test
@@ -507,7 +507,7 @@ class WorkspaceProfileTest {
         // A value the profile leaves null (filterListRows) counts as the default, so a changed one shows; the chrome lock never does.
         state.updateSettings { it.copy(filterListRows = 12, chromeLocked = true) }
 
-        assertEquals(listOf("Tab style", "Ctrl+F opens", "Filter list rows"), state.workspaceProfileDifferences())
+        assertEquals(listOf("Tab style", "Ctrl/Cmd+F opens", "Filter list rows"), state.workspaceProfileDifferences())
     }
 
     @Test
@@ -515,7 +515,7 @@ class WorkspaceProfileTest {
         val builtIn = AppState()
         builtIn.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
         builtIn.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL, ctrlFTarget = CtrlFTarget.TAGS, tabStripPosition = TabStripPosition.LEFT) }
-        assertEquals(listOf("Tab style", "Tab position", "Ctrl+F opens"), builtIn.workspaceProfileDifferences())
+        assertEquals(listOf("Tab style", "Tab position", "Ctrl/Cmd+F opens"), builtIn.workspaceProfileDifferences())
 
         val custom = AppState()
         val saved = custom.saveCurrentAsWorkspaceProfile("Mine")
@@ -537,7 +537,7 @@ class WorkspaceProfileTest {
             )
 
         assertEquals(
-            listOf("Tab style", "Tab position", "Toolbar order on the tab edge", "Ctrl+F also shows Original", "Row wrapping"),
+            listOf("Tab style", "Tab position", "Toolbar order on the tab edge", "Ctrl/Cmd+F also shows Original", "Row wrapping"),
             profileDifferences(spec, live),
         )
     }

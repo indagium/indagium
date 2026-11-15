@@ -120,7 +120,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         }
         SettingsRow(
             "Process names in new tabs",
-            "New tabs show names from \"Start proc\" lines instead of PIDs. Each tab can still switch on its own, but its pick resets every session.",
+            "New tabs show names from “Start proc” lines instead of PIDs. Each tab can still switch on its own, but its pick resets every session.",
         ) {
             SettingsToggle(
                 checked = settings.showProcessNamesInNewTabs,
@@ -132,7 +132,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         }
     }
     SettingsGroup("Highlights") {
-        SettingsRow("Crash rows", "Color every row of an expanded crash group, not just its header.") {
+        SettingsRow("Crash rows", "Colour every row of an expanded crash group, not just its header.") {
             SettingsToggle(
                 checked = settings.highlightEntireCrashGroup,
                 label = "Crash rows",
@@ -171,7 +171,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 testTag = LogPageTags.OPEN_WITH_ORIGINAL,
             )
         }
-        SettingsRow("Minimap", "Replace the scrollbar with a miniature of the file, colored by level. Click it to jump.") {
+        SettingsRow("Minimap", "Replace the scrollbar with a miniature of the file, coloured by level. Click it to jump.") {
             SettingsToggle(
                 checked = settings.showMinimap,
                 label = "Minimap",
@@ -195,15 +195,15 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     }
 }
 
-/** Settings › Search & filters: what Ctrl+F does and how Find behaves in split views, the filter panel's lists and keyboard navigation. */
+/** Settings › Search & filters: what Ctrl/Cmd+F does and how Find behaves in split views, the filter panel's lists and keyboard navigation. */
 @Composable
 internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val settings = state.settings
-    SettingsGroup("Ctrl+F") {
+    SettingsGroup("Ctrl/Cmd+F") {
         SettingsRow(
             "Opens",
             "Find highlights matches and hides nothing. Tags and Regex focus that filter and hide other rows.",
-            anchor = "Ctrl+F opens",
+            anchor = "Ctrl/Cmd+F opens",
         ) {
             Box(Modifier.width(SELECTOR_WIDTH)) {
                 CtrlFTargetSelector(
@@ -216,7 +216,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
         SettingsRow(
             "Find searches",
             "Which field Find opens in. Ctrl/Cmd+Alt+F always opens Unfiltered, and compare mode uses Filtered.",
-            anchor = "Search scope behavior",
+            anchor = "Search scope behaviour",
         ) {
             Box(Modifier.width(WIDE_SELECTOR_WIDTH)) {
                 SearchScopeBehaviorSelector(
@@ -228,8 +228,8 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
         }
         SettingsRow(
             "Also show Original",
-            "Reveal the unfiltered Original panel whenever Ctrl+F opens. Single-tab view only.",
-            anchor = "Ctrl+F also shows Original",
+            "Reveal the unfiltered Original panel whenever Ctrl/Cmd+F opens. Single-tab view only.",
+            anchor = "Ctrl/Cmd+F also shows Original",
         ) {
             SettingsToggle(
                 checked = settings.openUnfilteredOnCtrlF,
@@ -254,7 +254,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
     }
     SettingsGroup("Filter panel") {
         SettingsRow("Most-used tags", "How many frequent tags are offered as quick picks.") {
-            ListStepper(
+            SettingsStepper(
                 options = MOST_USED_TAG_LIMITS,
                 value = settings.mostUsedTagLimit,
                 onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
@@ -262,7 +262,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
             )
         }
         SettingsRow("List height", "Visible rows in the filter panel's lists before they scroll.", anchor = "Filter list rows") {
-            ListStepper(
+            SettingsStepper(
                 options = FILTER_LIST_ROW_LIMITS,
                 value = settings.filterListRows,
                 onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
@@ -288,7 +288,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
             "Rows kept visible above and below the selection when moving with the arrow keys.",
             anchor = "Keyboard scroll margin",
         ) {
-            ListStepper(
+            SettingsStepper(
                 options = SCROLL_MARGINS,
                 value = settings.navScrollMargin,
                 onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },

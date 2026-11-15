@@ -1,17 +1,18 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
@@ -42,6 +43,15 @@ private sealed interface ProfileNameRequest {
 /** Test tag of the "⋯" menu of the Workspace profile group, and the prefix of its entries (`-save`, `-import`, `-export`). */
 internal const val PROFILE_GROUP_MENU_TAG = "profile-group-menu"
 
+/** The profile row's description, also the search entry's. */
+internal const val PROFILE_INTRO =
+    "Sets the theme, font size and defaults, and applies a layout, in one step. Profiles you save also keep your tab style, " +
+        "window layout and editor behaviour. Every setting stays editable afterwards."
+
+/** The inactive-tab-memory row's description, also the search entry's. */
+internal const val INACTIVE_TAB_MEMORY_HINT =
+    "Release log rows from reloadable tabs after they have been out of view. The displayed tab and compare panes stay loaded."
+
 private const val INACTIVE_MINUTES_DIGITS = 5
 private const val DIMMED_ALPHA = 0.5f
 
@@ -56,7 +66,6 @@ internal fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
 
 @Composable
 private fun WorkspaceProfileGroup(state: AppState, reclaimFocus: () -> Unit) {
-    val tc = tc()
     val selectedProfile = state.selectedWorkspaceProfile
     var nameRequest by remember { mutableStateOf<ProfileNameRequest?>(null) }
     var deleteRequest by remember { mutableStateOf<ResolvedProfile?>(null) }
@@ -81,18 +90,7 @@ private fun WorkspaceProfileGroup(state: AppState, reclaimFocus: () -> Unit) {
             )
         },
     ) {
-        Column(
-            Modifier.fillMaxWidth().settingsAnchor("Workspace profile").padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            AppText(
-                "Sets the theme, font size and defaults, and applies a layout, in one step. Profiles you save also keep your tab style, " +
-                    "window layout and editor behavior. Every setting stays editable afterwards.",
-                color = tc.ts,
-                fontSize = 11.sp,
-                fontFamily = UI,
-                maxLines = 3,
-            )
+        SettingsStackedRow("Profile", PROFILE_INTRO, anchor = "Workspace profile") {
             WorkspaceProfileCards(
                 profiles = profiles,
                 selectedId = selectedProfile?.id,
@@ -101,33 +99,19 @@ private fun WorkspaceProfileGroup(state: AppState, reclaimFocus: () -> Unit) {
                 onMenuClosed = reclaimFocus,
                 menuFor = profileActions,
             )
-            if (selectedProfile != null) ProfileLayoutRow(state, selectedProfile, reclaimFocus)
-            // The same actions as the card's "⋯", always in view for the selected custom profile.
-            if (selectedProfile != null && selectedProfile.custom) {
-                ProfileActionStrip(
-                    selectedProfile.title,
-                    profileActions(selectedProfile).map { action ->
-                        action.copy(
-                            onClick = {
-                                reclaimFocus()
-                                action.onClick()
-                            },
-                        )
-                    },
-                )
-            }
-            // Read straight from state on every recomposition: theme/font edits made elsewhere
-            // (Appearance) show up here without any extra plumbing. Panels belong to the layout, not the profile.
-            val differences = state.workspaceProfileDifferences()
-            if (selectedProfile != null && differences.isNotEmpty()) {
-                CustomizedBanner(
-                    selectedProfile,
-                    differences,
-                    onReset = { state.applyResolvedProfile(selectedProfile) },
-                    onSaveNew = { nameRequest = ProfileNameRequest.New },
-                    onUpdate = { state.updateWorkspaceProfileFromCurrent(selectedProfile.id) },
-                )
-            }
+        }
+        if (selectedProfile != null) ProfileLayoutRow(state, selectedProfile, reclaimFocus)
+        // Read straight from state on every recomposition: theme/font edits made elsewhere
+        // (Appearance) show up here without any extra plumbing. Panels belong to the layout, not the profile.
+        val differences = state.workspaceProfileDifferences()
+        if (selectedProfile != null && differences.isNotEmpty()) {
+            CustomizedBanner(
+                selectedProfile,
+                differences,
+                onReset = { state.applyResolvedProfile(selectedProfile) },
+                onSaveNew = { nameRequest = ProfileNameRequest.New },
+                onUpdate = { state.updateWorkspaceProfileFromCurrent(selectedProfile.id) },
+            )
         }
     }
     nameRequest?.let { request ->
@@ -198,7 +182,7 @@ private fun ProfileGroupMenu(onSave: () -> Unit, onImport: () -> Unit, onExport:
                             },
                         ),
                         SettingsMenuItem(
-                            "Export current setup as .json",
+                            "Export current setup…",
                             "$PROFILE_GROUP_MENU_TAG-export",
                             onClick = {
                                 onExport()
@@ -215,7 +199,10 @@ private fun ProfileGroupMenu(onSave: () -> Unit, onImport: () -> Unit, onExport:
     }
 }
 
-/** What differs between the live settings and the selected profile, with the ways out: reset, save as a new profile, update the custom one. */
+/**
+ * What differs between the live settings and the selected profile, with the ways out: reset, save as a new profile, update the custom
+ * one. A status, so a note row on the panel fill with the Tune icon and secondary buttons at the right.
+ */
 @Composable
 private fun CustomizedBanner(
     profile: ResolvedProfile,
@@ -225,10 +212,8 @@ private fun CustomizedBanner(
     onUpdate: () -> Unit,
 ) {
     val tc = tc()
-    val shape = RoundedCornerShape(6.dp)
     Column(
-        Modifier.fillMaxWidth().background(tc.warnBg, shape).border(0.5.dp, tc.br, shape)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().background(tc.p2).padding(horizontal = 12.dp, vertical = 9.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
@@ -240,16 +225,18 @@ private fun CustomizedBanner(
                 color = tc.tx,
                 fontSize = 11.sp,
                 fontFamily = UI,
-                maxLines = 3,
+                maxLines = Int.MAX_VALUE,
                 modifier = Modifier.weight(1f),
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            AppButton("Reset to profile", onClick = onReset)
-            AppButton("Save as new profile…", onClick = onSaveNew, variant = ButtonVariant.Secondary)
-            if (profile.custom) {
-                AppButton("Update “${profile.title}”", onClick = onUpdate, variant = ButtonVariant.Secondary)
-            }
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            SettingsButton("Reset to profile", onClick = onReset)
+            SettingsButton("Save as new profile…", onClick = onSaveNew)
+            if (profile.custom) SettingsButton("Update “${profile.title}”", onClick = onUpdate)
         }
     }
 }
@@ -266,10 +253,7 @@ private fun InactiveTabMemoryRow(state: AppState) {
     SideEffect { if (minutes > 0) state.lastInactiveTabMinutes = minutes }
     val restored = state.lastInactiveTabMinutes.takeIf { it > 0 } ?: DEFAULT_INACTIVE_TAB_UNLOAD_MINUTES
     var timeoutText by remember(minutes) { mutableStateOf((minutes.takeIf { it > 0 } ?: restored).toString()) }
-    SettingsRow(
-        "Inactive tab memory",
-        "Release log rows from reloadable tabs after they have been out of view. The displayed tab and compare panes stay loaded.",
-    ) {
+    SettingsRow("Inactive tab memory", INACTIVE_TAB_MEMORY_HINT) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("after", color = tc.ts, fontSize = 11.sp, modifier = Modifier.alpha(if (on) 1f else DIMMED_ALPHA))
             SettingsNumberField(
@@ -332,10 +316,9 @@ private fun UpdateCheckRow(state: AppState) {
             updateStatusText?.let { text ->
                 AppText(text, color = if (isError) DANGER_RED else tc.ts, fontSize = 11.sp, modifier = Modifier.testTag("update-check-status"))
             }
-            AppButton(
-                "Check now",
+            SettingsButton(
+                "Check for updates",
                 onClick = { state.checkForUpdates(manual = true) },
-                variant = ButtonVariant.Secondary,
                 modifier = Modifier.testTag("update-check-now"),
             )
             SettingsSwitch(

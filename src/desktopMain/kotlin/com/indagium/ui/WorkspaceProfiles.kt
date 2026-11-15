@@ -131,9 +131,9 @@ private fun appearanceDifferences(a: ProfileAppearance, s: AppSettings): List<St
 }
 
 private fun behaviorDifferences(b: ProfileBehavior, s: AppSettings): List<String> = buildList {
-    differs("Ctrl+F opens", b.ctrlFTarget, s.ctrlFTarget)
-    differs("Ctrl+F also shows Original", b.openUnfilteredOnCtrlF, s.openUnfilteredOnCtrlF)
-    differs("Search scope behavior", b.searchScopeBehavior, s.searchScopeBehavior)
+    differs("Ctrl/Cmd+F opens", b.ctrlFTarget, s.ctrlFTarget)
+    differs("Ctrl/Cmd+F also shows Original", b.openUnfilteredOnCtrlF, s.openUnfilteredOnCtrlF)
+    differs("Search scope behaviour", b.searchScopeBehavior, s.searchScopeBehavior)
     differs("Link split selection and Find", b.syncSplitPanelSelectionAndScroll, s.syncSplitPanelSelectionAndScroll)
     differs("Row wrapping", b.autoLogRowWrap, s.autoLogRowWrap)
     differs("Row wrapping", b.logRowWrapLimitChars, s.logRowWrapLimitChars)

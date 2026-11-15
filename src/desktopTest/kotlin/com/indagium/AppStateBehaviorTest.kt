@@ -6268,7 +6268,7 @@ class AppStateBehaviorTest {
         assertTrue(restored.settings.toolbarIconOnlyButtons)
     }
 
-    // ── ctrlFTarget/inViewSearch consolidation (single "Ctrl+F opens" selector) ─────────────────
+    // ── ctrlFTarget/inViewSearch consolidation (single "Ctrl/Cmd+F opens" selector) ─────────────────
     // `inViewSearch` was a short-lived separate boolean, paired with ctrlFTarget, that got folded
     // into a single new CtrlFTarget.FIND_BAR enum value on ctrlFTarget itself (settingsFromJson's
     // migration comment). These pin every combination of the two keys a real token can hold.
@@ -7851,7 +7851,7 @@ class AppStateBehaviorTest {
         assertFalse(state.tab("other")!!.showUnfiltered)
     }
 
-    // Issue A (Ctrl+F opens Original + Find bar together): App.kt's onFocusFilterSearch FIND_BAR
+    // Issue A (Ctrl/Cmd+F opens Original + Find bar together): App.kt's onFocusFilterSearch FIND_BAR
     // branch now calls ensureActiveTabUnfiltered() before openSearch() whenever openUnfilteredOnCtrlF
     // is on and compare mode isn't active — mirrored here at the AppState level, since the actual
     // branch itself is a couple of inline Composable-lambda lines with no Compose test harness in

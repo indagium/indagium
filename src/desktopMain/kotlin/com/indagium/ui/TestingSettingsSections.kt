@@ -273,7 +273,7 @@ private fun StoredRecordingEvidenceRow(state: AppState) {
         },
         anchor = "Stored recording evidence",
     ) {
-        AppButton(
+        SettingsButton(
             "Delete stored recording evidence",
             onClick = { confirming = true },
             enabled = (current?.recordings ?: 0) > 0,
@@ -437,7 +437,7 @@ private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (Str
                     tokenText, onTokenText, Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Paste the token",
                     visualTransformation = PasswordVisualTransformation(), testTag = TestingPageTags.TRACKER_TOKEN,
                 )
-                AppButton(
+                SettingsButton(
                     "Save token", enabled = tokenText.isNotBlank(),
                     onClick = {
                         val typed = tokenText
@@ -448,7 +448,7 @@ private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (Str
                     },
                     modifier = Modifier.testTag(TestingPageTags.TRACKER_SAVE_TOKEN),
                 )
-                AppButton(
+                SettingsButton(
                     "Remove token", enabled = state.trackerStatus.tokenPresent == true, variant = ButtonVariant.Secondary,
                     onClick = { scope.launch { tokenMessage = state.removeTrackerToken() } },
                     modifier = Modifier.testTag(TestingPageTags.TRACKER_REMOVE_TOKEN),
@@ -472,7 +472,7 @@ private fun TestConnectionRow(state: AppState, tracker: TrackerSettings, typedTo
     // The button sits on the right like every action row; the outcome of the last test stays under it.
     Column(Modifier.fillMaxWidth()) {
         SettingsRow("Test connection", "Connect to the tracker and list the tools it offers.") {
-            AppButton(
+            SettingsButton(
                 if (test == TestUi.Running) "Connecting…" else "Test connection",
                 enabled = test != TestUi.Running && ready,
                 onClick = {

@@ -1142,7 +1142,7 @@ enum class AnnotationCopyFormat(val label: String) {
 // (AppState.openSearch, ui/SearchBar.kt); TAGS/KEYWORD_REGEX instead focus the corresponding
 // filter input via FilterPanel's tab-scoped filter-search request (see FilterSearchRequest) —
 // MESSAGE_RULE is a third such input, still routable via that request/AI tooling, just no longer
-// offered in the Settings selector (see SettingsDialog's "Ctrl+F opens" control).
+// offered in the Settings selector (see SettingsDialog's "Ctrl/Cmd+F opens" control).
 enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX, FIND_BAR }
 
 /** The execution protocol behind an AI profile. Secrets never belong in [AppSettings]. */

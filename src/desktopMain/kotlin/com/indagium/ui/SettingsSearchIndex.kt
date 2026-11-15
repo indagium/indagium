@@ -32,12 +32,12 @@ private fun entry(
 private fun general() = listOf(
     entry(
         SettingsPage.General, "Workspace profile",
-        "Sets panels, filter placement, theme and font size in one step.",
+        PROFILE_INTRO,
         listOf("profile", "layout", "classic", "focused", "compare", "minimal", "logcat query", "workspace"),
     ),
     entry(
         SettingsPage.General, "Inactive tab memory",
-        "Release rows from inactive reloadable log tabs after a configurable number of minutes; switch it off to disable it.",
+        INACTIVE_TAB_MEMORY_HINT,
         listOf("memory", "ram", "unload", "idle", "inactive tabs", "large logs", "timeout", "off"),
     ),
     entry(
@@ -72,12 +72,12 @@ private fun general() = listOf(
     ),
     entry(
         SettingsPage.Storage, "Snapshots folder",
-        "Destination for \"Save snapshot\" while a capture is recording.",
+        "Destination for “Save snapshot” while a capture is recording.",
         listOf("screenshots", "save folder"),
     ),
     entry(
         SettingsPage.Storage, "Saved captures folder (Save ZIP)",
-        "Destination for \"Save ZIP\" on a stopped or retained capture.",
+        "Destination for “Save ZIP” on a stopped or retained capture.",
         listOf("zip", "archive", "save folder"),
     ),
     entry(
@@ -116,12 +116,12 @@ private fun general() = listOf(
 private fun appearanceShapes() = listOf(
     entry(
         SettingsPage.Appearance, "Shape style",
-        "Corners of the tiles: theme default, square, soft, rounded or round. Tabs and the toolbar have their own settings.",
+        SHAPE_STYLE_HINT,
         listOf("shape", "corners", "rounded", "square", "round", "radius", "soft", "tiles"),
     ),
     entry(
         SettingsPage.Appearance, "Toolbar shape",
-        "Corners of the toolbar's button groups and the Layout menu button: same as tiles, theme default, square, soft, rounded or round (a capsule).",
+        TOOLBAR_SHAPE_HINT,
         listOf("toolbar", "buttons", "menu buttons", "corners", "rounded", "square", "round", "capsule", "pill", "same as tiles"),
     ),
 )
@@ -130,7 +130,7 @@ private fun appearance() = buildList {
     add(
         entry(
             SettingsPage.Appearance, "Theme",
-            "Color theme of the whole window.",
+            SEASONAL_THEME_KIND_HINT,
             listOf("dark", "light", "palette", "colors", "look"),
         ),
     )
@@ -138,7 +138,7 @@ private fun appearance() = buildList {
         entry(
             SettingsPage.Appearance,
             "Interface font",
-            "Search and preview an installed system font for controls and interface text.",
+            INTERFACE_FONT_HINT,
             listOf("typeface", "ui", "font family"),
         ),
     )
@@ -146,28 +146,28 @@ private fun appearance() = buildList {
         entry(
             SettingsPage.Appearance,
             "Log font",
-            "Monospace or proportional default, or an installed system font, for log rows and highlighter previews.",
+            LOG_FONT_HINT,
             listOf("typeface", "font family", "monospace", "proportional", "mono", "fallback log family", "default font"),
         ),
     )
     add(
         entry(
             SettingsPage.Appearance, "Log font size",
-            "Text size of the log rows.",
+            LOG_FONT_SIZE_HINT,
             listOf("text size", "zoom", "bigger", "smaller"),
         ),
     )
     add(
         entry(
             SettingsPage.Appearance, "Interface scale",
-            "Scales the whole interface, not just the log.",
+            INTERFACE_SCALE_HINT,
             listOf("zoom", "dpi", "size", "hidpi"),
         ),
     )
     add(
         entry(
             SettingsPage.TabsToolbar, "Toolbar labels",
-            "Hides text on the main toolbar buttons, leaving only their icons.",
+            TOOLBAR_LABELS_HINT,
             listOf("icons only", "buttons"),
         ),
     )
@@ -181,36 +181,35 @@ private fun appearance() = buildList {
     add(
         entry(
             SettingsPage.TabsToolbar, "Tab size",
-            "Fixed gives every tab an equal share of the strip; Fit label sizes each tab to its name.",
+            TAB_SIZE_HINT,
             listOf("tabs", "width", "tab bar", "fixed", "fit"),
         ),
     )
     add(
         entry(
             SettingsPage.TabsToolbar, "Tab label",
-            "What a tab shows: the file name (plus its folder when two open tabs share a name), the folder only, " +
-                "the file name only, or always the file and its folder.",
+            TAB_LABEL_HINT,
             listOf("tabs", "title", "name", "file", "session", "folder", "same name", "duplicate"),
         ),
     )
     add(
         entry(
             SettingsPage.TabsToolbar, "File-type badge",
-            "Adds a LOG, ZIP or IND badge before the tab name.",
+            TAB_BADGE_HINT,
             listOf("tabs", "type", "log", "zip", "ind", "capture"),
         ),
     )
     add(
         entry(
             SettingsPage.TabsToolbar, "Source colour stripe",
-            "Adds a coloured stripe on top of a tab by where it came from: file, live capture, bug report or capture.",
+            TAB_STRIPE_HINT,
             listOf("tabs", "color", "colour", "source", "stripe", "live"),
         ),
     )
     add(
         entry(
             SettingsPage.TabsToolbar, "Close button on every tab",
-            "Off shows a tab's close button only on the active tab and under the pointer.",
+            TAB_CLOSE_EVERY_HINT,
             listOf("tabs", "x", "close", "hover"),
         ),
     )
@@ -232,25 +231,24 @@ private fun appearance() = buildList {
 private val SEASONAL_THEMES = HOLIDAY_THEMES.values
 private val SEASONAL_KEYWORDS = listOf("special", "seasonal", "holiday", "theme pack") +
     SEASONAL_THEMES.flatMap { listOf(it.label.lowercase(), it.occasion.lowercase()) + it.keywords }.distinct()
-private val SEASONAL_NAMES = SEASONAL_THEMES.joinToString(", ") { it.label }
 private val SEASONAL_DATES = SEASONAL_THEMES.joinToString("; ") { "${it.label} runs ${holidayDatesLabel(it)}" }
 
 private fun seasonalThemes() = listOf(
     entry(
         SettingsPage.Appearance, "Special theme",
-        "Theme > Special themes: turn a special theme on always or only during its dates. $SEASONAL_DATES and goes back to your theme after.",
+        "Off, always, or only during the pack's dates, going back to your theme after: $SEASONAL_DATES.",
         SEASONAL_KEYWORDS + listOf("automatic", "always", "off", "dates", "colours"),
         anchor = SEASONAL_ANCHOR_WHEN,
     ),
     entry(
         SettingsPage.Appearance, "Special theme pack",
-        "$SEASONAL_NAMES, each with its own palette, tab shapes, scene behind the tabs and pictures.",
+        SEASONAL_PACK_HINT,
         SEASONAL_KEYWORDS + listOf("tabs", "scene", "cat"),
         anchor = SEASONAL_ANCHOR_PACK,
     ),
     entry(
         SettingsPage.Appearance, "Special light or dark",
-        "Whether the special theme uses its light or dark colours, or follows your theme preset.",
+        SEASONAL_LIGHTNESS_HINT,
         SEASONAL_KEYWORDS + listOf("follow preset", "light", "dark", "mode"),
         anchor = SEASONAL_ANCHOR_LIGHTNESS,
     ),
@@ -262,18 +260,18 @@ private fun seasonalThemes() = listOf(
     ),
     entry(
         SettingsPage.Appearance, "Special theme tabs",
-        "Tabs: the special theme's own tab shapes, or My tab style, which keeps your Tab style in the pack's colours.",
+        OWN_TABS_HINT,
         SEASONAL_KEYWORDS + listOf("tab style", "seasonal tabs", "my tab style", "tabs", "shape"),
         anchor = SEASONAL_ANCHOR_TABS,
     ),
     entry(
         SettingsPage.Appearance, "Fun icons",
-        "Toolbar buttons become pictures under a special theme. Hover one to see its real name.",
+        FUN_ICONS_HINT,
         SEASONAL_KEYWORDS + listOf("icons", "toolbar", "pictures", "tooltip", "cat"),
     ),
     entry(
         SettingsPage.Appearance, "Pause effects while capturing or playing video",
-        "Stops special theme effects and animated pictures while a capture is running or a video plays.",
+        SEASONAL_PAUSE_HINT,
         SEASONAL_KEYWORDS + listOf("pause", "capture", "video", "effects", "animation", "motion"),
     ),
 )
@@ -282,34 +280,33 @@ private fun seasonalThemes() = listOf(
 private fun chromePlacement() = listOf(
     entry(
         SettingsPage.TabsToolbar, "Tab position",
-        "Which window edge the tab strip sits on: top, left, right or bottom. Left and right stack the tabs vertically.",
+        TAB_POSITION_HINT,
         listOf("tabs", "tab bar", "vertical", "side", "edge", "dock", "move"),
     ),
     entry(
         SettingsPage.TabsToolbar, "Toolbar placement",
-        "Where the main toolbar sits: at the start or end of the tab strip, beside a vertical tab strip, on an edge of its own, or as a tile in the log view.",
+        TOOLBAR_PLACEMENT_HINT,
         listOf("toolbar", "buttons", "dock", "tabs", "beside", "own edge", "vertical", "tile", "layout", "log view"),
     ),
     entry(
         SettingsPage.TabsToolbar, "Toolbar alignment",
-        "Where the buttons sit along a toolbar that has a bar of its own: at the start, the centre or the end, " +
-            "and before or after the tab bar on the tab strip's edge.",
+        TOOLBAR_ALIGN_HINT,
         listOf("toolbar", "align", "start", "end", "center", "before tabs", "after tabs", "right", "left"),
     ),
     entry(
         SettingsPage.TabsToolbar, "Toolbar edge",
-        "The window edge the toolbar is docked to when it has an edge of its own.",
+        TOOLBAR_EDGE_HINT,
         listOf("toolbar", "dock", "top", "bottom", "left", "right"),
     ),
     entry(
         SettingsPage.TabsToolbar, "Lock tabs and toolbar",
-        "Hides the grips that drag the tab strip and the toolbar to another edge, so they stay where they are.",
+        TOOLBAR_LOCK_HINT,
         listOf("tabs", "toolbar", "grip", "lock", "dock", "move", "drag"),
     ),
 )
 
 private fun editorBehavior() = listOf(
-    entry(SettingsPage.TabsToolbar, "Visible tabs", "How many tabs show before the rest collapse into a menu.", listOf("tab bar", "overflow")),
+    entry(SettingsPage.TabsToolbar, "Visible tabs", VISIBLE_TABS_HINT, listOf("tab bar", "overflow")),
     entry(
         SettingsPage.SearchFilters, "Keyboard scroll margin",
         "Rows kept in view around the selection when moving with the keyboard.",
@@ -334,7 +331,7 @@ private fun editorBehavior() = listOf(
     ),
     entry(
         SettingsPage.LogView, "Crash rows",
-        "Colors every row in an expanded crash/stack-trace group, not just the header.",
+        "Colours every row in an expanded crash/stack-trace group, not just the header.",
         listOf("stack trace", "exception", "highlight", "anr"),
     ),
     entry(
@@ -349,21 +346,21 @@ private fun editorBehavior() = listOf(
     ),
     entry(
         SettingsPage.LogView, "Minimap",
-        "Replaces the scrollbar with a text minimap colored by level.",
+        "Replaces the scrollbar with a text minimap coloured by level.",
         listOf("scrollbar", "overview"),
     ),
     entry(
-        SettingsPage.SearchFilters, "Ctrl+F opens",
+        SettingsPage.SearchFilters, "Ctrl/Cmd+F opens",
         "Whether Ctrl/Cmd+F opens the Find bar, or focuses the Tags or Regex filter field.",
         listOf("cmd+f", "find", "search", "shortcut", "keyboard", "find bar"),
     ),
     entry(
-        SettingsPage.SearchFilters, "Ctrl+F also shows Original",
-        "Reveals the Original panel whenever Ctrl/Cmd+F opens; Search scope behavior still picks the Find field.",
+        SettingsPage.SearchFilters, "Ctrl/Cmd+F also shows Original",
+        "Reveals the Original panel whenever Ctrl/Cmd+F opens; Search scope behaviour still picks the Find field.",
         listOf("cmd+f", "find", "shortcut", "keyboard", "unfiltered", "opens original"),
     ),
     entry(
-        SettingsPage.SearchFilters, "Search scope behavior",
+        SettingsPage.SearchFilters, "Search scope behaviour",
         "Choose Filtered, Unfiltered, Two searches, Last search mode, or Auto-switch by open view for normal Find opens.",
         listOf("find", "search", "two searches", "dual", "scope", "cmd+f", "ctrl+f", "filtered", "unfiltered", "last used", "auto"),
     ),
@@ -400,7 +397,7 @@ private fun editorBehavior() = listOf(
     ),
     entry(
         SettingsPage.LogView, "Error rows",
-        "Highlight parsed Error rows by default and choose their background, text color, font, bold and italic style.",
+        "Highlight parsed Error rows by default and choose their background, text colour, font, bold and italic style.",
         listOf("error", "error level", "crash", "highlight", "red", "log row", "bold", "italic", "font"),
     ),
     entry(
@@ -469,7 +466,7 @@ private fun exportAnnotations() = listOf(
     ),
     entry(
         SettingsPage.CopyExport, "Annotation file prefix",
-        "Prefix used in front of the log name in note labels, e.g. \"From app.log\".",
+        "Prefix used in front of the log name in note labels, e.g. “From app.log”.",
         listOf("note", "label", "name", "from"),
     ),
     entry(
@@ -665,7 +662,7 @@ private fun aiProviders() = listOf(
 private fun voiceInput() = listOf(
     entry(
         SettingsPage.VoiceInput, "Recognition engine",
-        "Local Whisper or the operating system's speech recognizer.",
+        "Local Whisper or the operating system's speech recogniser.",
         listOf("dictation", "microphone", "speech", "whisper", "apple", "windows", "voice"),
     ),
     entry(
@@ -696,12 +693,12 @@ private fun customAiCommands() = listOf(
 private fun sourceCode() = listOf(
     entry(
         SettingsPage.SourceCode, "Register source code",
-        "Point Indagium at your project's source folder(s) to enable \"Show in code\".",
+        "Point Indagium at your project's source folders to enable “Show in code”.",
         listOf("project", "index", "repository", "folder", "directory", "show in code", "add"),
     ),
     entry(
         SettingsPage.SourceCode, "Open command",
-        "Editor used by \"Show in code\" to open a file at the logged line.",
+        "Editor used by “Show in code” to open a file at the logged line.",
         listOf("editor", "ide", "vs code", "intellij", "android studio", "cursor", "sublime", "zed", "external"),
     ),
     entry(
@@ -808,7 +805,11 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> =
 // is a prefix of) a member also matches every other member of its group.
 private val SETTINGS_SYNONYM_GROUPS: List<Set<String>> = listOf(
     setOf("folder", "directory", "path", "location", "dir", "folders"),
-    setOf("theme", "color", "colour", "colors", "dark", "light", "appearance", "palette"),
+    setOf("theme", "color", "colour", "colors", "colours", "dark", "light", "appearance", "palette"),
+    setOf("center", "centre"),
+    setOf("behavior", "behaviour"),
+    setOf("recognizer", "recogniser"),
+    setOf("authorization", "authorisation"),
     setOf("font", "typeface", "fonts"),
     setOf("shortcut", "shortcuts", "key", "keys", "keyboard", "hotkey", "hotkeys"),
     setOf("ai", "llm", "model", "provider", "gpt"),

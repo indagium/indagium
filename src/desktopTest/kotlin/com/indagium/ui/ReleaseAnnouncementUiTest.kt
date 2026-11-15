@@ -134,7 +134,10 @@ class ReleaseAnnouncementUiTest {
             listOf(false, true).forEach { dark ->
                 val bounds = rule.onNodeWithTag(seasonalPackModeTag(pack, dark)).getUnclippedBoundsInRoot()
                 val pixel = rule.onNodeWithTag(seasonalPackModeTag(pack, dark)).captureToImage().toPixelMap()
-                val expected = theme.palette(dark).p2
+                // A picture-picker card: the page fill while unselected, the accent wash while chosen (the one selected-state rule).
+                val config = rule.onNodeWithTag(seasonalPackModeTag(pack, dark)).fetchSemanticsNode().config
+                val selected = androidx.compose.ui.semantics.SemanticsProperties.Selected.let { it in config && config[it] }
+                val expected = theme.palette(dark).let { if (selected) it.abg else it.bg }
                 val corner = pixel[(bounds.width.value * rule.density.density / 2).toInt(), (rule.density.density * 3).toInt()]
                 assertTrue(
                     kotlin.math.abs(corner.red - expected.red) < .06f && kotlin.math.abs(corner.green - expected.green) < .06f &&

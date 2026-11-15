@@ -11,6 +11,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -36,6 +37,8 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -715,52 +718,61 @@ internal fun ThemeGallery(
     }
 }
 
+/**
+ * One theme of the gallery: a miniature window in the theme's own colours with its name under it. A picture picker, so it follows the one
+ * selected-state rule ([settingsPickerSurface]): accent border, wash and caption while chosen, the hover tint only otherwise.
+ */
 @Composable
 internal fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boolean, onClick: () -> Unit) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
-    var hovered by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
     Column(
-        Modifier.width(118.dp).height(66.dp)
-            .clip(shape)
-            .background(if (hovered && !selected) colors.ac.copy(.08f) else colors.bg)
-            .border(1.dp, if (selected || hovered) colors.ac else tc.br, shape)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+        Modifier.width(118.dp)
+            .settingsPickerSurface(selected, hovered, shape, tc)
+            .hoverable(interaction)
+            .semantics { this.selected = selected }
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(5.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Row(
-            Modifier.fillMaxWidth().height(14.dp).background(colors.p, RoundedCornerShape(5.dp)).padding(horizontal = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            Modifier.fillMaxWidth().height(46.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(colors.bg)
+                .border(0.5.dp, tc.br, RoundedCornerShape(5.dp))
+                .padding(4.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            listOf(colors.ac, colors.seq1, colors.seq2).forEach { color ->
-                Box(Modifier.size(4.dp).background(color, RoundedCornerShape(50)))
-            }
-        }
-        Box(Modifier.fillMaxWidth().weight(1f).background(colors.p2, RoundedCornerShape(4.dp))) {
-            Box(Modifier.align(Alignment.CenterStart).fillMaxHeight().width(4.dp).background(colors.ac, CORNER_SM))
             Row(
-                Modifier.align(Alignment.BottomEnd).padding(4.dp),
+                Modifier.fillMaxWidth().height(12.dp).background(colors.p, RoundedCornerShape(4.dp)).padding(horizontal = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.size(8.dp).background(colors.seq1, CORNER_SM))
-                Box(Modifier.size(8.dp).background(colors.seq2, CORNER_SM))
+                listOf(colors.ac, colors.seq1, colors.seq2).forEach { color ->
+                    Box(Modifier.size(4.dp).background(color, RoundedCornerShape(50)))
+                }
+            }
+            Box(Modifier.fillMaxWidth().weight(1f).background(colors.p2, RoundedCornerShape(3.dp))) {
+                Box(Modifier.align(Alignment.CenterStart).fillMaxHeight().width(4.dp).background(colors.ac, CORNER_SM))
+                Row(
+                    Modifier.align(Alignment.BottomEnd).padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Box(Modifier.size(7.dp).background(colors.seq1, CORNER_SM))
+                    Box(Modifier.size(7.dp).background(colors.seq2, CORNER_SM))
+                }
             }
         }
         AppText(
             text = label,
-            color = if (selected) colors.ac else tc.ts,
-            fontSize = 9.sp,
+            color = settingsPickerCaptionColor(selected, tc),
+            fontSize = 10.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             overflow = TextOverflow.Ellipsis,
             maxLines = 1,
+            modifier = Modifier.padding(horizontal = 2.dp),
         )
     }
 }

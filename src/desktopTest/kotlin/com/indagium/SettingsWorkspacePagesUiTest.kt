@@ -56,13 +56,13 @@ class SettingsWorkspacePagesUiTest {
 
         rule.onNodeWithText("Save current setup as profile…").assertDoesNotExist()
         rule.onNodeWithText("Import profile…").assertDoesNotExist()
-        rule.onNodeWithText("Export current setup as .json").assertDoesNotExist()
+        rule.onNodeWithText("Export current setup…").assertDoesNotExist()
         rule.onNodeWithTag(PROFILE_GROUP_MENU_TAG).performClick()
         rule.waitForIdle()
         listOf("save", "import", "export").forEach { rule.onNodeWithTag("$PROFILE_GROUP_MENU_TAG-$it").assertExists() }
         rule.onNodeWithText("Save current setup as profile…").assertExists()
         rule.onNodeWithText("Import profile…").assertExists()
-        rule.onNodeWithText("Export current setup as .json").assertExists()
+        rule.onNodeWithText("Export current setup…").assertExists()
 
         rule.onNodeWithTag("$PROFILE_GROUP_MENU_TAG-save").performClick()
         rule.waitForIdle()
@@ -124,10 +124,10 @@ class SettingsWorkspacePagesUiTest {
 
     @Test
     fun theLogFontListStartsWithTheTwoDefaultsAndPickingOneSetsTheFallbackKindAndClearsTheFamily() {
-        val family = FontCatalog.families.first()
+        val family = FontCatalog.families.first { !it.startsWith(".") }
         val state = AppState()
         rule.setContent { Column(Modifier.width(700.dp)) { AppearanceSystemFontSelectors(state) } }
-        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Monospace (default)")
+        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Monospace · default")
 
         rule.onNodeWithTag("settings-log-font-trigger").performClick()
         rule.onNodeWithTag("settings-log-font-option-default-monospace").assertExists()
@@ -136,7 +136,7 @@ class SettingsWorkspacePagesUiTest {
         rule.waitForIdle()
         assertFalse(state.settings.fontMono)
         assertNull(state.settings.logFontFamily)
-        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Proportional (default)")
+        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Proportional · default")
 
         // A named family leaves the default kind alone: it is the fallback if the family goes missing.
         rule.onNodeWithTag("settings-log-font-trigger").performClick()
@@ -176,15 +176,16 @@ class SettingsWorkspacePagesUiTest {
     fun theTabsRowsCoverPositionWidthLabelCloseButtonAndVisibleTabs() {
         val state = AppState()
         rule.setContent { Column(Modifier.width(700.dp).verticalScroll(rememberScrollState())) { TabsAppearanceSettings(state) } }
-        listOf("Position", "Width", "Label", "Close button position", "Visible tabs", "Placement", "Button labels", "Lock tabs and toolbar")
-            .forEach { rule.onNodeWithText(it).assertExists() }
-        rule.onNodeWithText("Show on tabs").assertExists()
+        listOf(
+            "Position", "Width", "Label", "Close button position", "Close button on every tab", "Visible tabs", "Placement", "Button labels",
+            "Lock tabs and toolbar", "File-type badge", "Source colour stripe",
+        ).forEach { rule.onNodeWithText(it).assertExists() }
         // Visible tabs is a stepper: + moves to the next limit.
         val before = state.settings.visibleTabLimit
         rule.onNodeWithText("+").performScrollTo().performClick()
         rule.waitForIdle()
         assertTrue(state.settings.visibleTabLimit > before)
-        // Button labels: Show | Icons only.
+        // Button labels: Icon and text | Icons only.
         rule.onNodeWithText("Icons only").performScrollTo().performClick()
         rule.waitForIdle()
         assertTrue(state.settings.toolbarIconOnlyButtons)

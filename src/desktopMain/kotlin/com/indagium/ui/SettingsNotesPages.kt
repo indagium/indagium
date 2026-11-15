@@ -75,7 +75,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
         }
         SettingsRow("Log excerpts", "How log lines are wrapped inside a note: plain indent or a Jira code block.", anchor = "Log blocks") {
             val styles = AnnotationLogBlockStyle.entries
-            SegmentedControl(
+            SettingsSegmented(
                 options = listOf("Indented", "Jira wiki", "Jira Cloud"),
                 selectedIndices = setOf(styles.indexOf(settings.annotationLogBlockStyle)),
                 onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
@@ -101,7 +101,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
             "What the diagram toolbar's quick button adds. The workspace always offers both snapshot and linked notes in its menu.",
             anchor = "Diagram note action",
         ) {
-            SegmentedControl(
+            SettingsSegmented(
                 options = listOf("Snapshot", "Link"),
                 selectedIndices = setOf(if (settings.diagramLinkedNotePrimary) 1 else 0),
                 onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
@@ -125,7 +125,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
             )
         }
         SettingsRow("Spelling", "American or British English rules for the suggestions.", anchor = "English variant", indent = true) {
-            SegmentedControl(
+            SettingsSegmented(
                 options = listOf("US", "UK"),
                 selectedIndices = setOf(if (settings.proofreading.language == "en-GB") 1 else 0),
                 onToggle = { idx ->
@@ -166,8 +166,7 @@ private fun ProofreadingVocabularyManager(state: AppState) {
         "Personal vocabulary",
         "Words the checker should accept, such as app, class or tag names. Used while English proofreading is on.",
         indent = true,
-        // Dimmed while proofreading is off, but still editable: the words are kept for when it is turned back on.
-        enabled = proofreading.enabled,
+        // Not dimmed or locked while proofreading is off: the words stay editable and are kept for when it is turned back on.
         modifier = Modifier.testTag("proofreading-vocabulary-manager"),
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -186,7 +185,7 @@ private fun ProofreadingVocabularyManager(state: AppState) {
                     },
                     testTag = "proofreading-vocabulary-query",
                 )
-                AppButton(
+                SettingsButton(
                     "Add",
                     onClick = {
                         addVocabularyWord(state, query)
@@ -344,7 +343,7 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
             "Image works anywhere; Source keeps editable Mermaid or PlantUML text. Existing notes keep their own choice.",
             anchor = "Diagram export",
         ) {
-            SegmentedControl(
+            SettingsSegmented(
                 options = listOf("Image", "Source"),
                 selectedIndices = setOf(if (settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
                 onToggle = { index ->
@@ -387,7 +386,7 @@ private fun MaskWordsRows(state: AppState, reclaimFocus: () -> Unit) {
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (settings.maskWordOnCopy) {
-                    AppButton(
+                    SettingsButton(
                         "Add pair",
                         onClick = { state.updateSettings { it.copy(copyMaskRules = it.copyMaskRules + CopyMaskRule()) } },
                         variant = ButtonVariant.Secondary,
@@ -463,7 +462,7 @@ private fun MaskRuleRow(state: AppState, index: Int, rule: CopyMaskRule) {
             Modifier.weight(1f),
             placeholder = "j*ava",
         )
-        AppButton(
+        SettingsButton(
             "Remove",
             onClick = {
                 state.updateSettings { settings ->

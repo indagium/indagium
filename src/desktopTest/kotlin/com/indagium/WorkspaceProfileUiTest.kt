@@ -65,7 +65,7 @@ class WorkspaceProfileUiTest {
         val saved = state.settings.customWorkspaceProfiles.single()
         assertEquals("Evening", saved.name)
         assertEquals(saved.id, state.settings.workspaceProfileId)
-        rule.onNodeWithTag("profile-strip-name").assertTextEquals("Evening") // the selected custom profile's visible strip
+        rule.onNodeWithTag("profile-layout-select").assertExists() // the new custom profile is the selected one: its layout row is a dropdown
     }
 
     @Test
@@ -84,37 +84,22 @@ class WorkspaceProfileUiTest {
         assertTrue(state.settings.customWorkspaceProfiles.isEmpty())
     }
 
-    @Test
-    fun deletingTheSelectedProfileThroughTheCardMenuAsksFirstAndClearsTheSelection() {
-        val state = AppState()
-        state.saveCurrentAsWorkspaceProfile("Doomed")
-        install(state)
-
+    private fun pickFromCardMenu(label: String) {
         rule.onNodeWithTag("profile-card-menu").performClick()
-        // The strip shows the same action; the popup's entry is the second "Delete…" node.
-        rule.onAllNodesWithText("Delete…").assertCountEquals(2)
-        rule.onAllNodesWithText("Delete…")[1].performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("Delete profile?").assertExists()
-        assertEquals(1, state.settings.customWorkspaceProfiles.size)
-
-        rule.onNodeWithText("Delete").performClick()
+        rule.onNodeWithText(label).performClick()
         rule.waitForIdle()
-
-        assertTrue(state.settings.customWorkspaceProfiles.isEmpty())
-        assertNull(state.settings.workspaceProfileId)
     }
 
     @Test
-    fun theVisibleStripDeletesTheSelectedCustomProfileAfterAConfirm() {
+    fun deletingTheSelectedProfileThroughTheCardMenuAsksFirstAndClearsTheSelection() {
         val state = AppState()
         val doomed = state.saveCurrentAsWorkspaceProfile("Doomed")
         install(state)
 
-        rule.onNodeWithTag("profile-strip").assertExists()
-        rule.onNodeWithTag("profile-strip-name").assertTextEquals("Doomed")
-        rule.onNodeWithTag("profile-strip-action-delete").performClick()
-        rule.waitForIdle()
+        // The card's "⋯" is the one home of the profile's actions: no strip of links repeats them under the cards.
+        rule.onAllNodesWithText("Delete…").assertCountEquals(0)
+        pickFromCardMenu("Delete…")
         rule.onNodeWithText("Delete profile?").assertExists()
         assertEquals(1, state.settings.customWorkspaceProfiles.size)
 
@@ -123,47 +108,49 @@ class WorkspaceProfileUiTest {
         rule.waitForIdle()
         assertEquals(doomed.id, state.settings.customWorkspaceProfiles.single().id)
 
-        rule.onNodeWithTag("profile-strip-action-delete").performClick()
-        rule.waitForIdle()
+        pickFromCardMenu("Delete…")
         rule.onNodeWithText("Delete").performClick()
         rule.waitForIdle()
 
         assertTrue(state.settings.customWorkspaceProfiles.isEmpty())
         assertNull(state.settings.workspaceProfileId)
-        rule.onNodeWithTag("profile-strip").assertDoesNotExist()
+        rule.onAllNodesWithTag("profile-card-menu").assertCountEquals(0)
     }
 
     @Test
-    fun theStripOffersRenameAndUpdateFromCurrentSetupAndOnlyForACustomProfile() {
+    fun thereIsNoLinkStripUnderTheCardsAndTheCardMenuOffersRenameUpdateExportAndDeleteOnlyForACustomProfile() {
         val state = AppState()
         install(state)
-        rule.onNodeWithTag("profile-strip").assertDoesNotExist()
+        rule.onAllNodesWithTag("profile-card-menu").assertCountEquals(0)
 
         rule.runOnIdle { state.applyWorkspaceProfile(WorkspaceProfile.FOCUSED) }
         rule.waitForIdle()
-        rule.onNodeWithTag("profile-strip").assertDoesNotExist()
+        rule.onAllNodesWithTag("profile-card-menu").assertCountEquals(0)
 
         val saved = rule.runOnIdle { state.saveCurrentAsWorkspaceProfile("Mine") }
         rule.waitForIdle()
-        listOf("rename", "update-from-current-setup", "export", "delete").forEach {
-            rule.onNodeWithTag("profile-strip-action-$it").assertExists()
-        }
+        rule.onAllNodesWithTag("profile-card-menu").assertCountEquals(1)
+        rule.onNodeWithTag("profile-card-menu").performClick()
+        rule.waitForIdle()
+        listOf("Rename…", "Update from current setup", "Export…", "Delete…").forEach { rule.onNodeWithText(it).assertExists() }
+        // Nothing else on the page repeats them as links.
+        rule.onAllNodesWithText("Rename…").assertCountEquals(1)
+        rule.onNodeWithText("Update from current setup").performClick()
+        rule.waitForIdle()
+        assertEquals(emptyList(), state.workspaceProfileDifferences())
 
         rule.runOnIdle { state.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL) } }
         rule.waitForIdle()
-        rule.onNodeWithTag("profile-strip-action-update-from-current-setup").performClick()
-        rule.waitForIdle()
-
+        pickFromCardMenu("Update from current setup")
         assertEquals(TabStripStyle.PILL, state.settings.customWorkspaceProfiles.single { it.id == saved.id }.spec.appearance?.tabStripStyle)
         assertEquals(emptyList(), state.workspaceProfileDifferences())
 
-        rule.onNodeWithTag("profile-strip-action-rename").performClick()
-        rule.waitForIdle()
+        pickFromCardMenu("Rename…")
         rule.onNodeWithTag("profile-name-field").assertExists()
     }
 
     @Test
-    fun theCardMenuButtonIsDrawnWithoutHoverAndIsA22dpTarget() {
+    fun theCardMenuButtonIsDrawnWithoutHoverOnTheCaptionLineAndIsAn18dpTarget() {
         val state = AppState()
         state.saveCurrentAsWorkspaceProfile("Mine")
         install(state)
@@ -173,8 +160,8 @@ class WorkspaceProfileUiTest {
         val node = rule.onNodeWithTag("profile-card-menu")
         node.assertIsDisplayed()
         val bounds = node.getBoundsInRoot()
-        assertEquals(22f, bounds.width.value, 0.5f)
-        assertEquals(22f, bounds.height.value, 0.5f)
+        assertEquals(18f, bounds.width.value, 0.5f)
+        assertEquals(18f, bounds.height.value, 0.5f)
     }
 
     @Test

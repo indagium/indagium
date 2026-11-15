@@ -1,5 +1,8 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.indagium.ui
 
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,13 +30,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +52,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.SubcomposeLayout
@@ -64,6 +74,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.constrainWidth
 import androidx.compose.ui.unit.dp
@@ -79,6 +90,11 @@ private val SWITCH_TRACK_HEIGHT = 18.dp
 private val SWITCH_KNOB_ON = 14.dp
 private val SWITCH_KNOB_OFF = 12.dp
 private const val DISABLED_ALPHA = 0.5f
+private const val DESCRIPTION_MAX_LINES = 2
+private const val DETAIL_TOOLTIP_MAX_LINES = 12
+private val CHECKBOX_SIZE = 16.dp
+private val CHECKBOX_SHAPE = RoundedCornerShape(3.dp)
+private val DETAIL_ICON_SIZE = 12.dp
 private const val BADGE_FILL_ALPHA = 0.13f
 private const val BADGE_BORDER_ALPHA = 0.27f
 private val SETTINGS_ROW_INDENT = 28.dp
@@ -92,8 +108,33 @@ private val DRILL_SUMMARY_MAX_WIDTH = 320.dp
 private val OVERFLOW_TARGET = 22.dp
 private val OVERFLOW_MENU_MIN_WIDTH = 190.dp
 
+/**
+ * The height of every control in a settings row: dropdowns, text and number fields, segmented controls, steppers and row buttons. Outlines
+ * are 1dp ([SETTINGS_CONTROL_BORDER]); fields use [CORNER_SM], segmented controls and steppers 6dp.
+ */
+internal val SETTINGS_CONTROL_HEIGHT = 26.dp
+internal val SETTINGS_CONTROL_BORDER = 1.dp
+
+/** The two standard field widths: short values and dropdowns, and URLs, names and model ids. In one card they all share one width. */
+internal val SETTINGS_FIELD_SHORT = 200.dp
+internal val SETTINGS_FIELD_LONG = 300.dp
+
 /** The width of a [SettingsTextField] whose caller sets none. */
-internal val SETTINGS_TEXT_FIELD_WIDTH = 200.dp
+internal val SETTINGS_TEXT_FIELD_WIDTH = SETTINGS_FIELD_SHORT
+
+/**
+ * True while the [SettingsRow] or [SettingsStackedRow] drawing the control is disabled. The row already dims itself to half, so the
+ * Settings controls inside it only stop taking input and add no dim of their own: one 50% dim, never two stacked.
+ */
+internal val LocalSettingsRowDimmed = compositionLocalOf { false }
+
+/** The dim a control adds for its own `enabled = false`: half, unless the row around it is already dimmed. */
+@Composable
+internal fun Modifier.settingsDimmed(enabled: Boolean): Modifier = if (!enabled && !LocalSettingsRowDimmed.current) alpha(DISABLED_ALPHA) else this
+
+/** Whether a Settings control takes input: its own [enabled] and the row around it being enabled. */
+@Composable
+internal fun settingsEnabled(enabled: Boolean): Boolean = enabled && !LocalSettingsRowDimmed.current
 
 /** The fixed width of the number in a [SettingsNumberField]. */
 internal val SETTINGS_NUMBER_FIELD_WIDTH = 64.dp
@@ -123,12 +164,12 @@ internal fun SettingsSwitch(
     Box(
         modifier
             .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
-            .alpha(if (enabled) 1f else DISABLED_ALPHA)
+            .settingsDimmed(enabled)
             .size(SWITCH_TRACK_WIDTH, SWITCH_TRACK_HEIGHT)
             .clip(shape)
             .background(if (checked) tc.ac else tc.p2, shape)
             .then(if (checked) Modifier else Modifier.border(1.dp, tc.td, shape))
-            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange)
+            .toggleable(value = checked, enabled = settingsEnabled(enabled), role = Role.Switch, onValueChange = onCheckedChange)
             .semantics { contentDescription = label }
             .padding(if (checked) 2.dp else 3.dp),
         contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart,
@@ -141,10 +182,14 @@ internal fun SettingsSwitch(
 }
 
 /**
- * One setting: [label] with an optional one-line [description] on the left and [control] right-aligned. It carries
+ * One setting: [label] with an optional [description] (at most two lines) on the left and [control] right-aligned. It carries
  * [settingsAnchor] for [anchor] (the search index key, default the label) so a search result can scroll to and flash it.
- * [indent] marks a row that depends on the one above. [enabled] = false dims the label and control to half; the control must
- * disable its own interaction as well, the row only draws. [danger] draws the label in the danger colour (a destructive action).
+ * [indent] marks a row that depends on the one above. [enabled] = false dims the row to half and disables the Settings controls in it
+ * ([LocalSettingsRowDimmed]); a custom control must stop its own input. [danger] draws the label in the danger colour (a destructive
+ * action).
+ *
+ * A description that does not fit two lines is never cut silently: the whole text, or [detail] when given, shows as a hover hint on the
+ * label and description, marked by a small info glyph after the label.
  */
 @Composable
 internal fun SettingsRow(
@@ -156,46 +201,68 @@ internal fun SettingsRow(
     modifier: Modifier = Modifier,
     descriptionTag: String? = null,
     danger: Boolean = false,
+    detail: String? = null,
     control: @Composable () -> Unit,
 ) {
     val tc = tc()
+    var cut by remember(description) { mutableStateOf(false) }
+    val hint = detail?.takeIf { it.isNotBlank() } ?: description?.takeIf { cut }
     Box(modifier.fillMaxWidth().settingsAnchor(anchor)) {
-        Row(
-            Modifier.fillMaxWidth()
-                .alpha(if (enabled) 1f else DISABLED_ALPHA)
-                .padding(start = 12.dp + if (indent) SETTINGS_ROW_INDENT else 0.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                AppText(
-                    label,
-                    color = if (danger) DANGER_RED else tc.tx,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (!description.isNullOrBlank()) {
-                    AppText(
-                        description,
-                        color = tc.ts,
-                        fontSize = 11.sp,
-                        maxLines = 4,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = if (descriptionTag != null) Modifier.testTag(descriptionTag) else Modifier,
-                    )
+        CompositionLocalProvider(LocalSettingsRowDimmed provides !enabled) {
+            Row(
+                Modifier.fillMaxWidth()
+                    .alpha(if (enabled) 1f else DISABLED_ALPHA)
+                    .padding(start = 12.dp + if (indent) SETTINGS_ROW_INDENT else 0.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                HintArea(hint, Modifier.weight(1f)) {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                            AppText(
+                                label,
+                                color = if (danger) DANGER_RED else tc.tx,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (hint != null) Icon(Icons.Outlined.Info, contentDescription = null, tint = tc.ts, modifier = Modifier.size(DETAIL_ICON_SIZE))
+                        }
+                        if (!description.isNullOrBlank()) {
+                            AppText(
+                                description,
+                                color = tc.ts,
+                                fontSize = 11.sp,
+                                maxLines = DESCRIPTION_MAX_LINES,
+                                overflow = TextOverflow.Ellipsis,
+                                onTextLayout = { if (it.hasVisualOverflow != cut) cut = it.hasVisualOverflow },
+                                modifier = if (descriptionTag != null) Modifier.testTag(descriptionTag) else Modifier,
+                            )
+                        }
+                    }
                 }
+                control()
             }
-            control()
         }
+    }
+}
+
+/** Shows [hint] in a hover tooltip over [content]; with no hint it is just [content]. */
+@Composable
+private fun HintArea(hint: String?, modifier: Modifier, content: @Composable () -> Unit) {
+    if (hint == null) {
+        Box(modifier) { content() }
+    } else {
+        TooltipArea(tooltip = { ToolbarTooltip(hint, maxLines = DETAIL_TOOLTIP_MAX_LINES) }, modifier = modifier) { content() }
     }
 }
 
 /**
  * A [SettingsRow] whose control needs the full width: [label] and the optional [description] on top, [content] (a list of choices, a
- * picker) under them. Same padding, anchor, indent and dimming as [SettingsRow]; [content] must disable its own interaction when
- * [enabled] is false.
+ * picker) under them. Same padding, anchor, indent, dimming and [detail] hint as [SettingsRow]; [enabled] = false disables the
+ * Settings controls in [content] too, a custom one must stop its own input.
  */
 @Composable
 internal fun SettingsStackedRow(
@@ -205,23 +272,40 @@ internal fun SettingsStackedRow(
     indent: Boolean = false,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    detail: String? = null,
     content: @Composable () -> Unit,
 ) {
     val tc = tc()
+    var cut by remember(description) { mutableStateOf(false) }
+    val hint = detail?.takeIf { it.isNotBlank() } ?: description?.takeIf { cut }
     Box(modifier.fillMaxWidth().settingsAnchor(anchor)) {
-        Column(
-            Modifier.fillMaxWidth()
-                .alpha(if (enabled) 1f else DISABLED_ALPHA)
-                .padding(start = 12.dp + if (indent) SETTINGS_ROW_INDENT else 0.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                AppText(label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (!description.isNullOrBlank()) {
-                    AppText(description, color = tc.ts, fontSize = 11.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+        CompositionLocalProvider(LocalSettingsRowDimmed provides !enabled) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .alpha(if (enabled) 1f else DISABLED_ALPHA)
+                    .padding(start = 12.dp + if (indent) SETTINGS_ROW_INDENT else 0.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                HintArea(hint, Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                            AppText(label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (hint != null) Icon(Icons.Outlined.Info, contentDescription = null, tint = tc.ts, modifier = Modifier.size(DETAIL_ICON_SIZE))
+                        }
+                        if (!description.isNullOrBlank()) {
+                            AppText(
+                                description,
+                                color = tc.ts,
+                                fontSize = 11.sp,
+                                maxLines = DESCRIPTION_MAX_LINES,
+                                overflow = TextOverflow.Ellipsis,
+                                onTextLayout = { if (it.hasVisualOverflow != cut) cut = it.hasVisualOverflow },
+                            )
+                        }
+                    }
                 }
+                content()
             }
-            content()
         }
     }
 }
@@ -379,7 +463,7 @@ internal fun SettingsPageHeader(groupLabel: String, title: String, description: 
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         AppText(groupLabel, color = tc.ts, fontSize = 11.sp)
         AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        if (description.isNotBlank()) AppText(description, color = tc.ts, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        if (description.isNotBlank()) AppText(description, color = tc.ts, fontSize = 11.sp, maxLines = Int.MAX_VALUE)
     }
 }
 
@@ -402,18 +486,21 @@ internal fun <T> SettingsDropdown(
     onSelect: (T) -> Unit,
     testTag: String,
     modifier: Modifier = Modifier,
-    minWidth: Dp = 168.dp,
+    minWidth: Dp = SETTINGS_FIELD_SHORT,
     optionTag: ((T) -> String)? = null,
     isEnabled: (T) -> Boolean = { true },
     optionNote: (T) -> String? = { null },
     onInteraction: () -> Unit = {},
+    enabled: Boolean = true,
+    leading: (@Composable () -> Unit)? = null,
+    placeholder: String? = null,
 ) {
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     SettingsDropdownField(
-        text = label(selected),
-        open = open,
+        text = placeholder ?: label(selected),
+        open = open && settingsEnabled(enabled),
         onClick = {
             if (System.currentTimeMillis() >= suppressToggleUntilMs) {
                 open = !open
@@ -423,9 +510,13 @@ internal fun <T> SettingsDropdown(
         modifier = modifier,
         minWidth = minWidth,
         testTag = testTag,
+        textColor = if (placeholder != null) tc.td else null,
+        enabled = enabled,
+        leading = leading,
     ) { fieldWidth, popupOffset ->
         Popup(
-            alignment = Alignment.TopStart,
+            // Right-aligned to the field, like the control it sits beside: a popup wider than the field grows to the left.
+            alignment = Alignment.TopEnd,
             offset = popupOffset,
             onDismissRequest = {
                 open = false
@@ -472,15 +563,15 @@ internal fun <T> SettingsDropdown(
                         ) {
                             AppText(
                                 label(option),
-                                color = when {
-                                    !optionEnabled -> tc.td
-                                    active -> tc.ac
-                                    else -> tc.tx
-                                },
+                                color = if (active) tc.ac else tc.tx,
                                 fontSize = 11.sp,
                                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.alpha(if (optionEnabled) 1f else DISABLED_ALPHA),
                             )
-                            if (note != null) AppText(note, color = tc.td, fontSize = 10.sp)
+                            if (note != null) {
+                                AppText("·", color = tc.ts, fontSize = 11.sp, modifier = Modifier.alpha(if (optionEnabled) 1f else DISABLED_ALPHA))
+                                AppText(note, color = tc.ts, fontSize = 10.sp, modifier = Modifier.alpha(if (optionEnabled) 1f else DISABLED_ALPHA))
+                            }
                         }
                     }
                 }
@@ -505,13 +596,16 @@ internal fun SettingsDropdownField(
     open: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    minWidth: Dp = 168.dp,
+    minWidth: Dp = SETTINGS_FIELD_SHORT,
     testTag: String? = null,
     textFontFamily: FontFamily? = null,
     textColor: Color? = null,
+    enabled: Boolean = true,
+    leading: (@Composable () -> Unit)? = null,
     popup: @Composable (fieldWidth: Dp, popupOffset: IntOffset) -> Unit = { _, _ -> },
 ) {
     val tc = tc()
+    val active = settingsEnabled(enabled)
     val density = LocalDensity.current
     var fieldWidth by remember { mutableStateOf(0.dp) }
     val interaction = remember { MutableInteractionSource() }
@@ -521,26 +615,33 @@ internal fun SettingsDropdownField(
     Box(
         modifier.widthIn(min = minWidth).height(DROPDOWN_FIELD_HEIGHT)
             .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+            .settingsDimmed(enabled)
             .onGloballyPositioned { fieldWidth = with(density) { it.size.width.toDp() } }
             .clip(CORNER_SM)
             .background(tc.bg, CORNER_SM)
-            .background(if (hovered) tc.hv else Color.Transparent, CORNER_SM)
+            .background(if (hovered && active) tc.hv else Color.Transparent, CORNER_SM)
             .border(1.dp, tc.br, CORNER_SM)
             .hoverable(interaction)
-            .clickable(interactionSource = interaction, indication = null, role = Role.DropdownList, onClick = onClick)
+            .clickable(interactionSource = interaction, indication = null, enabled = active, role = Role.DropdownList, onClick = onClick)
             .padding(start = 8.dp, end = 6.dp),
         propagateMinConstraints = true,
     ) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            AppText(
-                text,
-                color = textColor ?: tc.tx,
-                fontSize = 12.sp,
-                fontFamily = textFontFamily ?: LocalUiFontFamily.current,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
-            )
+            Row(Modifier.weight(1f, fill = false), verticalAlignment = Alignment.CenterVertically) {
+                if (leading != null) {
+                    leading()
+                    Spacer(Modifier.width(8.dp))
+                }
+                AppText(
+                    text,
+                    color = textColor ?: tc.tx,
+                    fontSize = 12.sp,
+                    fontFamily = textFontFamily ?: LocalUiFontFamily.current,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
+                )
+            }
             Icon(
                 if (open) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                 contentDescription = null,
@@ -548,7 +649,7 @@ internal fun SettingsDropdownField(
                 modifier = Modifier.size(16.dp),
             )
         }
-        if (open) popup(fieldWidth, IntOffset(0, with(density) { DROPDOWN_POPUP_OFFSET.roundToPx() }))
+        if (open && active) popup(fieldWidth, IntOffset(0, with(density) { DROPDOWN_POPUP_OFFSET.roundToPx() }))
     }
 }
 
@@ -581,7 +682,7 @@ internal fun SettingsTextField(
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
-        enabled = enabled,
+        enabled = settingsEnabled(enabled),
         textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = fontFamily, textAlign = textAlign),
         cursorBrush = SolidColor(tc.ac),
         singleLine = true,
@@ -591,7 +692,7 @@ internal fun SettingsTextField(
         modifier = modifier
             .then(focusReporter)
             .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
-            .alpha(if (enabled) 1f else DISABLED_ALPHA)
+            .settingsDimmed(enabled)
             .height(DROPDOWN_FIELD_HEIGHT)
             .background(tc.bg, CORNER_SM)
             .border(1.dp, if (invalid) DANGER_RED else tc.br, CORNER_SM),
@@ -606,7 +707,7 @@ internal fun SettingsTextField(
                     }
                     inner()
                 }
-                if (onClear != null && value.isNotEmpty() && enabled) {
+                if (onClear != null && value.isNotEmpty() && settingsEnabled(enabled)) {
                     SquareIconButton("×", fontSize = 12.sp, onClick = onClear, modifier = Modifier.padding(start = 4.dp), size = 18.dp)
                 }
             }
@@ -653,7 +754,7 @@ internal fun SettingsNumberField(
                 color = tc.ts,
                 fontSize = 11.sp,
                 maxLines = 1,
-                modifier = Modifier.alpha(if (enabled) 1f else DISABLED_ALPHA).then(if (unitWidth != null) Modifier.width(unitWidth) else Modifier),
+                modifier = Modifier.settingsDimmed(enabled).then(if (unitWidth != null) Modifier.width(unitWidth) else Modifier),
             )
         }
     }
@@ -743,8 +844,7 @@ internal fun SettingsNoteRow(text: String, error: Boolean = false, modifier: Mod
             text,
             color = if (error) DANGER_RED else tc.ts,
             fontSize = 11.sp,
-            maxLines = 4,
-            overflow = TextOverflow.Ellipsis,
+            maxLines = Int.MAX_VALUE,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
         )
     }
@@ -766,3 +866,174 @@ internal fun SettingsBadge(text: String, modifier: Modifier = Modifier, dot: Boo
         AppText(text, color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
+
+/**
+ * A [SegmentedControl] at the Settings control height ([SETTINGS_CONTROL_HEIGHT], a 1dp outline): 2 to 4 short choices. The chosen
+ * segment is the accent wash with accent text; a disabled control (or one in a dimmed row) keeps its colours, takes no input and is dimmed
+ * once. [segmentModifier] and [segmentLeading] put a test tag or a small picture on one segment.
+ */
+@Composable
+internal fun SettingsSegmented(
+    options: List<String>,
+    selectedIndices: Set<Int>,
+    onToggle: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    fillWidth: Boolean = false,
+    selectedColors: List<Color>? = null,
+    weightByLabel: Boolean = false,
+    segmentModifier: (index: Int) -> Modifier = { Modifier },
+    segmentLeading: (@Composable (index: Int, color: Color) -> Unit)? = null,
+    segmentHorizontalPadding: Dp = 10.dp,
+) {
+    SegmentedControl(
+        options = options,
+        selectedIndices = selectedIndices,
+        onToggle = onToggle,
+        modifier = modifier.settingsDimmed(enabled),
+        selectedColors = selectedColors,
+        fillWidth = fillWidth,
+        enabled = settingsEnabled(enabled),
+        segmentHeight = SETTINGS_CONTROL_HEIGHT,
+        weightByLabel = weightByLabel,
+        borderWidth = SETTINGS_CONTROL_BORDER,
+        recolourWhenDisabled = false,
+        segmentModifier = segmentModifier,
+        segmentLeading = segmentLeading,
+        segmentHorizontalPadding = segmentHorizontalPadding,
+    )
+}
+
+/** A [ListStepper] at the Settings control height, with a 1dp outline. */
+@Composable
+internal fun SettingsStepper(
+    options: List<Int>,
+    value: Int,
+    onChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    format: (Int) -> String = Int::toString,
+    enabled: Boolean = true,
+) {
+    ListStepper(
+        options = options,
+        value = value,
+        onChange = onChange,
+        modifier = modifier.settingsDimmed(enabled),
+        format = format,
+        height = SETTINGS_CONTROL_HEIGHT,
+        borderWidth = SETTINGS_CONTROL_BORDER,
+        enabled = settingsEnabled(enabled),
+    )
+}
+
+/**
+ * A button in a settings row, at the Settings control height. Secondary for a row action, [ButtonVariant.Primary] only for the commit of
+ * an explicit-save form, [isDanger] for a destructive action (its label then ends in "…" when it confirms). Disabled (or in a dimmed row)
+ * it is dimmed once and takes no input.
+ */
+@Composable
+internal fun SettingsButton(
+    label: String,
+    onClick: () -> Unit,
+    variant: ButtonVariant = ButtonVariant.Secondary,
+    isDanger: Boolean = false,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    leadingIcon: ImageVector? = null,
+    tooltip: String? = null,
+    horizontalPadding: Dp = 10.dp,
+) {
+    val tc = tc()
+    val active = settingsEnabled(enabled)
+    val sized = modifier.height(SETTINGS_CONTROL_HEIGHT).settingsDimmed(enabled)
+    if (active) {
+        AppButton(label, onClick, variant, isDanger, modifier = sized, leadingIcon = leadingIcon, horizontalPadding = horizontalPadding, tooltip = tooltip)
+    } else if (variant == ButtonVariant.Primary) {
+        // A disabled primary keeps its fill (AppButton draws none for a disabled one), so it only goes dim and inert.
+        AppButton(label, {}, variant, isDanger, modifier = sized.semantics { disabled() }, leadingIcon = leadingIcon, horizontalPadding = horizontalPadding)
+    } else {
+        val textColor = when {
+            isDanger -> DANGER_RED
+            variant == ButtonVariant.Ghost -> tc.ts
+            else -> tc.tx
+        }
+        AppButton(
+            label,
+            onClick,
+            variant,
+            isDanger,
+            enabled = false,
+            modifier = sized,
+            leadingIcon = leadingIcon,
+            horizontalPadding = horizontalPadding,
+            textColor = textColor,
+        )
+    }
+}
+
+/**
+ * The one checkbox of the Settings pages, for picking several items from a set or for a consent. It carries no inset of its own, so it
+ * sits on the text edge of the row it is in: 16dp box, accent fill with a check when on. One toggleable node; [enabled] = false dims it
+ * once and ignores clicks. [anchor] makes it a search target.
+ */
+@Composable
+internal fun SettingsCheckbox(
+    checked: Boolean,
+    label: String,
+    onChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
+    testTag: String? = null,
+    modifier: Modifier = Modifier,
+    anchor: String? = null,
+    maxLines: Int = 1,
+    monospace: Boolean = false,
+    labelColor: Color? = null,
+    fontSize: TextUnit = 12.sp,
+) {
+    val tc = tc()
+    DisableSelection {
+        Row(
+            modifier
+                .then(if (anchor != null) Modifier.settingsAnchor(anchor) else Modifier)
+                .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+                .settingsDimmed(enabled)
+                .toggleable(value = checked, enabled = settingsEnabled(enabled), role = Role.Checkbox, onValueChange = onChange)
+                .padding(vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                Modifier.size(CHECKBOX_SIZE)
+                    .background(if (checked) tc.ac else Color.Transparent, CHECKBOX_SHAPE)
+                    .border(1.5.dp, if (checked) tc.ac else tc.td, CHECKBOX_SHAPE),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (checked) Icon(Icons.Outlined.Check, contentDescription = null, tint = tc.onAc, modifier = Modifier.size(12.dp))
+            }
+            AppText(
+                label,
+                color = labelColor ?: tc.tx,
+                fontSize = fontSize,
+                fontFamily = if (monospace) MONO else LocalUiFontFamily.current,
+                maxLines = maxLines,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private const val PICKER_SELECTED_BORDER_DP = 1.5f
+
+/**
+ * The surface of a picture picker's card (a theme, a tab style, a pack, a profile): the accent wash with a 1.5dp accent border when
+ * [selected], else the page fill with a 1dp outline. [hovered] adds only the hover tint, never an accent border. Draw its caption in
+ * [settingsPickerCaptionColor]. [colors] are the ones to draw with (a pack card draws in its own palette).
+ */
+internal fun Modifier.settingsPickerSurface(selected: Boolean, hovered: Boolean, shape: Shape, colors: ThemeColors): Modifier =
+    this.clip(shape)
+        .background(if (selected) colors.abg else colors.bg, shape)
+        .background(if (hovered) colors.hv else Color.Transparent, shape)
+        .border(if (selected) PICKER_SELECTED_BORDER_DP.dp else 1.dp, if (selected) colors.ac else colors.br, shape)
+
+/** The caption colour of a picture picker's card: accent when [selected], else secondary. */
+internal fun settingsPickerCaptionColor(selected: Boolean, colors: ThemeColors): Color = if (selected) colors.ac else colors.ts

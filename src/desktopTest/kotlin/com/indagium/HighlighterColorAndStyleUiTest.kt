@@ -486,7 +486,7 @@ class HighlighterColorAndStyleUiTest {
         var newColor by mutableStateOf(Color(0xFFfacc15))
         var filter by mutableStateOf(Filter())
         var added: Highlighter? = null
-        val pickedFont = FontCatalog.families.firstOrNull()
+        val pickedFont = FontCatalog.families.firstOrNull { !it.startsWith(".") }
         val actions = HighlighterActions(
             onAdd = { pattern, regex, color, whole, target, tag, background, foreground, family, bold, italic ->
                 val created = Highlighter(
@@ -685,7 +685,8 @@ class HighlighterColorAndStyleUiTest {
 
     @Test
     fun appearanceFontSelectorsUpdateIndependentSettingsAndMissingNamesFallBack() {
-        val families = FontCatalog.families
+        // Hidden system families (".AppleSystemUIFont") are not offered by the picker.
+        val families = FontCatalog.families.filter { !it.startsWith(".") }
         assertTrue(families.isNotEmpty())
         val first = families.first()
         val second = families.last()

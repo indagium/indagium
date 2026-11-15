@@ -8,7 +8,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
@@ -140,7 +143,7 @@ class SeasonalThemesSettingsUiTest {
         assertNotNull(resolveHolidayLook(state.settings, LocalDate.of(2026, 10, 31)))
         choose(SEASONAL_MODE_TAG, "Always")
         assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
-        rule.onNodeWithText("Pumpkin patch: Oct 24 – Nov 1").assertExists()
+        rule.onNodeWithText("Pumpkin patch: Oct 24 – Nov 1.").assertExists()
     }
 
     @Test
@@ -151,21 +154,42 @@ class SeasonalThemesSettingsUiTest {
             assertTrue(!present(SEASONAL_STATUS_TAG), "inside the window nothing is waiting")
         } else {
             rule.onNodeWithTag(SEASONAL_STATUS_TAG).assertExists()
-            rule.onNodeWithText("Pumpkin patch turns on Oct 24; until then your theme is Dracula").assertExists()
+            rule.onNodeWithText("Pumpkin patch turns on Oct 24; until then your theme is Dracula.").assertExists()
         }
     }
 
     @Test
-    fun turnOffSeasonalThemeSwitchesItOffAndOnlyThenShows() {
+    fun offIsTheFirstWhenSegmentAndSwitchesTheSeasonalThemeOffKeepingThePack() {
         setup()
         openSeasonalTab()
-        assertTrue(!present(SEASONAL_OFF_TAG), "nothing to turn off")
+        // With nothing on, Off is the chosen segment (selected, not merely dimmed).
+        rule.onNode(hasText("Off") and hasAnyAncestor(hasTestTag(SEASONAL_MODE_TAG))).assertIsSelected()
         rule.onNodeWithTag(seasonalPackTag(HolidayPack.PUMPKIN_PATCH)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithTag(SEASONAL_OFF_TAG).performClick()
-        rule.waitForIdle()
+        rule.onNode(hasText("Off") and hasAnyAncestor(hasTestTag(SEASONAL_MODE_TAG))).assertIsNotSelected()
+        rule.onNode(hasText("Always") and hasAnyAncestor(hasTestTag(SEASONAL_MODE_TAG))).assertIsSelected()
+        choose(SEASONAL_MODE_TAG, "Off")
         assertEquals(HolidayMode.OFF, state.settings.holiday.mode)
-        assertTrue(!present(SEASONAL_OFF_TAG))
+        assertEquals(HolidayPack.PUMPKIN_PATCH, state.settings.holiday.pack, "Off keeps the pack for next time")
+        rule.onNode(hasText("Off") and hasAnyAncestor(hasTestTag(SEASONAL_MODE_TAG))).assertIsSelected()
+    }
+
+    @Test
+    fun theWhenSegmentsAreOffAlwaysAndTheDatesAndAnAnyTimePackHasNoDatesOption() {
+        setup()
+        openSeasonalTab()
+
+        fun inMode(label: String) = rule.onAllNodes(hasText(label) and hasAnyAncestor(hasTestTag(SEASONAL_MODE_TAG))).fetchSemanticsNodes().size
+        assertEquals(1, inMode("Off"))
+        assertEquals(1, inMode("Always"))
+        assertEquals(1, inMode("Only during its dates"))
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.COFFEE_BEAR)).performClick()
+        rule.waitForIdle()
+        assertEquals(1, inMode("Off"))
+        assertEquals(1, inMode("Always"))
+        assertEquals(0, inMode("Only during its dates"), "an any-time pack has no dates to follow")
+        rule.onNodeWithText("Coffee bear is on all year while chosen.").assertExists()
+        assertTrue(rule.onAllNodes(hasText("Jan 1 – Dec 31", substring = true)).fetchSemanticsNodes().isEmpty(), "no dates for an any-time pack")
     }
 
     @Test
@@ -187,7 +211,7 @@ class SeasonalThemesSettingsUiTest {
         setup()
         openSeasonalTab()
         assertTrue(state.settings.holiday.ownTabStylePacks.isEmpty())
-        rule.onNodeWithText("My tab style keeps your Tab style (Settings › Appearance) in the pack's colours.").assertExists()
+        rule.onNodeWithText("My tab style keeps your Tab style (Settings › Tabs & toolbar) in the pack's colours.").assertExists()
         choose(SEASONAL_TABS_TAG, "My tab style")
         assertEquals(setOf(HolidayPack.PUMPKIN_PATCH), state.settings.holiday.ownTabStylePacks)
         choose(SEASONAL_TABS_TAG, "Theme's tabs")
@@ -207,14 +231,29 @@ class SeasonalThemesSettingsUiTest {
     }
 
     @Test
-    fun theCheckboxesFlipTheirFieldsAndTheDimmedRowsStayEditable() {
+    fun theTwoSwitchesFlipTheirFieldsAndTheRowsStayEditableWithNoSpecialThemeOn() {
         setup()
         openSeasonalTab()
-        // No special theme is on, so the rows look dimmed, but they still take clicks.
-        rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).performClick()
+        // No special theme is on and nothing is dimmed: the rows take clicks, so a choice can be made before switching it on.
+        rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).assertIsOn().assertIsEnabled().performClick()
         assertTrue(!state.settings.holiday.funIcons)
-        rule.onNodeWithTag(SEASONAL_PAUSE_TAG).performClick()
+        rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).assertIsOff()
+        rule.onNodeWithTag(SEASONAL_PAUSE_TAG).assertIsEnabled().performClick()
         assertTrue(!state.settings.holiday.pauseWhileBusy)
+        assertEquals(HolidayMode.OFF, state.settings.holiday.mode)
+    }
+
+    @Test
+    fun theRowsAreSettingsRowsWithTheirHintsAsWrappingDescriptions() {
+        setup()
+        openSeasonalTab()
+        listOf(
+            SEASONAL_ANCHOR_PACK, SEASONAL_ANCHOR_WHEN, SEASONAL_ANCHOR_LIGHTNESS, SEASONAL_ANCHOR_EFFECTS, SEASONAL_ANCHOR_TABS,
+            SEASONAL_ANCHOR_FUN_ICONS, SEASONAL_ANCHOR_PAUSE,
+        ).forEach { rule.onNodeWithText(it).assertExists() }
+        // The Effects hint is a whole sentence, not clipped mid-word.
+        rule.onNodeWithText(holidayEffectsHint(PumpkinPatchTheme)).assertExists()
+        rule.onNodeWithText("Log levels, sequences and highlighters keep their colours in every pack.").assertExists()
     }
 
     @Test

@@ -186,7 +186,7 @@ internal fun SettingsSearchField(
             },
         )
         if (query.isEmpty()) {
-            AppText(if (isMacOs) "⌘F" else "Ctrl F", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(if (isMacOs) "⌘F" else "Ctrl+F", color = tc.td, fontSize = 10.sp, fontFamily = UI)
         } else {
             SquareIconButton(
                 "×", fontSize = 12.sp,

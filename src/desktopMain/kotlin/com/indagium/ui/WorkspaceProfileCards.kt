@@ -1,19 +1,16 @@
-@file:OptIn(
-    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
-    androidx.compose.ui.ExperimentalComposeUiApi::class,
-)
-
 package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,12 +20,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,10 +32,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -58,10 +52,16 @@ import com.indagium.model.ProfileSpec
 
 private val WIREFRAME_HEIGHT = 68.dp
 
-/** The "⋯" shortcut on a custom profile's card: always drawn (never hover-only), with a 22dp target. */
-private val CARD_MENU_TARGET = 22.dp
+/** The "⋯" menu on a custom profile's card: always drawn (never hover-only), on the caption line, an 18dp target. */
+private val CARD_MENU_TARGET = 18.dp
 
-/** One selectable card: a [preview] area, the [title] and a one-line-ish [description]. */
+/** Below this width the profile cards go four to a row instead of five, so a name keeps room for two lines. */
+private val FIVE_CARD_COLUMNS_MIN_WIDTH = 600.dp
+
+/**
+ * One selectable card: a [preview] area, the [title] and a short [description]. A picture picker, so it follows the one selected-state
+ * rule ([settingsPickerSurface]): accent border, wash and caption while chosen, the hover tint only otherwise.
+ */
 @Composable
 internal fun WorkspaceProfileCard(
     title: String,
@@ -69,48 +69,33 @@ internal fun WorkspaceProfileCard(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    // A "⋯" menu at the preview's top-left (custom profiles: rename, update, export, delete).
+    // A "⋯" menu on the caption line (custom profiles: rename, update, export, delete).
     menuActions: List<ProfileMenuAction> = emptyList(),
     onMenuClosed: () -> Unit = {},
     preview: @Composable BoxScope.() -> Unit,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
-    var hovered by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
     Column(
         modifier
-            .clip(shape)
-            .background(if (hovered && !selected) tc.hv else tc.p2)
-            .border(if (selected) 2.dp else 1.dp, if (selected) tc.ac else tc.br, shape)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick,
-            )
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .settingsPickerSurface(selected, hovered, shape, tc)
+            .hoverable(interaction)
+            .semantics { this.selected = selected }
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(Modifier.fillMaxWidth().height(WIREFRAME_HEIGHT)) {
-            preview()
-            if (menuActions.isNotEmpty()) {
-                ProfileCardMenu(menuActions, onMenuClosed, Modifier.align(Alignment.TopStart).padding(3.dp))
-            }
-            if (selected) {
-                Box(
-                    Modifier.align(Alignment.TopEnd).padding(3.dp).size(14.dp).background(tc.ac, CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Outlined.Check, contentDescription = "Selected", tint = tc.bg, modifier = Modifier.size(10.dp))
-                }
-            }
+        Box(Modifier.fillMaxWidth().height(WIREFRAME_HEIGHT)) { preview() }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText(
+                title, color = settingsPickerCaptionColor(selected, tc), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+            )
+            if (menuActions.isNotEmpty()) ProfileCardMenu(menuActions, onMenuClosed)
         }
-        AppText(
-            title, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-        AppText(description, color = tc.td, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        AppText(description, color = tc.ts, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -122,18 +107,24 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Un
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val density = LocalDensity.current
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
     Box(modifier) {
         Box(
-            Modifier.size(CARD_MENU_TARGET).background(tc.p, CircleShape).border(1.dp, tc.br, CircleShape)
-                .clip(CircleShape).clickable { open = !open }
+            Modifier.size(CARD_MENU_TARGET)
+                .clip(CORNER_SM)
+                .background(if (hovered || open) tc.hv else Color.Transparent, CORNER_SM)
+                .hoverable(interaction)
+                .clickable(interactionSource = interaction, indication = null) { open = !open }
+                .semantics { contentDescription = "More profile actions" }
                 .testTag("profile-card-menu"),
             contentAlignment = Alignment.Center,
         ) {
-            AppText("⋯", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            AppText("⋯", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
         if (open) {
             Popup(
-                alignment = Alignment.TopStart,
+                alignment = Alignment.TopEnd,
                 offset = IntOffset(0, with(density) { (CARD_MENU_TARGET + 4.dp).roundToPx() }),
                 onDismissRequest = {
                     open = false
@@ -165,38 +156,6 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Un
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/**
- * The strip under the cards for the selected custom profile: its name and the same actions as the card's "⋯" menu, always in view
- * ("Rename…", "Update from current setup", "Export…", "Delete…"). Wraps onto more lines in a narrow window.
- */
-@Composable
-internal fun ProfileActionStrip(name: String, actions: List<ProfileMenuAction>, modifier: Modifier = Modifier) {
-    val tc = tc()
-    FlowRow(
-        modifier.fillMaxWidth().testTag("profile-strip"),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-        itemVerticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText(
-            name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = UI,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = 8.dp).widthIn(max = 220.dp).testTag("profile-strip-name"),
-        )
-        actions.forEach { action ->
-            val tag = "profile-strip-action-" + action.label.removeSuffix("…").lowercase().replace(' ', '-')
-            HoverBox(modifier = Modifier.clip(RoundedCornerShape(4.dp)).testTag(tag), onClick = action.onClick) {
-                AppText(
-                    action.label,
-                    color = if (action.danger) DANGER_RED else tc.ac,
-                    fontSize = 11.sp,
-                    fontFamily = UI,
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                )
             }
         }
     }
@@ -242,7 +201,7 @@ internal fun ResolvedProfileCard(
     ) { ProfileWireframe(profile.spec, panels) }
 }
 
-/** The built-in profiles followed by the custom ones, five per row. [menuFor] gives a custom card its "⋯" menu. */
+/** The built-in profiles followed by the custom ones, five per row (four in a narrow window). [menuFor] gives a custom card its "⋯" menu. */
 @Composable
 internal fun WorkspaceProfileCards(
     profiles: List<ResolvedProfile>,
@@ -253,24 +212,25 @@ internal fun WorkspaceProfileCards(
     modifier: Modifier = Modifier,
     onMenuClosed: () -> Unit = {},
 ) {
-    WorkspaceCardGrid(
-        cards = profiles.map { profile ->
-            { cardModifier: Modifier ->
-                ResolvedProfileCard(
-                    profile = profile,
-                    panels = panelsFor(profile),
-                    selected = profile.id == selectedId,
-                    onClick = { onSelect(profile) },
-                    modifier = cardModifier,
-                    menuActions = if (profile.custom) menuFor(profile) else emptyList(),
-                    onMenuClosed = onMenuClosed,
-                )
-            }
-        },
-        columns = 5,
-        spacing = 8.dp,
-        modifier = modifier,
-    )
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        WorkspaceCardGrid(
+            cards = profiles.map { profile ->
+                { cardModifier: Modifier ->
+                    ResolvedProfileCard(
+                        profile = profile,
+                        panels = panelsFor(profile),
+                        selected = profile.id == selectedId,
+                        onClick = { onSelect(profile) },
+                        modifier = cardModifier,
+                        menuActions = if (profile.custom) menuFor(profile) else emptyList(),
+                        onMenuClosed = onMenuClosed,
+                    )
+                }
+            },
+            columns = if (maxWidth < FIVE_CARD_COLUMNS_MIN_WIDTH) 4 else 5,
+            spacing = 8.dp,
+        )
+    }
 }
 
 /** A miniature window drawn in the profile's own theme: sidebar, inline filter bar, notes/video column (from [panels], i.e. from the

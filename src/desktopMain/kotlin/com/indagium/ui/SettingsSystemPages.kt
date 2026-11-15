@@ -136,7 +136,7 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.SNAPSHOTS -> SaveFolderRow(
             label = "Snapshots folder",
-            tooltip = "Destination for \"Save snapshot\" while a capture is recording.",
+            tooltip = "Destination for “Save snapshot” while a capture is recording.",
             explicitValue = state.settings.captureSnapshotsDir,
             effectivePath = state.effectiveCaptureSnapshotsDir().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS) },
@@ -145,7 +145,7 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.ZIP -> SaveFolderRow(
             label = "Saved captures folder (Save ZIP)",
-            tooltip = "Destination for \"Save ZIP\" on a stopped or retained capture.",
+            tooltip = "Destination for “Save ZIP” on a stopped or retained capture.",
             explicitValue = state.settings.captureZipDir,
             effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
@@ -225,8 +225,8 @@ internal fun SaveFolderRow(
     val displayText = truncatePathForDisplay(effectivePath).let { if (explicitValue != null) it else "$it  (default)" }
     val buttons: @Composable () -> Unit = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            AppButton("Browse", onClick = onBrowse, enabled = enabled)
-            if (explicitValue != null) AppButton("Reset", onClick = onReset, enabled = enabled)
+            SettingsButton("Browse", onClick = onBrowse, enabled = enabled)
+            if (explicitValue != null) SettingsButton("Reset", onClick = onReset, enabled = enabled)
         }
     }
     val buttonsWithHint: @Composable () -> Unit = {
@@ -328,7 +328,7 @@ private fun DiskUseGroup(state: AppState) {
                     fontFamily = MONO,
                     modifier = Modifier.testTag(SystemPageTags.TEMP_SIZE),
                 )
-                AppButton(
+                SettingsButton(
                     "Clear temporary data",
                     onClick = { state.requestClearCache() },
                     variant = ButtonVariant.Secondary,
@@ -356,7 +356,7 @@ private fun DiskUseGroup(state: AppState) {
             "Deletes everything in app data, after you confirm. Indagium then exits and starts again with its defaults.",
             danger = true,
         ) {
-            AppButton(
+            SettingsButton(
                 "Reset app data…",
                 onClick = { state.requestResetAppData() },
                 variant = ButtonVariant.Secondary,
@@ -526,7 +526,7 @@ private fun McpConnectionRow(state: AppState, port: Int) {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                AppButton(
+                SettingsButton(
                     "Copy config for Claude Code",
                     onClick = {
                         state.copyToClipboard(mcpConfigSnippet(port, state.connectionInfoToken()))
@@ -535,7 +535,7 @@ private fun McpConnectionRow(state: AppState, port: Int) {
                     modifier = Modifier.testTag(SystemPageTags.MCP_COPY_CLAUDE),
                 )
                 copiedMark(McpCopied.Claude)
-                AppButton(
+                SettingsButton(
                     "Copy config for Codex",
                     onClick = {
                         state.copyToClipboard(codexMcpConfigSnippet(port, state.connectionInfoToken()))
@@ -546,7 +546,7 @@ private fun McpConnectionRow(state: AppState, port: Int) {
                 copiedMark(McpCopied.Codex)
                 // Deliberately doesn't close Settings first: stacks on top instead, so closing the dialog returns you to Settings
                 // rather than to the main window.
-                AppButton(
+                SettingsButton(
                     "Connection info…",
                     onClick = { state.mcpInfoOpen = true },
                     variant = ButtonVariant.Secondary,
@@ -576,8 +576,8 @@ private fun DiagnosticsGroup(state: AppState, reclaimFocus: () -> Unit) {
         val logFileRow: @Composable () -> Unit = {
             SettingsRow("Debug log file", fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AppButton("Browse", onClick = { state.pickDebugLogFile() }, modifier = Modifier.testTag(SystemPageTags.DEBUG_BROWSE))
-                    AppButton(
+                    SettingsButton("Browse", onClick = { state.pickDebugLogFile() }, modifier = Modifier.testTag(SystemPageTags.DEBUG_BROWSE))
+                    SettingsButton(
                         "Open current log",
                         onClick = { state.openCurrentDebugLog() },
                         variant = ButtonVariant.Secondary,
@@ -599,7 +599,7 @@ private fun DiagnosticsGroup(state: AppState, reclaimFocus: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AppText("Diagnostic logging unavailable: $message", color = DANGER_RED, fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
-                AppButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
+                SettingsButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
             }
         }
     }
@@ -632,7 +632,7 @@ internal fun AboutSettingsSection(state: AppState) {
             status?.let { (text, isError) ->
                 AppText(text, color = if (isError) DANGER_RED else tc.ts, fontSize = 11.sp, modifier = Modifier.testTag(SystemPageTags.ABOUT_UPDATE_STATUS))
             }
-            AppButton(
+            SettingsButton(
                 "Check for updates",
                 onClick = { state.checkForUpdates(manual = true) },
                 variant = ButtonVariant.Secondary,
@@ -677,7 +677,7 @@ private fun EditionGroup(state: AppState) {
             SettingsRow("Development switch", "Changes the edition for this run only.") {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Edition.entries.forEach { candidate ->
-                        AppButton(
+                        SettingsButton(
                             candidate.label,
                             onClick = { state.editionService.setForDev(candidate) },
                             variant = if (candidate == edition) ButtonVariant.Primary else ButtonVariant.Secondary,

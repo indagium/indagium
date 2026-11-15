@@ -115,7 +115,7 @@ internal fun IssueCategoriesSettingsSection(state: AppState, reclaimFocus: () ->
                                     reclaimFocus = reclaimFocus,
                                     testTag = "${SourcePageTags.CATEGORY_SWITCH_PREFIX}$index",
                                 )
-                                AppButton(
+                                SettingsButton(
                                     "Remove",
                                     onClick = { drafts = drafts.filterIndexed { i, _ -> i != index } },
                                     variant = ButtonVariant.Secondary,
@@ -127,20 +127,20 @@ internal fun IssueCategoriesSettingsSection(state: AppState, reclaimFocus: () ->
                 }
                 validation?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppButton(
+                    SettingsButton(
                         "Add category",
                         onClick = { drafts = drafts + CustomIssueRule(UUID.randomUUID().toString(), "", "") },
                         variant = ButtonVariant.Secondary,
                         modifier = Modifier.testTag(SourcePageTags.ADD_CATEGORY),
                     )
-                    AppButton(
+                    SettingsButton(
                         "Save changes",
                         onClick = { state.updateSettings { it.copy(customIssueRules = drafts.map { rule -> rule.copy(name = rule.name.trim()) }) } },
                         enabled = dirty && validation == null,
                         modifier = Modifier.testTag(SourcePageTags.SAVE_CATEGORIES),
                     )
                     if (dirty) {
-                        AppButton("Discard", onClick = { drafts = state.settings.customIssueRules }, variant = ButtonVariant.Secondary)
+                        SettingsButton("Discard", onClick = { drafts = state.settings.customIssueRules }, variant = ButtonVariant.Secondary)
                     }
                 }
             }
@@ -165,10 +165,10 @@ internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit
         Column(Modifier.fillMaxWidth()) {
             SettingsRow(
                 "Registered folders",
-                "Point Indagium at your project's source folder(s), then right-click a log line → \"Show in code\" to see the code that logged it.",
+                "Point Indagium at your project's source folders, then right-click a log line → “Show in code” to see the code that logged it.",
                 anchor = "Register source code",
             ) {
-                AppButton("Register source code", onClick = { state.pickSourceFolder() }, modifier = Modifier.testTag(SourcePageTags.REGISTER_SOURCE))
+                SettingsButton("Register source code", onClick = { state.pickSourceFolder() }, modifier = Modifier.testTag(SourcePageTags.REGISTER_SOURCE))
             }
             Box(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
                 if (state.settings.sourceFolders.isEmpty()) {
@@ -185,12 +185,12 @@ internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit
         Column(Modifier.fillMaxWidth()) {
             SettingsRow(
                 "Open command",
-                "The editor \"Show in code\" opens a file in at the logged line. Automatic uses the first installed app; Custom command… takes " +
+                "The editor “Show in code” opens a file at the logged line. Automatic uses the first installed app; Custom command… takes " +
                     "a raw command with {file} and {line}. There is no fallback to the system's default app, which cannot jump to the line.",
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.width(EDITOR_DROPDOWN_WIDTH)) { EditorChoiceDropdown(state, reclaimFocus) }
-                    AppButton(
+                    SettingsButton(
                         "Rescan",
                         onClick = { state.rescanEditors() },
                         variant = ButtonVariant.Secondary,
@@ -306,7 +306,7 @@ private fun SourceLoggingConfigurations(state: AppState) {
 
     Column(Modifier.fillMaxWidth()) {
         SettingsRow("Logging configurations", "Assign module-specific wrapper rules to registered source folders.") {
-            AppButton(
+            SettingsButton(
                 "Add configuration",
                 onClick = {
                     val id = UUID.randomUUID().toString()
@@ -346,8 +346,8 @@ private fun SourceLoggingConfigurations(state: AppState) {
                                 fontSize = 10.sp,
                             )
                         }
-                        AppButton("Edit", onClick = { editingId = configuration.id; editingIsNew = false })
-                        AppButton(
+                        SettingsButton("Edit", onClick = { editingId = configuration.id; editingIsNew = false })
+                        SettingsButton(
                             "Duplicate",
                             onClick = {
                                 val id = UUID.randomUUID().toString()
@@ -356,7 +356,7 @@ private fun SourceLoggingConfigurations(state: AppState) {
                                 editingIsNew = true
                             },
                         )
-                        AppButton(
+                        SettingsButton(
                             "Delete",
                             onClick = {
                                 state.deleteSourceLogConfiguration(configuration.id)
@@ -390,7 +390,7 @@ private fun SourceLoggingConfigurationEditor(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Edit logging configuration", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-            AppButton("Cancel", onClick = onClose)
+            SettingsButton("Cancel", onClick = onClose)
         }
         SettingsTextField(
             draft.name,
@@ -404,21 +404,23 @@ private fun SourceLoggingConfigurationEditor(
         } else {
             state.settings.sourceFolders.forEach { folder ->
                 val path = File(folder).absolutePath
-                CheckRow(
+                SettingsCheckbox(
                     checked = configuration.id in assignedFolders[path].orEmpty(),
-                    onToggle = {
+                    label = truncatePathForDisplay(folder),
+                    onChange = {
                         val current = assignedFolders[path].orEmpty().toSet()
                         val next = if (configuration.id in current) current - configuration.id else current + configuration.id
                         state.assignSourceLogConfigurations(path, next.toList())
                     },
-                ) {
-                    AppText(truncatePathForDisplay(folder), color = tc.ts, fontSize = 10.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
-                }
+                    monospace = true,
+                    labelColor = tc.ts,
+                    fontSize = 10.sp,
+                )
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Wrapper rules", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-            AppButton(
+            SettingsButton(
                 "Add rule",
                 onClick = { draft = draft.copy(wrapperRules = draft.wrapperRules + SourceWrapperRule("", "")) },
             )
@@ -438,7 +440,7 @@ private fun SourceLoggingConfigurationEditor(
                         Modifier.width(100.dp),
                         placeholder = "Method",
                     )
-                    AppButton(
+                    SettingsButton(
                         "Remove",
                         onClick = { draft = draft.copy(wrapperRules = draft.wrapperRules.filterIndexed { ruleIndex, _ -> ruleIndex != index }) },
                         isDanger = true,
@@ -467,7 +469,7 @@ private fun SourceLoggingConfigurationEditor(
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            AppButton(
+            SettingsButton(
                 "Save configuration",
                 onClick = { state.saveSourceLogConfiguration(draft); onSaved() },
                 variant = ButtonVariant.Primary,
@@ -512,26 +514,26 @@ private fun SourceFolderRow(state: AppState, path: String) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            AppButton(
+            SettingsButton(
                 "Reindex",
                 onClick = { state.reindexSources(path) },
                 variant = ButtonVariant.Secondary,
                 enabled = File(path).absolutePath !in state.indexingFolders,
             )
             if (File(path).absolutePath in state.indexingFolders) {
-                AppButton(
+                SettingsButton(
                     "Cancel",
                     onClick = { state.cancelReindexSources(path) },
                     variant = ButtonVariant.Secondary,
                     enabled = File(path).absolutePath !in state.cancelledIndexingFolders,
                 )
             }
-            AppButton(
+            SettingsButton(
                 "Info",
                 onClick = { state.sourceFolderInfoEditorTarget = path },
                 variant = ButtonVariant.Secondary,
             )
-            AppButton("Remove", onClick = { state.removeSourceFolder(path) }, variant = ButtonVariant.Secondary)
+            SettingsButton("Remove", onClick = { state.removeSourceFolder(path) }, variant = ButtonVariant.Secondary)
         }
         val folderStatus = state.sourceIndexStatusForFolder(path)
         AppText(

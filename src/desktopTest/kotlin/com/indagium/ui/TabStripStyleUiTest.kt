@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
@@ -719,11 +720,11 @@ class TabStripStyleUiTest {
         assertTrue(state.settings.tabShowTypeBadge)
         rule.onNodeWithTag("tab-style-TYPED").performClick()
         rule.waitForIdle()
-        // TYPED always shows the badge: the checkbox is locked, so a click leaves the stored value alone.
+        // TYPED always shows the badge: the switch is locked (its row dimmed), so a click leaves the stored value alone.
         rule.onNodeWithTag("tab-detail-file-type-badge", useUnmergedTree = true).performClick()
         rule.waitForIdle()
         assertTrue(state.settings.tabShowTypeBadge)
-        rule.onNodeWithText("Fit label").performClick()
+        rule.onNodeWithText("Fit the label").performClick()
         rule.waitForIdle()
         assertEquals(TabSizeMode.FIT, state.settings.tabSizeMode)
         rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).performClick()
@@ -745,10 +746,10 @@ class TabStripStyleUiTest {
     }
 
     @Test
-    fun theShowOnTabsChecksShareOneLineWhenWideAndWrapWhenNarrow() {
+    fun theTabDetailsAreThreeSwitchRowsThatStayInTheirCardsAtEveryWidth() {
         state = newState()
         val tags = listOf("tab-detail-file-type-badge", "tab-detail-source-colour-stripe", "tab-detail-close-button-on-every-tab")
-        listOf(1100, 700).forEach { width ->
+        listOf(1100, 700, 480).forEach { width ->
             rule.setContent {
                 CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
                     Column(Modifier.width(width.dp)) { TabsAppearanceSettings(state) }
@@ -756,18 +757,30 @@ class TabStripStyleUiTest {
             }
             rule.waitForIdle()
             val rects = tags.map { bounds(it, useUnmergedTree = true) }
-            assertTrue(rects.all { it.top == rects.first().top }, "the three checks share a line at $width dp: $rects")
-            assertTrue(rects.zipWithNext().all { (a, b) -> a.right <= b.left }, "the checks do not overlap at $width dp: $rects")
+            // One switch per row: they sit at the right edge of their rows, in the same column, never wrapped beside one another.
+            assertTrue(rects.all { it.right == rects.first().right }, "the three switches share one right edge at $width dp: $rects")
+            assertTrue(rects.all { it.right <= width.dp }, "every switch stays inside the $width dp column: $rects")
+            assertTrue(rects.map { it.top }.distinct().size == 3, "each switch is on a row of its own at $width dp: $rects")
         }
+        // Their labels are the rows' own labels, with the search descriptions under them (no "Show on tabs" line, no inline checkboxes).
+        listOf("File-type badge", "Source colour stripe", "Close button on every tab").forEach { rule.onNodeWithText(it).assertExists() }
+        rule.onNodeWithText("Show on tabs").assertDoesNotExist()
+        rule.onNodeWithText(TAB_BADGE_HINT).assertExists()
+    }
+
+    @Test
+    fun theLockedDetailIsADimmedSwitchRowThatSaysWhyAndKeepsTheStoredValue() {
+        state = newState()
+        state.updateSettings { it.copy(tabStripStyle = TabStripStyle.TYPED, tabShowTypeBadge = false) }
         rule.setContent {
-            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
-                Column(Modifier.width(260.dp)) { TabsAppearanceSettings(state) }
-            }
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Column(Modifier.width(700.dp)) { TabsAppearanceSettings(state) } }
         }
         rule.waitForIdle()
-        val narrow = tags.map { bounds(it, useUnmergedTree = true) }
-        assertTrue(narrow.last().top > narrow.first().top, "the checks wrap onto more than one line at 260 dp: $narrow")
-        assertTrue(narrow.all { it.right <= 260.dp }, "every check stays inside the 260 dp column: $narrow")
+        rule.onNodeWithTag("tab-detail-file-type-badge", useUnmergedTree = true).assertIsOn()
+        rule.onNodeWithText("Always on with this tab style.").assertExists()
+        rule.onNodeWithTag("tab-detail-file-type-badge", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertFalse(state.settings.tabShowTypeBadge, "the stored value is kept")
     }
 
     @Test
@@ -905,7 +918,7 @@ class TabStripStyleUiTest {
                 }
             }
             rule.waitForIdle()
-            val labels = listOf("File (+ folder if same name)", "Folder", "File only", "File — folder")
+            val labels = listOf("File, plus folder if same name", "Folder", "File only", "File — folder")
             assertEquals(labels, TabLabelMode.entries.map(::tabLabelModeLabel))
             val control = rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).getBoundsInRoot()
             assertTrue(control.right <= width.dp, "the control fits a $width dp column: $control")

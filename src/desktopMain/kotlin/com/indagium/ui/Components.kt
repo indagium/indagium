@@ -92,6 +92,7 @@ import kotlinx.coroutines.delay
 import java.awt.KeyboardFocusManager
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.compose.ui.semantics.selected as selectedSemantics
 import java.awt.Cursor as AwtCursor
 
 @Composable fun tc() = LocalTheme.current
@@ -1518,12 +1519,19 @@ fun SegmentedControl(
     // With [fillWidth], sizes each segment in proportion to its label instead of equally, so a
     // control mixing long and short labels spans the full width without truncating the long ones.
     weightByLabel: Boolean = false,
+    // The outline and the dividers between segments; Settings uses 1dp (see SettingsSegmented).
+    borderWidth: Dp = 0.5.dp,
+    // False keeps a disabled control's normal colours (the caller dims the whole control once), instead of recolouring it as well.
+    recolourWhenDisabled: Boolean = true,
+    // Extra modifier of one segment (a test tag, a content description) and a picture drawn before its label, in the label's colour.
+    segmentModifier: (index: Int) -> Modifier = { Modifier },
+    segmentLeading: (@Composable (index: Int, color: Color) -> Unit)? = null,
 ) {
     val tc = tc()
     val controlShape = RoundedCornerShape(6.dp)
     Row(
         modifier = modifier
-            .border(0.5.dp, tc.br, controlShape)
+            .border(borderWidth, tc.br, controlShape)
             .clip(controlShape),
     ) {
         options.forEachIndexed { index, label ->
@@ -1539,38 +1547,48 @@ fun SegmentedControl(
                 index == options.lastIndex -> RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp)
                 else -> RoundedCornerShape(0.dp)
             }
+            val coloured = enabled || !recolourWhenDisabled
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = (if (fillWidth) Modifier.weight(if (weightByLabel) label.length + 4f else 1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(segmentHeight)
                     .clip(segmentShape)
                     .background(
-                        if (selected && enabled) {
+                        if (selected && coloured) {
                             if (selectedSolid) selColor else selColor.copy(.2f)
                         } else {
                             Color.Transparent
                         },
                         segmentShape,
                     )
-                    .clickable(enabled = enabled) { onToggle(index) },
+                    .then(segmentModifier(index))
+                    .clickable(enabled = enabled) { onToggle(index) }
+                    .semantics { this.selectedSemantics = selected },
             ) {
                 DisableSelection {
-                    AppText(
-                        text = label,
-                        color = when {
-                            !enabled -> tc.td.copy(.5f)
-                            selected && selectedSolid -> if (customColor == null) tc.onAc else Color.White
-                            selected -> selColor
-                            else -> tc.ts
-                        },
-                        fontSize = segmentFontSize,
-                        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                    val labelColor = when {
+                        !coloured -> tc.td.copy(.5f)
+                        selected && selectedSolid -> if (customColor == null) tc.onAc else Color.White
+                        selected -> selColor
+                        else -> tc.ts
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(horizontal = segmentHorizontalPadding),
-                    )
+                    ) {
+                        segmentLeading?.invoke(index, labelColor)
+                        AppText(
+                            text = label,
+                            color = labelColor,
+                            fontSize = segmentFontSize,
+                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                        )
+                    }
                 }
             }
             if (index < options.lastIndex) {
-                Box(Modifier.width(0.5.dp).height(segmentHeight).background(tc.br))
+                Box(Modifier.width(borderWidth).height(segmentHeight).background(tc.br))
             }
         }
     }
@@ -1718,39 +1736,51 @@ internal fun ListStepper(
     modifier: Modifier = Modifier,
     /** How the shown value reads, e.g. "12 px"; the bare number by default. */
     format: (Int) -> String = Int::toString,
+    /** The control's height; Settings passes its 26dp control height. */
+    height: Dp = 28.dp,
+    /** The outline and the dividers; Settings uses 1dp. */
+    borderWidth: Dp = 0.5.dp,
+    /** False takes no input and draws as normal; the caller dims it (Settings dims once, see SettingsStepper). */
+    enabled: Boolean = true,
 ) {
     val tc = tc()
     val index = options.indexOf(value).coerceAtLeast(0)
     Row(
         modifier
-            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
+            .border(borderWidth, tc.br, RoundedCornerShape(6.dp))
             .clip(RoundedCornerShape(6.dp)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        StepperButton("−", enabled = index > 0, onClick = { onChange(options[(index - 1).coerceAtLeast(0)]) })
-        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
-        Box(Modifier.width(44.dp).height(28.dp), contentAlignment = Alignment.Center) {
+        StepperButton("−", enabled = index > 0, height = height, locked = !enabled, onClick = { onChange(options[(index - 1).coerceAtLeast(0)]) })
+        Box(Modifier.width(borderWidth).height(height).background(tc.br))
+        Box(Modifier.width(44.dp).height(height), contentAlignment = Alignment.Center) {
             AppText(format(value), color = tc.tx, fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Medium)
         }
-        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
-        StepperButton("+", enabled = index < options.lastIndex, onClick = { onChange(options[(index + 1).coerceAtMost(options.lastIndex)]) })
+        Box(Modifier.width(borderWidth).height(height).background(tc.br))
+        StepperButton(
+            "+",
+            enabled = index < options.lastIndex,
+            height = height,
+            locked = !enabled,
+            onClick = { onChange(options[(index + 1).coerceAtMost(options.lastIndex)]) },
+        )
     }
 }
 
 @Composable
-internal fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit) {
+internal fun StepperButton(symbol: String, enabled: Boolean, height: Dp = 28.dp, locked: Boolean = false, onClick: () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .width(28.dp).height(28.dp)
-            .background(if (hovered && enabled) tc.hv else Color.Transparent)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .width(28.dp).height(height)
+            .background(if (hovered && enabled && !locked) tc.hv else Color.Transparent)
+            .then(if (enabled && !locked) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,
     ) {
-        AppText(symbol, color = if (enabled) tc.tx else tc.td.copy(alpha = .4f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        AppText(symbol, color = if (enabled || locked) tc.tx else tc.td.copy(alpha = .4f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
     }
 }
 

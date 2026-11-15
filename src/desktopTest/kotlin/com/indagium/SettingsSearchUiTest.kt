@@ -295,7 +295,7 @@ class SettingsSearchUiTest {
         val state = AppState()
         rule.setContent { SettingsDialog(state, onDismiss = {}) }
         type("scope behavior")
-        rule.onNodeWithText("Search scope behavior").performClick()
+        rule.onNodeWithText("Search scope behaviour").performClick()
         rule.onNodeWithTag("search-scope-behavior-selector").performClick()
         rule.onNodeWithText("Two searches").performClick()
         rule.runOnIdle { assertEquals(SearchScopeBehavior.TWO_SEARCHES, state.settings.searchScopeBehavior) }

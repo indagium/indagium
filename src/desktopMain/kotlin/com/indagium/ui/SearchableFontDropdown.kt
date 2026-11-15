@@ -46,7 +46,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 
 /**
- * A default that sits above the installed families in [SearchableFontDropdown]'s list, such as "Monospace (default)": [key] names it in
+ * A default that sits above the installed families in [SearchableFontDropdown]'s list, such as "Monospace · default": [key] names it in
  * the `-option-<tagSuffix>` test tag and in `selectedPinnedKey`, [family] draws its row.
  */
 internal data class PinnedFontDefault(val key: String, val label: String, val family: FontFamily)
@@ -87,7 +87,8 @@ internal fun SearchableFontDropdown(
     val fontListState = rememberLazyListState()
     val matches = remember(query) {
         val needle = query.trim()
-        FontCatalog.families.filter { needle.isBlank() || it.contains(needle, ignoreCase = true) }
+        // Hidden system families (".AppleSystemUIFont" and the like) are not for picking.
+        FontCatalog.families.filter { !it.startsWith(".") && (needle.isBlank() || it.contains(needle, ignoreCase = true)) }
     }
     val listHeight = (popupHeight - 72.dp).coerceAtLeast(80.dp)
     val pinnedSelected = if (selectedFamily == null) pinnedDefaults.firstOrNull { it.key == selectedPinnedKey } else null
@@ -219,11 +220,11 @@ internal fun SearchableFontDropdown(
                     modifier = Modifier.testTag("$testTagPrefix-preview"),
                 )
                 if (selectedFamily != null && FontCatalog.resolveOrNull(selectedFamily) == null) {
-                    AppText("Unavailable; using fallback", color = tc.td, fontSize = 9.sp)
+                    AppText("Unavailable; using fallback", color = tc.ts, fontSize = 10.sp)
                 }
             }
         } else if (selectedFamily != null && FontCatalog.resolveOrNull(selectedFamily) == null) {
-            AppText("Unavailable; using fallback", color = tc.td, fontSize = 9.sp)
+            AppText("Unavailable; using fallback", color = tc.ts, fontSize = 10.sp)
         }
     }
 }
@@ -247,14 +248,15 @@ private fun FontChoiceRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        // The same option style as SettingsDropdown: the chosen one in accent semibold on the accent wash, the rest in the text colour.
         AppText(
             name,
-            color = tc.ts,
+            color = if (selected) tc.ac else tc.tx,
             fontSize = 11.sp,
             fontFamily = family,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             modifier = Modifier.weight(1f),
             overflow = TextOverflow.Ellipsis,
         )
-        if (selected) AppText("✓", color = tc.ac, fontSize = 11.sp)
     }
 }

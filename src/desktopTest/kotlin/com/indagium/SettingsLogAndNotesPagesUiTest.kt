@@ -109,7 +109,7 @@ class SettingsLogAndNotesPagesUiTest {
     fun theSearchPageShowsItsFourGroupsAndTheRegexSummaryIsAnOrdinarySwitch() {
         val state = AppState()
         openPage(state, SettingsPage.SearchFilters)
-        assertGroups("Ctrl+F", "Filter panel", "Keyboard")
+        assertGroups("Ctrl/Cmd+F", "Filter panel", "Keyboard")
         rule.onNodeWithText("Find searches").assertExists()
         rule.onNodeWithText("List height").assertExists()
         rule.onNodeWithText("Scroll margin").assertExists()

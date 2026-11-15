@@ -377,8 +377,8 @@ private fun SearchStep(state: AppState, reclaimFocus: () -> Unit) {
     StepHeading("Choose how search works", "These choices apply right away and start with your current settings.")
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SearchSettingCard(
-            title = "Search scope behavior",
-            description = "Choose which Find field Ctrl+F opens and how scope follows the current view. " +
+            title = "Search scope behaviour",
+            description = "Choose which Find field Ctrl/Cmd+F opens and how scope follows the current view. " +
                 "Two searches keeps queries independent.",
         ) {
             SearchScopeBehaviorSelector(
@@ -388,7 +388,7 @@ private fun SearchStep(state: AppState, reclaimFocus: () -> Unit) {
             )
         }
         SearchSettingCard(
-            title = "Ctrl+F opens",
+            title = "Ctrl/Cmd+F opens",
             description = "Open the Find bar, or jump to the Tags or Regex filter.",
         ) {
             CtrlFTargetSelector(
@@ -398,8 +398,8 @@ private fun SearchStep(state: AppState, reclaimFocus: () -> Unit) {
             )
         }
         SearchSwitchCard(
-            title = "Ctrl+F also shows Original",
-            description = "Reveal unfiltered rows whenever Ctrl+F opens.",
+            title = "Ctrl/Cmd+F also shows Original",
+            description = "Reveal unfiltered rows whenever Ctrl/Cmd+F opens.",
             checked = state.settings.openUnfilteredOnCtrlF,
             onCheckedChange = { value ->
                 state.updateSettings { it.copy(openUnfilteredOnCtrlF = value) }
