@@ -41,7 +41,7 @@ internal const val TOOLBAR_PLACEMENT_HINT = "Where the toolbar sits. Own edge ad
 internal const val TOOLBAR_EDGE_HINT = "The window edge the toolbar is docked to."
 internal const val TOOLBAR_ALIGN_HINT = "Where the buttons sit along a toolbar that has a bar of its own."
 internal const val TOOLBAR_ORDER_HINT = "Whether the toolbar comes before or after the tabs on the edge they share."
-internal const val TOOLBAR_LABELS_HINT = "Hides text on the main toolbar buttons, leaving only their icons."
+internal const val TOOLBAR_LABELS_HINT = "Show text beside the main toolbar icons, or only the icons."
 internal const val TOOLBAR_LOCK_HINT = "Hides the grips that move them, so they can't be dragged by accident."
 
 /** The two options of the Button labels control (the Toolbar group here, the setup assistant's Look step). */

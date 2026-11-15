@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
@@ -513,7 +514,12 @@ internal fun ErrorRowsSettingControl(
     val tc = tc()
     val density = LocalDensity.current
     val windowSize = LocalWindowInfo.current.containerSize
-    val popupWidth = with(density) { ERROR_ROWS_STYLE_POPUP_WIDTH.coerceAtMost((windowSize.width.toDp() - 24.dp).coerceAtLeast(240.dp)) }
+    // At most as wide as the row the Style button sits in, so the card never reaches past the page's content column.
+    val rowWidth = LocalSettingsRowWidth.current
+    val popupWidth = with(density) {
+        ERROR_ROWS_STYLE_POPUP_WIDTH.coerceAtMost((windowSize.width.toDp() - 24.dp).coerceAtLeast(240.dp))
+            .let { if (rowWidth.isSpecified) it.coerceAtMost(rowWidth.coerceAtLeast(240.dp)) else it }
+    }
     var wasOpen by remember { mutableStateOf(false) }
     LaunchedEffect(styleExpanded) {
         if (styleExpanded) {
@@ -586,25 +592,34 @@ internal fun ErrorRowsSettingControl(
 private val ERROR_ROWS_STYLE_POPUP_WIDTH = 520.dp
 private val ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING = 7.dp
 
-/** Places the style popup's card under the Style button, start edges aligned, kept inside the window (flipped above when there is no room below). */
+/**
+ * Places the style popup's card under the Style button, end edges aligned like every Settings popup (a card wider than the button grows
+ * to the left), kept inside the window (flipped above when there is no room below).
+ */
 internal class ErrorRowsStylePopupPosition(private val shadowPaddingPx: Int) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
         windowSize: IntSize,
         layoutDirection: LayoutDirection,
         popupContentSize: IntSize,
-    ): IntOffset = seq3PopoverPosition(
+    ): IntOffset {
         // The popup content carries the shadow padding on every side, the visible card does not: place the card.
-        anchor = IntRect(
-            anchorBounds.left - shadowPaddingPx, anchorBounds.top + shadowPaddingPx,
-            anchorBounds.right, anchorBounds.bottom - shadowPaddingPx,
-        ),
-        popup = popupContentSize,
-        window = windowSize,
-        gapPx = ERROR_ROWS_STYLE_POPUP_GAP_PX,
-    )
+        val placed = seq3PopoverPosition(
+            anchor = IntRect(
+                anchorBounds.left - shadowPaddingPx, anchorBounds.top + shadowPaddingPx,
+                anchorBounds.right, anchorBounds.bottom - shadowPaddingPx,
+            ),
+            popup = popupContentSize,
+            window = windowSize,
+            gapPx = ERROR_ROWS_STYLE_POPUP_GAP_PX,
+        )
+        val maxX = (windowSize.width - popupContentSize.width - ERROR_ROWS_STYLE_POPUP_WINDOW_MARGIN_PX).coerceAtLeast(ERROR_ROWS_STYLE_POPUP_WINDOW_MARGIN_PX)
+        val x = (anchorBounds.right + shadowPaddingPx - popupContentSize.width).coerceIn(ERROR_ROWS_STYLE_POPUP_WINDOW_MARGIN_PX, maxX)
+        return IntOffset(x, placed.y)
+    }
 }
 
+private const val ERROR_ROWS_STYLE_POPUP_WINDOW_MARGIN_PX = 4
 private const val ERROR_ROWS_STYLE_POPUP_GAP_PX = 4
 
 /** The style editor the "Error rows" Style button opens in a popup: the colour, text, font and preview controls on a menu-style card. */
@@ -945,7 +960,7 @@ internal fun HighlighterStyleControls(
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
         AppText("Preview", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         AppText(
-            "Bold ${styleOverrideName(state.bold)} · Italic ${styleOverrideName(state.italic)}",
+            styleStateLabel(state.bold, state.italic),
             color = if (wide) tc.ts else tc.td,
             fontSize = if (wide) 10.sp else 9.sp,
             modifier = Modifier.testTag("$testTagPrefix-style-state"),
@@ -1103,7 +1118,8 @@ private fun HighlighterStyleCycleButton(
                 style = TextStyle(
                     color = if (value == false) tc.td else tc.tx,
                     fontSize = 12.sp,
-                    fontFamily = UI,
+                    // A slanted sans "I" reads as a slash; the serif one keeps its bars and still reads as an italic I.
+                    fontFamily = if (fontStyle == FontStyle.Italic) androidx.compose.ui.text.font.FontFamily.Serif else UI,
                     fontWeight = fontWeight ?: FontWeight.Normal,
                     fontStyle = fontStyle,
                 ),
@@ -1117,6 +1133,14 @@ private fun styleOverrideName(value: Boolean?): String = when (value) {
     true -> "on"
     false -> "off"
 }
+
+/** The line under the style controls: what Bold and Italic are set to, "as the log font" while neither is overridden. */
+private fun styleStateLabel(bold: Boolean?, italic: Boolean?): String =
+    if (bold == null && italic == null) {
+        "Bold and italic: as the log font"
+    } else {
+        "Bold ${bold?.let { if (it) "on" else "off" } ?: "as log font"} · Italic ${italic?.let { if (it) "on" else "off" } ?: "as log font"}"
+    }
 
 private fun contrastingTextColor(background: Color): Color =
     if (background.luminance() > HIGH_CONTRAST_LUMINANCE_THRESHOLD) Color.Black else Color.White

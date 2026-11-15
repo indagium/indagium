@@ -1158,7 +1158,9 @@ fun ScrollableTextArea(
                         proofreadingAnchorState?.update(it, layout, fieldValue.selection.end)
                     },
                 ) {
-                    if (value.isEmpty()) AppText(dictation?.placeholder(placeholder) ?: placeholder, color = tc.td, fontSize = fontSize)
+                    if (value.isEmpty()) {
+                        AppText(dictation?.placeholder(placeholder) ?: placeholder, color = tc.td, fontSize = fontSize, maxLines = Int.MAX_VALUE)
+                    }
                     inner()
                 }
             },
@@ -1619,6 +1621,8 @@ fun AppButton(
     multicolorIcon: Boolean = false,
     // A drawn picture before the label (the Seq3 source toolbar's glyphs), given the label colour.
     leadingContent: (@Composable (Color) -> Unit)? = null,
+    // Room above and below the label; a compact button in a group's header trims it so its label fits a 22dp height.
+    verticalPadding: Dp = 5.dp,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -1651,7 +1655,7 @@ fun AppButton(
                 .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false }
-                .padding(horizontal = horizontalPadding, vertical = 5.dp),
+                .padding(horizontal = horizontalPadding, vertical = verticalPadding),
             contentAlignment = Alignment.Center,
         ) {
             // A button label must never behave like selectable text - without this, a button placed

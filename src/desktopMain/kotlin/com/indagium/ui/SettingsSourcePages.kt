@@ -24,7 +24,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.CrashCategory
@@ -44,8 +43,8 @@ internal const val ISSUE_CATEGORIES_HINT = "Each enabled regex is matched agains
     "It does not change stack-trace folding or built-in crash detection."
 internal const val SOURCE_REGISTER_HINT =
     "Point Indagium at your project's source folders, then right-click a log line → “Show in code” to see the code that logged it."
-internal const val SOURCE_OPEN_COMMAND_HINT = "The editor “Show in code” opens at the logged line. Automatic uses the first installed app; " +
-    "Custom command… takes a raw command with {file} and {line}."
+internal const val SOURCE_OPEN_COMMAND_HINT = "The editor “Show in code” opens at the logged line: the first installed one, or your own command " +
+    "with {file} and {line}."
 internal const val SOURCE_OPEN_COMMAND_DETAIL = SOURCE_OPEN_COMMAND_HINT +
     " There is no fallback to the system's default app, which cannot jump to the line."
 internal const val SOURCE_DISCOVER_WRAPPERS_HINT =
@@ -272,14 +271,7 @@ private fun EditorChoiceDetail(state: AppState) {
             )
             else -> {
                 val (preset, template) = detected.first()
-                AppText(
-                    "Will use ${preset.displayName}: $template",
-                    color = tc.ts,
-                    fontSize = 11.sp,
-                    fontFamily = MONO,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                ResolvedCommandLine("Will use ${preset.displayName}:", template)
             }
         }
         else -> when {
@@ -287,7 +279,7 @@ private fun EditorChoiceDetail(state: AppState) {
             else -> {
                 val resolved = detected.find { it.first.id == choice }
                 if (resolved != null) {
-                    AppText(resolved.second, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    ResolvedCommandLine(null, resolved.second)
                 } else {
                     val name = EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "This app"
                     AppText(
@@ -298,6 +290,24 @@ private fun EditorChoiceDetail(state: AppState) {
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * The command an editor choice resolves to, on one line like every Settings path: an optional [prefix] in the interface font, then the command in
+ * mono, cut in the middle when it does not fit (never mid-token across two lines); the whole command shows in a hover hint.
+ */
+@Composable
+private fun ResolvedCommandLine(prefix: String?, command: String) {
+    val tc = tc()
+    TooltipArea(
+        tooltip = { ToolbarTooltip(command, maxLines = 4) },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (prefix != null) AppText(prefix, color = tc.ts, fontSize = 11.sp, maxLines = 1)
+            SettingsPathText(command, Modifier.weight(1f))
         }
     }
 }

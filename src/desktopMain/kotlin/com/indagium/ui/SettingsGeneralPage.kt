@@ -148,12 +148,12 @@ private fun WorkspaceProfileGroup(state: AppState, reclaimFocus: () -> Unit) {
                 reclaimFocus()
             },
         ) {
-            DialogActionButton("Delete", active = true, danger = true) {
+            SettingsDialogButton("Delete", primary = true, danger = true) {
                 state.deleteWorkspaceProfile(profile.id)
                 deleteRequest = null
                 reclaimFocus()
             }
-            DialogActionButton("Cancel", active = false) {
+            SettingsDialogButton("Cancel") {
                 deleteRequest = null
                 reclaimFocus()
             }

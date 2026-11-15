@@ -26,7 +26,7 @@ object VoiceRecognitionEngines {
         VoiceRecognitionEngine.WHISPER -> "Runs locally on macOS, Windows, and Linux after the selected Whisper model is installed."
         VoiceRecognitionEngine.APPLE_SPEECH -> "Uses Apple's Speech framework in on-device-only mode. It never falls back to network recognition."
         VoiceRecognitionEngine.WINDOWS_SPEECH ->
-            "Uses a matching installed legacy Windows Speech recognizer. It never sends audio to a provider, " +
+            "Uses a matching installed legacy Windows Speech recogniser. It never sends audio to a provider, " +
                 "but supports fewer languages than Whisper."
     }
 }

@@ -127,7 +127,7 @@ class SettingsWorkspacePagesUiTest {
         val family = FontCatalog.families.first { !it.startsWith(".") }
         val state = AppState()
         rule.setContent { Column(Modifier.width(700.dp)) { AppearanceSystemFontSelectors(state) } }
-        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Monospace · default")
+        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Monospace")
 
         rule.onNodeWithTag("settings-log-font-trigger").performClick()
         rule.onNodeWithTag("settings-log-font-option-default-monospace").assertExists()
@@ -136,7 +136,7 @@ class SettingsWorkspacePagesUiTest {
         rule.waitForIdle()
         assertFalse(state.settings.fontMono)
         assertNull(state.settings.logFontFamily)
-        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Proportional · default")
+        rule.onNodeWithTag("settings-log-font-trigger").assertTextContains("Proportional")
 
         // A named family leaves the default kind alone: it is the fallback if the family goes missing.
         rule.onNodeWithTag("settings-log-font-trigger").performClick()

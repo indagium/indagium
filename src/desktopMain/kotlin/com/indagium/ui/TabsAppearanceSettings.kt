@@ -68,7 +68,7 @@ internal fun tabLabelModeLabel(mode: TabLabelMode): String = when (mode) {
     TabLabelMode.FILE_SESSION -> "File, plus folder if same name"
     TabLabelMode.SESSION_ONLY -> "Folder"
     TabLabelMode.FILE_ONLY -> "File only"
-    TabLabelMode.FILE_FOLDER_ALWAYS -> "File — folder"
+    TabLabelMode.FILE_FOLDER_ALWAYS -> "File and folder, always"
 }
 
 /** The hint under the Tab label control: what the default does, which is the one choice whose name does not say it all. */
@@ -81,7 +81,7 @@ internal const val TAB_CLOSE_BUTTON_POSITION_CONTROL_TAG = "tab-close-button-pos
 internal const val TAB_STYLE_GRID_TAG = "tab-style-grid"
 
 /** The descriptions of the Tabs rows, shared with their search entries. */
-internal const val TAB_SIZE_HINT = "Share the strip gives every tab an equal share of the strip; Fit the label sizes each tab to its name."
+internal const val TAB_SIZE_HINT = "Every tab gets an equal share, or each is as wide as its name."
 internal const val TAB_BADGE_HINT = "Adds a LOG, ZIP or IND badge before the tab name."
 internal const val TAB_STRIPE_HINT = "Adds a coloured stripe on top of a tab by where it came from: file, live capture, bug report or capture."
 internal const val TAB_CLOSE_EVERY_HINT = "Off shows a tab's close button only on the active tab and under the pointer."

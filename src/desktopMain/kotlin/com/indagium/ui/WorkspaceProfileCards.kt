@@ -32,6 +32,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -41,10 +44,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.ProfileSpec
+import kotlin.math.roundToInt
 
 // Workspace-profile picker (Settings → General; the first-run setup assistant reuses the same
 // card). The card itself is preview-agnostic so a caller can pass its own wireframe, e.g. a
@@ -78,8 +86,10 @@ internal fun WorkspaceProfileCard(
     val shape = RoundedCornerShape(8.dp)
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
+    var cardLeftPx by remember { mutableStateOf(0) }
     Column(
         modifier
+            .onGloballyPositioned { cardLeftPx = it.positionInWindow().x.roundToInt() }
             .settingsPickerSurface(selected, hovered, shape, tc)
             .hoverable(interaction)
             .semantics { this.selected = selected }
@@ -93,9 +103,31 @@ internal fun WorkspaceProfileCard(
                 title, color = settingsPickerCaptionColor(selected, tc), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
             )
-            if (menuActions.isNotEmpty()) ProfileCardMenu(menuActions, onMenuClosed)
+            if (menuActions.isNotEmpty()) ProfileCardMenu(menuActions, onMenuClosed, cardLeftPx = { cardLeftPx })
         }
         AppText(description, color = tc.ts, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+private val MENU_PAGE_MARGIN = 12.dp
+
+/**
+ * Where a card's "⋯" menu opens: under the button, its start edge on the card's start edge, and kept inside the page (the Settings content
+ * column) and the window, so a menu wider than a narrow card never reaches into the gutter.
+ */
+private class CardMenuPosition(
+    private val cardLeftPx: () -> Int,
+    private val page: IntRect?,
+    private val marginPx: Int,
+    private val gapPx: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
+        val minX = (page?.left ?: 0) + marginPx
+        val maxX = ((page?.right ?: windowSize.width).coerceAtMost(windowSize.width) - marginPx - popupContentSize.width).coerceAtLeast(minX)
+        val x = cardLeftPx().coerceIn(minX, maxX)
+        val below = anchorBounds.bottom + gapPx
+        val y = if (below + popupContentSize.height <= windowSize.height) below else (anchorBounds.top - gapPx - popupContentSize.height).coerceAtLeast(0)
+        return IntOffset(x, y)
     }
 }
 
@@ -103,7 +135,7 @@ internal fun WorkspaceProfileCard(
 internal data class ProfileMenuAction(val label: String, val danger: Boolean = false, val onClick: () -> Unit)
 
 @Composable
-private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Unit, modifier: Modifier = Modifier) {
+private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Unit, cardLeftPx: () -> Int, modifier: Modifier = Modifier) {
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val density = LocalDensity.current
@@ -123,9 +155,17 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Un
             AppText("⋯", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
         if (open) {
+            val contentBounds = LocalSettingsAnchors.current?.content?.takeIf { it.isAttached }?.boundsInWindow()
+            val margin = with(density) { MENU_PAGE_MARGIN.roundToPx() }
             Popup(
-                alignment = Alignment.TopEnd,
-                offset = IntOffset(0, with(density) { (CARD_MENU_TARGET + 4.dp).roundToPx() }),
+                popupPositionProvider = remember(contentBounds, margin) {
+                    CardMenuPosition(
+                        cardLeftPx = cardLeftPx,
+                        page = contentBounds?.let { IntRect(it.left.roundToInt(), it.top.roundToInt(), it.right.roundToInt(), it.bottom.roundToInt()) },
+                        marginPx = margin,
+                        gapPx = with(density) { 4.dp.roundToPx() },
+                    )
+                },
                 onDismissRequest = {
                     open = false
                     onClosed()

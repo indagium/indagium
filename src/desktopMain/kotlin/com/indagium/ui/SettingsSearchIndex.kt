@@ -587,7 +587,6 @@ private fun capture() = buildList {
     add(entry(markIssue, "Before, seconds", CAPTURE_MARKER_BEFORE_HINT, listOf("marker", "pre", "window", "mark issue")))
     add(entry(markIssue, "After, seconds", CAPTURE_MARKER_AFTER_HINT, listOf("marker", "post", "window", "mark issue")))
     add(entry(markIssue, "Take a screenshot on Mark issue", CAPTURE_MARKER_SCREENSHOT_HINT, listOf("marker", "image", "mark issue")))
-    add(entry(markIssue, "Include markers in saved snapshots", CAPTURE_MARKER_SNAPSHOT_HINT, listOf("marker", "notes", "mark issue")))
 }
 
 private fun automation() = listOf(
@@ -872,6 +871,27 @@ internal fun searchSettings(query: String, visiblePages: Set<SettingsPage>): Lis
         }
         .sortedBy { it.first } // stable, so ties keep the index order
         .map { it.second }
+}
+
+/** Every word a result highlights for [tokens]: the words themselves and their synonyms ("colour" also marks "color"). */
+internal fun searchHighlightTerms(tokens: List<String>): List<String> = tokens.flatMap { synonymsOf(it) }.distinct()
+
+/**
+ * Why [entry] matched when a word of the query is not in its visible label or description: the keyword (or, failing that, the page or group
+ * name) that carried it, one per such word. Empty when every word is visible, which the row then highlights itself.
+ */
+internal fun searchMatchedKeywords(entry: SettingsSearchEntry, tokens: List<String>): List<String> {
+    val visible = (entry.label.replace('\n', ' ') + " " + entry.hint).lowercase()
+    val found = LinkedHashSet<String>()
+    for (token in tokens) {
+        val variants = synonymsOf(token)
+        if (variants.any { it in visible }) continue
+        val keyword = entry.keywords.firstOrNull { keyword -> variants.any { it in keyword.lowercase() } }
+        val pageNames = listOfNotNull(entry.page.parent?.title, entry.page.title, entry.page.group.label)
+        val name = pageNames.firstOrNull { pageName -> variants.any { it in pageName.lowercase() } }
+        (keyword ?: name)?.let { found += it }
+    }
+    return found.toList()
 }
 
 /** Half-open ranges of [text] covered by any of [tokens] (case-insensitive), merged. */

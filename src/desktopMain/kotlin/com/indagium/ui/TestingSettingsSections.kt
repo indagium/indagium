@@ -2,7 +2,8 @@ package com.indagium.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -47,6 +48,8 @@ import kotlinx.coroutines.withContext
 internal const val TESTING_JUDGE_HINT =
     "A blind AI judge compares each step's expected result with the evidence. It never sees what the agent claimed."
 internal const val TESTING_EVIDENCE_HINT = "What a new test run keeps. You can still change this in the run dialog."
+internal const val TESTING_SCREENSHOTS_HINT = "A screenshot after every step."
+internal const val TESTING_TRANSCRIPT_HINT = "What the agent did and said, step by step."
 internal const val TESTING_CONFIRM_TIMEOUT_HINT = "An action the agent asks to confirm is denied when nobody answers in this time " +
     "($MIN_CONFIRMATION_TIMEOUT_MINUTES to $MAX_CONFIRMATION_TIMEOUT_MINUTES minutes)."
 internal const val TESTING_KEEP_RECORDING_HINT = "Applying a recording also saves its screenshots, screen readings and video beside the case, " +
@@ -133,7 +136,7 @@ private fun ProfileDropdown(
         label = { it?.choiceLabel() ?: placeholder },
         onSelect = { profile -> if (profile != null) onSelect(profile) },
         testTag = testTag,
-        modifier = Modifier.width(FIELD_WIDTH),
+        modifier = Modifier.width(settingsFieldWidth(FIELD_WIDTH)),
         onInteraction = reclaimFocus,
         // While nothing is chosen the field shows the prompt in the dim colour, so it never reads as a chosen value.
         placeholder = if (selected == null) placeholder else null,
@@ -186,7 +189,7 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
     // Three independent on/off choices, each its own switch row: nothing here depends on the row above.
     SettingsGroup("Evidence to keep", modifier = Modifier.settingsAnchor("Default evidence to keep")) {
         SettingsNoteRow(TESTING_EVIDENCE_HINT)
-        SettingsRow("Screenshots") {
+        SettingsRow("Screenshots", TESTING_SCREENSHOTS_HINT) {
             SettingsToggle(
                 checked = testing.evidence.screenshots,
                 label = "Screenshots",
@@ -195,7 +198,7 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
                 testTag = TestingPageTags.EVIDENCE_SCREENSHOTS,
             )
         }
-        SettingsRow("Agent transcript") {
+        SettingsRow("Agent transcript", TESTING_TRANSCRIPT_HINT) {
             SettingsToggle(
                 checked = testing.evidence.transcript,
                 label = "Agent transcript",
@@ -301,7 +304,7 @@ private fun StoredRecordingEvidenceRow(state: AppState) {
                 "This can't be undone.",
             onDismissRequest = { confirming = false },
         ) {
-            DialogActionButton("Delete", active = true, danger = true) {
+            SettingsDialogButton("Delete", primary = true, danger = true) {
                 confirming = false
                 scope.launch {
                     val result = withContext(Dispatchers.IO) { state.deleteStoredRecordingEvidence() }
@@ -312,7 +315,7 @@ private fun StoredRecordingEvidenceRow(state: AppState) {
                     refresh++
                 }
             }
-            DialogActionButton("Cancel", active = false) { confirming = false }
+            SettingsDialogButton("Cancel") { confirming = false }
         }
     }
 }
@@ -362,18 +365,18 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
         SettingsRow("Tracker name", TRACKER_NAME_HINT, indent = true, enabled = tracker.enabled) {
             SettingsTextField(
                 tracker.name, { value -> updateTracker(state) { it.copy(name = value.take(MAX_NAME_CHARS)) } },
-                Modifier.width(FIELD_WIDTH), placeholder = "Jira", testTag = TestingPageTags.TRACKER_NAME,
+                Modifier.width(settingsFieldWidth(FIELD_WIDTH)), placeholder = "Jira", testTag = TestingPageTags.TRACKER_NAME,
             )
         }
         SettingsRow("Tracker MCP URL", TRACKER_URL_HINT, indent = true, enabled = tracker.enabled) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
                 SettingsTextField(
                     tracker.mcpUrl, { value -> updateTracker(state) { it.copy(mcpUrl = value.trim()) } },
-                    Modifier.width(FIELD_WIDTH), placeholder = "https://tracker.example.com/mcp", testTag = TestingPageTags.TRACKER_URL,
+                    Modifier.width(settingsFieldWidth(FIELD_WIDTH)), placeholder = "https://tracker.example.com/mcp", testTag = TestingPageTags.TRACKER_URL,
                 )
                 if (tracker.mcpUrl.isNotBlank()) {
                     (urlCheck.problem ?: urlCheck.warning)?.let {
-                        AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3, modifier = Modifier.width(FIELD_WIDTH))
+                        AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3, modifier = Modifier.width(settingsFieldWidth(FIELD_WIDTH)))
                     }
                 }
             }
@@ -384,10 +387,10 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
                 SettingsTextField(
                     tracker.authHeaderName, { value -> updateTracker(state) { it.copy(authHeaderName = value.trim()) } },
-                    Modifier.width(FIELD_WIDTH), placeholder = "Authorization", testTag = TestingPageTags.TRACKER_HEADER,
+                    Modifier.width(settingsFieldWidth(FIELD_WIDTH)), placeholder = "Authorization", testTag = TestingPageTags.TRACKER_HEADER,
                 )
                 checkAuthHeaderName(tracker.authHeaderName)?.let {
-                    AppText(it, color = DANGER_RED, fontSize = 11.sp, modifier = Modifier.width(FIELD_WIDTH))
+                    AppText(it, color = DANGER_RED, fontSize = 11.sp, modifier = Modifier.width(settingsFieldWidth(FIELD_WIDTH)))
                 }
             }
         }
@@ -425,6 +428,7 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
     SettingsGroup("Connection") { TestConnectionRow(state, tracker, tokenText) }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (String) -> Unit) {
     val scope = rememberCoroutineScope()
@@ -432,9 +436,14 @@ private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (Str
     // One card row for the form and its status lines, so no divider falls between them.
     Column(Modifier.fillMaxWidth()) {
         SettingsStackedRow("Access token", TRACKER_TOKEN_HINT) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // The buttons keep their full width and wrap under the field when the row is too narrow for all three.
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
                 SettingsTextField(
-                    tokenText, onTokenText, Modifier.width(FIELD_WIDTH), placeholder = "Paste the token",
+                    tokenText, onTokenText, Modifier.width(settingsFieldWidth(FIELD_WIDTH)), placeholder = "Paste the token",
                     visualTransformation = PasswordVisualTransformation(), testTag = TestingPageTags.TRACKER_TOKEN,
                 )
                 SettingsButton(

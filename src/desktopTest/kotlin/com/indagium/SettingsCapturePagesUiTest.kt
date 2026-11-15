@@ -316,21 +316,17 @@ class SettingsCapturePagesUiTest {
     }
 
     @Test
-    fun theMarkIssuePageHasTheWindowFieldsAndTwoSwitches() {
+    fun theMarkIssuePageHasTheWindowFieldsAndTheScreenshotSwitch() {
         val state = AppState()
         openCapturePage(state)
         drillInto(SettingsPage.CaptureMarkIssue)
         val shown = anchorsOnScreen()
-        listOf("Mark issue", "Before, seconds", "After, seconds", "Take a screenshot on Mark issue", "Include markers in saved snapshots")
+        listOf("Mark issue", "Before, seconds", "After, seconds", "Take a screenshot on Mark issue")
             .forEach { assertTrue(it in shown, "$it on the Mark issue page") }
+        // No row for a setting the snapshot export does not read yet: it neither shows nor has a search entry.
+        assertFalse("Include markers in saved snapshots" in shown, "the unused snapshot switch has no row")
 
         assertSwitchFlips(state, CapturePageTags.MARKER_SCREENSHOT) { it.captureSettings.markerScreenshot }
-        // The snapshot export does not read this setting yet: the switch shows the stored value and cannot be changed meanwhile.
-        val stored = state.settings.captureSettings.markerNotesInSnapshot
-        rule.onNodeWithTag(CapturePageTags.MARKER_IN_SNAPSHOT).performScrollTo().assertIsNotEnabled()
-        rule.onNodeWithTag(CapturePageTags.MARKER_IN_SNAPSHOT).performClick()
-        rule.waitForIdle()
-        assertEquals(stored, state.settings.captureSettings.markerNotesInSnapshot)
 
         val before = captureFieldTag("Before, seconds")
         rule.onNodeWithTag(before).performScrollTo().performTextClearance()

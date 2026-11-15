@@ -326,7 +326,7 @@ internal fun SettingsDialog(
             error = guardSaveError,
             onDismissRequest = { pendingPageSwitch = null; guardSaveError = null },
         ) {
-            DialogActionButton("Save", active = true) {
+            SettingsDialogButton("Save", primary = true) {
                 val err = aiProviderGuard?.save?.invoke()
                 if (err == null) {
                     pendingPageSwitch = null
@@ -336,12 +336,12 @@ internal fun SettingsDialog(
                     guardSaveError = err
                 }
             }
-            DialogActionButton("Discard", active = false, danger = true) {
+            SettingsDialogButton("Discard", danger = true) {
                 pendingPageSwitch = null
                 guardSaveError = null
                 selectedPage = target
             }
-            DialogActionButton("Cancel", active = false) { pendingPageSwitch = null; guardSaveError = null }
+            SettingsDialogButton("Cancel") { pendingPageSwitch = null; guardSaveError = null }
         }
     }
 
@@ -369,19 +369,19 @@ internal fun SettingsDialog(
             error = guardSaveError,
             onDismissRequest = ::cancelClose,
         ) {
-            DialogActionButton("Save", active = true) {
+            SettingsDialogButton("Save", primary = true) {
                 val err = aiProviderGuard?.save?.invoke()
                 if (err == null) finishClose() else guardSaveError = err
             }
-            DialogActionButton("Discard", active = false, danger = true) { finishClose() }
-            DialogActionButton("Cancel", active = false) { cancelClose() }
+            SettingsDialogButton("Discard", danger = true) { finishClose() }
+            SettingsDialogButton("Cancel") { cancelClose() }
         }
     }
 }
 
 /** What [page] shows, in the content column under its header. The interim bodies reuse each setting's existing control. */
 @Composable
-private fun SettingsPageBody(
+internal fun SettingsPageBody(
     state: AppState,
     page: SettingsPage,
     reclaimFocus: () -> Unit,
@@ -416,7 +416,7 @@ private fun SettingsPageBody(
 
 /** Shared modal shape for the confirm/discard prompts in this file - title, message, an optional
  *  inline error (surfaced when a Save attempt from within the dialog fails validation), and a
- *  caller-supplied row of [DialogActionButton]s. */
+ *  caller-supplied row of [SettingsDialogButton]s. */
 @Composable
 internal fun SettingsConfirmDialog(
     title: String,

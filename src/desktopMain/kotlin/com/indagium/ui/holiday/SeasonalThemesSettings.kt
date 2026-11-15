@@ -184,7 +184,9 @@ private fun SeasonalThemeRows(state: AppState, themes: Map<HolidayPack, HolidayT
         state.updateSettings { s -> s.withHoliday { it.edit() } }
     }
     SettingsStackedRow(SEASONAL_ANCHOR_PACK, SEASONAL_PACK_HINT) {
-        PackCards(themes, holiday.pack.takeIf { on }) { pack -> update { withPackOn(pack) } }
+        // While no special theme is on no card is chosen, but the one Always or its dates would turn on is outlined, so the row below never names a
+        // pack the cards do not show.
+        PackCards(themes, holiday.pack.takeIf { on }, remembered = holiday.pack.takeIf { !on }) { pack -> update { withPackOn(pack) } }
     }
     if (selected != null) WhenRow(selected, holiday.mode, state.settings.theme.label) { mode -> update { copy(mode = mode, pack = selected.pack) } }
     SettingsRow(SEASONAL_ANCHOR_LIGHTNESS, SEASONAL_LIGHTNESS_HINT) {
@@ -238,6 +240,11 @@ private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, themeLabel: String, 
     }
     val waiting = theme.supportsAutomatic && mode == HolidayMode.AUTOMATIC && !theme.automaticAt(now)
     val description = when {
+        mode == HolidayMode.OFF -> "Off. ${theme.label}, outlined above, turns on with Always" + when {
+            !theme.supportsAutomatic -> "."
+            theme.automaticLabel == null -> " or during its dates (${holidayDatesLabel(theme)})."
+            else -> " or automatically (${holidayDatesLabel(theme)})."
+        }
         waiting -> "${theme.label} turns on ${holidayDatesLabel(theme).substringBefore(" – ")}; until then your theme is $themeLabel."
         theme.supportsAutomatic -> "${theme.label}: ${holidayDatesLabel(theme)}."
         else -> "${theme.label} is on all year while chosen."
@@ -268,11 +275,13 @@ private fun SeasonalSwitchRow(label: String, hint: String, checked: Boolean, tag
 // One selectable card per registered theme: a small thumbnail of its tab-strip scene with some of its icons, its name and dates. Two equal
 // columns that fill the row, one column in a narrow window.
 @Composable
-private fun PackCards(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayPack?, onSelect: (HolidayPack) -> Unit) {
+private fun PackCards(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayPack?, remembered: HolidayPack?, onSelect: (HolidayPack) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         WorkspaceCardGrid(
             cards = themes.values.map { theme ->
-                { cardModifier: Modifier -> PackCard(theme, theme.pack == selected, modifier = cardModifier, onClick = { onSelect(theme.pack) }) }
+                { cardModifier: Modifier ->
+                    PackCard(theme, theme.pack == selected, modifier = cardModifier, remembered = theme.pack == remembered, onClick = { onSelect(theme.pack) })
+                }
             },
             columns = if (maxWidth >= TWO_PACK_COLUMNS_MIN_WIDTH) 2 else 1,
             spacing = 8.dp,
@@ -295,6 +304,8 @@ internal fun PackCard(
     selected: Boolean,
     dark: Boolean? = null,
     modifier: Modifier = Modifier.width(PACK_CARD_WIDTH),
+    // The pack that would turn on while none is chosen: a neutral outline instead of the accent one.
+    remembered: Boolean = false,
     onClick: () -> Unit,
 ) {
     val current = tc()
@@ -306,7 +317,7 @@ internal fun PackCard(
     val hovered by interaction.collectIsHoveredAsState()
     Row(
         modifier
-            .settingsPickerSurface(selected, hovered, shape, tc)
+            .settingsPickerSurface(selected, hovered, shape, tc, remembered = remembered)
             .hoverable(interaction)
             .semantics {
                 role = Role.Button

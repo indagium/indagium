@@ -45,6 +45,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 
+// The " · default" a default font's name ends in: drawn after the name in the interface font and the dim colour, so it never reads as part of a family name.
+private const val DEFAULT_SUFFIX = " · default"
+private const val DEFAULT_SUFFIX_TEXT = "· default"
+
 /**
  * A default that sits above the installed families in [SearchableFontDropdown]'s list, such as "Monospace · default": [key] names it in
  * the `-option-<tagSuffix>` test tag and in `selectedPinnedKey`, [family] draws its row.
@@ -100,7 +104,8 @@ internal fun SearchableFontDropdown(
             AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         }
         SettingsDropdownField(
-            text = shownName,
+            text = shownName.removeSuffix(DEFAULT_SUFFIX),
+            textSuffix = if (shownName.endsWith(DEFAULT_SUFFIX)) DEFAULT_SUFFIX_TEXT else null,
             open = expanded,
             onClick = {
                 query = ""
@@ -250,13 +255,16 @@ private fun FontChoiceRow(
     ) {
         // The same option style as SettingsDropdown: the chosen one in accent semibold on the accent wash, the rest in the text colour.
         AppText(
-            name,
+            name.removeSuffix(DEFAULT_SUFFIX),
             color = if (selected) tc.ac else tc.tx,
             fontSize = 11.sp,
             fontFamily = family,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f, fill = !name.endsWith(DEFAULT_SUFFIX)),
             overflow = TextOverflow.Ellipsis,
         )
+        if (name.endsWith(DEFAULT_SUFFIX)) {
+            AppText(DEFAULT_SUFFIX_TEXT, color = tc.td, fontSize = 11.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+        }
     }
 }

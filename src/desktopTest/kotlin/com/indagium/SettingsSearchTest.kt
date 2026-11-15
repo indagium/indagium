@@ -5,7 +5,10 @@ import com.indagium.ui.SettingsGroupKind
 import com.indagium.ui.SettingsPage
 import com.indagium.ui.holiday.*
 import com.indagium.ui.matchRanges
+import com.indagium.ui.searchHighlightTerms
+import com.indagium.ui.searchMatchedKeywords
 import com.indagium.ui.searchSettings
+import com.indagium.ui.searchTokens
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -243,5 +246,26 @@ class SettingsSearchTest {
         assertTrue("Pause effects while capturing or playing video" in labels("pause"))
         assertTrue("Special light or dark" in labels("follow preset"))
         assertTrue(searchSettings("halloween", all).all { it.page == SettingsPage.Appearance })
+    }
+
+    @Test
+    fun everyResultShowsWhyItMatched() {
+        // "font" reaches Error rows only through a keyword: the result says which one instead of showing no mark at all.
+        val errorRows = searchSettings("font", all).first { it.label == "Error rows" }
+        assertEquals(listOf("font"), searchMatchedKeywords(errorRows, searchTokens("font")))
+        // A word that is in the label or description is marked there, so it needs no note.
+        val interfaceFont = searchSettings("font", all).first { it.label == "Interface font" }
+        assertTrue(searchMatchedKeywords(interfaceFont, searchTokens("font")).isEmpty())
+        for (query in listOf("font", "colour", "folder", "capture", "shortcut")) {
+            for (entry in searchSettings(query, all)) {
+                val tokens = searchTokens(query)
+                val visible = (entry.label + " " + entry.hint).lowercase()
+                val shownInText = searchHighlightTerms(tokens).any { it in visible }
+                assertTrue(
+                    shownInText || searchMatchedKeywords(entry, tokens).isNotEmpty(),
+                    "\"${entry.label}\" matched \"$query\" with no visible reason",
+                )
+            }
+        }
     }
 }

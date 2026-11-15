@@ -66,13 +66,14 @@ internal fun WorkspaceProfileNameDialog(
         ) {
             AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(10.dp))
-            InlineField(
+            // The one Settings field (26dp), so the dialog's field matches the pages'.
+            SettingsTextField(
                 value = value,
-                onValue = { value = it },
+                onValueChange = { value = it },
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
                 placeholder = noun.replaceFirstChar { it.uppercase() } + " name",
-                modifier = Modifier.fillMaxWidth().focusRequester(focus).testTag("profile-name-field"),
-                fontSize = 12.sp,
                 onSubmit = ::confirm,
+                testTag = "profile-name-field",
             )
             Spacer(Modifier.height(4.dp))
             // Kept on one fixed-height line so the buttons don't jump when the message appears.
@@ -83,8 +84,8 @@ internal fun WorkspaceProfileNameDialog(
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                DialogActionButton(confirmLabel, active = error == null, enabled = error == null) { confirm() }
-                DialogActionButton("Cancel", active = false) { onDismiss() }
+                SettingsDialogButton(confirmLabel, primary = true, enabled = error == null) { confirm() }
+                SettingsDialogButton("Cancel") { onDismiss() }
             }
         }
     }

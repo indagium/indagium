@@ -55,7 +55,7 @@ import kotlinx.coroutines.withContext
 
 // The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
 internal const val AI_PROFILE_HINT = "Pick the profile to edit. The AI panel uses the profile that is selected."
-internal const val AI_PROVIDER_TYPE_HINT = "Anthropic, OpenAI-compatible, or a local Codex or Claude Code account."
+internal const val AI_PROVIDER_TYPE_HINT = "An API provider (OpenAI, Anthropic or OpenAI-compatible) or a local Codex or Claude Code account."
 internal const val AI_PROFILE_NAME_HINT = "How this profile is called in the AI panel's provider picker."
 internal const val AI_ENDPOINT_HINT = "Base URL of an HTTP AI provider."
 internal const val AI_CLI_EXECUTABLE_HINT = "Optional. The Codex or Claude Code CLI of an account that is already signed in on this computer."
@@ -202,7 +202,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                         editingProfileId = id
                     }
                 },
-                modifier = Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.PROVIDER_PICKER),
+                modifier = Modifier.width(settingsFieldWidth(PROVIDER_FIELD_WIDTH)).testTag(AiPageTags.PROVIDER_PICKER),
                 settingsStyle = true,
                 onInteraction = reclaimFocus,
             )
@@ -234,7 +234,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             SettingsTextField(
                 name,
                 { name = it },
-                Modifier.width(PROVIDER_FIELD_WIDTH),
+                Modifier.width(settingsFieldWidth(PROVIDER_FIELD_WIDTH)),
                 placeholder = "LM Studio (local)",
                 testTag = AiPageTags.PROFILE_NAME,
             )
@@ -244,7 +244,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 SettingsTextField(
                     endpoint,
                     { endpoint = it },
-                    Modifier.width(PROVIDER_FIELD_WIDTH),
+                    Modifier.width(settingsFieldWidth(PROVIDER_FIELD_WIDTH)),
                     placeholder = "https://api.example.com/v1",
                     testTag = AiPageTags.ENDPOINT,
                 )
@@ -318,7 +318,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                         .orEmpty()
                     if (reasoningEffort !in supportedEfforts) reasoningEffort = ""
                 },
-                modifier = Modifier.width(PROVIDER_FIELD_WIDTH),
+                modifier = Modifier.width(settingsFieldWidth(PROVIDER_FIELD_WIDTH)),
                 settingsStyle = true,
                 onInteraction = reclaimFocus,
             )
@@ -329,7 +329,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                     efforts = reasoningEfforts,
                     selected = reasoningEffort,
                     onPick = { reasoningEffort = it },
-                    modifier = Modifier.width(PROVIDER_FIELD_WIDTH),
+                    modifier = Modifier.width(settingsFieldWidth(PROVIDER_FIELD_WIDTH)),
                     settingsStyle = true,
                     onInteraction = reclaimFocus,
                 )
@@ -340,7 +340,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 SettingsTextField(
                     apiKey,
                     { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
-                    Modifier.width(PROVIDER_FIELD_WIDTH),
+                    Modifier.width(settingsFieldWidth(PROVIDER_FIELD_WIDTH)),
                     placeholder = "Required for cloud API providers",
                     visualTransformation = PasswordVisualTransformation(),
                     testTag = AiPageTags.API_KEY,
@@ -441,12 +441,12 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             message = "Delete “$targetName” from AI providers. This can't be undone.",
             onDismissRequest = { pendingDeleteProfileId = null },
         ) {
-            DialogActionButton("Delete", active = true, danger = true) {
+            SettingsDialogButton("Delete", primary = true, danger = true) {
                 state.removeAiProviderProfile(id)
                 editingProfileId = state.settings.aiProviderProfiles.first { it.selected }.id
                 pendingDeleteProfileId = null
             }
-            DialogActionButton("Cancel", active = false) { pendingDeleteProfileId = null }
+            SettingsDialogButton("Cancel") { pendingDeleteProfileId = null }
         }
     }
 
@@ -457,7 +457,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             error = navigationSaveError,
             onDismissRequest = { pendingNavigation = null; navigationSaveError = null },
         ) {
-            DialogActionButton("Save", active = true) {
+            SettingsDialogButton("Save", primary = true) {
                 val err = state.updateAiProviderProfile(draft)
                 if (err == null) {
                     pendingNavigation = null
@@ -467,12 +467,12 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                     navigationSaveError = err
                 }
             }
-            DialogActionButton("Discard", active = false, danger = true) {
+            SettingsDialogButton("Discard", danger = true) {
                 pendingNavigation = null
                 navigationSaveError = null
                 action()
             }
-            DialogActionButton("Cancel", active = false) { pendingNavigation = null; navigationSaveError = null }
+            SettingsDialogButton("Cancel") { pendingNavigation = null; navigationSaveError = null }
         }
     }
 }
@@ -538,11 +538,11 @@ internal fun CustomAiCommandsSettingsSection(state: AppState) {
             message = "Delete /${command.name} from AI commands. This can't be undone.",
             onDismissRequest = { pendingDeleteCommand = null },
         ) {
-            DialogActionButton("Delete", active = true, danger = true) {
+            SettingsDialogButton("Delete", primary = true, danger = true) {
                 state.deleteCustomAiCommand(command.name)
                 pendingDeleteCommand = null
             }
-            DialogActionButton("Cancel", active = false) { pendingDeleteCommand = null }
+            SettingsDialogButton("Cancel") { pendingDeleteCommand = null }
         }
     }
 }
@@ -608,14 +608,20 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
     SettingsGroup("Dictation") {
         // An OS engine's own notes (the permission it asks for, what it cannot do) are folded into this row's hover hint rather than shown
         // as a sentence row of their own.
+        // A stored engine this computer does not offer (settings carried over from another OS) shows no chosen segment, and the description says so.
+        val engineAvailable = engine in engineChoices
         SettingsRow(
             "Recognition engine",
-            VoiceRecognitionEngines.description(engine),
-            detail = voiceEngineDetail(engine),
+            if (engineAvailable) {
+                VoiceRecognitionEngines.description(engine)
+            } else {
+                "${engine.label} isn't available on this computer. Choose one of these engines."
+            },
+            detail = voiceEngineDetail(engine).takeIf { engineAvailable },
         ) {
             SettingsSegmented(
                 options = engineChoices.map { it.label },
-                selectedIndices = setOf(engineChoices.indexOf(engine).coerceAtLeast(0)),
+                selectedIndices = setOfNotNull(engineChoices.indexOf(engine).takeIf { it >= 0 }),
                 onToggle = { index ->
                     state.updateSettings { settings ->
                         settings.copy(voiceInput = settings.voiceInput.copy(recognitionEngine = engineChoices[index]))

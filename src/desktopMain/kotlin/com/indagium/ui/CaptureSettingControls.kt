@@ -582,7 +582,7 @@ internal fun KeepDeviceAudioCheck(settings: CaptureSettings, edit: CaptureSettin
 }
 
 internal const val DEVICE_AUDIO_MUTING_TEXT = "While audio is captured the phone's speaker is muted (Android 11–12 always; Android 13+ " +
-    "unless \"Keep sound on the device\" is on). Apps can block capture of their sound."
+    "unless “Keep sound on the device” is on). Apps can block capture of their sound."
 
 @Composable
 internal fun DeviceAudioMutingNotice() {

@@ -791,12 +791,12 @@ internal fun LayoutMenuPopup(
                     onReclaimFocus()
                 },
             ) {
-                DialogActionButton("Delete", active = true, danger = true) {
+                SettingsDialogButton("Delete", primary = true, danger = true) {
                     state.deleteSavedLogViewLayout(layout.id)
                     deleteLayoutRequest = null
                     onReclaimFocus()
                 }
-                DialogActionButton("Cancel", active = false) {
+                SettingsDialogButton("Cancel") {
                     deleteLayoutRequest = null
                     onReclaimFocus()
                 }

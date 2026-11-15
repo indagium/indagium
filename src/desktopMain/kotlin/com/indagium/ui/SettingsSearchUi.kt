@@ -269,9 +269,13 @@ private fun SettingsSearchResultRow(entry: SettingsSearchEntry, tokens: List<Str
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(6.dp)
     val label = entry.label.replace('\n', ' ')
-    val highlighted = remember(label, tokens, tc.searchMatchBg) { highlightMatches(label, tokens, tc.searchMatchBg) }
+    // Synonyms are marked too, so a result that matched on "color" for a search of "colour" shows where.
+    val terms = remember(tokens) { searchHighlightTerms(tokens) }
+    val highlighted = remember(label, terms, tc.searchMatchBg) { highlightMatches(label, terms, tc.searchMatchBg) }
     // A result that matches only in its description marks the match there.
-    val highlightedHint = remember(entry.hint, tokens, tc.searchMatchBg) { highlightMatches(entry.hint, tokens, tc.searchMatchBg) }
+    val highlightedHint = remember(entry.hint, terms, tc.searchMatchBg) { highlightMatches(entry.hint, terms, tc.searchMatchBg) }
+    // A result that matched only on a keyword (or a page name) says which one: every result shows why it is listed.
+    val keywords = remember(entry, tokens) { searchMatchedKeywords(entry, tokens) }
     Row(
         Modifier.fillMaxWidth()
             .background(if (hovered) tc.hv else tc.p2.copy(alpha = 0f), shape)
@@ -291,6 +295,19 @@ private fun SettingsSearchResultRow(entry: SettingsSearchEntry, tokens: List<Str
                 highlightedHint, color = tc.ts, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 fontFamily = LocalUiFontFamily.current,
             )
+            if (keywords.isNotEmpty()) {
+                androidx.compose.material3.Text(
+                    remember(keywords, terms, tc.searchMatchBg) {
+                        buildAnnotatedString {
+                            append("Matches: ")
+                            append(highlightMatches(keywords.joinToString(", "), terms, tc.searchMatchBg))
+                        }
+                    },
+                    color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    fontFamily = LocalUiFontFamily.current,
+                    modifier = Modifier.testTag("settings-search-match-note"),
+                )
+            }
         }
         AppText("${entry.page.breadcrumb} ›", color = tc.td, fontSize = 10.sp, fontFamily = UI, maxLines = 1)
     }

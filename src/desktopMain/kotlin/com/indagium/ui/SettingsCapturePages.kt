@@ -50,7 +50,6 @@ internal const val CAPTURE_LABEL_HINT = "Stored in the capture archive."
 internal const val CAPTURE_MARKER_BEFORE_HINT = "Log window kept before pressing Mark issue."
 internal const val CAPTURE_MARKER_AFTER_HINT = "Log window kept after pressing Mark issue."
 internal const val CAPTURE_MARKER_SCREENSHOT_HINT = "Adds a device screenshot to the marker note."
-internal const val CAPTURE_MARKER_SNAPSHOT_HINT = "Not used yet: snapshot export does not read this setting."
 internal const val CAPTURE_FOLLOW_READOUT_HINT = "Shows a line under the video transport bar that says what Follow is doing."
 internal const val CAPTURE_FOLLOW_READOUT_DETAIL = "Shows the “video → log → holding at …” diagnostic line under the video transport bar, explaining exactly " +
     "what Follow is doing at the current playhead position."
@@ -75,7 +74,6 @@ internal object CapturePageTags {
     const val HARDWARE_MIRROR = "capture-hardware-mirror"
     const val SAVED_VIDEO_FORMAT = "capture-saved-video-format"
     const val MARKER_SCREENSHOT = "capture-marker-screenshot"
-    const val MARKER_IN_SNAPSHOT = "capture-marker-in-snapshot"
     const val FOLLOW_READOUT = "capture-follow-readout"
     const val DOUBLE_CLICK_SEEKS = "capture-double-click-seeks"
 
@@ -457,19 +455,8 @@ internal fun CaptureMarkIssueSettingsSection(state: AppState, reclaimFocus: () -
                 testTag = CapturePageTags.MARKER_SCREENSHOT,
             )
         }
-        // markerNotesInSnapshot has no reader yet - Phase 4 (snapshot archive export/import) is the consumer and isn't implemented in this
-        // phase. The setting and this row exist now so that phase only has to add the export-time gate, not another settings round-trip.
-        // Shown but off-limits until a snapshot export reads it: the stored value is kept, the switch cannot be changed meanwhile.
-        SettingsRow("Include markers in saved snapshots", CAPTURE_MARKER_SNAPSHOT_HINT, enabled = false) {
-            SettingsToggle(
-                checked = settings.markerNotesInSnapshot,
-                label = "Include markers in saved snapshots",
-                onChange = { next -> edit { it.copy(markerNotesInSnapshot = next) } },
-                reclaimFocus = reclaimFocus,
-                enabled = false,
-                testTag = CapturePageTags.MARKER_IN_SNAPSHOT,
-            )
-        }
+        // markerNotesInSnapshot has no reader yet (Phase 4, the snapshot export, is its consumer), so it has no row: a switch that does nothing
+        // would only mislead. The stored value is kept, and the row and its search entry come back with the export that reads it.
     }
 }
 

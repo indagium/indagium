@@ -918,7 +918,7 @@ class TabStripStyleUiTest {
                 }
             }
             rule.waitForIdle()
-            val labels = listOf("File, plus folder if same name", "Folder", "File only", "File — folder")
+            val labels = listOf("File, plus folder if same name", "Folder", "File only", "File and folder, always")
             assertEquals(labels, TabLabelMode.entries.map(::tabLabelModeLabel))
             val control = rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).getBoundsInRoot()
             assertTrue(control.right <= width.dp, "the control fits a $width dp column: $control")
@@ -935,7 +935,7 @@ class TabStripStyleUiTest {
             rule.onNodeWithTag("$TAB_LABEL_CONTROL_TAG-option-${TabLabelMode.FILE_FOLDER_ALWAYS.name}").performClick()
             rule.waitForIdle()
             assertEquals(TabLabelMode.FILE_FOLDER_ALWAYS, state.settings.tabLabelMode)
-            rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).assertTextContains("File — folder")
+            rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).assertTextContains("File and folder, always")
             rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).performClick()
             rule.waitForIdle()
             rule.onNodeWithTag("$TAB_LABEL_CONTROL_TAG-option-${TabLabelMode.SESSION_ONLY.name}").performClick()

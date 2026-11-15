@@ -17,18 +17,18 @@ class ErrorRowsStylePopupPositionTest {
         provider.calculatePosition(anchor, window, LayoutDirection.Ltr, popup)
 
     @Test
-    fun cardStartsAtTheButtonsStartEdgeBelowIt() {
-        val anchor = IntRect(200, 100, 280, 124)
+    fun cardEndsAtTheButtonsEndEdgeBelowIt() {
+        val anchor = IntRect(600, 100, 680, 124)
         val popup = IntSize(534, 90)
         val offset = place(anchor, popup)
-        // The popup's content carries the shadow padding, so the visible card sits shadowPad inside it.
-        assertEquals(anchor.left, offset.x + shadowPad)
+        // The popup's content carries the shadow padding, so the visible card ends shadowPad inside it.
+        assertEquals(anchor.right, offset.x + popup.width - shadowPad)
         assertTrue(offset.y + shadowPad > anchor.bottom, "card must open below the button")
     }
 
     @Test
-    fun cardIsShiftedLeftToStayInsideTheWindow() {
-        val anchor = IntRect(800, 100, 880, 124)
+    fun cardIsShiftedRightToStayInsideTheWindow() {
+        val anchor = IntRect(200, 100, 280, 124)
         val popup = IntSize(534, 90)
         val offset = place(anchor, popup)
         assertTrue(offset.x >= 0 && offset.x + popup.width <= window.width, "popup at $offset must stay inside $window")

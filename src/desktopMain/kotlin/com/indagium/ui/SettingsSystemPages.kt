@@ -365,7 +365,7 @@ private fun DiskUseGroup(state: AppState) {
                 )
             }
         }
-        SettingsRow("Return to defaults", STORAGE_RESET_HINT, danger = true) {
+        SettingsRow("Return to defaults", STORAGE_RESET_HINT) {
             SettingsButton(
                 "Reset app data…",
                 onClick = { state.requestResetAppData() },
