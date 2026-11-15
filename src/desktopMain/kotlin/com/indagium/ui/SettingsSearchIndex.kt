@@ -1,5 +1,10 @@
 package com.indagium.ui
+import com.indagium.edition.Edition
+import com.indagium.model.VoiceInputSettings
+import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.ui.holiday.*
+import com.indagium.voice.VoiceModelCatalog
+import com.indagium.voice.VoiceRecognitionEngines
 
 // Search index behind the Settings dialog's "Search settings" field: one entry per labelled setting
 // row, keyed to the page that shows it. Labels are copied from the literals the rows render (so a result reads exactly like the row
@@ -57,42 +62,42 @@ private fun general() = listOf(
     ),
     entry(
         SettingsPage.Storage, "Default save folder",
-        "Parent folder every other save location defaults under. Defaults to your Documents folder.",
+        SAVE_ROOT_HINT,
         listOf("documents", "root"),
     ),
     entry(
         SettingsPage.Storage, "Analysis artifacts folder",
-        "Where analysis notes, filtered exports and split logs are saved.",
+        SAVE_ANALYSIS_HINT,
         listOf("notes", "exports", "split logs", "save folder"),
     ),
     entry(
         SettingsPage.Storage, "Capture sessions folder",
-        "Where new device captures are recorded; applies from the next Start.",
+        SAVE_SESSIONS_HINT,
         listOf("recordings", "device", "save folder"),
     ),
     entry(
         SettingsPage.Storage, "Snapshots folder",
-        "Destination for “Save snapshot” while a capture is recording.",
+        SAVE_SNAPSHOTS_HINT,
         listOf("screenshots", "save folder"),
     ),
     entry(
-        SettingsPage.Storage, "Saved captures folder (Save ZIP)",
-        "Destination for “Save ZIP” on a stopped or retained capture.",
+        SettingsPage.Storage, "Saved captures folder",
+        SAVE_ZIP_HINT,
         listOf("zip", "archive", "save folder"),
     ),
     entry(
         SettingsPage.TestRuns, "Test suites folder",
-        "Where your AI test suites are kept: library, suites and golden screenshots.",
+        SAVE_TEST_SUITES_HINT,
         listOf("tests", "ai tests", "library", "assets", "save folder"),
     ),
     entry(
         SettingsPage.TestRuns, "Test runs folder",
-        "Where each AI test run keeps its evidence: run files, recordings, screenshots and transcripts.",
+        SAVE_TEST_RUNS_HINT,
         listOf("tests", "ai tests", "evidence", "recordings", "save folder"),
     ),
     entry(
         SettingsPage.TestRuns, "Issues folder",
-        "Where the issues made from failed test steps are kept, with their evidence.",
+        SAVE_TEST_ISSUES_HINT,
         listOf("tests", "ai tests", "bugs", "tracker", "save folder"),
     ),
     entry(
@@ -102,13 +107,13 @@ private fun general() = listOf(
     ),
     entry(
         SettingsPage.Storage, "Temporary data",
-        "Downloaded archive cache and app-managed notes. Clear temporary data removes these items.",
+        STORAGE_TEMP_HINT,
         listOf("clear", "cache", "delete", "temp"),
     ),
     entry(
         SettingsPage.Storage, "App data",
-        "Everything Indagium stores: settings, session, saved filters, indexes and diagnostics. Reset app data wipes it.",
-        listOf("reset", "wipe", "delete", "clear", "factory"),
+        STORAGE_APP_DATA_HINT,
+        listOf("reset", "wipe", "delete", "clear", "factory", "return to defaults", "reset app data"),
     ),
 )
 
@@ -309,100 +314,105 @@ private fun editorBehavior() = listOf(
     entry(SettingsPage.TabsToolbar, "Visible tabs", VISIBLE_TABS_HINT, listOf("tab bar", "overflow")),
     entry(
         SettingsPage.SearchFilters, "Keyboard scroll margin",
-        "Rows kept in view around the selection when moving with the keyboard.",
+        SEARCH_SCROLL_MARGIN_HINT,
         listOf("arrow keys", "context", "navigation"),
     ),
-    entry(SettingsPage.SearchFilters, "Most-used tags", "How many frequent tags are offered as quick picks.", listOf("tag list", "filter")),
-    entry(SettingsPage.SearchFilters, "Filter list rows", "Visible rows of the filter panel's lists.", listOf("sidebar", "height")),
+    entry(SettingsPage.SearchFilters, "Most-used tags", SEARCH_MOST_USED_TAGS_HINT, listOf("tag list", "filter")),
+    entry(SettingsPage.SearchFilters, "Filter list rows", SEARCH_LIST_HEIGHT_HINT, listOf("sidebar", "height")),
     entry(
         SettingsPage.LogView, "Follow live logs",
-        "Keeps the view pinned to the newest line while a tab is live-watching.",
+        LOG_FOLLOW_LIVE_HINT,
         listOf("tail", "auto scroll", "autoscroll", "live watching"),
     ),
     entry(
         SettingsPage.SearchFilters, "Regex summary",
-        "Shows retained Tags-mode selectors above the Regex field; informational only.",
+        SEARCH_REGEX_SUMMARY_HINT,
         listOf("regex", "tags", "filter"),
     ),
     entry(
         SettingsPage.LogView, "Row wrapping",
-        "Auto wraps long lines to the panel width, or set a fixed wrap column and scroll horizontally.",
-        listOf("wrap", "long lines", "horizontal scroll"),
+        LOG_ROW_WRAPPING_HINT,
+        listOf("wrap", "long lines", "horizontal scroll", "auto", "fixed"),
+    ),
+    entry(
+        SettingsPage.LogView, "Wrap at",
+        LOG_WRAP_AT_HINT,
+        listOf("wrap", "columns", "fixed", "long lines", "row wrapping"),
     ),
     entry(
         SettingsPage.LogView, "Crash rows",
-        "Colours every row in an expanded crash/stack-trace group, not just the header.",
+        LOG_CRASH_ROWS_HINT,
         listOf("stack trace", "exception", "highlight", "anr"),
     ),
     entry(
         SettingsPage.LogView, "Original panel",
-        "Whether newly opened files start with the unfiltered Original panel visible.",
+        LOG_OPEN_WITH_ORIGINAL_HINT,
         listOf("unfiltered", "split", "new files"),
     ),
     entry(
-        SettingsPage.LogView, "Row number",
-        "Shows a left gutter with each row's original row number.",
-        listOf("line number", "gutter"),
+        SettingsPage.LogView, "Row numbers",
+        LOG_ROW_NUMBERS_HINT,
+        listOf("line number", "gutter", "row number"),
     ),
     entry(
         SettingsPage.LogView, "Minimap",
-        "Replaces the scrollbar with a text minimap coloured by level.",
+        LOG_MINIMAP_HINT,
         listOf("scrollbar", "overview"),
     ),
     entry(
         SettingsPage.SearchFilters, "Ctrl/Cmd+F opens",
-        "Whether Ctrl/Cmd+F opens the Find bar, or focuses the Tags or Regex filter field.",
+        SEARCH_OPENS_HINT,
         listOf("cmd+f", "find", "search", "shortcut", "keyboard", "find bar"),
     ),
     entry(
         SettingsPage.SearchFilters, "Ctrl/Cmd+F also shows Original",
-        "Reveals the Original panel whenever Ctrl/Cmd+F opens; Search scope behaviour still picks the Find field.",
+        SEARCH_ALSO_ORIGINAL_HINT,
         listOf("cmd+f", "find", "shortcut", "keyboard", "unfiltered", "opens original"),
     ),
     entry(
         SettingsPage.SearchFilters, "Search scope behaviour",
-        "Choose Filtered, Unfiltered, Two searches, Last search mode, or Auto-switch by open view for normal Find opens.",
+        SEARCH_SCOPE_HINT,
         listOf("find", "search", "two searches", "dual", "scope", "cmd+f", "ctrl+f", "filtered", "unfiltered", "last used", "auto"),
     ),
     entry(
         SettingsPage.SearchFilters, "Link split selection and Find",
-        "In any Filtered and Original split view, mirror row selection and Find navigation, or keep each panel independent.",
+        SEARCH_LINK_SPLIT_HINT,
         listOf("find", "search", "original", "filtered", "two searches", "dual", "selection", "scroll", "sync"),
     ),
     entry(
         SettingsPage.LogView, "Process names in new tabs",
-        "Whether new tabs show process names in place of numeric pids.",
+        LOG_PROCESS_NAMES_HINT,
         listOf("pid", "proc", "process"),
     ),
     entry(
         SettingsPage.CaptureVideoPlayback, "Video follow readout",
-        "Shows the diagnostic line under the video transport bar explaining what Follow is doing.",
+        CAPTURE_FOLLOW_READOUT_HINT,
         listOf("video", "sync", "playhead"),
     ),
     entry(
         SettingsPage.CaptureVideoPlayback, "New video links: double-click seeks",
-        "Default for newly linked log/video anchors; each link can still be toggled from its header.",
+        CAPTURE_DOUBLE_CLICK_HINT,
         listOf("video", "anchor", "double click", "seek"),
         anchor = "New video links:\ndouble-click seeks",
     ),
     entry(
         SettingsPage.NotesWriting, "English proofreading",
-        "Local, optional English spelling and grammar suggestions in editable prose.",
+        NOTES_PROOFREADING_HINT,
         listOf("proofread", "grammar", "spelling", "language tool", "writing", "suggestions", "english"),
     ),
     entry(
         SettingsPage.NotesWriting, "English variant",
-        "Choose American or British English rules for local proofreading suggestions.",
+        NOTES_SPELLING_HINT,
         listOf("proofread", "grammar", "spelling", "en-us", "en-gb", "american", "british"),
     ),
     entry(
         SettingsPage.LogView, "Error rows",
-        "Highlight parsed Error rows by default and choose their background, text colour, font, bold and italic style.",
+        LOG_ERROR_ROWS_HINT,
         listOf("error", "error level", "crash", "highlight", "red", "log row", "bold", "italic", "font"),
     ),
     entry(
         SettingsPage.NotesWriting, "Personal vocabulary",
-        "Search, add, or remove single words that spelling suggestions should accept in every editor.",
+        NOTES_VOCABULARY_HINT,
         listOf("personal", "proofread", "vocabulary", "dictionary", "spelling", "words", "ignore"),
     ),
 )
@@ -410,68 +420,68 @@ private fun editorBehavior() = listOf(
 private fun exportAnnotations() = listOf(
     entry(
         SettingsPage.Storage, "Auto-save",
-        "Saves note Markdown and its .ann sidecar after note changes.",
+        STORAGE_AUTO_SAVE_HINT,
         listOf("autosave", "notes", "save", "markdown"),
     ),
     entry(
         SettingsPage.Storage, "Filter backups",
-        "Writes timestamped saved-filter backups after saved-filter changes.",
+        STORAGE_FILTER_BACKUPS_HINT,
         listOf("backup", "saved filters", "save"),
     ),
-    entry(SettingsPage.NotesWriting, "Number blocks", "Numbers the blocks of a note.", listOf("numbering", "annotation")),
+    entry(SettingsPage.NotesWriting, "Number blocks", NOTES_NUMBER_BLOCKS_HINT, listOf("numbering", "annotation")),
     entry(
         SettingsPage.NotesWriting, "Log blocks",
-        "Format of log excerpts in exported notes: Indented, Wiki or Cloud.",
+        NOTES_LOG_EXCERPTS_HINT,
         listOf("jira", "wiki", "code block", "annotation"),
     ),
     entry(
         SettingsPage.NotesWriting, "Inline Markdown",
-        "Shows note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
+        NOTES_INLINE_MARKDOWN_HINT,
         listOf("render", "notes", "markdown"),
     ),
     entry(
         SettingsPage.CopyExport, "Pid/Tid copy",
-        "Includes PID and TID for log rows when copying lines, annotations or filtered exports.",
+        COPY_PID_TID_HINT,
         listOf("copy", "clipboard", "pid", "tid", "thread"),
     ),
     entry(
         SettingsPage.CopyExport, "Pid copy as name",
-        "Uses a process name learned from the log instead of the numeric PID when copying.",
+        COPY_PID_AS_NAME_HINT,
         listOf("copy", "clipboard", "process name"),
     ),
     entry(
         SettingsPage.CopyExport, "Row number copy",
-        "Includes the original log row number when copying and the row-number gutter is visible.",
+        COPY_ROW_NUMBER_HINT,
         listOf("copy", "clipboard", "line number"),
     ),
     entry(
         SettingsPage.CopyExport, "Time delta copy",
-        "Includes Δt when copying and the Δt column is visible.",
+        COPY_TIME_DELTA_HINT,
         listOf("copy", "clipboard", "delta", "elapsed"),
     ),
     entry(
         SettingsPage.CopyExport, "Copy default",
-        "Format used by the main Copy button: Cloud, Wiki, Markdown or HTML.",
+        COPY_NOTE_FORMAT_HINT,
         listOf("copy", "clipboard", "jira", "html", "format"),
     ),
     entry(
         SettingsPage.NotesWriting, "Diagram note action",
-        "Which half of the sequence-diagram note action is primary: snapshot or linked note.",
+        NOTES_DIAGRAM_ACTION_HINT,
         listOf("sequence diagram", "uml", "snapshot", "link"),
     ),
     entry(
         SettingsPage.CopyExport, "Diagram export",
-        "Representation of newly added sequence-diagram notes: image or source.",
+        COPY_DIAGRAM_EXPORT_HINT,
         listOf("sequence diagram", "uml", "mermaid", "plantuml", "image"),
     ),
     entry(
         SettingsPage.CopyExport, "Annotation file prefix",
-        "Prefix used in front of the log name in note labels, e.g. “From app.log”.",
+        COPY_SOURCE_LINE_LABEL_HINT,
         listOf("note", "label", "name", "from"),
     ),
     entry(
         SettingsPage.CopyExport, "Mask word on copy",
-        "Replaces listed words with a masked form when copying a note.",
+        COPY_MASK_HINT,
         listOf("redact", "privacy", "censor", "hide", "sensitive", "copy"),
     ),
 )
@@ -483,54 +493,54 @@ private fun capture() = buildList {
     val markIssue = SettingsPage.CaptureMarkIssue
     val playback = SettingsPage.CaptureVideoPlayback
     add(entry(tools, "Tools", "adb and scrcpy executables used for device capture.", listOf("adb", "scrcpy", "android", "device", "path")))
-    add(entry(tools, "ADB path", "Path to adb; leave blank to auto-detect.", listOf("adb", "android", "device", "phone", "executable")))
+    add(entry(tools, "ADB path", CAPTURE_ADB_HINT, listOf("adb", "android", "device", "phone", "executable")))
     add(
         entry(
             tools, "scrcpy path",
-            "Optional; only for the native mirror window, used when Device display is set to a scrcpy window.",
+            CAPTURE_SCRCPY_HINT,
             listOf("scrcpy", "mirror", "android", "device", "executable"),
         ),
     )
     add(entry(c, "Before start", "Defaults for the New tab's Before start panel.", listOf("capture", "device", "phone", "launcher")))
     add(
         entry(
-            c, "Record video to file", "Records the device screen into the retained session.",
+            c, "Record video to file", CAPTURE_RECORD_SCREEN_HINT,
             listOf("video", "screen", "recording", "android", "device", "phone"),
         ),
     )
-    add(entry(c, "Capture audio", "Captures device audio into the recording.", listOf("sound", "record", "android", "device", "phone")))
+    add(entry(c, "Capture audio", CAPTURE_AUDIO_HINT, listOf("sound", "record", "android", "device", "phone")))
     add(
         entry(
             c, "Include earlier device logs",
-            "Also copies what the device already holds from before Start.",
+            EARLIER_DEVICE_LOGS_TEXT,
             listOf("buffer", "history", "logcat", "android", "device"),
         ),
     )
     add(
         entry(
-            c, "Keep sound on the device (Android 13+)",
-            "Keeps the phone's speaker on while audio is captured.",
+            c, "Keep sound on the device",
+            CAPTURE_KEEP_DEVICE_AUDIO_HINT,
             listOf("audio", "mute", "speaker", "android", "device"),
         ),
     )
     if (!isMacOs) {
         add(
             entry(
-                tools, "Hardware-accelerated mirror (experimental)",
-                "Uses hardware video decoding for the in-app mirror.",
+                tools, "Hardware-accelerated mirror",
+                CAPTURE_HARDWARE_MIRROR_HINT,
                 listOf("gpu", "decode", "mirror", "android", "device", "experimental"),
             ),
         )
     }
     add(
         entry(
-            c, "Microphone", "Records audio from this computer's microphone with the screen capture.",
+            c, "Microphone", CAPTURE_MICROPHONE_HINT,
             listOf("audio", "voice", "record", "device"),
         ),
     )
     add(
         entry(
-            c, "Device display", "In-app mirror, scrcpy window or off while capturing.",
+            c, "Device display", CAPTURE_DEVICE_DISPLAY_HINT,
             listOf("mirror", "scrcpy", "screen", "android", "device", "phone"),
         ),
     )
@@ -543,68 +553,68 @@ private fun capture() = buildList {
     add(entry(c, "Buffer mode", "Which logcat buffers are captured: default, all or custom.", listOf("logcat", "buffers", "android", "device")))
     add(
         entry(
-            c, "Buffers to capture", "Choose the logcat buffers used by Custom buffer mode.",
+            c, "Buffers to capture", CAPTURE_CUSTOM_BUFFERS_HINT,
             listOf("main", "system", "crash", "kernel", "events", "radio", "logcat"),
         ),
     )
     add(entry(limits, "Screen recording", "Size, frame rate, bitrate and format of the screen recording.", listOf("video", "android", "device", "phone")))
     add(
         entry(
-            limits, "Max size", "Longest side in pixels of the recording; 0 keeps full resolution.",
+            limits, "Max size", CAPTURE_MAX_SIZE_HINT,
             listOf("resolution", "video", "scale", "screen recording"),
         ),
     )
-    add(entry(limits, "Max FPS", "Frame-rate cap for the screen recording.", listOf("frame rate", "video", "screen recording")))
-    add(entry(limits, "Bitrate Mbps", "Video bitrate of the screen recording in Mbps.", listOf("quality", "video", "screen recording")))
-    add(entry(limits, "Saved video format", "Container used by Save snapshot / Save ZIP: MP4 or MKV.", listOf("mp4", "mkv", "video", "container", "export")))
-    add(entry(playback, "Live audio volume %", "Volume of the embedded mirror's speaker toggle.", listOf("sound", "speaker", "mirror", "audio")))
-    add(entry(limits, "Session limit GiB", "Largest size a single capture session may grow to.", listOf("storage", "disk", "size", "limit", "gigabytes")))
-    add(entry(limits, "Reserve GiB", "Free disk space left untouched while capturing.", listOf("storage", "disk", "free space", "gigabytes")))
+    add(entry(limits, "Max FPS", CAPTURE_MAX_FPS_HINT, listOf("frame rate", "video", "screen recording")))
+    add(entry(limits, "Bitrate Mbps", CAPTURE_BITRATE_HINT, listOf("quality", "video", "screen recording")))
+    add(entry(limits, "Saved video format", CAPTURE_SAVED_FORMAT_HINT, listOf("mp4", "mkv", "video", "container", "export")))
+    add(entry(playback, "Live audio volume %", CAPTURE_LIVE_VOLUME_HINT, listOf("sound", "speaker", "mirror", "audio")))
+    add(entry(limits, "Session limit GiB", CAPTURE_SESSION_LIMIT_HINT, listOf("storage", "disk", "size", "limit", "gigabytes")))
+    add(entry(limits, "Reserve GiB", CAPTURE_RESERVE_HINT, listOf("storage", "disk", "free space", "gigabytes")))
     add(entry(limits, "Snapshot files", "Filename template and label for saved snapshots.", listOf("naming", "export")))
     add(
         entry(
-            limits, "Filename template", "Placeholders: {device}, {start}, {range}, {counter}.",
+            limits, "Filename template", CAPTURE_FILENAME_TEMPLATE_HINT,
             listOf("snapshot", "name", "naming", "export", "save"),
         ),
     )
-    add(entry(limits, "Label", "Label stored in the capture archive.", listOf("snapshot", "archive", "name")))
+    add(entry(limits, "Label", CAPTURE_LABEL_HINT, listOf("snapshot", "archive", "name")))
     add(
         entry(
             markIssue, "Mark issue", "The Mark issue button drops a note with the log window around the press.",
             listOf("marker", "bug", "note", "screenshot"),
         ),
     )
-    add(entry(markIssue, "Before, seconds", "Log window kept before pressing Mark issue.", listOf("marker", "pre", "window", "mark issue")))
-    add(entry(markIssue, "After, seconds", "Log window kept after pressing Mark issue.", listOf("marker", "post", "window", "mark issue")))
-    add(entry(markIssue, "Take a screenshot on Mark issue", "Adds a device screenshot to the marker note.", listOf("marker", "image", "mark issue")))
-    add(entry(markIssue, "Include markers in saved snapshots", "Snapshot export does not use this setting yet.", listOf("marker", "notes", "mark issue")))
+    add(entry(markIssue, "Before, seconds", CAPTURE_MARKER_BEFORE_HINT, listOf("marker", "pre", "window", "mark issue")))
+    add(entry(markIssue, "After, seconds", CAPTURE_MARKER_AFTER_HINT, listOf("marker", "post", "window", "mark issue")))
+    add(entry(markIssue, "Take a screenshot on Mark issue", CAPTURE_MARKER_SCREENSHOT_HINT, listOf("marker", "image", "mark issue")))
+    add(entry(markIssue, "Include markers in saved snapshots", CAPTURE_MARKER_SNAPSHOT_HINT, listOf("marker", "notes", "mark issue")))
 }
 
 private fun automation() = listOf(
     entry(
         SettingsPage.Integrations, "MCP control server",
-        "Local server that lets AI clients drive Indagium over MCP.",
+        MCP_SERVER_HINT,
         listOf("mcp", "api", "server", "claude", "codex", "automation", "rest"),
     ),
-    entry(SettingsPage.Integrations, "Port", "Loopback port of the MCP control server.", listOf("mcp", "server", "8991", "network")),
+    entry(SettingsPage.Integrations, "Port", MCP_PORT_HINT, listOf("mcp", "server", "8991", "network")),
     entry(
-        SettingsPage.Integrations, "Allow browser-based MCP clients (CORS)",
-        "Lets a browser-based MCP inspector call the local server; off by default.",
+        SettingsPage.Integrations, "Allow browser-based MCP clients",
+        MCP_CORS_HINT,
         listOf("cors", "browser", "mcp", "security", "origin"),
     ),
     entry(
         SettingsPage.Integrations, "Connection info",
-        "URL, token and config snippets for connecting an MCP client.",
+        MCP_CONNECTION_HINT,
         listOf("mcp", "token", "url", "config", "claude", "codex", "snippet"),
     ),
     entry(
         SettingsPage.Integrations, "Debug logging",
-        "Writes Indagium's own diagnostic log to a file.",
+        DEBUG_LOGGING_HINT,
         listOf("diagnostics", "troubleshooting", "log file", "verbose"),
     ),
     entry(
         SettingsPage.Integrations, "Debug log file",
-        "Where the diagnostic log is written; open the current one from here.",
+        DEBUG_LOG_FILE_HINT,
         listOf("path", "diagnostics", "browse", "open current log"),
     ),
     entry(
@@ -616,45 +626,45 @@ private fun automation() = listOf(
 
 private fun aiProviders() = listOf(
     entry(
-        SettingsPage.AiProviders, "Providers",
-        "Provider profiles used by the AI panel; add, switch or remove profiles here.",
-        listOf("profile", "openai", "anthropic", "claude", "codex", "lm studio", "llm", "chatgpt", "gpt"),
+        SettingsPage.AiProviders, "Profile",
+        AI_PROFILE_HINT,
+        listOf("providers", "openai", "anthropic", "claude", "codex", "lm studio", "llm", "chatgpt", "gpt", "add profile", "remove profile"),
+        anchor = "Providers",
     ),
     entry(
         SettingsPage.AiProviders, "Provider type",
-        "Anthropic, OpenAI-compatible, or a local Codex / Claude Code account.",
+        AI_PROVIDER_TYPE_HINT,
         listOf("openai", "anthropic", "claude code", "codex", "account", "cli", "llm"),
     ),
-    entry(SettingsPage.AiProviders, "Profile name", "Display name of this provider profile.", listOf("provider", "rename")),
+    entry(SettingsPage.AiProviders, "Profile name", AI_PROFILE_NAME_HINT, listOf("provider", "rename")),
     entry(
         SettingsPage.AiProviders, "Endpoint",
-        "Base URL of an HTTP AI provider.",
+        AI_ENDPOINT_HINT,
         listOf("url", "api", "server", "lm studio", "local", "host"),
     ),
     entry(
         SettingsPage.AiProviders, "CLI executable",
-        "Path to the Codex or Claude Code CLI used for account providers.",
+        AI_CLI_EXECUTABLE_HINT,
         listOf("codex", "claude code", "path", "binary", "account"),
     ),
     entry(
         SettingsPage.AiProviders, "Model",
-        "Optional model id to use; detect the models a provider offers.",
+        AI_MODEL_HINT,
         listOf("llm", "gpt", "sonnet", "opus", "haiku", "override", "discover"),
     ),
     entry(
         SettingsPage.AiProviders, "Reasoning effort",
-        "Reasoning level for models that support it.",
+        AI_REASONING_EFFORT_HINT,
         listOf("thinking", "llm", "model", "effort"),
     ),
     entry(
-        SettingsPage.AiProviders, "API key — this session only; it is never saved",
-        "Key for cloud API providers; kept in memory for this session only.",
-        listOf("api key", "token", "secret", "password", "credentials", "openai", "anthropic"),
-        anchor = "API key",
+        SettingsPage.AiProviders, "API key",
+        AI_API_KEY_HINT,
+        listOf("api key", "token", "secret", "password", "credentials", "openai", "anthropic", "session"),
     ),
     entry(
         SettingsPage.AiProviders, "Max MCP tool calls per request",
-        "Tool-call budget for one AI request before it stops.",
+        AI_MAX_TOOL_CALLS_HINT,
         listOf("rounds", "limit", "budget", "tool calls", "llm", "mcp"),
     ),
 )
@@ -662,30 +672,30 @@ private fun aiProviders() = listOf(
 private fun voiceInput() = listOf(
     entry(
         SettingsPage.VoiceInput, "Recognition engine",
-        "Local Whisper or the operating system's speech recogniser.",
+        VoiceRecognitionEngines.description(VoiceRecognitionEngine.WHISPER),
         listOf("dictation", "microphone", "speech", "whisper", "apple", "windows", "voice"),
     ),
     entry(
         SettingsPage.VoiceInput, "Translate dictated speech to English",
-        "Outputs an English translation instead of the spoken-language transcript.",
+        VOICE_TRANSLATE_HINT,
         listOf("whisper", "dictation", "translation", "voice"),
     ),
     entry(
         SettingsPage.VoiceInput, "Recognition language",
-        "Language dictation listens for; Automatic detects it.",
-        listOf("dictation", "speech", "ukrainian", "english", "whisper", "voice"),
+        VOICE_LANGUAGE_HINT,
+        listOf("dictation", "speech", "ukrainian", "english", "whisper", "voice", "add language", "language code"),
     ),
     entry(
-        SettingsPage.VoiceInput, "Local model",
-        "Size of the local Whisper model and its download.",
-        listOf("whisper", "download", "install", "base", "small", "dictation", "voice"),
+        SettingsPage.VoiceInput, "Recognition model",
+        VoiceModelCatalog.byId(VoiceInputSettings().modelId).description,
+        listOf("local model", "whisper", "download", "install", "base", "small", "dictation", "voice", "license"),
     ),
 )
 
 private fun customAiCommands() = listOf(
     entry(
         SettingsPage.AiCommands, "Add command",
-        "Create a reusable prompt invoked as a button in Actions or by typing /name in the chat box.",
+        SettingsPage.AiCommands.description,
         listOf("slash", "prompt", "template", "macro", "custom", "llm", "shortcut"),
     ),
 )
@@ -693,22 +703,22 @@ private fun customAiCommands() = listOf(
 private fun sourceCode() = listOf(
     entry(
         SettingsPage.SourceCode, "Register source code",
-        "Point Indagium at your project's source folders to enable “Show in code”.",
+        SOURCE_REGISTER_HINT,
         listOf("project", "index", "repository", "folder", "directory", "show in code", "add"),
     ),
     entry(
         SettingsPage.SourceCode, "Open command",
-        "Editor used by “Show in code” to open a file at the logged line.",
+        SOURCE_OPEN_COMMAND_HINT,
         listOf("editor", "ide", "vs code", "intellij", "android studio", "cursor", "sublime", "zed", "external"),
     ),
     entry(
         SettingsPage.SourceCode, "Discover simple custom log wrappers",
-        "During reindexing, follows simple wrapper methods that delegate to Log.* or Timber.",
+        SOURCE_DISCOVER_WRAPPERS_HINT,
         listOf("timber", "log", "wrapper", "index", "reindex", "auto discovery"),
     ),
     entry(
         SettingsPage.SourceCode, "Logging configurations",
-        "Assign module-specific wrapper rules to registered source folders.",
+        SOURCE_LOG_CONFIGURATIONS_HINT,
         listOf("wrapper", "rules", "module", "source", "add configuration"),
     ),
 )
@@ -716,7 +726,7 @@ private fun sourceCode() = listOf(
 private fun issues() = listOf(
     entry(
         SettingsPage.IssueCategories, "Custom issue categories",
-        "Regexes matched against a log tag or message that add clickable anchors to Issues.",
+        ISSUE_CATEGORIES_HINT,
         listOf("regex", "rules", "anchor", "category", "crash", "anr", "problem"),
     ),
 )
@@ -724,32 +734,32 @@ private fun issues() = listOf(
 private fun testing() = listOf(
     entry(
         SettingsPage.TestRuns, "Default judge",
-        "Whether a blind AI judge checks the steps of a new test run, and with which AI profile.",
+        TESTING_JUDGE_HINT,
         listOf("test run", "judge", "verdict", "ai", "failed steps only", "every step"),
     ),
     entry(
         SettingsPage.TestRuns, "Default evidence to keep",
-        "Screenshots, logcat, agent transcript and video a new test run keeps.",
+        TESTING_EVIDENCE_HINT,
         listOf("test run", "screenshots", "logcat", "transcript", "video", "scrcpy"),
     ),
     entry(
-        SettingsPage.TestRuns, "Confirmation timeout (minutes)",
-        "How long a test agent waits for you to allow an action before it is denied.",
+        SettingsPage.TestRuns, "Confirmation timeout",
+        TESTING_CONFIRM_TIMEOUT_HINT,
         listOf("test run", "allow", "deny", "confirm", "wait", "timeout"),
     ),
     entry(
         SettingsPage.TestRuns, "Keep recording evidence with recorded cases",
-        "Save the screenshots, screen readings and video of an applied recording beside the case so Rewrite with AI can run on it again.",
+        TESTING_KEEP_RECORDING_HINT,
         listOf("record", "recording", "rewrite", "reopen", "video", "password", "privacy", "disk", "storage", "evidence"),
     ),
     entry(
         SettingsPage.TestRuns, "Stored recording evidence",
-        "How much disk the stored recordings of the Test suites folder use, and a button that deletes them.",
+        TESTING_STORED_EVIDENCE_HINT,
         listOf("record", "recording", "delete", "disk", "space", "size", "clean", "evidence", "storage"),
     ),
     entry(
         SettingsPage.About, "Edition",
-        "The edition and its limits on test suites and cases; development builds can switch it.",
+        editionSummary(Edition.UNLIMITED),
         listOf("free", "premium", "unlimited", "limits", "suites", "cases", "friends"),
     ),
 )
@@ -757,42 +767,42 @@ private fun testing() = listOf(
 private fun issueTracker() = listOf(
     entry(
         SettingsPage.IssueTracker, "Use an issue tracker",
-        "Turn on sending issues from failed test steps to your own tracker.",
+        TRACKER_USE_HINT,
         listOf("jira", "mcp", "issues", "tracker", "ticket", "bug", "send"),
     ),
     entry(
         SettingsPage.IssueTracker, "Tracker name",
-        "How the tracker is called in the issue dialog.",
+        TRACKER_NAME_HINT,
         listOf("jira", "linear", "github", "name"),
     ),
     entry(
         SettingsPage.IssueTracker, "Tracker MCP URL",
-        "The address of the tracker's MCP server (http or https).",
+        TRACKER_URL_HINT,
         listOf("mcp", "url", "server", "endpoint", "https", "address"),
     ),
     entry(
         SettingsPage.IssueTracker, "Authentication header",
-        "The header that carries the access token, and whether it is sent as a Bearer token.",
+        TRACKER_HEADER_HINT,
         listOf("authorization", "bearer", "header", "auth", "token", "api key"),
     ),
     entry(
         SettingsPage.IssueTracker, "Access token",
-        "The tracker's access token, kept in your system's secret store (keychain), never in settings.",
+        TRACKER_TOKEN_HINT,
         listOf("token", "secret", "keychain", "password", "credential", "save token", "remove token", "api key"),
     ),
     entry(
         SettingsPage.IssueTracker, "Issue agent profile",
-        "The AI profile that files the issue by calling the tracker's tools.",
+        TRACKER_PROFILE_HINT,
         listOf("ai", "profile", "agent", "claude", "codex", "model"),
     ),
     entry(
         SettingsPage.IssueTracker, "Issue instructions",
-        "The agent's prompt: how to create an issue, with project key, issue type, labels and field mapping.",
+        TRACKER_PROMPT_HINT,
         listOf("prompt", "project key", "issue type", "labels", "fields", "instructions"),
     ),
     entry(
         SettingsPage.IssueTracker, "Test connection",
-        "Connect to the tracker and list the tools it offers.",
+        TRACKER_CONNECTION_HINT,
         listOf("check", "connect", "tools", "verify", "mcp"),
     ),
 )

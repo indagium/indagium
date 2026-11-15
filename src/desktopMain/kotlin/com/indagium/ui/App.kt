@@ -2055,12 +2055,12 @@ fun App(
                         )
                         state.filterRenameError?.let {
                             Spacer(Modifier.height(6.dp))
-                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = Int.MAX_VALUE)
                         }
                         Spacer(Modifier.height(14.dp))
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             DialogActionButton("Save", active = state.filterRenameName.isNotBlank()) {
@@ -2711,14 +2711,15 @@ fun App(
                             "Deletes cached archive data and app-managed notes. Keeps settings, the current " +
                                 "session/autosave, saved filters, source and case indexes, diagnostics, and " +
                                 "integration data. It does not reset Indagium.",
-                            color = tc2.td,
+                            // Must-read text: secondary, never the dim colour, and never cut at a line count.
+                            color = tc2.ts,
                             fontSize = 11.sp,
-                            maxLines = 6,
+                            maxLines = Int.MAX_VALUE,
                         )
                         Spacer(Modifier.height(14.dp))
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             DialogActionButton(
@@ -2743,14 +2744,14 @@ fun App(
                         AppText("Reset app data?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         AppText(
-                            "Permanently deletes all data stored by Indagium in \"${state.appCachePath}\" and then closes " +
+                            "Permanently deletes all data stored by Indagium in “${state.appCachePath}” and then closes " +
                                 "the app. Your logs, source folders, exports, and Default save folder are kept.",
-                            color = tc2.td,
+                            color = tc2.ts,
                             fontSize = 11.sp,
-                            maxLines = 5,
+                            maxLines = Int.MAX_VALUE,
                         )
                         Spacer(Modifier.height(12.dp))
-                        AppText("Type RESET to continue", color = tc2.td, fontSize = 11.sp)
+                        AppText("Type RESET to continue", color = tc2.ts, fontSize = 11.sp)
                         Spacer(Modifier.height(4.dp))
                         androidx.compose.foundation.text.BasicTextField(
                             value = confirmation,
@@ -2762,12 +2763,12 @@ fun App(
                         )
                         state.resetAppDataError?.let {
                             Spacer(Modifier.height(8.dp))
-                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = Int.MAX_VALUE)
                         }
                         Spacer(Modifier.height(14.dp))
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             DialogActionButton(

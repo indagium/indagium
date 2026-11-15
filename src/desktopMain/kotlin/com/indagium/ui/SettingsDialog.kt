@@ -14,16 +14,12 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -39,7 +35,6 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -273,10 +268,15 @@ internal fun SettingsDialog(
                             verticalArrangement = Arrangement.spacedBy(16.dp),
                         ) {
                             selectedPage.parent?.let { parent ->
-                                AccentLink("‹ ${parent.title}", onClick = {
-                                    requestPageSwitch(parent)
-                                    reclaimFocus()
-                                })
+                                // The link's own 6dp inset is pulled back so its text starts on the page edge, like the header under it.
+                                AccentLink(
+                                    "‹ ${parent.title}",
+                                    onClick = {
+                                        requestPageSwitch(parent)
+                                        reclaimFocus()
+                                    },
+                                    modifier = Modifier.offset(x = (-6).dp),
+                                )
                             }
                             SettingsPageHeader(selectedPage.group.label, selectedPage.title, selectedPage.description)
                             SettingsPageBody(
@@ -403,14 +403,14 @@ private fun SettingsPageBody(
         SettingsPage.CaptureLimits -> CaptureLimitsSettingsSection(state, reclaimFocus)
         SettingsPage.CaptureMarkIssue -> CaptureMarkIssueSettingsSection(state, reclaimFocus)
         SettingsPage.CaptureVideoPlayback -> CaptureVideoPlaybackSettingsSection(state, reclaimFocus)
-        SettingsPage.AiProviders -> AiProviderSettingsSection(state, onProviderGuard)
+        SettingsPage.AiProviders -> AiProviderSettingsSection(state, onProviderGuard, reclaimFocus)
         SettingsPage.AiCommands -> CustomAiCommandsSettingsSection(state)
         SettingsPage.VoiceInput -> VoiceInputSettingsSection(state, reclaimFocus)
         SettingsPage.TestRuns -> TestRunsSettingsSection(state, reclaimFocus)
         SettingsPage.IssueTracker -> IssueTrackerSettingsSection(state, reclaimFocus)
         SettingsPage.Storage -> StorageSettingsSection(state, reclaimFocus)
         SettingsPage.Integrations -> IntegrationsSettingsSection(state, reclaimFocus)
-        SettingsPage.About -> AboutSettingsSection(state)
+        SettingsPage.About -> AboutSettingsSection(state, reclaimFocus)
     }
 }
 
@@ -433,15 +433,16 @@ internal fun SettingsConfirmDialog(
         ) {
             AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
-            AppText(message, color = tc.td, fontSize = 11.sp, maxLines = 3)
+            // The message is must-read text, so it is secondary (never the dim colour) and is never cut at a line count.
+            AppText(message, color = tc.ts, fontSize = 11.sp, maxLines = Int.MAX_VALUE)
             error?.let {
                 Spacer(Modifier.height(6.dp))
-                AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3)
+                AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = Int.MAX_VALUE)
             }
             Spacer(Modifier.height(14.dp))
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
                 content = buttons,
             )
@@ -613,54 +614,6 @@ internal fun codexMcpConfigSnippet(port: Int, token: String): String =
     """.trimIndent()
 
 internal fun mcpUrl(port: Int): String = "http://127.0.0.1:$port/mcp"
-
-@Composable
-internal fun RowWrapControl(auto: Boolean, wrapChars: Int, onToggleAuto: () -> Unit, onWrapCharsChange: (Int) -> Unit) {
-    val tc = tc()
-    var wrapLimitText by remember(wrapChars) { mutableStateOf(wrapChars.toString()) }
-    Row(
-        Modifier
-            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
-            .clip(RoundedCornerShape(6.dp)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .height(28.dp)
-                .background(if (auto) tc.ac.copy(alpha = .2f) else Color.Transparent)
-                .clickable(onClick = onToggleAuto)
-                .padding(horizontal = 10.dp),
-        ) {
-            AppText(
-                "Auto",
-                color = if (auto) tc.ac else tc.ts,
-                fontSize = 12.sp,
-                fontWeight = if (auto) FontWeight.Medium else FontWeight.Normal,
-            )
-        }
-        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
-        if (auto) {
-            Box(Modifier.width(60.dp).height(28.dp).padding(horizontal = 8.dp), contentAlignment = Alignment.CenterStart) {
-                AppText(wrapLimitText, color = tc.td.copy(alpha = 0.5f), fontSize = 12.sp, fontFamily = MONO)
-            }
-        } else {
-            BasicTextField(
-                value = wrapLimitText,
-                onValueChange = { value ->
-                    val digits = value.filter { it.isDigit() }.take(5)
-                    wrapLimitText = digits
-                    digits.toIntOrNull()?.let { onWrapCharsChange(it.coerceIn(80, 20_000)) }
-                },
-                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = MONO),
-                cursorBrush = SolidColor(tc.ac),
-                singleLine = true,
-                modifier = Modifier.width(60.dp).height(28.dp).padding(horizontal = 8.dp),
-                decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } },
-            )
-        }
-    }
-}
 
 /**
  * WP8: generalised so both the Settings "Theme" control and the per-document diagram picker in

@@ -37,8 +37,22 @@ import java.util.UUID
 // Settings › Issue categories and Settings › Source code: the same editors as before (rule drafts with Save, source folders, the editor
 // command, logging configurations), laid out as groups of rows. The editors' own inner lists keep their tinted boxes.
 
-private val EDITOR_DROPDOWN_WIDTH = 220.dp
 private val RULE_ACTIONS_WIDTH = 102.dp
+
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val ISSUE_CATEGORIES_HINT = "Each enabled regex is matched against a log tag or message and adds a clickable anchor to Issues. " +
+    "It does not change stack-trace folding or built-in crash detection."
+internal const val SOURCE_REGISTER_HINT =
+    "Point Indagium at your project's source folders, then right-click a log line → “Show in code” to see the code that logged it."
+internal const val SOURCE_OPEN_COMMAND_HINT = "The editor “Show in code” opens at the logged line. Automatic uses the first installed app; " +
+    "Custom command… takes a raw command with {file} and {line}."
+internal const val SOURCE_OPEN_COMMAND_DETAIL = SOURCE_OPEN_COMMAND_HINT +
+    " There is no fallback to the system's default app, which cannot jump to the line."
+internal const val SOURCE_DISCOVER_WRAPPERS_HINT =
+    "While reindexing, follow simple wrapper methods that delegate to Log.* or Timber, one hop deep."
+internal const val SOURCE_DISCOVER_WRAPPERS_DETAIL = "While reindexing, follow simple wrapper methods that delegate to Log.* or Timber, one " +
+    "interface or implementation hop deep. Runs for every registered folder; ambiguous or multi-level wrappers are skipped."
+internal const val SOURCE_LOG_CONFIGURATIONS_HINT = "Assign module-specific wrapper rules to registered source folders."
 
 /** Test tags of the Issue categories and Source code controls that have no tag of their own. */
 internal object SourcePageTags {
@@ -72,78 +86,79 @@ internal fun IssueCategoriesSettingsSection(state: AppState, reclaimFocus: () ->
     var drafts by remember { mutableStateOf(state.settings.customIssueRules) }
     val validation = customIssueRulesValidation(drafts)
     val dirty = drafts != state.settings.customIssueRules
-    SettingsGroup("Categories") {
-        SettingsStackedRow(
-            "Custom issue categories",
-            "Each enabled regex is matched against a log tag or message and adds a clickable anchor to Issues. " +
-                "It does not change stack-trace folding or built-in crash detection.",
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    SettingsGroup(
+        "Categories",
+        trailing = {
+            SettingsButton(
+                "Add category",
+                onClick = { drafts = drafts + CustomIssueRule(UUID.randomUUID().toString(), "", "") },
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier.testTag(SourcePageTags.ADD_CATEGORY),
+            )
+        },
+    ) {
+        SettingsNoteRow(ISSUE_CATEGORIES_HINT, anchor = "Custom issue categories")
+        if (drafts.isEmpty()) {
+            SettingsEmptyState("No custom issue categories yet.", asRow = true)
+        } else {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // The column names only head a list that has rows.
+                // The same inset as the list box under it (its 8dp padding and 1dp border, and the scrollbar's lane), so the names sit over their fields.
+                Row(Modifier.fillMaxWidth().padding(start = 9.dp, end = 21.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AppText("Category", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(0.8f))
                     AppText("Tag or message regex", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1.2f))
                     Spacer(Modifier.width(RULE_ACTIONS_WIDTH))
                 }
-                if (drafts.isEmpty()) {
-                    SettingsEmptyState("No custom issue categories yet.")
-                } else {
-                    SettingsScrollableRows {
-                        drafts.forEachIndexed { index, rule ->
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                SettingsTextField(
-                                    rule.name,
-                                    { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(name = value) else current } },
-                                    Modifier.weight(0.8f),
-                                    placeholder = "Network timeouts",
-                                )
-                                SettingsTextField(
-                                    rule.regex,
-                                    { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(regex = value) else current } },
-                                    Modifier.weight(1.2f),
-                                    placeholder = "timeout\\\\s+after\\\\s+\\\\d+ms",
-                                )
-                                SettingsToggle(
-                                    checked = rule.enabled,
-                                    label = "Category ${index + 1} enabled",
-                                    onChange = { enabled ->
-                                        drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(enabled = enabled) else current }
-                                    },
-                                    reclaimFocus = reclaimFocus,
-                                    testTag = "${SourcePageTags.CATEGORY_SWITCH_PREFIX}$index",
-                                )
-                                SettingsButton(
-                                    "Remove",
-                                    onClick = { drafts = drafts.filterIndexed { i, _ -> i != index } },
-                                    variant = ButtonVariant.Secondary,
-                                    isDanger = true,
-                                )
-                            }
+                SettingsScrollableRows {
+                    drafts.forEachIndexed { index, rule ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SettingsTextField(
+                                rule.name,
+                                { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(name = value) else current } },
+                                Modifier.weight(0.8f),
+                                placeholder = "Network timeouts",
+                            )
+                            SettingsTextField(
+                                rule.regex,
+                                { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(regex = value) else current } },
+                                Modifier.weight(1.2f),
+                                placeholder = "timeout\\\\s+after\\\\s+\\\\d+ms",
+                            )
+                            SettingsToggle(
+                                checked = rule.enabled,
+                                label = "Category ${index + 1} enabled",
+                                onChange = { enabled ->
+                                    drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(enabled = enabled) else current }
+                                },
+                                reclaimFocus = reclaimFocus,
+                                testTag = "${SourcePageTags.CATEGORY_SWITCH_PREFIX}$index",
+                            )
+                            SettingsButton(
+                                "Remove",
+                                onClick = { drafts = drafts.filterIndexed { i, _ -> i != index } },
+                                variant = ButtonVariant.Secondary,
+                                isDanger = true,
+                            )
                         }
                     }
                 }
-                validation?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2) }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SettingsButton(
-                        "Add category",
-                        onClick = { drafts = drafts + CustomIssueRule(UUID.randomUUID().toString(), "", "") },
-                        variant = ButtonVariant.Secondary,
-                        modifier = Modifier.testTag(SourcePageTags.ADD_CATEGORY),
-                    )
-                    SettingsButton(
-                        "Save changes",
-                        onClick = { state.updateSettings { it.copy(customIssueRules = drafts.map { rule -> rule.copy(name = rule.name.trim()) }) } },
-                        enabled = dirty && validation == null,
-                        modifier = Modifier.testTag(SourcePageTags.SAVE_CATEGORIES),
-                    )
-                    if (dirty) {
-                        SettingsButton("Discard", onClick = { drafts = state.settings.customIssueRules }, variant = ButtonVariant.Secondary)
-                    }
-                }
             }
+        }
+        validation?.let { SettingsNoteRow(it, error = true) }
+        // The form saves only on this button (the page guard and the draft stay as they were); it is the one Primary action of the page.
+        SettingsActionRow {
+            if (dirty) SettingsButton("Discard", onClick = { drafts = state.settings.customIssueRules }, variant = ButtonVariant.Secondary)
+            SettingsButton(
+                "Save changes",
+                onClick = { state.updateSettings { it.copy(customIssueRules = drafts.map { rule -> rule.copy(name = rule.name.trim()) }) } },
+                variant = ButtonVariant.Primary,
+                enabled = dirty && validation == null,
+                modifier = Modifier.testTag(SourcePageTags.SAVE_CATEGORIES),
+            )
         }
     }
 }
@@ -161,35 +176,29 @@ internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit
     LaunchedEffect(Unit) {
         if (state.detectedEditors == null) state.rescanEditors()
     }
-    SettingsGroup("Source folders") {
-        Column(Modifier.fillMaxWidth()) {
-            SettingsRow(
-                "Registered folders",
-                "Point Indagium at your project's source folders, then right-click a log line → “Show in code” to see the code that logged it.",
-                anchor = "Register source code",
-            ) {
-                SettingsButton("Register source code", onClick = { state.pickSourceFolder() }, modifier = Modifier.testTag(SourcePageTags.REGISTER_SOURCE))
-            }
-            Box(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
-                if (state.settings.sourceFolders.isEmpty()) {
-                    SettingsEmptyState("No folders registered yet.")
-                } else {
-                    SettingsScrollableRows {
-                        state.settings.sourceFolders.forEach { path -> SourceFolderRow(state, path) }
-                    }
+    SettingsGroup(
+        "Source folders",
+        modifier = Modifier.settingsAnchor("Register source code"),
+        trailing = {
+            SettingsButton("Register source code", onClick = { state.pickSourceFolder() }, modifier = Modifier.testTag(SourcePageTags.REGISTER_SOURCE))
+        },
+    ) {
+        SettingsNoteRow(SOURCE_REGISTER_HINT)
+        if (state.settings.sourceFolders.isEmpty()) {
+            SettingsEmptyState("No folders registered yet.", asRow = true)
+        } else {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp)) {
+                SettingsScrollableRows {
+                    state.settings.sourceFolders.forEach { path -> SourceFolderRow(state, path) }
                 }
             }
         }
     }
     SettingsGroup("Opening code") {
         Column(Modifier.fillMaxWidth()) {
-            SettingsRow(
-                "Open command",
-                "The editor “Show in code” opens a file at the logged line. Automatic uses the first installed app; Custom command… takes " +
-                    "a raw command with {file} and {line}. There is no fallback to the system's default app, which cannot jump to the line.",
-            ) {
+            SettingsRow("Open command", SOURCE_OPEN_COMMAND_HINT, detail = SOURCE_OPEN_COMMAND_DETAIL) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.width(EDITOR_DROPDOWN_WIDTH)) { EditorChoiceDropdown(state, reclaimFocus) }
+                    Box(Modifier.width(SETTINGS_FIELD_SHORT)) { EditorChoiceDropdown(state, reclaimFocus) }
                     SettingsButton(
                         "Rescan",
                         onClick = { state.rescanEditors() },
@@ -202,11 +211,7 @@ internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit
         }
     }
     SettingsGroup("Log wrappers") {
-        SettingsRow(
-            "Discover simple custom log wrappers",
-            "While reindexing, follow simple wrapper methods that delegate to Log.* or Timber, one interface/implementation hop deep. " +
-                "Runs for every registered folder; ambiguous or multi-level wrappers are skipped.",
-        ) {
+        SettingsRow("Discover simple custom log wrappers", SOURCE_DISCOVER_WRAPPERS_HINT, detail = SOURCE_DISCOVER_WRAPPERS_DETAIL) {
             SettingsToggle(
                 checked = state.settings.sourceAutoDiscoveryEnabled,
                 label = "Discover simple custom log wrappers",
@@ -215,14 +220,14 @@ internal fun SourceCodeSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 testTag = SourcePageTags.DISCOVER_WRAPPERS,
             )
         }
-        SourceLoggingConfigurations(state)
     }
+    SourceLoggingConfigurations(state)
 }
 
 private fun editorChoiceLabel(choice: String): String = when (choice) {
-    "", "auto" -> "Automatic (first installed)"
+    "", "auto" -> "Automatic"
     "custom" -> "Custom command…"
-    else -> EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "Automatic (first installed)"
+    else -> EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "Automatic"
 }
 
 // The settings.editorChoice dropdown: "auto" (also stored as ""), every detected editor's preset id, then "custom".
@@ -238,6 +243,7 @@ private fun EditorChoiceDropdown(state: AppState, onInteraction: () -> Unit) {
         testTag = "editor-choice-dropdown",
         modifier = Modifier.fillMaxWidth(),
         minWidth = 0.dp,
+        optionNote = { if (it == "auto") "first installed app" else null },
         onInteraction = onInteraction,
     )
 }
@@ -257,37 +263,37 @@ private fun EditorChoiceDetail(state: AppState) {
             placeholder = "idea --line {line} {file}",
         )
         "", "auto" -> when {
-            detected == null -> AppText("Detecting installed editors…", color = tc.td, fontSize = 10.sp)
+            detected == null -> AppText("Detecting installed editors…", color = tc.ts, fontSize = 11.sp)
             detected.isEmpty() -> AppText(
-                "No known editor detected on this machine — install one above, or pick Custom " +
-                    "command… to type your own.",
-                color = tc.td,
-                fontSize = 10.sp,
+                "No known editor detected on this machine. Install one, or pick Custom command… to type your own.",
+                color = tc.ts,
+                fontSize = 11.sp,
                 maxLines = 2,
             )
             else -> {
                 val (preset, template) = detected.first()
                 AppText(
                     "Will use ${preset.displayName}: $template",
-                    color = tc.td,
-                    fontSize = 10.sp,
+                    color = tc.ts,
+                    fontSize = 11.sp,
                     fontFamily = MONO,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
         else -> when {
-            detected == null -> AppText("Detecting installed editors…", color = tc.td, fontSize = 10.sp)
+            detected == null -> AppText("Detecting installed editors…", color = tc.ts, fontSize = 11.sp)
             else -> {
                 val resolved = detected.find { it.first.id == choice }
                 if (resolved != null) {
-                    AppText(resolved.second, color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+                    AppText(resolved.second, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 } else {
                     val name = EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "This app"
                     AppText(
-                        "$name is no longer detected — pick another option above, or Custom command… " +
-                            "to type your own.",
-                        color = tc.td,
-                        fontSize = 10.sp,
+                        "$name is no longer detected. Pick another option, or Custom command… to type your own.",
+                        color = tc.ts,
+                        fontSize = 11.sp,
                         maxLines = 2,
                     )
                 }
@@ -304,8 +310,9 @@ private fun SourceLoggingConfigurations(state: AppState) {
     val configurations = state.settings.sourceLogConfigurations
     val editing = configurations.firstOrNull { it.id == editingId }
 
-    Column(Modifier.fillMaxWidth()) {
-        SettingsRow("Logging configurations", "Assign module-specific wrapper rules to registered source folders.") {
+    SettingsGroup(
+        "Logging configurations",
+        trailing = {
             SettingsButton(
                 "Add configuration",
                 onClick = {
@@ -316,9 +323,11 @@ private fun SourceLoggingConfigurations(state: AppState) {
                 },
                 variant = ButtonVariant.Secondary,
             )
-        }
-        Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (editing != null) {
+        },
+    ) {
+        SettingsNoteRow(SOURCE_LOG_CONFIGURATIONS_HINT, anchor = "Logging configurations")
+        if (editing != null) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp)) {
                 SourceLoggingConfigurationEditor(
                     state = state,
                     configuration = editing,
@@ -329,9 +338,11 @@ private fun SourceLoggingConfigurations(state: AppState) {
                     },
                     onSaved = { editingIsNew = false },
                 )
-            } else if (configurations.isEmpty()) {
-                SettingsEmptyState("No custom logging configurations.")
-            } else {
+            }
+        } else if (configurations.isEmpty()) {
+            SettingsEmptyState("No custom logging configurations yet.", asRow = true)
+        } else {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 configurations.forEach { configuration ->
                     Row(
                         Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(horizontal = 8.dp, vertical = 6.dp),
@@ -342,7 +353,7 @@ private fun SourceLoggingConfigurations(state: AppState) {
                             AppText(configuration.name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
                             AppText(
                                 "${configuration.wrapperRules.size} wrapper rules",
-                                color = tc.td,
+                                color = tc.ts,
                                 fontSize = 10.sp,
                             )
                         }
@@ -398,9 +409,9 @@ private fun SourceLoggingConfigurationEditor(
             Modifier.fillMaxWidth(),
             placeholder = "Configuration name",
         )
-        AppText("Source folders", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        AppText("Source folders", color = tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         if (state.settings.sourceFolders.isEmpty()) {
-            AppText("Register source folders above to assign this configuration.", color = tc.td, fontSize = 10.sp)
+            AppText("Register source folders above to assign this configuration.", color = tc.ts, fontSize = 11.sp)
         } else {
             state.settings.sourceFolders.forEach { folder ->
                 val path = File(folder).absolutePath
@@ -419,7 +430,7 @@ private fun SourceLoggingConfigurationEditor(
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            AppText("Wrapper rules", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Wrapper rules", color = tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             SettingsButton(
                 "Add rule",
                 onClick = { draft = draft.copy(wrapperRules = draft.wrapperRules + SourceWrapperRule("", "")) },
@@ -506,13 +517,7 @@ private fun SourceFolderRow(state: AppState, path: String) {
                 },
                 modifier = Modifier.weight(1f),
             ) {
-                AppText(
-                    truncatePathForDisplay(path),
-                    color = tc.ts,
-                    fontSize = 11.sp,
-                    fontFamily = MONO,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                SettingsPathText(path)
             }
             SettingsButton(
                 "Reindex",
@@ -545,23 +550,23 @@ private fun SourceFolderRow(state: AppState, path: String) {
                 "${folderStatus.fileCount} files · ${folderStatus.siteCount} call sites · " +
                     "indexed ${sourceIndexAgeLabel(folderStatus.builtAt)}"
             },
-            color = tc.td,
-            fontSize = 10.sp,
+            color = tc.ts,
+            fontSize = 11.sp,
             fontFamily = UI,
         )
         val configurationNames = state.sourceConfigurationsForFolder(path).map { it.name }
         if (configurationNames.isNotEmpty()) {
             AppText(
                 "Configurations: ${configurationNames.joinToString()}",
-                color = tc.td,
-                fontSize = 10.sp,
+                color = tc.ts,
+                fontSize = 11.sp,
                 fontFamily = UI,
             )
         } else if (state.settings.sourceLogConfigurations.isNotEmpty()) {
             AppText(
                 "No logging configuration assigned — assign one below, then reindex",
                 color = tc.ac,
-                fontSize = 10.sp,
+                fontSize = 11.sp,
                 fontFamily = UI,
             )
         }
@@ -569,7 +574,7 @@ private fun SourceFolderRow(state: AppState, path: String) {
             AppText(
                 "${folderStatus.changedFileCount} files changed — reindex recommended",
                 color = tc.ac,
-                fontSize = 10.sp,
+                fontSize = 11.sp,
                 fontFamily = UI,
             )
         }

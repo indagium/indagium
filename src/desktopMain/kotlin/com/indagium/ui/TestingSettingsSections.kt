@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,9 +43,27 @@ import kotlinx.coroutines.withContext
 // that fails) and never shown again or written anywhere else. The keychain and the network are only ever touched off the UI thread
 // (AppState.saveTrackerToken and friends, Test connection).
 
-private val FIELD_WIDTH = 300.dp
-private val SHORT_FIELD_WIDTH = 240.dp
-private val JUDGE_FIELD_WIDTH = 168.dp
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val TESTING_JUDGE_HINT =
+    "A blind AI judge compares each step's expected result with the evidence. It never sees what the agent claimed."
+internal const val TESTING_EVIDENCE_HINT = "What a new test run keeps. You can still change this in the run dialog."
+internal const val TESTING_CONFIRM_TIMEOUT_HINT = "An action the agent asks to confirm is denied when nobody answers in this time " +
+    "($MIN_CONFIRMATION_TIMEOUT_MINUTES to $MAX_CONFIRMATION_TIMEOUT_MINUTES minutes)."
+internal const val TESTING_KEEP_RECORDING_HINT = "Applying a recording also saves its screenshots, screen readings and video beside the case, " +
+    "so Rewrite with AI can run again on it."
+internal const val TESTING_STORED_EVIDENCE_HINT = "How much disk the stored recordings of the Test suites folder use, and a button to delete them."
+internal const val TRACKER_USE_HINT = "Turn on sending issues from failed test steps to your own tracker."
+internal const val TRACKER_NAME_HINT = "How the tracker is called in the issue dialog."
+internal const val TRACKER_URL_HINT = "The address of the tracker's MCP server (http or https)."
+internal const val TRACKER_HEADER_HINT = "The header that carries the access token. Leave the name empty for a server that needs no authentication."
+internal const val TRACKER_BEARER_HINT = "Adds the Bearer prefix in front of the token in that header."
+internal const val TRACKER_TOKEN_HINT = "The token is kept only in your system's secret store (never in Indagium's settings, notes, runs or issue files)."
+internal const val TRACKER_PROFILE_HINT = "The AI profile that files the issue by calling the tracker's tools."
+internal const val TRACKER_PROMPT_HINT = "The agent's prompt: tell it how to create an issue, with the project key, issue type, labels and how the " +
+    "issue's fields map to the tracker's."
+internal const val TRACKER_CONNECTION_HINT = "Connect to the tracker and list the tools it offers."
+
+private val FIELD_WIDTH = SETTINGS_FIELD_LONG
 private val PROMPT_MIN_HEIGHT = 96.dp
 private val PROMPT_MAX_HEIGHT = 240.dp
 private const val BYTES_PER_MB = 1024L * 1024L
@@ -76,21 +93,25 @@ internal object TestingPageTags {
     const val TRACKER_TEST = "tracker-test-connection"
 }
 
-/** "Free (1 suite, 5 cases per suite)" or "Unlimited": what an edition allows, for Settings > About. */
+/** What an edition allows, for Settings > About: "1 test suite, up to 5 cases per suite." or "No limits on test suites or cases.". */
 internal fun editionSummary(edition: Edition): String {
     val limits = edition.limits
     val suites = limits.maxSuites
     val cases = limits.maxCasesPerSuite
-    return if (suites == null && cases == null) {
-        "${edition.label} (no limits)"
-    } else {
-        "${edition.label} (${suites ?: "unlimited"} suite${if (suites == 1) "" else "s"}, ${cases ?: "unlimited"} cases per suite)"
+    if (suites == null && cases == null) return "No limits on test suites or cases."
+    val suitesText = when (suites) {
+        null -> "Unlimited test suites"
+        1 -> "1 test suite"
+        else -> "$suites test suites"
     }
+    val casesText = if (cases == null) "unlimited cases per suite" else "up to $cases cases per suite"
+    return "$suitesText, $casesText."
 }
 
 private fun AiProviderProfile.choiceLabel(): String = "${displayName.ifBlank { kind.label }} · ${kind.label}"
 
-private const val NO_PROFILE_TEXT = "No AI profile configured (Settings > AI > Providers)"
+private const val NO_PROFILE_TEXT = "No AI profile configured. Add one in Settings › Providers."
+private const val CHOOSE_PROFILE_PLACEHOLDER = "Choose a profile"
 
 /**
  * The AI-profile picker both pages use: the selected profile (or [placeholder] while none is chosen) in a [SettingsDropdown] of every
@@ -105,14 +126,17 @@ private fun ProfileDropdown(
     testTag: String,
     reclaimFocus: () -> Unit,
 ) {
+    val selected = profiles.firstOrNull { it.id == selectedId }
     SettingsDropdown<AiProviderProfile?>(
         options = profiles,
-        selected = profiles.firstOrNull { it.id == selectedId },
+        selected = selected,
         label = { it?.choiceLabel() ?: placeholder },
         onSelect = { profile -> if (profile != null) onSelect(profile) },
         testTag = testTag,
         modifier = Modifier.width(FIELD_WIDTH),
         onInteraction = reclaimFocus,
+        // While nothing is chosen the field shows the prompt in the dim colour, so it never reads as a chosen value.
+        placeholder = if (selected == null) placeholder else null,
     )
 }
 
@@ -130,18 +154,14 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
     val testing = state.settings.testing
     val profiles = state.settings.aiProviderProfiles
     SettingsGroup("New runs") {
-        SettingsRow(
-            "Judge",
-            "A blind AI judge compares each step's expected result with the evidence. It never sees what the agent claimed.",
-            anchor = "Default judge",
-        ) {
+        SettingsRow("Judge", TESTING_JUDGE_HINT, anchor = "Default judge") {
             SettingsDropdown(
                 options = JudgeMode.entries,
                 selected = testing.judgeMode,
                 label = { it.label },
                 onSelect = { mode -> updateTesting(state) { it.copy(defaultJudgeMode = mode.wire) } },
                 testTag = TestingPageTags.JUDGE,
-                minWidth = JUDGE_FIELD_WIDTH,
+                minWidth = FIELD_WIDTH,
                 onInteraction = reclaimFocus,
             )
         }
@@ -154,39 +174,35 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
                 ProfileDropdown(
                     profiles = profiles,
                     selectedId = testing.defaultJudgeProfileId,
-                    placeholder = "Choose the judge's AI profile",
+                    placeholder = CHOOSE_PROFILE_PLACEHOLDER,
                     onSelect = { profile -> updateTesting(state) { it.copy(defaultJudgeProfileId = profile.id) } },
                     testTag = TestingPageTags.JUDGE_PROFILE,
                     reclaimFocus = reclaimFocus,
                 )
             }
         }
-        SettingsStackedRow(
-            "Evidence to keep",
-            "What a new test run keeps. You can still change this in the run dialog.",
-            anchor = "Default evidence to keep",
-        ) {
-            val evidence = testing.evidence
-            Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                SettingsCheckbox(
-                    checked = evidence.screenshots,
-                    label = "Screenshots",
-                    onChange = { on ->
-                        updateEvidence(state) { it.copy(screenshots = on) }
-                        reclaimFocus()
-                    },
-                    testTag = TestingPageTags.EVIDENCE_SCREENSHOTS,
-                )
-                SettingsCheckbox(
-                    checked = evidence.transcript,
-                    label = "Agent transcript",
-                    onChange = { on ->
-                        updateEvidence(state) { it.copy(transcript = on) }
-                        reclaimFocus()
-                    },
-                    testTag = TestingPageTags.EVIDENCE_TRANSCRIPT,
-                )
-            }
+        ConfirmationTimeoutRow(state, testing)
+    }
+    // Three independent on/off choices, each its own switch row: nothing here depends on the row above.
+    SettingsGroup("Evidence to keep", modifier = Modifier.settingsAnchor("Default evidence to keep")) {
+        SettingsNoteRow(TESTING_EVIDENCE_HINT)
+        SettingsRow("Screenshots") {
+            SettingsToggle(
+                checked = testing.evidence.screenshots,
+                label = "Screenshots",
+                onChange = { on -> updateEvidence(state) { it.copy(screenshots = on) } },
+                reclaimFocus = reclaimFocus,
+                testTag = TestingPageTags.EVIDENCE_SCREENSHOTS,
+            )
+        }
+        SettingsRow("Agent transcript") {
+            SettingsToggle(
+                checked = testing.evidence.transcript,
+                label = "Agent transcript",
+                onChange = { on -> updateEvidence(state) { it.copy(transcript = on) } },
+                reclaimFocus = reclaimFocus,
+                testTag = TestingPageTags.EVIDENCE_TRANSCRIPT,
+            )
         }
         SettingsRow("Record the screen by default", "A new test run records the device screen as video evidence.") {
             SettingsToggle(
@@ -197,16 +213,15 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
                 testTag = TestingPageTags.RECORD_SCREEN,
             )
         }
-        ConfirmationTimeoutRow(state, testing)
     }
     SettingsGroup("Recorded cases") {
         SettingsRow(
             "Keep recording evidence",
-            "When on, applying a recording also saves its screenshots, screen readings and video beside the case, so Rewrite with AI can " +
-                "be run again on the saved case. A recording in which a password was typed keeps no video and no screens from that time. " +
+            TESTING_KEEP_RECORDING_HINT,
+            anchor = "Keep recording evidence with recorded cases",
+            detail = TESTING_KEEP_RECORDING_HINT + " A recording in which a password was typed keeps no video and no screens from that time. " +
                 "One recording takes at most ${MAX_RECORDING_EVIDENCE_BYTES / BYTES_PER_MB} MB (the video is left out first). " +
                 "Suite exports never include it.",
-            anchor = "Keep recording evidence with recorded cases",
         ) {
             SettingsToggle(
                 checked = testing.keepRecordingEvidence,
@@ -227,12 +242,7 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
 @Composable
 private fun ConfirmationTimeoutRow(state: AppState, testing: TestingSettings) {
     var text by remember(testing.confirmationTimeoutMinutes) { mutableStateOf(testing.confirmationTimeoutMinutes.toString()) }
-    SettingsRow(
-        "Confirmation timeout",
-        "An action the agent asks to confirm is denied when nobody answers in this time " +
-            "($MIN_CONFIRMATION_TIMEOUT_MINUTES to $MAX_CONFIRMATION_TIMEOUT_MINUTES minutes).",
-        anchor = "Confirmation timeout (minutes)",
-    ) {
+    SettingsRow("Confirmation timeout", TESTING_CONFIRM_TIMEOUT_HINT, anchor = "Confirmation timeout") {
         SettingsNumberField(
             value = text,
             onValueChange = { digits ->
@@ -265,19 +275,21 @@ private fun StoredRecordingEvidenceRow(state: AppState) {
             append(
                 when {
                     current == null -> "Measuring…"
-                    current.recordings == 0 -> "No recording evidence is stored in ${folder.path}."
-                    else -> "${current.recordings} stored recording(s), ${megabytesText(current.bytes)} in ${folder.path}."
+                    current.recordings == 0 -> "No recording evidence is stored."
+                    else -> "${current.recordings} stored recording(s), ${megabytesText(current.bytes)}."
                 },
             )
             status?.let { append("\n$it") }
         },
         anchor = "Stored recording evidence",
+        detail = "$TESTING_STORED_EVIDENCE_HINT\n${folder.path}",
     ) {
         SettingsButton(
-            "Delete stored recording evidence",
+            "Delete stored recordings…",
             onClick = { confirming = true },
             enabled = (current?.recordings ?: 0) > 0,
             variant = ButtonVariant.Secondary,
+            isDanger = true,
             modifier = Modifier.testTag(TestingPageTags.DELETE_RECORDING_EVIDENCE),
         )
     }
@@ -337,7 +349,7 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
     var tokenText by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { state.refreshTrackerStatus() }
     SettingsGroup("Tracker") {
-        SettingsRow("Use an issue tracker", "Turn on sending issues from failed test steps to your own tracker.") {
+        SettingsRow("Use an issue tracker", TRACKER_USE_HINT) {
             SettingsToggle(
                 checked = tracker.enabled,
                 label = "Use an issue tracker",
@@ -346,13 +358,14 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
                 testTag = TestingPageTags.TRACKER_ENABLE,
             )
         }
-        SettingsRow("Tracker name", "How the tracker is called in the issue dialog.", indent = true) {
+        // Dependent on the switch above: dimmed and locked while it is off, the values are kept.
+        SettingsRow("Tracker name", TRACKER_NAME_HINT, indent = true, enabled = tracker.enabled) {
             SettingsTextField(
                 tracker.name, { value -> updateTracker(state) { it.copy(name = value.take(MAX_NAME_CHARS)) } },
-                Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Jira", testTag = TestingPageTags.TRACKER_NAME,
+                Modifier.width(FIELD_WIDTH), placeholder = "Jira", testTag = TestingPageTags.TRACKER_NAME,
             )
         }
-        SettingsRow("Tracker MCP URL", "The address of the tracker's MCP server (http or https).", indent = true) {
+        SettingsRow("Tracker MCP URL", TRACKER_URL_HINT, indent = true, enabled = tracker.enabled) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
                 SettingsTextField(
                     tracker.mcpUrl, { value -> updateTracker(state) { it.copy(mcpUrl = value.trim()) } },
@@ -360,28 +373,25 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
                 )
                 if (tracker.mcpUrl.isNotBlank()) {
                     (urlCheck.problem ?: urlCheck.warning)?.let {
-                        AppText(it, color = DANGER_RED, fontSize = 10.sp, maxLines = 3, modifier = Modifier.width(FIELD_WIDTH))
+                        AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3, modifier = Modifier.width(FIELD_WIDTH))
                     }
                 }
             }
         }
     }
     SettingsGroup("Authentication") {
-        SettingsRow(
-            "Authentication header",
-            "The header that carries the access token. Leave the name empty for a server that needs no authentication.",
-        ) {
+        SettingsRow("Authentication header", TRACKER_HEADER_HINT) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
                 SettingsTextField(
                     tracker.authHeaderName, { value -> updateTracker(state) { it.copy(authHeaderName = value.trim()) } },
-                    Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Authorization", testTag = TestingPageTags.TRACKER_HEADER,
+                    Modifier.width(FIELD_WIDTH), placeholder = "Authorization", testTag = TestingPageTags.TRACKER_HEADER,
                 )
                 checkAuthHeaderName(tracker.authHeaderName)?.let {
-                    AppText(it, color = DANGER_RED, fontSize = 10.sp, modifier = Modifier.width(SHORT_FIELD_WIDTH))
+                    AppText(it, color = DANGER_RED, fontSize = 11.sp, modifier = Modifier.width(FIELD_WIDTH))
                 }
             }
         }
-        SettingsRow("Send the token as “Bearer <token>”", "Adds the Bearer prefix in front of the token in that header.", indent = true) {
+        SettingsRow("Send the token as “Bearer <token>”", TRACKER_BEARER_HINT, indent = true) {
             SettingsToggle(
                 checked = tracker.bearerPrefix,
                 label = "Send the token as Bearer",
@@ -393,24 +403,17 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
         AccessTokenRow(state, tokenText) { tokenText = it }
     }
     SettingsGroup("Filing issues") {
-        SettingsRow(
-            "Issue agent profile",
-            if (profiles.isEmpty()) NO_PROFILE_TEXT else "The AI profile that files the issue by calling the tracker's tools.",
-        ) {
+        SettingsRow("Issue agent profile", if (profiles.isEmpty()) NO_PROFILE_TEXT else TRACKER_PROFILE_HINT) {
             ProfileDropdown(
                 profiles = profiles,
                 selectedId = tracker.agentProfileId,
-                placeholder = "Choose the AI profile that files the issue",
+                placeholder = CHOOSE_PROFILE_PLACEHOLDER,
                 onSelect = { profile -> updateTracker(state) { it.copy(agentProfileId = profile.id) } },
                 testTag = TestingPageTags.TRACKER_PROFILE,
                 reclaimFocus = reclaimFocus,
             )
         }
-        SettingsStackedRow(
-            "Issue instructions",
-            "The agent's prompt: tell it how to create an issue, with the project key, issue type, labels and how the issue's fields map " +
-                "to the tracker's.",
-        ) {
+        SettingsStackedRow("Issue instructions", TRACKER_PROMPT_HINT) {
             DictatedTextArea(
                 tracker.prompt, { value -> updateTracker(state) { it.copy(prompt = value.take(MAX_TRACKER_PROMPT_CHARS)) } },
                 proseTargetId = "settings:issue-tracker:prompt",
@@ -424,17 +427,14 @@ internal fun IssueTrackerSettingsSection(state: AppState, reclaimFocus: () -> Un
 
 @Composable
 private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (String) -> Unit) {
-    val tc = tc()
     val scope = rememberCoroutineScope()
     var tokenMessage by remember { mutableStateOf<String?>(null) }
-    SettingsStackedRow(
-        "Access token",
-        "The token is kept only in your system's secret store (never in Indagium's settings, notes, runs or issue files).",
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    // One card row for the form and its status lines, so no divider falls between them.
+    Column(Modifier.fillMaxWidth()) {
+        SettingsStackedRow("Access token", TRACKER_TOKEN_HINT) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 SettingsTextField(
-                    tokenText, onTokenText, Modifier.width(SHORT_FIELD_WIDTH), placeholder = "Paste the token",
+                    tokenText, onTokenText, Modifier.width(FIELD_WIDTH), placeholder = "Paste the token",
                     visualTransformation = PasswordVisualTransformation(), testTag = TestingPageTags.TRACKER_TOKEN,
                 )
                 SettingsButton(
@@ -449,18 +449,15 @@ private fun AccessTokenRow(state: AppState, tokenText: String, onTokenText: (Str
                     modifier = Modifier.testTag(TestingPageTags.TRACKER_SAVE_TOKEN),
                 )
                 SettingsButton(
-                    "Remove token", enabled = state.trackerStatus.tokenPresent == true, variant = ButtonVariant.Secondary,
+                    "Remove token", enabled = state.trackerStatus.tokenPresent == true, variant = ButtonVariant.Secondary, isDanger = true,
                     onClick = { scope.launch { tokenMessage = state.removeTrackerToken() } },
                     modifier = Modifier.testTag(TestingPageTags.TRACKER_REMOVE_TOKEN),
                 )
             }
-            if (state.trackerStatus.tokenPresent == false) {
-                SettingsEmptyState(state.trackerStatus.tokenLine())
-            } else {
-                AppText(state.trackerStatus.tokenLine(), color = tc.ts, fontSize = 11.sp, maxLines = 3)
-            }
-            tokenMessage?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
         }
+        // What is stored is a status, so it is a note row and not an empty-list box.
+        SettingsNoteRow(state.trackerStatus.tokenLine())
+        tokenMessage?.let { SettingsNoteRow(it, error = true) }
     }
 }
 
@@ -471,7 +468,7 @@ private fun TestConnectionRow(state: AppState, tracker: TrackerSettings, typedTo
     val ready = checkTrackerUrl(tracker.mcpUrl).valid && checkAuthHeaderName(tracker.authHeaderName) == null
     // The button sits on the right like every action row; the outcome of the last test stays under it.
     Column(Modifier.fillMaxWidth()) {
-        SettingsRow("Test connection", "Connect to the tracker and list the tools it offers.") {
+        SettingsRow("Tracker connection", TRACKER_CONNECTION_HINT, anchor = "Test connection") {
             SettingsButton(
                 if (test == TestUi.Running) "Connecting…" else "Test connection",
                 enabled = test != TestUi.Running && ready,
@@ -482,14 +479,6 @@ private fun TestConnectionRow(state: AppState, tracker: TrackerSettings, typedTo
                 modifier = Modifier.testTag(TestingPageTags.TRACKER_TEST),
             )
         }
-        (test as? TestUi.Done)?.let {
-            AppText(
-                it.message,
-                color = if (it.ok) tc().ts else DANGER_RED,
-                fontSize = 11.sp,
-                maxLines = 6,
-                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 9.dp),
-            )
-        }
+        (test as? TestUi.Done)?.let { SettingsNoteRow(it.message, error = !it.ok) }
     }
 }

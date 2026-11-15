@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.automirrored.outlined.ViewList
+import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Category
@@ -136,7 +137,7 @@ internal enum class SettingsPage(
         parent = CaptureVideo,
     ),
     CaptureLimits(
-        "Limits and snapshots", Icons.Outlined.Storage, SettingsGroupKind.Devices,
+        "Limits & snapshots", Icons.Outlined.Storage, SettingsGroupKind.Devices,
         "Size, frame rate and bitrate of the recording, how big a session may grow, and how saved snapshots are named.",
         parent = CaptureVideo,
     ),
@@ -205,8 +206,13 @@ internal fun settingsDialogSize(windowWidth: Dp, windowHeight: Dp): DpSize {
 
 internal fun settingsNavTag(page: SettingsPage): String = "settings-nav-${page.name}"
 
+// Tight enough that the 18 pages, their 7 group labels and the "All results" item of a search all fit in the dialog's 812dp without the
+// list scrolling (and About staying out of view).
+private val NAV_GROUP_GAP = 3.dp
+private val NAV_GROUP_LABEL_HEIGHT = 18.dp
+
 /**
- * The nav's page list: a 20dp group label over its 26dp items. While [searching] a leading "All results" item stands for the results, each
+ * The nav's page list: an 18dp group label over its 26dp items. While [searching] a leading "All results" item stands for the results, each
  * page shows its match count from [resultCounts] and pages with none are dimmed. [onPick] gets the page that was clicked.
  */
 @Composable
@@ -221,7 +227,7 @@ internal fun SettingsNavList(
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
-    ScrollColumnWithBar(modifier, verticalArrangement = Arrangement.spacedBy(6.dp), showBarOnlyWhenScrollable = true) {
+    ScrollColumnWithBar(modifier, verticalArrangement = Arrangement.spacedBy(NAV_GROUP_GAP), showBarOnlyWhenScrollable = true) {
         if (searching) {
             SettingsNavItem(
                 title = "All results",
@@ -236,7 +242,7 @@ internal fun SettingsNavList(
             val pages = SettingsPage.entries.filter { it.group == group && it.parent == null && it in visiblePages }
             if (pages.isEmpty()) return@forEach
             Column(Modifier.fillMaxWidth()) {
-                Box(Modifier.fillMaxWidth().height(20.dp).padding(horizontal = 10.dp), contentAlignment = Alignment.CenterStart) {
+                Box(Modifier.fillMaxWidth().height(NAV_GROUP_LABEL_HEIGHT).padding(horizontal = 10.dp), contentAlignment = Alignment.CenterStart) {
                     AppText(group.label, color = tc.ts, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 }
                 pages.forEach { page ->
@@ -342,6 +348,7 @@ internal fun SettingsFooter(
                 "Setup assistant…",
                 onClick = onSetupAssistant,
                 variant = ButtonVariant.Ghost,
+                leadingIcon = Icons.Outlined.AutoFixHigh,
                 modifier = Modifier.testTag("settings-footer-setup-assistant"),
             )
             Box(Modifier.weight(1f))
@@ -350,9 +357,7 @@ internal fun SettingsFooter(
                 onClick = onVersion,
             ) {
                 Row(Modifier.padding(horizontal = 6.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AppText("Version ", color = tc.ts, fontSize = 11.sp)
-                    AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
-                    AppText(" · ${BuildInfo.APP_AUTHOR}", color = tc.ts, fontSize = 11.sp)
+                    AppText("Version ${BuildInfo.APP_VERSION} · ${BuildInfo.APP_AUTHOR}", color = tc.ts, fontSize = 11.sp)
                 }
             }
             Box(Modifier.size(8.dp))

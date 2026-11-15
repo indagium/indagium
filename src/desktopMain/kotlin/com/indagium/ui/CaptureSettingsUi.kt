@@ -79,11 +79,12 @@ internal fun CaptureNumberRow(
     unit: String,
     description: String? = null,
     anchor: String = label,
+    detail: String? = null,
     onValue: (Int) -> Unit,
 ) {
     var text by remember(value) { mutableStateOf(value.toString()) }
     val parsed = text.toIntOrNull()
-    CaptureNumberRowCore(label, description, anchor, unit, text, valid = parsed != null && parsed in range) { next ->
+    CaptureNumberRowCore(label, description, anchor, unit, text, valid = parsed != null && parsed in range, detail = detail) { next ->
         text = next
         next.toIntOrNull()?.let(onValue)
     }
@@ -98,11 +99,12 @@ internal fun CaptureLongRow(
     unit: String,
     description: String? = null,
     anchor: String = label,
+    detail: String? = null,
     onValue: (Long) -> Unit,
 ) {
     var text by remember(value) { mutableStateOf(value.toString()) }
     val parsed = text.toLongOrNull()
-    CaptureNumberRowCore(label, description, anchor, unit, text, valid = parsed != null && parsed in range) { next ->
+    CaptureNumberRowCore(label, description, anchor, unit, text, valid = parsed != null && parsed in range, detail = detail) { next ->
         text = next
         next.toLongOrNull()?.let(onValue)
     }
@@ -116,9 +118,10 @@ private fun CaptureNumberRowCore(
     unit: String,
     text: String,
     valid: Boolean,
+    detail: String? = null,
     onText: (String) -> Unit,
 ) {
-    SettingsRow(label, description, anchor = anchor) {
+    SettingsRow(label, description, anchor = anchor, detail = detail) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (!valid) AppText(OUT_OF_RANGE_NOTE, color = DANGER_RED, fontSize = 11.sp)
             SettingsNumberField(
@@ -137,8 +140,9 @@ private fun CaptureNumberRowCore(
 private val UNIT_COLUMN_WIDTH = 34.dp
 
 /**
- * One text setting on a row of its own, the field spanning the width: [label] with an optional [description] above, the field with an
- * optional Browse button, then [invalidMessage] in red while [invalid], the auto-detected [effectivePath] and a red [effectiveMessage].
+ * One text setting on a row of its own, the field spanning the width: [label] with an optional [description] above, the field (with a
+ * [placeholder] while empty) and an optional Browse button, then [invalidMessage] in red while [invalid], the auto-detected [effectivePath]
+ * and a red [effectiveMessage].
  */
 @Composable
 internal fun CaptureTextRow(
@@ -152,22 +156,25 @@ internal fun CaptureTextRow(
     invalidMessage: String = "value is invalid",
     effectivePath: String? = null,
     effectiveMessage: String? = null,
+    placeholder: String = "",
+    detail: String? = null,
 ) {
     val tc = tc()
-    SettingsStackedRow(label, description, anchor = anchor) {
+    SettingsStackedRow(label, description, anchor = anchor, detail = detail) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 SettingsTextField(
                     value,
                     onValue,
                     modifier = Modifier.weight(1f),
+                    placeholder = placeholder,
                     invalid = invalid,
                     testTag = captureFieldTag(anchor),
                 )
-                onBrowse?.let { AppButton("Browse", it, ButtonVariant.Secondary) }
+                onBrowse?.let { SettingsButton("Browse", it, ButtonVariant.Secondary) }
             }
             if (invalid) AppText(invalidMessage, color = DANGER_RED, fontSize = 11.sp)
-            effectivePath?.let { AppText("Auto-detected: $it", color = tc.ts, fontSize = 10.sp, fontFamily = MONO) }
+            effectivePath?.let { AppText("Auto-detected: $it", color = tc.ts, fontSize = 11.sp, fontFamily = MONO) }
             effectiveMessage?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
         }
     }

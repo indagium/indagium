@@ -62,7 +62,7 @@ class SettingsSearchTest {
 
     @Test
     fun theGroupLabelAndPageTitleAreSearchable() {
-        assertTrue("Providers" in labels("providers"), labels("providers").toString())
+        assertTrue("Profile" in labels("providers"), labels("providers").toString())
         val reading = searchSettings("reading logs", all)
         assertTrue(reading.isNotEmpty() && reading.all { it.page.group == SettingsGroupKind.ReadingLogs }, reading.toString())
         assertEquals("Reading logs › Log view", SettingsPage.LogView.breadcrumb)
@@ -88,7 +88,7 @@ class SettingsSearchTest {
             found.containsAll(
                 listOf(
                     "Default save folder", "Analysis artifacts folder", "Capture sessions folder",
-                    "Snapshots folder", "Saved captures folder (Save ZIP)",
+                    "Snapshots folder", "Saved captures folder",
                     "Test suites folder", "Test runs folder", "Issues folder",
                 ),
             ),

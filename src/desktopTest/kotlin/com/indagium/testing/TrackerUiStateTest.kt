@@ -85,9 +85,9 @@ class TrackerUiStateTest {
 
     @Test
     fun theEditionSummaryStatesTheLimits() {
-        assertEquals("Free (1 suite, 5 cases per suite)", editionSummary(Edition.FREE))
-        assertEquals("Unlimited (no limits)", editionSummary(Edition.UNLIMITED))
-        assertEquals("Premium (no limits)", editionSummary(Edition.PREMIUM))
+        assertEquals("1 test suite, up to 5 cases per suite.", editionSummary(Edition.FREE))
+        assertEquals("No limits on test suites or cases.", editionSummary(Edition.UNLIMITED))
+        assertEquals("No limits on test suites or cases.", editionSummary(Edition.PREMIUM))
     }
 
     @Test

@@ -779,6 +779,8 @@ internal fun AiProviderDropdown(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
     settingsStyle: Boolean = false,
+    // Runs after every toggle, dismiss and pick, so the Settings dialog can take back the keyboard focus the popup left.
+    onInteraction: () -> Unit = {},
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -792,6 +794,7 @@ internal fun AiProviderDropdown(
             onDismissRequest = {
                 open = false
                 suppressToggleUntilMs = System.currentTimeMillis() + 200
+                onInteraction()
             },
             properties = PopupProperties(focusable = false),
         ) {
@@ -814,7 +817,7 @@ internal fun AiProviderDropdown(
                         HoverBox(
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
                             baseBg = if (active) tc.abg else Color.Transparent,
-                            onClick = { open = false; onSelect(item.id) },
+                            onClick = { open = false; onSelect(item.id); onInteraction() },
                         ) {
                             AppText(
                                 item.displayName,
@@ -835,7 +838,12 @@ internal fun AiProviderDropdown(
         SettingsDropdownField(
             text = selected.displayName,
             open = open,
-            onClick = { if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open },
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) {
+                    open = !open
+                    onInteraction()
+                }
+            },
             modifier = modifier,
             minWidth = 0.dp,
             popup = popup,
@@ -852,7 +860,12 @@ internal fun AiProviderDropdown(
                 .clip(CORNER_SM)
                 .background(tc.p2, CORNER_SM)
                 .border(1.dp, tc.br, CORNER_SM),
-            onClick = { if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open },
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) {
+                    open = !open
+                    onInteraction()
+                }
+            },
         ) {
             Row(
                 Modifier.fillMaxSize().padding(horizontal = 10.dp),
@@ -888,6 +901,8 @@ internal fun AiModelDropdown(
     onPickModel: (String) -> Unit,
     modifier: Modifier = Modifier,
     settingsStyle: Boolean = false,
+    // Runs after every toggle, dismiss and pick, so the Settings dialog can take back the keyboard focus the popup left.
+    onInteraction: () -> Unit = {},
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -905,6 +920,7 @@ internal fun AiModelDropdown(
             onDismissRequest = {
                 open = false
                 suppressToggleUntilMs = System.currentTimeMillis() + 200
+                onInteraction()
             },
             properties = PopupProperties(focusable = false),
         ) {
@@ -938,7 +954,7 @@ internal fun AiModelDropdown(
                                 HoverBox(
                                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
                                     baseBg = if (active) tc.abg else Color.Transparent,
-                                    onClick = { open = false; onPickModel(item.id) },
+                                    onClick = { open = false; onPickModel(item.id); onInteraction() },
                                 ) {
                                     AppText(
                                         item.displayName,
@@ -975,7 +991,7 @@ internal fun AiModelDropdown(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         InlineField(manualEntry, { manualEntry = it }, "Enter a model id", Modifier.weight(1f), fontSize = 11.sp)
-                        AppButton("Use", onClick = { open = false; onPickModel(manualEntry.trim()) }, modifier = Modifier.height(26.dp))
+                        AppButton("Use", onClick = { open = false; onPickModel(manualEntry.trim()); onInteraction() }, modifier = Modifier.height(26.dp))
                     }
                 }
             }
@@ -986,6 +1002,7 @@ internal fun AiModelDropdown(
             val opening = !open
             open = opening
             if (opening && discovery == null) onDiscoverModels()
+            onInteraction()
         }
     }
     if (settingsStyle) {
@@ -1044,6 +1061,8 @@ internal fun AiReasoningEffortDropdown(
     onPick: (String) -> Unit,
     modifier: Modifier = Modifier,
     settingsStyle: Boolean = false,
+    // Runs after every toggle, dismiss and pick, so the Settings dialog can take back the keyboard focus the popup left.
+    onInteraction: () -> Unit = {},
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -1059,6 +1078,7 @@ internal fun AiReasoningEffortDropdown(
             onDismissRequest = {
                 open = false
                 suppressToggleUntilMs = System.currentTimeMillis() + 200
+                onInteraction()
             },
             properties = PopupProperties(focusable = false),
         ) {
@@ -1075,7 +1095,7 @@ internal fun AiReasoningEffortDropdown(
                         HoverBox(
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
                             baseBg = if (active) tc.abg else Color.Transparent,
-                            onClick = { open = false; onPick(value) },
+                            onClick = { open = false; onPick(value); onInteraction() },
                         ) {
                             AppText(
                                 label,
@@ -1094,7 +1114,12 @@ internal fun AiReasoningEffortDropdown(
         SettingsDropdownField(
             text = selectedLabel,
             open = open,
-            onClick = { if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open },
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) {
+                    open = !open
+                    onInteraction()
+                }
+            },
             modifier = modifier,
             minWidth = 0.dp,
             popup = popup,

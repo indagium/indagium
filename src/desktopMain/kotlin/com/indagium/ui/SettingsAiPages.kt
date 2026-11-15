@@ -1,6 +1,5 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,9 +8,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -23,7 +20,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -57,13 +53,31 @@ import kotlinx.coroutines.withContext
 // the draft, Save profile, the prompt that stops a switch, add or remove of a provider while the draft is dirty, the AiProviderGuard it
 // publishes for the dialog (which stops a page switch or Done), and the API key that is stored per keystroke for this session only.
 
-private val PROVIDER_FIELD_WIDTH = 300.dp
-private val MODEL_FIELD_WIDTH = 260.dp
-private val EFFORT_FIELD_WIDTH = 200.dp
-private val ADD_PROVIDER_SIZE = 26.dp
-private val LANGUAGE_CODE_FIELD_WIDTH = 200.dp
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val AI_PROFILE_HINT = "Pick the profile to edit. The AI panel uses the profile that is selected."
+internal const val AI_PROVIDER_TYPE_HINT = "Anthropic, OpenAI-compatible, or a local Codex or Claude Code account."
+internal const val AI_PROFILE_NAME_HINT = "How this profile is called in the AI panel's provider picker."
+internal const val AI_ENDPOINT_HINT = "Base URL of an HTTP AI provider."
+internal const val AI_CLI_EXECUTABLE_HINT = "Optional. The Codex or Claude Code CLI of an account that is already signed in on this computer."
+internal const val AI_MODEL_HINT = "Optional. The model this profile asks for. Open the list to detect what the provider offers."
+internal const val AI_REASONING_EFFORT_HINT = "How much the model thinks before it answers."
+internal const val AI_API_KEY_HINT = "For this session only; it is never saved."
+internal const val AI_MAX_TOOL_CALLS_HINT = "How many tool calls one request may use before it stops. Notes reads and writes are unlimited."
+internal const val AI_MAX_TOOL_CALLS_DETAIL = "A multi-step investigation (filtering, reading lines, then writing a note) can take many tool calls, " +
+    "especially with a smaller local model. Raise this if a request stops with “MCP tool-call budget” before it finishes. " +
+    "Notes reads and writes are unlimited; only analysis and operational calls consume this budget."
+internal const val VOICE_TRANSLATE_HINT = "Writes what you dictate as English text, whatever language you speak. You can edit it before sending."
+internal const val VOICE_LANGUAGE_HINT =
+    "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias."
+internal const val VOICE_LANGUAGE_WINDOWS_HINT =
+    "Windows Speech needs a matching installed legacy recogniser. For Ukrainian or any unavailable language, choose Local Whisper."
+internal const val VOICE_MODEL_HINT = "Size of the local Whisper model. Downloads start only when you choose Download; speech stays local."
+
+private val PROVIDER_FIELD_WIDTH = SETTINGS_FIELD_LONG
+private val LANGUAGE_CODE_FIELD_WIDTH = SETTINGS_FIELD_SHORT
 private const val VOICE_MODEL_POLL_MS = 5_000L
 private const val LANGUAGE_CODE_MAX = 3
+private const val ADD_LANGUAGE_OPTION = "add-language"
 
 /** Test tags of the AI pages' controls that have no tag of their own. */
 internal object AiPageTags {
@@ -90,7 +104,7 @@ internal object AiPageTags {
 // ── Providers ─────────────────────────────────────────────────────────
 
 @Composable
-internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProviderGuard) -> Unit = {}) {
+internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProviderGuard) -> Unit = {}, reclaimFocus: () -> Unit = {}) {
     val tc = tc()
     // Settings migration normally guarantees this invariant, but keeping the editor safe during
     // a transient empty state avoids a compose-time crash while a profile list is being replaced.
@@ -165,33 +179,35 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
     val reasoningEfforts = discoveredModel?.reasoningEfforts.orEmpty()
     val showReasoningDropdown = discoveredModel != null && reasoningEfforts.isNotEmpty()
 
-    SettingsGroup("Provider profile") {
-        // Same dropdown-plus-"+" treatment as the AI panel's own provider switcher (AiProviderControls in AiSidebar.kt), for a
-        // consistent look and so both places share one battle-tested selection path instead of a second, subtly different one.
-        SettingsRow("Providers", "Pick the profile to edit, or add a new one with +. The AI panel uses the profile that is selected.") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                AiProviderDropdown(
-                    profiles = profiles,
-                    selected = profile,
-                    onSelect = { id ->
-                        navigateOrConfirm {
-                            state.selectAiProviderProfile(id)
-                            editingProfileId = id
-                        }
-                    },
-                    modifier = Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.PROVIDER_PICKER),
-                    settingsStyle = true,
-                )
-                HoverBox(
-                    modifier = Modifier.size(ADD_PROVIDER_SIZE).clip(RoundedCornerShape(6.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(6.dp)).testTag(AiPageTags.ADD_PROVIDER),
-                    onClick = { navigateOrConfirm { editingProfileId = state.addAiProviderProfile().id } },
-                ) {
-                    AppText("+", color = tc.td, fontSize = 16.sp, modifier = Modifier.align(Alignment.Center))
-                }
-            }
+    SettingsGroup(
+        "Provider profile",
+        trailing = {
+            SettingsButton(
+                "Add profile",
+                onClick = { navigateOrConfirm { editingProfileId = state.addAiProviderProfile().id } },
+                modifier = Modifier.testTag(AiPageTags.ADD_PROVIDER),
+            )
+        },
+    ) {
+        // Same dropdown treatment as the AI panel's own provider switcher (AiProviderControls in AiSidebar.kt), for a consistent look and so
+        // both places share one battle-tested selection path instead of a second, subtly different one. Adding a profile is the group's
+        // header button, like every list.
+        SettingsRow("Profile", AI_PROFILE_HINT, anchor = "Providers") {
+            AiProviderDropdown(
+                profiles = profiles,
+                selected = profile,
+                onSelect = { id ->
+                    navigateOrConfirm {
+                        state.selectAiProviderProfile(id)
+                        editingProfileId = id
+                    }
+                },
+                modifier = Modifier.width(PROVIDER_FIELD_WIDTH).testTag(AiPageTags.PROVIDER_PICKER),
+                settingsStyle = true,
+                onInteraction = reclaimFocus,
+            )
         }
-        SettingsRow("Provider type", "Anthropic, OpenAI-compatible, or a local Codex / Claude Code account.") {
+        SettingsRow("Provider type", AI_PROVIDER_TYPE_HINT) {
             SettingsDropdown(
                 options = AiProviderKind.entries,
                 selected = kind,
@@ -211,9 +227,10 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 testTag = AiPageTags.PROVIDER_TYPE,
                 minWidth = PROVIDER_FIELD_WIDTH,
                 optionTag = { "${AiPageTags.PROVIDER_TYPE}-${it.name}" },
+                onInteraction = reclaimFocus,
             )
         }
-        SettingsRow("Profile name", "How this profile is called in the AI panel's provider picker.") {
+        SettingsRow("Profile name", AI_PROFILE_NAME_HINT) {
             SettingsTextField(
                 name,
                 { name = it },
@@ -223,7 +240,7 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
             )
         }
         if (kind.usesHttpEndpoint) {
-            SettingsRow("Endpoint", "Base URL of an HTTP AI provider.") {
+            SettingsRow("Endpoint", AI_ENDPOINT_HINT) {
                 SettingsTextField(
                     endpoint,
                     { endpoint = it },
@@ -235,12 +252,12 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
         } else {
             SettingsStackedRow(
                 "CLI executable",
-                "Optional. Uses a local CLI account already signed in on this computer.\n" +
-                    if (kind == AiProviderKind.CODEX_ACCOUNT) {
-                        "Choose a CLI executable, not an app bundle. On macOS Detect can use ChatGPT's bundled Codex CLI."
-                    } else {
-                        "Choose the Claude Code CLI executable. Claude desktop app bundles cannot run managed panel requests."
-                    },
+                AI_CLI_EXECUTABLE_HINT,
+                detail = AI_CLI_EXECUTABLE_HINT + "\n" + if (kind == AiProviderKind.CODEX_ACCOUNT) {
+                    "Choose a CLI executable, not an app bundle. On macOS Detect can use ChatGPT's bundled Codex CLI."
+                } else {
+                    "Choose the Claude Code CLI executable. Claude desktop app bundles cannot run managed panel requests."
+                },
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -301,23 +318,25 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                         .orEmpty()
                     if (reasoningEffort !in supportedEfforts) reasoningEffort = ""
                 },
-                modifier = Modifier.width(MODEL_FIELD_WIDTH),
+                modifier = Modifier.width(PROVIDER_FIELD_WIDTH),
                 settingsStyle = true,
+                onInteraction = reclaimFocus,
             )
         }
         if (showReasoningDropdown) {
-            SettingsRow("Reasoning effort", "How much the model thinks before it answers.", indent = true) {
+            SettingsRow("Reasoning effort", AI_REASONING_EFFORT_HINT, indent = true) {
                 AiReasoningEffortDropdown(
                     efforts = reasoningEfforts,
                     selected = reasoningEffort,
                     onPick = { reasoningEffort = it },
-                    modifier = Modifier.width(EFFORT_FIELD_WIDTH),
+                    modifier = Modifier.width(PROVIDER_FIELD_WIDTH),
                     settingsStyle = true,
+                    onInteraction = reclaimFocus,
                 )
             }
         }
         if (kind.usesApiKey) {
-            SettingsRow("API key", "For this session only; it is never saved.") {
+            SettingsRow("API key", AI_API_KEY_HINT) {
                 SettingsTextField(
                     apiKey,
                     { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
@@ -343,44 +362,26 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 )
             }
         }
-        if (validationError != null || connectionTest != null || accountCliCheck != null) {
-            Column(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                validationError?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
-                connectionTest?.let { result ->
-                    when (result) {
-                        is ModelDiscoveryResult.Available -> AppText(
-                            "Reachable — ${result.models.size} model(s) found.",
-                            color = tc.ac,
-                            fontSize = 11.sp,
-                        )
-                        is ModelDiscoveryResult.Unavailable -> AppText(result.message, color = DANGER_RED, fontSize = 11.sp)
-                    }
-                }
-                accountCliCheck?.let { result ->
-                    AppText(
-                        result.message,
-                        color = if (result.isReady) tc.ac else DANGER_RED,
-                        fontSize = 11.sp,
-                        maxLines = 3,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+        validationError?.let { SettingsNoteRow(it, error = true) }
+        connectionTest?.let { result ->
+            when (result) {
+                is ModelDiscoveryResult.Available -> SettingsNoteRow("Reachable — ${result.models.size} model(s) found.")
+                is ModelDiscoveryResult.Unavailable -> SettingsNoteRow(result.message, error = true)
             }
         }
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            // Secondary, not Primary — elsewhere in Settings, Primary is reserved for the
-            // dialog's own "Done" action, not per-section actions like this one.
-            SettingsButton(
-                "Save profile",
-                onClick = { validationError = state.updateAiProviderProfile(draft) },
-                modifier = Modifier.testTag(AiPageTags.SAVE_PROFILE),
-            )
+        accountCliCheck?.let { result -> SettingsNoteRow(result.message, error = !result.isReady) }
+        // Right-aligned like every action row. Save profile is the explicit-save form's commit: Primary, and only enabled while the draft
+        // differs from the stored profile. Test and Remove stay secondary.
+        SettingsActionRow {
+            if (profiles.size > 1) {
+                SettingsButton(
+                    "Remove…",
+                    onClick = { pendingDeleteProfileId = profile.id },
+                    variant = ButtonVariant.Secondary,
+                    isDanger = true,
+                    modifier = Modifier.testTag(AiPageTags.REMOVE_PROVIDER),
+                )
+            }
             // Reachability is a pure network probe against the current form fields: it never
             // saves, validates, or otherwise touches the stored profile, so it works whether or
             // not the endpoint would currently pass Save (e.g. an unacknowledged remote endpoint).
@@ -412,24 +413,17 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
                 variant = ButtonVariant.Secondary,
                 enabled = !testingConnection && (!kind.usesHttpEndpoint || endpoint.isNotBlank()),
             )
-            if (profiles.size > 1) {
-                SettingsButton(
-                    "Remove",
-                    onClick = { pendingDeleteProfileId = profile.id },
-                    variant = ButtonVariant.Secondary,
-                    isDanger = true,
-                    modifier = Modifier.testTag(AiPageTags.REMOVE_PROVIDER),
-                )
-            }
+            SettingsButton(
+                "Save profile",
+                onClick = { validationError = state.updateAiProviderProfile(draft) },
+                variant = ButtonVariant.Primary,
+                enabled = isDirty,
+                modifier = Modifier.testTag(AiPageTags.SAVE_PROFILE),
+            )
         }
     }
     SettingsGroup("AI requests") {
-        SettingsRow(
-            "Max MCP tool calls per request",
-            "A multi-step investigation (filtering, reading lines, then writing a note) can take many tool calls, especially with a smaller " +
-                "local model. Raise this if a request stops with \"MCP tool-call budget\" before it finishes. Notes reads and writes are " +
-                "unlimited; only analysis and operational calls consume this budget.",
-        ) {
+        SettingsRow("Max MCP tool calls per request", AI_MAX_TOOL_CALLS_HINT, detail = AI_MAX_TOOL_CALLS_DETAIL) {
             val roundLimits = listOf(12, 25, 50, 100, 200, 500)
             SettingsStepper(
                 options = roundLimits,
@@ -486,19 +480,14 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
 /** The line under the Model row: what the field is for, plus the notes that depend on the provider and on the models it reported. */
 private fun modelDescription(kind: AiProviderKind, noConfigurableEffort: Boolean): String = buildString {
     append(
-        if (kind.usesHttpEndpoint) {
-            "Optional. The model this profile asks for. Open the list to detect what the provider offers."
-        } else {
-            "Optional override. Leave blank to use your account's default model."
+        when {
+            kind.usesHttpEndpoint -> AI_MODEL_HINT
+            kind == AiProviderKind.CLAUDE_CODE_ACCOUNT ->
+                "Optional. Blank uses your account's default. Sonnet, Opus and Haiku aliases work, or enter a full model id."
+            else -> "Optional. Blank uses your account's default model."
         },
     )
     if (noConfigurableEffort) append("\nThis model does not expose configurable reasoning effort.")
-    if (kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
-        append(
-            "\nClaude Code cannot list models enabled for this account. Sonnet, Opus, and Haiku are documented aliases; " +
-                "blank uses your account default, and you can enter a full model id.",
-        )
-    }
 }
 
 // ── Commands ──────────────────────────────────────────────────────────
@@ -506,15 +495,19 @@ private fun modelDescription(kind: AiProviderKind, noConfigurableEffort: Boolean
 @Composable
 internal fun CustomAiCommandsSettingsSection(state: AppState) {
     var pendingDeleteCommand by remember { mutableStateOf<CustomAiCommand?>(null) }
-    SettingsGroup("Commands") {
-        SettingsRow("Add command", "Reusable prompts for Actions and /name in the chat box.") {
+    // The group is the list: adding is its header button, and the page description above already says what a command is.
+    SettingsGroup(
+        "Commands",
+        modifier = Modifier.settingsAnchor("Add command"),
+        trailing = {
             SettingsButton(
                 "Add command",
                 onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
                 variant = ButtonVariant.Secondary,
                 modifier = Modifier.testTag(AiPageTags.ADD_COMMAND),
             )
-        }
+        },
+    ) {
         if (state.customAiCommands.isEmpty()) {
             SettingsEmptyState("No commands yet.", asRow = true)
         } else {
@@ -528,7 +521,7 @@ internal fun CustomAiCommandsSettingsSection(state: AppState) {
                             modifier = Modifier.testTag(AiPageTags.commandEdit(command.name)),
                         )
                         SettingsButton(
-                            "Delete",
+                            "Delete…",
                             onClick = { pendingDeleteCommand = command },
                             variant = ButtonVariant.Secondary,
                             isDanger = true,
@@ -559,7 +552,6 @@ internal fun CustomAiCommandsSettingsSection(state: AppState) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
-    val tc = tc()
     val scope = rememberCoroutineScope()
     val voiceSettings = state.settings.voiceInput
     val selectedModel = VoiceModelCatalog.byId(voiceSettings.modelId)
@@ -571,6 +563,7 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
     var downloadedBytes by remember { mutableStateOf(0L) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var languageToAdd by remember { mutableStateOf("") }
+    var addingLanguage by remember { mutableStateOf(false) }
 
     LaunchedEffect(installer) {
         while (true) {
@@ -606,15 +599,23 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 settings.copy(voiceInput = settings.voiceInput.copy(recognitionLanguageCodes = settings.voiceInput.recognitionLanguageCodes + code))
             }
             languageToAdd = ""
+            addingLanguage = false
         }
     }
 
     val engineChoices = VoiceRecognitionEngines.availableChoices()
+    val engine = voiceSettings.recognitionEngine
     SettingsGroup("Dictation") {
-        SettingsRow("Recognition engine", VoiceRecognitionEngines.description(voiceSettings.recognitionEngine)) {
+        // An OS engine's own notes (the permission it asks for, what it cannot do) are folded into this row's hover hint rather than shown
+        // as a sentence row of their own.
+        SettingsRow(
+            "Recognition engine",
+            VoiceRecognitionEngines.description(engine),
+            detail = voiceEngineDetail(engine),
+        ) {
             SettingsSegmented(
                 options = engineChoices.map { it.label },
-                selectedIndices = setOf(engineChoices.indexOf(voiceSettings.recognitionEngine).coerceAtLeast(0)),
+                selectedIndices = setOf(engineChoices.indexOf(engine).coerceAtLeast(0)),
                 onToggle = { index ->
                     state.updateSettings { settings ->
                         settings.copy(voiceInput = settings.voiceInput.copy(recognitionEngine = engineChoices[index]))
@@ -623,18 +624,8 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 modifier = Modifier.testTag(AiPageTags.VOICE_ENGINE),
             )
         }
-        if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine, selectedModel)) {
-            SettingsRow(
-                "Translate dictated speech to English",
-                if (voiceSettings.translateToEnglish) {
-                    "Output mode: English translation after " +
-                        "${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} recognition. " +
-                        "You can edit the result before sending."
-                } else {
-                    "Output mode: ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} " +
-                        "transcript. You can edit the result before sending."
-                },
-            ) {
+        if (VoiceRecognitionEngines.supportsTranslation(engine, selectedModel)) {
+            SettingsRow("Translate dictated speech to English", VOICE_TRANSLATE_HINT) {
                 SettingsToggle(
                     checked = voiceSettings.translateToEnglish,
                     label = "Translate dictated speech to English",
@@ -645,14 +636,10 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                     testTag = AiPageTags.VOICE_TRANSLATE,
                 )
             }
-        } else {
+        } else if (engine == VoiceRecognitionEngine.WHISPER) {
             SettingsNoteRow(
-                if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
-                    "Large v3 Turbo supports transcription only. Your saved English translation preference " +
-                        "will apply again when you select a model that supports translation."
-                } else {
-                    "This OS engine returns the recognised spoken language only; English translation remains available with Whisper."
-                },
+                "Large v3 Turbo supports transcription only. Your saved English translation preference " +
+                    "will apply again when you select a model that supports translation.",
             )
         }
     }
@@ -660,34 +647,41 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
     SettingsGroup("Language") {
         val addableLanguages = VoiceLanguageCatalog.additional.filter { it.code !in voiceSettings.recognitionLanguageCodes }
         val removableLanguages = voiceSettings.recognitionLanguageCodes.filter { code -> VoiceLanguageCatalog.defaults.none { it.code == code } }
-        // One card row: the picker on the right of the name like every other row, and under it the part that adds or removes languages.
-        Column(Modifier.fillMaxWidth()) {
-            SettingsRow(
-                "Recognition language",
-                if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
-                    "Windows Speech needs a matching installed legacy recogniser. For Ukrainian or any unavailable language, choose Local Whisper."
-                } else {
-                    "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias."
-                },
-            ) {
-                SettingsSegmented(
-                    options = voiceSettings.recognitionLanguageCodes.map(VoiceLanguageCatalog::label),
-                    selectedIndices = setOf(voiceSettings.recognitionLanguageCodes.indexOf(voiceSettings.selectedRecognitionLanguageCode).coerceAtLeast(0)),
-                    onToggle = { index ->
-                        val code = voiceSettings.recognitionLanguageCodes[index]
+        // A dropdown, because the list grows with every code added: the languages in use, then "Add language…", which opens the row below.
+        SettingsRow(
+            "Recognition language",
+            if (engine == VoiceRecognitionEngine.WINDOWS_SPEECH) VOICE_LANGUAGE_WINDOWS_HINT else VOICE_LANGUAGE_HINT,
+        ) {
+            SettingsDropdown(
+                options = voiceSettings.recognitionLanguageCodes + if (addableLanguages.isNotEmpty()) listOf(ADD_LANGUAGE_OPTION) else emptyList(),
+                selected = voiceSettings.selectedRecognitionLanguageCode,
+                label = { code -> if (code == ADD_LANGUAGE_OPTION) "Add language…" else VoiceLanguageCatalog.label(code) },
+                onSelect = { code ->
+                    if (code == ADD_LANGUAGE_OPTION) {
+                        addingLanguage = true
+                    } else {
                         state.updateSettings { settings ->
                             settings.copy(voiceInput = settings.voiceInput.copy(selectedRecognitionLanguageCode = code))
                         }
-                    },
-                    modifier = Modifier.testTag(AiPageTags.VOICE_LANGUAGE),
-                )
-            }
-            if (addableLanguages.isNotEmpty() || removableLanguages.isNotEmpty()) {
-                Column(
-                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 9.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (addableLanguages.isNotEmpty()) {
+                    }
+                },
+                testTag = AiPageTags.VOICE_LANGUAGE,
+                optionTag = { code -> "${AiPageTags.VOICE_LANGUAGE}-option-$code" },
+                onInteraction = reclaimFocus,
+            )
+        }
+        if ((addingLanguage && addableLanguages.isNotEmpty()) || removableLanguages.isNotEmpty()) {
+            SettingsStackedRow(
+                "More languages",
+                if (addableLanguages.isNotEmpty()) {
+                    "Supported codes: ${addableLanguages.joinToString { "${it.label} (${it.code})" }}"
+                } else {
+                    null
+                },
+                indent = true,
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (addingLanguage && addableLanguages.isNotEmpty()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                             SettingsTextField(
                                 value = languageToAdd,
@@ -697,17 +691,11 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                                 onSubmit = { addLanguage(addableLanguages) },
                             )
                             SettingsButton(
-                                "Add language",
+                                "Add",
                                 onClick = { addLanguage(addableLanguages) },
                                 enabled = addableLanguages.any { it.code == languageToAdd },
                             )
                         }
-                        AppText(
-                            "Additional supported codes: ${addableLanguages.joinToString { "${it.label} (${it.code})" }}",
-                            color = tc.ts,
-                            fontSize = 11.sp,
-                            maxLines = 3,
-                        )
                     }
                     if (removableLanguages.isNotEmpty()) {
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -737,20 +725,22 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
         }
     }
 
-    if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
+    if (engine == VoiceRecognitionEngine.WHISPER) {
         SettingsGroup("Local model") {
             SettingsRow(
-                "Local model",
-                selectedModel.description + " Downloads start only when you choose Download; speech stays local.",
+                "Recognition model",
+                selectedModel.description,
+                detail = selectedModel.description + " Downloads start only when you choose Download; speech stays local.",
             ) {
                 SettingsDropdown(
                     options = VoiceModelCatalog.all,
                     selected = selectedModel,
-                    label = { model: VoiceModelDescriptor -> "${model.displayName} (${formatByteSize(model.sizeBytes)})" },
+                    label = { model: VoiceModelDescriptor -> "${model.displayName} · ${formatByteSize(model.sizeBytes)}" },
                     onSelect = { model ->
                         state.updateSettings { settings -> settings.copy(voiceInput = settings.voiceInput.copy(modelId = model.id)) }
                     },
                     testTag = AiPageTags.VOICE_MODEL,
+                    minWidth = SETTINGS_FIELD_LONG,
                     onInteraction = reclaimFocus,
                 )
             }
@@ -760,16 +750,16 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                     append(
                         when {
                             checkingModel -> "Checking local model…"
-                            installed -> "Installed at Indagium application data/voice-models."
+                            installed -> "Installed in Indagium's application data, in voice-models."
                             else -> "Not installed."
                         },
                     )
                     if (installing) append("\nDownloading ${formatByteSize(downloadedBytes)}…")
                     statusMessage?.let { append("\n$it") }
-                    append("\nModel license: ${selectedModel.licenseUrl}")
                 },
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AccentLink("Model license", onClick = { openExternalUrl(selectedModel.licenseUrl) })
                     if (installed) {
                         SettingsButton(
                             "Remove model",
@@ -790,28 +780,30 @@ internal fun VoiceInputSettingsSection(state: AppState, reclaimFocus: () -> Unit
                             enabled = !installing,
                         )
                     } else {
+                        // A secondary action like every other row's button: Primary is only for the commit of a form and the dialog's Done.
                         SettingsButton(
                             if (installing) "Downloading…" else "Download local model",
                             onClick = ::installModel,
-                            variant = ButtonVariant.Primary,
+                            variant = ButtonVariant.Secondary,
                             enabled = !installing && !checkingModel,
                         )
                     }
                 }
             }
         }
-    } else {
-        SettingsGroup("Native engine") {
-            SettingsNoteRow(
-                if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.APPLE_SPEECH) {
-                    "At first use macOS asks for Speech Recognition permission. If the selected " +
-                        "language has no on-device Apple model, Indagium refuses to send audio and " +
-                        "you can switch back to Whisper."
-                } else {
-                    "Windows Speech uses a matching installed legacy recogniser. Language availability is narrower than Whisper; " +
-                        "if there is no recogniser for the selected language, Indagium shows the reason and you can switch back to Whisper."
-                },
-            )
-        }
+    }
+}
+
+/** The hover hint of the engine row: the engine's own description and, for an OS engine, what to expect of it. */
+private fun voiceEngineDetail(engine: VoiceRecognitionEngine): String? {
+    val description = VoiceRecognitionEngines.description(engine)
+    return when (engine) {
+        VoiceRecognitionEngine.WHISPER -> null
+        VoiceRecognitionEngine.APPLE_SPEECH ->
+            "$description At first use macOS asks for Speech Recognition permission. If the selected language has no on-device Apple model, " +
+                "Indagium refuses to send audio and you can switch back to Whisper. English translation is available only with Whisper."
+        VoiceRecognitionEngine.WINDOWS_SPEECH ->
+            "$description Language availability is narrower than Whisper; if there is no recogniser for the selected language, Indagium " +
+                "shows the reason and you can switch back to Whisper. English translation is available only with Whisper."
     }
 }

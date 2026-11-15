@@ -80,7 +80,7 @@ internal fun WorkspaceProfileNameDialog(
             Spacer(Modifier.height(10.dp))
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 DialogActionButton(confirmLabel, active = error == null, enabled = error == null) { confirm() }

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,7 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Gavel
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Visibility
@@ -51,10 +52,32 @@ import java.io.File
 // save folders and what Indagium keeps on disk, Integrations the local MCP control server and diagnostic logging, About the version,
 // edition and project links.
 
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val SAVE_ROOT_HINT = "Parent folder every other save location defaults under. Defaults to your Documents folder."
+internal const val SAVE_ANALYSIS_HINT = "Where analysis notes, filtered exports and split logs are saved."
+internal const val SAVE_SESSIONS_HINT = "Where new device captures are recorded; applies from the next Start."
+internal const val SAVE_SNAPSHOTS_HINT = "Destination for “Save snapshot” while a capture is recording."
+internal const val SAVE_ZIP_HINT = "Where “Save ZIP” writes a stopped or retained capture."
+internal const val SAVE_TEST_SUITES_HINT = "Where your AI test suites are kept: library, suites and golden screenshots."
+internal const val SAVE_TEST_RUNS_HINT = "Where each AI test run keeps its evidence: run files, recordings, screenshots and transcripts."
+internal const val SAVE_TEST_ISSUES_HINT = "Where the issues made from failed test steps are kept, with their evidence."
+internal const val STORAGE_AUTO_SAVE_HINT = "Saves note Markdown and its .ann sidecar after note changes."
+internal const val STORAGE_FILTER_BACKUPS_HINT = "Writes timestamped saved-filter backups after saved-filter changes."
+internal const val STORAGE_TEMP_HINT = "Downloaded archive cache and app-managed notes."
+internal const val STORAGE_APP_DATA_HINT = "Everything Indagium stores: settings, session, saved filters, indexes and diagnostics."
+internal const val STORAGE_RESET_HINT = "Deletes everything in app data, after you confirm. Indagium then exits and starts again with its defaults."
+internal const val MCP_SERVER_HINT = "Local server that lets AI clients drive Indagium over MCP. It listens on this computer only and is off by default."
+internal const val MCP_PORT_HINT = "Loopback port the server listens on. Changing it restarts a running server."
+internal const val MCP_CORS_HINT = "Allows CORS, so a browser-based MCP inspector can call the local server. Leave it off unless you use one."
+internal const val MCP_CONNECTION_HINT =
+    "Point any MCP client (LM Studio, Claude Code, Codex) at the URL, or copy a ready-made config. The token authorises every request."
+internal const val DEBUG_LOGGING_HINT = "Writes Indagium's own diagnostic log to a file. Attach it when you report a bug."
+internal const val DEBUG_LOG_FILE_HINT = "Where the diagnostic log is written."
+
+private const val NOT_SET = "Not set"
 private const val RUNNING_POLL_MS = 250L
 private const val RUNNING_POLL_TRIES = 20
 private const val TOKEN_MASK = "••••••••••••••••••••••••"
-private val TOKEN_FIELD_SHAPE = RoundedCornerShape(4.dp)
 private val ABOUT_CARD_SHAPE = RoundedCornerShape(8.dp)
 
 internal const val TEST_RUN_LOCK_HINT = "Unavailable while a test run is in progress. Change it after the run has finished."
@@ -90,6 +113,7 @@ internal object SystemPageTags {
     const val ABOUT_GITHUB = "about-github"
     const val ABOUT_SUPPORT = "about-support"
     const val ABOUT_LICENSE = "about-license"
+    const val EDITION_SWITCH = "about-edition-switch"
 }
 
 // ── Save folders ──────────────────────────────────────────────────────
@@ -104,8 +128,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
     when (kind) {
         SaveFolderKind.ROOT -> SaveFolderRow(
             label = "Default save folder",
-            tooltip = "Parent folder every other save location below defaults under when it isn't " +
-                "set on its own. Defaults to your Documents folder.",
+            tooltip = SAVE_ROOT_HINT,
+            detail = "Parent folder every other save location defaults under when it isn't set on its own. Defaults to your Documents folder.",
             explicitValue = state.settings.saveRootDir,
             effectivePath = state.effectiveSaveRootDir.absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ROOT) },
@@ -116,8 +140,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.ANALYSIS -> SaveFolderRow(
             label = "Analysis artifacts folder",
-            tooltip = "Where analysis notes, filtered exports and split logs are saved. Auto-saved " +
-                "notes are written here, created on first save.",
+            tooltip = SAVE_ANALYSIS_HINT,
+            detail = "$SAVE_ANALYSIS_HINT Auto-saved notes are written here, created on first save.",
             explicitValue = state.settings.defaultSaveDir,
             effectivePath = state.effectiveAnalysisDirForDisplay().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ANALYSIS) },
@@ -126,8 +150,9 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.SESSIONS -> SaveFolderRow(
             label = "Capture sessions folder",
-            tooltip = "Where new device captures are recorded. A change applies from the next " +
-                "Start; sessions already recorded stay exactly where they are.",
+            tooltip = SAVE_SESSIONS_HINT,
+            detail = "Where new device captures are recorded. A change applies from the next Start; sessions already recorded stay exactly " +
+                "where they are.",
             explicitValue = state.settings.captureSessionsDir,
             effectivePath = state.effectiveCaptureSessionsDir().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.SESSIONS) },
@@ -136,7 +161,7 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.SNAPSHOTS -> SaveFolderRow(
             label = "Snapshots folder",
-            tooltip = "Destination for “Save snapshot” while a capture is recording.",
+            tooltip = SAVE_SNAPSHOTS_HINT,
             explicitValue = state.settings.captureSnapshotsDir,
             effectivePath = state.effectiveCaptureSnapshotsDir().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS) },
@@ -144,8 +169,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
             asRow = asRow,
         )
         SaveFolderKind.ZIP -> SaveFolderRow(
-            label = "Saved captures folder (Save ZIP)",
-            tooltip = "Destination for “Save ZIP” on a stopped or retained capture.",
+            label = "Saved captures folder",
+            tooltip = SAVE_ZIP_HINT,
             explicitValue = state.settings.captureZipDir,
             effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
@@ -154,7 +179,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.TEST_SUITES -> SaveFolderRow(
             label = "Test suites folder",
-            tooltip = "Where your AI test suites are kept (library.json, suites/ and golden-screenshot assets/). " +
+            tooltip = SAVE_TEST_SUITES_HINT,
+            detail = "Where your AI test suites are kept (library.json, suites/ and golden-screenshot assets/). " +
                 "Changing it loads the suites found there; the old folder is left as it is.",
             explicitValue = state.settings.testSuitesDir,
             effectivePath = state.effectiveTestSuitesDirForDisplay().absolutePath,
@@ -166,7 +192,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.TEST_RUNS -> SaveFolderRow(
             label = "Test runs folder",
-            tooltip = "Where each AI test run keeps its evidence (run.json, lane recordings, screenshots, transcripts). " +
+            tooltip = SAVE_TEST_RUNS_HINT,
+            detail = "Where each AI test run keeps its evidence (run.json, lane recordings, screenshots, transcripts). " +
                 "Changing it lists the runs found there; the old folder is left as it is.",
             explicitValue = state.settings.testRunsDir,
             effectivePath = state.effectiveTestRunsDirForDisplay().absolutePath,
@@ -178,7 +205,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind, asRow: Boo
         )
         SaveFolderKind.TEST_ISSUES -> SaveFolderRow(
             label = "Issues folder",
-            tooltip = "Where the issues made from failed test steps are kept, one folder each with its evidence. " +
+            tooltip = SAVE_TEST_ISSUES_HINT,
+            detail = "Where the issues made from failed test steps are kept, one folder each with its evidence. " +
                 "Changing it lists the issues found there; the old folder is left as it is.",
             explicitValue = state.settings.testIssuesDir,
             effectivePath = state.effectiveTestIssuesDirForDisplay().absolutePath,
@@ -204,10 +232,11 @@ private fun SettingsTooltipBox(content: @Composable () -> Unit) {
 }
 
 /**
- * One row of a save-folders group: the label with its hint ([tooltip]), the effective path (dimmer with a "(default)" suffix when nothing
- * is explicitly set, [explicitValue] null), a Browse button, and a Reset button that only shows once the folder has been set to something
- * other than its computed default. [enabled] = false greys Browse and Reset out; [disabledHint] is the tooltip that says why.
- * With [asRow] the label, hint and path sit in a Settings page row, otherwise in the setup assistant's stacked form.
+ * One row of a save-folders group: the label with its hint ([tooltip], at most two lines; [detail] is the longer text for the hover hint),
+ * the effective path (one line, cut in the middle, with a "· default" while nothing is explicitly set, [explicitValue] null), a Browse
+ * button, and a Reset button that only shows once the folder has been set to something other than its computed default. [enabled] = false
+ * greys Browse and Reset out; [disabledHint] is the tooltip that says why. With [asRow] the label and hint sit on top of the path and its
+ * buttons in a Settings page row, otherwise in the setup assistant's stacked form.
  */
 @Composable
 internal fun SaveFolderRow(
@@ -220,9 +249,9 @@ internal fun SaveFolderRow(
     enabled: Boolean = true,
     disabledHint: String? = null,
     asRow: Boolean = false,
+    detail: String? = null,
 ) {
     val tc = tc()
-    val displayText = truncatePathForDisplay(effectivePath).let { if (explicitValue != null) it else "$it  (default)" }
     val buttons: @Composable () -> Unit = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             SettingsButton("Browse", onClick = onBrowse, enabled = enabled)
@@ -241,34 +270,21 @@ internal fun SaveFolderRow(
             tooltip = { SettingsTooltipBox { AppText(effectivePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO) } },
             modifier = modifier,
         ) {
-            AppText(
-                displayText,
-                color = if (explicitValue != null) tc.ts else tc.td,
-                fontSize = 11.sp,
-                fontFamily = MONO,
-                overflow = TextOverflow.Ellipsis,
-            )
+            SettingsPathText(effectivePath, isDefault = explicitValue == null)
         }
     }
     if (asRow) {
-        Box(Modifier.fillMaxWidth().settingsAnchor(label)) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    AppText(label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    AppText(tooltip, color = tc.ts, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                    pathText(Modifier)
-                }
+        // The path needs the width, so the label and hint are on top and the path with its buttons under them.
+        SettingsStackedRow(label, tooltip, detail = detail) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                pathText(Modifier.weight(1f))
                 buttonsWithHint()
             }
         }
         return
     }
     Column(Modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        TooltipArea(tooltip = { SettingsTooltipBox { AppText(tooltip, color = tc.tx, fontSize = 11.sp, maxLines = 3) } }) {
+        TooltipArea(tooltip = { SettingsTooltipBox { AppText(detail ?: tooltip, color = tc.tx, fontSize = 11.sp, maxLines = 3) } }) {
             AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -287,7 +303,7 @@ internal fun StorageSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         state.testStorageStatus?.let { message -> SettingsNoteRow(message, error = true) }
     }
     SettingsGroup("Saving") {
-        SettingsRow("Auto-save", "Saves note Markdown and its .ann sidecar after note changes.") {
+        SettingsRow("Auto-save", STORAGE_AUTO_SAVE_HINT) {
             SettingsToggle(
                 checked = state.settings.autoExportNotes,
                 label = "Auto-save",
@@ -296,7 +312,7 @@ internal fun StorageSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 testTag = SystemPageTags.AUTO_SAVE,
             )
         }
-        SettingsRow("Filter backups", "Writes timestamped saved-filter backups after saved-filter changes.") {
+        SettingsRow("Filter backups", STORAGE_FILTER_BACKUPS_HINT) {
             SettingsToggle(
                 checked = state.settings.autoSaveFilters,
                 label = "Filter backups",
@@ -307,7 +323,7 @@ internal fun StorageSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         }
     }
     DiskUseGroup(state)
-    state.autosaveError?.let { message -> AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2) }
+    state.autosaveError?.let { message -> SettingsGroup("") { SettingsNoteRow(message, error = true) } }
 }
 
 @Composable
@@ -316,10 +332,7 @@ private fun DiskUseGroup(state: AppState) {
     val appDataPath = state.appCachePath
     // The group anchor is the "Storage" search entry (where Indagium keeps its data); the rows keep their own.
     SettingsGroup("Disk use", modifier = Modifier.settingsAnchor("Storage")) {
-        SettingsRow(
-            "Temporary data",
-            "Downloaded archive cache and app-managed notes. Clear temporary data removes these items.",
-        ) {
+        SettingsRow("Temporary data", STORAGE_TEMP_HINT) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText(
                     formatByteSize(state.temporaryDataSizeBytes),
@@ -329,7 +342,7 @@ private fun DiskUseGroup(state: AppState) {
                     modifier = Modifier.testTag(SystemPageTags.TEMP_SIZE),
                 )
                 SettingsButton(
-                    "Clear temporary data",
+                    "Clear temporary data…",
                     onClick = { state.requestClearCache() },
                     variant = ButtonVariant.Secondary,
                     modifier = Modifier.testTag(SystemPageTags.CLEAR_TEMP),
@@ -339,8 +352,9 @@ private fun DiskUseGroup(state: AppState) {
         TooltipArea(tooltip = { SettingsTooltipBox { AppText(appDataPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO) } }) {
             SettingsRow(
                 "App data",
-                "Everything Indagium stores in ${truncatePathForDisplay(appDataPath)}: temporary data, settings, current session/autosave, " +
-                    "saved filters, source and case indexes, diagnostics, and integration data.",
+                STORAGE_APP_DATA_HINT,
+                detail = "Everything Indagium stores in $appDataPath: temporary data, settings, current session/autosave, saved filters, " +
+                    "source and case indexes, diagnostics, and integration data.",
             ) {
                 AppText(
                     formatByteSize(state.appDataSizeBytes),
@@ -351,11 +365,7 @@ private fun DiskUseGroup(state: AppState) {
                 )
             }
         }
-        SettingsRow(
-            "Reset app data",
-            "Deletes everything in app data, after you confirm. Indagium then exits and starts again with its defaults.",
-            danger = true,
-        ) {
+        SettingsRow("Return to defaults", STORAGE_RESET_HINT, danger = true) {
             SettingsButton(
                 "Reset app data…",
                 onClick = { state.requestResetAppData() },
@@ -393,11 +403,8 @@ private fun McpServerGroup(state: AppState, reclaimFocus: () -> Unit) {
         }
         running = state.controlServerToken() != null
     }
-    SettingsGroup("MCP control server") {
-        SettingsRow(
-            "MCP control server",
-            "Local server that lets AI clients drive Indagium over MCP. It listens on this computer only and is off by default.",
-        ) {
+    SettingsGroup("Control server") {
+        SettingsRow("MCP control server", MCP_SERVER_HINT) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (running) SettingsBadge("Running", dot = true, modifier = Modifier.testTag(SystemPageTags.MCP_RUNNING))
                 SettingsToggle(
@@ -410,7 +417,8 @@ private fun McpServerGroup(state: AppState, reclaimFocus: () -> Unit) {
             }
         }
         error?.let { message -> SettingsNoteRow(message, error = true) }
-        SettingsRow("Port", "Loopback port the server listens on. Changing it restarts a running server.", indent = true) {
+        // Not indented, dimmed or locked: the port, the connection details and CORS stay editable while the server is off, for when it is turned on.
+        SettingsRow("Port", MCP_PORT_HINT) {
             var portText by remember(port) { mutableStateOf(port.toString()) }
             SettingsNumberField(
                 value = portText,
@@ -430,14 +438,10 @@ private fun McpServerGroup(state: AppState, reclaimFocus: () -> Unit) {
         // (SEC-1) Off by default: CORS lets any origin a browser has open issue cross-origin requests to this loopback server.
         // Bearer-token auth still gates every request either way; this only controls whether a browser is additionally allowed to
         // do that at all. Opt-in for the uncommon case of a browser-based MCP inspector.
-        SettingsRow(
-            "Allow browser-based MCP clients (CORS)",
-            "Lets a browser-based MCP inspector call the local server. Leave it off unless you use one.",
-            indent = true,
-        ) {
+        SettingsRow("Allow browser-based MCP clients", MCP_CORS_HINT) {
             SettingsToggle(
                 checked = state.settings.mcpAllowBrowserClients,
-                label = "Allow browser-based MCP clients (CORS)",
+                label = "Allow browser-based MCP clients",
                 onChange = { next -> state.setMcpAllowBrowserClients(next) },
                 reclaimFocus = reclaimFocus,
                 testTag = SystemPageTags.MCP_CORS,
@@ -458,17 +462,18 @@ private fun SettingsIconButton(icon: ImageVector, description: String, tag: Stri
     }
 }
 
-private val ICON_BUTTON = 24.dp
+private val ICON_BUTTON = 22.dp
 
-/** One labelled line of the connection block: a [name], the mono [value] and its buttons. */
+/** One labelled line of the connection block: a [name], the mono [value] and its buttons, as a read-only 26dp field like every Settings field. */
 @Composable
 private fun ConnectionLine(name: String, value: String, buttons: @Composable () -> Unit) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth()
-            .background(tc.bg, TOKEN_FIELD_SHAPE)
-            .border(1.dp, tc.br, TOKEN_FIELD_SHAPE)
-            .padding(start = 10.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+            .height(SETTINGS_CONTROL_HEIGHT)
+            .background(tc.bg, CORNER_SM)
+            .border(SETTINGS_CONTROL_BORDER, tc.br, CORNER_SM)
+            .padding(start = 8.dp, end = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -499,12 +504,7 @@ private fun McpConnectionRow(state: AppState, port: Int) {
     val copiedMark: @Composable (McpCopied) -> Unit = { which ->
         if (copied == which) AppText("Copied", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.Medium)
     }
-    SettingsStackedRow(
-        "Connect a client",
-        "Point any MCP client (LM Studio, Claude Code, Codex) at the URL, or copy a ready-made config. The token authorises every request.",
-        anchor = "Connection info",
-        indent = true,
-    ) {
+    SettingsStackedRow("Connect a client", MCP_CONNECTION_HINT, anchor = "Connection info") {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             ConnectionLine("URL", mcpUrl(port)) {
                 copiedMark(McpCopied.Url)
@@ -561,10 +561,9 @@ private const val PORT_DIGITS = 5
 
 @Composable
 private fun DiagnosticsGroup(state: AppState, reclaimFocus: () -> Unit) {
-    val tc = tc()
     val fullPath = state.settings.debugLogFilePath
     SettingsGroup("Diagnostics") {
-        SettingsRow("Debug logging", "Writes Indagium's own diagnostic log to a file. Attach it when you report a bug.") {
+        SettingsRow("Debug logging", DEBUG_LOGGING_HINT) {
             SettingsToggle(
                 checked = state.settings.debugLoggingEnabled,
                 label = "Debug logging",
@@ -574,7 +573,7 @@ private fun DiagnosticsGroup(state: AppState, reclaimFocus: () -> Unit) {
             )
         }
         val logFileRow: @Composable () -> Unit = {
-            SettingsRow("Debug log file", fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)") {
+            SettingsRow("Debug log file", fullPath?.let { truncatePathForDisplay(it) } ?: NOT_SET, detail = fullPath?.let { "$DEBUG_LOG_FILE_HINT\n$it" }) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     SettingsButton("Browse", onClick = { state.pickDebugLogFile() }, modifier = Modifier.testTag(SystemPageTags.DEBUG_BROWSE))
                     SettingsButton(
@@ -587,11 +586,7 @@ private fun DiagnosticsGroup(state: AppState, reclaimFocus: () -> Unit) {
                 }
             }
         }
-        if (fullPath != null) {
-            TooltipArea(tooltip = { SettingsTooltipBox { AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO) } }) { logFileRow() }
-        } else {
-            logFileRow()
-        }
+        logFileRow()
         state.debugLoggingError?.let { message ->
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
@@ -610,11 +605,11 @@ private fun DiagnosticsGroup(state: AppState, reclaimFocus: () -> Unit) {
 private const val APP_TAGLINE = "Log viewer for Android logcat, bug reports and captures."
 
 @Composable
-internal fun AboutSettingsSection(state: AppState) {
+internal fun AboutSettingsSection(state: AppState, reclaimFocus: () -> Unit = {}) {
     val tc = tc()
     val status = updateStatusLine(state)
     Row(
-        Modifier.fillMaxWidth().background(tc.p, ABOUT_CARD_SHAPE).border(1.dp, tc.br, ABOUT_CARD_SHAPE).padding(16.dp),
+        Modifier.fillMaxWidth().background(tc.p, ABOUT_CARD_SHAPE).border(1.dp, tc.br, ABOUT_CARD_SHAPE).padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -623,7 +618,7 @@ internal fun AboutSettingsSection(state: AppState) {
             AppText(APP_TAGLINE, color = tc.ts, fontSize = 11.sp, maxLines = 2)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 AppText("Version ", color = tc.ts, fontSize = 11.sp)
-                AppText(BuildInfo.APP_VERSION, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                AppText(BuildInfo.APP_VERSION, color = tc.tx, fontSize = 11.sp)
                 AppText(" · by ", color = tc.ts, fontSize = 11.sp)
                 AppText(BuildInfo.APP_AUTHOR, color = tc.tx, fontSize = 11.sp)
             }
@@ -640,7 +635,7 @@ internal fun AboutSettingsSection(state: AppState) {
             )
         }
     }
-    EditionGroup(state)
+    EditionGroup(state, reclaimFocus)
     SettingsGroup("Project") {
         LinkRow(
             Icons.Outlined.Code,
@@ -651,7 +646,7 @@ internal fun AboutSettingsSection(state: AppState) {
             ::openProjectRepository,
         )
         LinkRow(
-            Icons.Outlined.Favorite,
+            Icons.Outlined.FavoriteBorder,
             "Support the project",
             "Ways to help keep Indagium going.",
             Icons.Outlined.ChevronRight,
@@ -669,21 +664,21 @@ internal fun AboutSettingsSection(state: AppState) {
 
 /** The edition and its limits, with the development-only switch while a build allows it. */
 @Composable
-private fun EditionGroup(state: AppState) {
+private fun EditionGroup(state: AppState, reclaimFocus: () -> Unit) {
     val edition by state.editionService.current.collectAsState()
     SettingsGroup("Edition") {
         SettingsRow("Edition", editionSummary(edition)) { SettingsBadge(edition.label) }
         if (state.editionService.devSwitchAllowed()) {
             SettingsRow("Development switch", "Changes the edition for this run only.") {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Edition.entries.forEach { candidate ->
-                        SettingsButton(
-                            candidate.label,
-                            onClick = { state.editionService.setForDev(candidate) },
-                            variant = if (candidate == edition) ButtonVariant.Primary else ButtonVariant.Secondary,
-                        )
-                    }
-                }
+                SettingsDropdown(
+                    options = Edition.entries,
+                    selected = edition,
+                    label = { it.label },
+                    onSelect = { candidate -> state.editionService.setForDev(candidate) },
+                    testTag = SystemPageTags.EDITION_SWITCH,
+                    optionTag = { "${SystemPageTags.EDITION_SWITCH}-${it.name}" },
+                    onInteraction = reclaimFocus,
+                )
             }
         }
     }

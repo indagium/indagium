@@ -15,7 +15,7 @@ const val PACKAGED_APP_PROPERTY = "jpackage.app-path"
 enum class Edition(val label: String) {
     FREE("Free"),
     PREMIUM("Premium"),
-    FRIENDS_FAMILY("Friends & Family"),
+    FRIENDS_FAMILY("Friends & family"),
     UNLIMITED("Unlimited"),
     ;
 

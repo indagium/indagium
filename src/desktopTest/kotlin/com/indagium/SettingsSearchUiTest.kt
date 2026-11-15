@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onFirst
@@ -64,7 +65,7 @@ class SettingsSearchUiTest {
         install()
         type("zzzznothing")
 
-        rule.onNodeWithText("No settings match “zzzznothing”").assertExists()
+        rule.onNode(hasText("No settings match “zzzznothing”", substring = true)).assertExists()
     }
 
     @Test
@@ -121,7 +122,7 @@ class SettingsSearchUiTest {
         rule.onNodeWithTag("proofreading-vocabulary-remove-${"Indagium".hashCode()}").performClick()
         rule.waitForIdle()
         rule.runOnIdle { assertEquals(emptyList(), state.settings.proofreading.vocabulary) }
-        rule.onNodeWithText("No saved words").assertExists()
+        rule.onNodeWithText("No words yet.").assertExists()
     }
 
     @Test
@@ -154,10 +155,10 @@ class SettingsSearchUiTest {
         openLogView(state)
 
         rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
-        rule.onNodeWithText("Style ▸").performClick()
+        rule.onNodeWithTag("error-highlight-global-style-toggle").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("error-highlight-global-panel").assertExists()
-        rule.onNodeWithText("Style ▾").assertExists()
+        rule.onNodeWithText("Style").assertExists()
         // The wide editor spells out the colour labels and previews on a sample Error row.
         rule.onNodeWithText("Background").assertExists()
         rule.onNodeWithText("Text").assertExists()
@@ -169,10 +170,10 @@ class SettingsSearchUiTest {
         // The tag sits inside the card's 12dp horizontal padding, so the card's own edge is that much further left.
         assertTrue(panel.left - 12f <= button.left, "panel $panel must not start right of the button $button")
 
-        rule.onNodeWithText("Style ▾").performClick()
+        rule.onNodeWithTag("error-highlight-global-style-toggle").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
-        rule.onNodeWithText("Style ▸").assertExists()
+        rule.onNodeWithText("Style").assertExists()
 
         rule.runOnIdle { assertTrue(state.settings.errorHighlightStyle.enabled) }
         rule.onNodeWithTag("error-highlight-global-switch").performClick()
@@ -183,7 +184,7 @@ class SettingsSearchUiTest {
     fun styleEditsInThePopupReachTheGlobalSetting() {
         val state = AppState()
         openLogView(state)
-        rule.onNodeWithText("Style ▸").performClick()
+        rule.onNodeWithTag("error-highlight-global-style-toggle").performClick()
         rule.waitForIdle()
 
         assertEquals(null, state.settings.errorHighlightStyle.bold)
@@ -199,7 +200,7 @@ class SettingsSearchUiTest {
         type("minimap")
         rule.onNodeWithText("Minimap").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("Style ▸").performClick()
+        rule.onNodeWithTag("error-highlight-global-style-toggle").performClick()
         rule.waitForIdle()
 
         rule.onNodeWithTag("error-highlight-global-background-swatch-zone").performClick()
@@ -231,7 +232,7 @@ class SettingsSearchUiTest {
         rule.onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Escape) }
         rule.waitForIdle()
         rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
-        rule.onNodeWithText("Style ▸").assertExists()
+        rule.onNodeWithText("Style").assertExists()
         assertFalse(dismissed, "Esc that closed the popups must not also close the Settings dialog")
 
         // Focus is back on the dialog, so its own key handling (Ctrl/Cmd+F focuses the search) works again.
@@ -249,14 +250,14 @@ class SettingsSearchUiTest {
     fun clickingOutsideTheStylePopupDismissesIt() {
         val state = AppState()
         openLogView(state)
-        rule.onNodeWithText("Style ▸").performClick()
+        rule.onNodeWithTag("error-highlight-global-style-toggle").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("error-highlight-global-panel").assertExists()
 
         rule.onAllNodes(isRoot()).onFirst().performMouseInput { click(Offset(2f, 2f)) }
         rule.waitForIdle()
         rule.onNodeWithTag("error-highlight-global-panel").assertDoesNotExist()
-        rule.onNodeWithText("Style ▸").assertExists()
+        rule.onNodeWithText("Style").assertExists()
     }
 
     @Test

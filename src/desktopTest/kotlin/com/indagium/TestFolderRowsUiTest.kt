@@ -2,21 +2,22 @@ package com.indagium
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.indagium.ui.AppState
 import com.indagium.ui.SaveFolderKind
 import com.indagium.ui.SaveFolderRow
 import com.indagium.ui.SaveFolderSetting
-import com.indagium.ui.truncatePathForDisplay
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 
-/** The three AI test folder rows as Settings › Test runs shows them: label, the "(default)" path under the save folder, Browse and Reset. */
+/** The three AI test folder rows as Settings › Test runs shows them: label, the path (marked "· default" under the save folder), Browse and Reset. */
 @OptIn(ExperimentalTestApi::class)
 class TestFolderRowsUiTest {
     @get:Rule
@@ -41,8 +42,10 @@ class TestFolderRowsUiTest {
         rule.onNodeWithText("Test runs folder").assertExists()
         rule.onNodeWithText("Issues folder").assertExists()
         listOf("test-suites", "test-runs", "test-issues").forEach { sub ->
-            rule.onNodeWithText("${truncatePathForDisplay(File(root, sub).absolutePath)}  (default)").assertExists()
+            rule.onNodeWithText(File(root, sub).absolutePath).assertExists()
         }
+        // Each path says it is the default in the interface font after it, never inside the path.
+        rule.onAllNodesWithText("· default").assertCountEquals(3)
         rule.onNodeWithText("Reset").assertDoesNotExist()
         dir.deleteRecursively()
     }
@@ -55,7 +58,9 @@ class TestFolderRowsUiTest {
         state.updateSettings { it.copy(testIssuesDir = mine.absolutePath) }
         install(state)
 
-        rule.onNodeWithText(truncatePathForDisplay(mine.absolutePath)).assertExists()
+        rule.onNodeWithText(mine.absolutePath).assertExists()
+        // Only the other two rows are still the default.
+        rule.onAllNodesWithText("· default").assertCountEquals(2)
         rule.onNodeWithText("Reset").assertExists()
         dir.deleteRecursively()
     }

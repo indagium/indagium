@@ -35,7 +35,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** The Capture & video page of the Settings dialog and its four drill-in pages: Tools, Limits and snapshots, Mark issue, Video playback. */
+/** The Capture & video page of the Settings dialog and its four drill-in pages: Tools, Limits & snapshots, Mark issue, Video playback. */
 @OptIn(ExperimentalTestApi::class)
 class SettingsCapturePagesUiTest {
     @get:Rule
@@ -88,9 +88,11 @@ class SettingsCapturePagesUiTest {
         val state = AppState()
         openCapturePage(state)
 
-        listOf("Recording", "Logcat", "Device availability", "More").forEach { rule.onNodeWithText(it).assertExists() }
-        listOf("Record the screen", "Video quality", "Recording codec", "Sound", "Microphone", "Show the device", "Buffers", "Include earlier device logs")
-            .forEach { rule.onNodeWithText(it).assertExists() }
+        listOf("Recording", "Audio", "Logcat", "Device availability", "More").forEach { rule.onNodeWithText(it).assertExists() }
+        listOf(
+            "Record the screen", "Video quality", "Recording codec", "Capture audio", "Keep sound on the device", "Microphone",
+            "Show the device", "Buffers", "Include earlier device logs",
+        ).forEach { rule.onNodeWithText(it).assertExists() }
         subPages.forEach { page ->
             rule.onNodeWithTag(CapturePageTags.drillRow(page)).performScrollTo().assertExists()
             rule.onNodeWithText(page.title).assertExists()
@@ -100,7 +102,7 @@ class SettingsCapturePagesUiTest {
         listOf("ADB path", "Max FPS", "Before, seconds", "Video follow readout", "Live audio volume %").forEach {
             assertFalse(it in shown, "$it is on a drill-in page")
         }
-        assertEquals(listOf("Tools", "Limits and snapshots", "Mark issue", "Video playback"), subPages.map { it.title })
+        assertEquals(listOf("Tools", "Limits & snapshots", "Mark issue", "Video playback"), subPages.map { it.title })
         assertTrue(subPages.all { it.parent == SettingsPage.CaptureVideo })
     }
 
@@ -180,7 +182,7 @@ class SettingsCapturePagesUiTest {
     }
 
     @Test
-    fun soundIsTwoCheckboxesAndKeepSoundWaitsForCaptureAudio() {
+    fun soundIsTwoSwitchesAndKeepSoundWaitsForCaptureAudio() {
         val state = AppState()
         openCapturePage(state)
         assertFalse(capture(state).audio)
@@ -254,13 +256,13 @@ class SettingsCapturePagesUiTest {
         openCapturePage(state)
         drillInto(SettingsPage.CaptureTools)
         val shown = anchorsOnScreen()
-        listOf("Tools", "ADB path", "scrcpy path", "Recheck tools").forEach {
+        listOf("Tools", "ADB path", "scrcpy path", "Tool detection").forEach {
             assertTrue(it in shown, "$it on the Tools page")
         }
         rule.onNodeWithText("Recheck tools").assertExists()
         rule.onNodeWithText("Install guidance").assertExists()
         if (isMacOs) {
-            assertFalse("Hardware-accelerated mirror (experimental)" in shown)
+            assertFalse("Hardware-accelerated mirror" in shown)
         } else {
             assertSwitchFlips(state, CapturePageTags.HARDWARE_MIRROR) { it.captureSettings.hardwareMirror }
         }
@@ -323,7 +325,12 @@ class SettingsCapturePagesUiTest {
             .forEach { assertTrue(it in shown, "$it on the Mark issue page") }
 
         assertSwitchFlips(state, CapturePageTags.MARKER_SCREENSHOT) { it.captureSettings.markerScreenshot }
-        assertSwitchFlips(state, CapturePageTags.MARKER_IN_SNAPSHOT) { it.captureSettings.markerNotesInSnapshot }
+        // The snapshot export does not read this setting yet: the switch shows the stored value and cannot be changed meanwhile.
+        val stored = state.settings.captureSettings.markerNotesInSnapshot
+        rule.onNodeWithTag(CapturePageTags.MARKER_IN_SNAPSHOT).performScrollTo().assertIsNotEnabled()
+        rule.onNodeWithTag(CapturePageTags.MARKER_IN_SNAPSHOT).performClick()
+        rule.waitForIdle()
+        assertEquals(stored, state.settings.captureSettings.markerNotesInSnapshot)
 
         val before = captureFieldTag("Before, seconds")
         rule.onNodeWithTag(before).performScrollTo().performTextClearance()

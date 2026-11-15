@@ -98,9 +98,22 @@ class SettingsLogAndNotesPagesUiTest {
     fun rowWrappingStillTogglesAutoOnTheLogViewPage() {
         val state = AppState()
         openPage(state, SettingsPage.LogView)
-        val before = state.settings.autoLogRowWrap
+        assertTrue(state.settings.autoLogRowWrap)
+        // "Wrap at" belongs to Fixed: dimmed and locked while Auto is on, its value kept.
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).performScrollTo().assertIsNotEnabled()
+        clickText("Fixed")
+        assertFalse(state.settings.autoLogRowWrap)
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).assertIsEnabled()
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).performTextClearance()
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).performTextInput("500")
+        assertEquals(500, state.settings.logRowWrapLimitChars)
+        // Typing below the lowest column keeps the nearest allowed one.
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).performTextClearance()
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).performTextInput("10")
+        assertEquals(80, state.settings.logRowWrapLimitChars)
         clickText("Auto")
-        assertEquals(!before, state.settings.autoLogRowWrap)
+        assertTrue(state.settings.autoLogRowWrap)
+        rule.onNodeWithTag(LogPageTags.ROW_WRAP_COLUMNS).assertIsNotEnabled()
     }
 
     // ---- Search & filters ----
@@ -163,7 +176,7 @@ class SettingsLogAndNotesPagesUiTest {
         state.updateSettings { it.copy(customIssueRules = listOf(CustomIssueRule("a", "Timeouts", "timeout"))) }
         openPage(state, SettingsPage.IssueCategories)
         assertGroups("Categories")
-        rule.onNodeWithText("Custom issue categories").assertExists()
+        rule.onNode(hasText("Each enabled regex", substring = true)).assertExists()
         rule.onNodeWithTag("${SourcePageTags.CATEGORY_SWITCH_PREFIX}0").assertIsOn()
         rule.onNodeWithTag(SourcePageTags.SAVE_CATEGORIES).assertIsNotEnabled()
 
@@ -201,12 +214,13 @@ class SettingsLogAndNotesPagesUiTest {
         val state = AppState()
         openPage(state, SettingsPage.SourceCode)
         assertGroups("Source folders", "Opening code", "Log wrappers")
-        rule.onNodeWithText("Registered folders").assertExists()
+        // Adding is the group's header button; the group is the list.
+        rule.onNodeWithTag(SourcePageTags.REGISTER_SOURCE).assertExists()
         rule.onNodeWithText("No folders registered yet.").assertExists()
         rule.onNodeWithTag("editor-choice-dropdown").assertExists()
         rule.onNodeWithTag(SourcePageTags.EDITOR_RESCAN).assertExists()
         rule.onNodeWithText("Logging configurations").assertExists()
-        rule.onNodeWithText("No custom logging configurations.").assertExists()
+        rule.onNodeWithText("No custom logging configurations yet.").assertExists()
 
         assertSwitchFlips(state, SourcePageTags.DISCOVER_WRAPPERS) { it.sourceAutoDiscoveryEnabled }
     }

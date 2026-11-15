@@ -4,14 +4,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
@@ -23,12 +20,44 @@ import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.formatCaptureSizeEstimate
 import com.indagium.capture.withMirrorMode
 
-// Settings › Capture & video and its four drill-in pages (Tools, Limits and snapshots, Mark issue, Video playback). The main page holds the
+// Settings › Capture & video and its four drill-in pages (Tools, Limits & snapshots, Mark issue, Video playback). The main page holds the
 // defaults the New tab's Before start panel starts from; the rest sits one click down. The controls themselves are shared with that panel
 // (ui/CaptureSettingControls.kt), so both screens behave the same.
 
-private val MICROPHONE_FIELD_WIDTH = 220.dp
-private val DISPLAY_FIELD_WIDTH = 168.dp
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val CAPTURE_RECORD_SCREEN_HINT = "Save the device screen with the session so you can replay it beside the log."
+internal const val CAPTURE_AUDIO_HINT = "Device audio goes into the recorded file and the scrcpy window; the in-app mirror is silent."
+internal const val CAPTURE_KEEP_DEVICE_AUDIO_HINT = "Needs Android 13 or later. Keeps the phone's speaker on while its audio is captured."
+internal const val CAPTURE_MICROPHONE_HINT = "Records audio from this computer's microphone with the screen capture."
+internal const val CAPTURE_DEVICE_DISPLAY_HINT = "Where the live screen appears while capturing."
+internal const val CAPTURE_CUSTOM_BUFFERS_HINT = "The logcat buffers that Custom mode captures."
+internal const val CAPTURE_ADB_HINT = "Path to adb. Leave it blank to auto-detect."
+internal const val CAPTURE_SCRCPY_HINT = "Optional. Only for the scrcpy window; recording and the in-app mirror work without it."
+internal const val CAPTURE_SCRCPY_DETAIL = "Optional. Only used when Device display is set to a scrcpy window; recording and the in-app mirror work without it."
+internal const val CAPTURE_HARDWARE_MIRROR_HINT = "Experimental. Decodes the in-app mirror on the GPU (D3D11 on Windows, VAAPI on Linux). " +
+    "Applies only while the device is shown in the in-app mirror."
+internal const val CAPTURE_TOOLS_CHECK_HINT = "Run it again after changing a path. Live-session diagnostics appear on the capture strip."
+internal const val CAPTURE_MAX_SIZE_HINT = "Longest side in pixels; larger screens are scaled down. 0 keeps the full device resolution."
+internal const val CAPTURE_MAX_FPS_HINT = "Frame-rate cap for the screen recording."
+internal const val CAPTURE_BITRATE_HINT = "Video bitrate of the screen recording. Typing numbers here sets the quality preset to Custom."
+internal const val CAPTURE_SAVED_FORMAT_HINT = "Used by Save snapshot and Save ZIP, not the live recording. MP4 opens more widely."
+internal const val CAPTURE_SAVED_FORMAT_DETAIL = "Applies to Save snapshot and Save ZIP, not the live recording. MP4 opens more widely; " +
+    "capturing with audio still exports as MKV."
+internal const val CAPTURE_SESSION_LIMIT_HINT = "Largest size a single capture session may grow to."
+internal const val CAPTURE_RESERVE_HINT = "Free disk space left untouched while capturing."
+internal const val CAPTURE_FILENAME_TEMPLATE_HINT = "Placeholders: {device}, {start}, {range}, {counter}."
+internal const val CAPTURE_LABEL_HINT = "Stored in the capture archive."
+internal const val CAPTURE_MARKER_BEFORE_HINT = "Log window kept before pressing Mark issue."
+internal const val CAPTURE_MARKER_AFTER_HINT = "Log window kept after pressing Mark issue."
+internal const val CAPTURE_MARKER_SCREENSHOT_HINT = "Adds a device screenshot to the marker note."
+internal const val CAPTURE_MARKER_SNAPSHOT_HINT = "Not used yet: snapshot export does not read this setting."
+internal const val CAPTURE_FOLLOW_READOUT_HINT = "Shows a line under the video transport bar that says what Follow is doing."
+internal const val CAPTURE_FOLLOW_READOUT_DETAIL = "Shows the “video → log → holding at …” diagnostic line under the video transport bar, explaining exactly " +
+    "what Follow is doing at the current playhead position."
+internal const val CAPTURE_DOUBLE_CLICK_HINT = "The default for a newly linked log and video anchor. Each link can still be switched from its header."
+internal const val CAPTURE_DOUBLE_CLICK_DETAIL = "The default for a newly linked log and video anchor. Each video link can then be toggled " +
+    "independently from its header; this does not affect existing links or Follow."
+internal const val CAPTURE_LIVE_VOLUME_HINT = "Volume of the in-app mirror's speaker toggle: device audio played live on this computer."
 
 /** Test tags of the Capture & video pages' controls that have no tag of their own. */
 internal object CapturePageTags {
@@ -69,6 +98,7 @@ private val DRILL_VALIDATION_KEYS = mapOf(
 )
 
 private const val NEEDS_ATTENTION = "Needs attention"
+private const val AUTO_DETECTED_PLACEHOLDER = "Auto-detected"
 
 private fun captureEdit(state: AppState): CaptureSettingsEdit = { transform ->
     state.updateSettings { it.copy(captureSettings = transform(it.captureSettings)) }
@@ -90,11 +120,7 @@ internal fun CaptureVideoSettingsSection(state: AppState, reclaimFocus: () -> Un
     SettingsGroup("Recording", modifier = Modifier.settingsAnchor("Before start")) {
         SettingsRow(
             "Record the screen",
-            if (supported) {
-                "Save the device screen with the session so you can replay it beside the log."
-            } else {
-                nativeMediaUnsupportedText(nativeMediaSupport)
-            },
+            if (supported) CAPTURE_RECORD_SCREEN_HINT else nativeMediaUnsupportedText(nativeMediaSupport),
             anchor = "Record video to file",
             enabled = supported,
         ) {
@@ -114,60 +140,20 @@ internal fun CaptureVideoSettingsSection(state: AppState, reclaimFocus: () -> Un
                 captureVideoQualityCaption(settings) + "\n" + formatCaptureSizeEstimate(settings.captureSizeEstimate()),
                 indent = true,
             ) {
-                CaptureVideoQualitySegments(settings, edit, reclaimFocus, Modifier.testTag(CapturePageTags.VIDEO_QUALITY))
+                CaptureVideoQualitySegments(settings, edit, reclaimFocus, Modifier.testTag(CapturePageTags.VIDEO_QUALITY), settingsStyle = true)
             }
             SettingsRow(
                 "Recording codec",
                 captureVideoCodecSupportText(settings.videoCodec, null, null),
                 indent = true,
             ) {
-                CaptureVideoCodecSegments(settings, edit, reclaimFocus, Modifier.testTag(CapturePageTags.VIDEO_CODEC))
+                CaptureVideoCodecSegments(settings, edit, reclaimFocus, Modifier.testTag(CapturePageTags.VIDEO_CODEC), settingsStyle = true)
             }
-        }
-        SettingsStackedRow(
-            "Sound",
-            "Device audio goes into the recorded file and the scrcpy window; the in-app mirror is silent." +
-                if (settings.audio) "\n$DEVICE_AUDIO_MUTING_TEXT" else "",
-            anchor = "Capture audio",
-            indent = true,
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                SettingsCheckbox(
-                    checked = settings.audio,
-                    label = "Capture audio",
-                    onChange = { next ->
-                        edit { it.copy(audio = next) }
-                        reclaimFocus()
-                    },
-                    testTag = CapturePageTags.CAPTURE_AUDIO,
-                )
-                // Dependent on Capture audio: nothing to keep on the device while the sound is not captured.
-                SettingsCheckbox(
-                    checked = settings.keepDeviceAudio,
-                    label = "Keep sound on the device (Android 13+)",
-                    onChange = { next ->
-                        edit { it.copy(keepDeviceAudio = next) }
-                        reclaimFocus()
-                    },
-                    enabled = settings.audio,
-                    testTag = CapturePageTags.KEEP_DEVICE_AUDIO,
-                    anchor = "Keep sound on the device (Android 13+)",
-                )
-            }
-        }
-        SettingsRow(
-            "Microphone",
-            "Records audio from this computer microphone with the screen capture." +
-                if (settings.microphoneDeviceId != MICROPHONE_OFF_ID) "\n$MICROPHONE_PICKUP_NOTE" else "",
-            indent = true,
-        ) {
-            CaptureMicrophonePicker(settings, edit, reclaimFocus, Modifier.width(MICROPHONE_FIELD_WIDTH).testTag(CapturePageTags.MICROPHONE))
         }
         val shownMode = effectiveDeviceDisplayMode(settings, nativeMediaSupport, scrcpyAvailable)
         SettingsRow(
             "Show the device",
-            "Where the live screen appears while capturing." +
-                deviceDisplayNote(settings, nativeMediaSupport, scrcpyAvailable)?.let { "\n$it" }.orEmpty(),
+            CAPTURE_DEVICE_DISPLAY_HINT + deviceDisplayNote(settings, nativeMediaSupport, scrcpyAvailable)?.let { "\n$it" }.orEmpty(),
             anchor = "Device display",
         ) {
             SettingsDropdown(
@@ -176,18 +162,62 @@ internal fun CaptureVideoSettingsSection(state: AppState, reclaimFocus: () -> Un
                 label = ::deviceDisplayLabel,
                 onSelect = { mode -> edit { it.withMirrorMode(mode) } },
                 testTag = CapturePageTags.DEVICE_DISPLAY,
-                minWidth = DISPLAY_FIELD_WIDTH,
                 onInteraction = reclaimFocus,
+            )
+        }
+    }
+
+    // Sound and the microphone are not part of the screen recording (the screen can be off while sound is kept), so they are a group of
+    // their own rather than rows indented under "Record the screen".
+    SettingsGroup("Audio") {
+        SettingsRow("Capture audio", CAPTURE_AUDIO_HINT) {
+            SettingsToggle(
+                checked = settings.audio,
+                label = "Capture audio",
+                onChange = { next -> edit { it.copy(audio = next) } },
+                reclaimFocus = reclaimFocus,
+                testTag = CapturePageTags.CAPTURE_AUDIO,
+            )
+        }
+        // Dependent on Capture audio: nothing to keep on the device while the sound is not captured. Dimmed and locked, the choice is kept.
+        SettingsRow(
+            "Keep sound on the device",
+            CAPTURE_KEEP_DEVICE_AUDIO_HINT,
+            indent = true,
+            enabled = settings.audio,
+            detail = CAPTURE_KEEP_DEVICE_AUDIO_HINT + "\n" + DEVICE_AUDIO_MUTING_TEXT,
+        ) {
+            SettingsToggle(
+                checked = settings.keepDeviceAudio,
+                label = "Keep sound on the device",
+                onChange = { next -> edit { it.copy(keepDeviceAudio = next) } },
+                reclaimFocus = reclaimFocus,
+                enabled = settings.audio,
+                testTag = CapturePageTags.KEEP_DEVICE_AUDIO,
+            )
+        }
+        SettingsRow(
+            "Microphone",
+            CAPTURE_MICROPHONE_HINT + if (settings.microphoneDeviceId != MICROPHONE_OFF_ID) "\n$MICROPHONE_PICKUP_NOTE" else "",
+        ) {
+            CaptureMicrophonePicker(
+                settings,
+                edit,
+                reclaimFocus,
+                Modifier.width(SETTINGS_FIELD_SHORT).testTag(CapturePageTags.MICROPHONE),
+                settingsStyle = true,
             )
         }
     }
 
     SettingsGroup("Logcat") {
         SettingsRow("Buffers", captureBufferModeHint(settings), anchor = "Buffer mode") {
-            CaptureBufferModeSegments(settings, edit, Modifier.testTag(CapturePageTags.BUFFER_MODE))
+            CaptureBufferModeSegments(settings, edit, Modifier.testTag(CapturePageTags.BUFFER_MODE), settingsStyle = true)
         }
         if (settings.bufferMode == CaptureBufferMode.CUSTOM) {
-            SettingsStackedRow("Buffers to capture", indent = true) { CaptureBufferChecks(settings, edit) }
+            SettingsStackedRow("Buffers to capture", CAPTURE_CUSTOM_BUFFERS_HINT, indent = true) {
+                CaptureBufferChecks(settings, edit, settingsStyle = true)
+            }
         }
         SettingsRow("Include earlier device logs", EARLIER_DEVICE_LOGS_TEXT) {
             SettingsToggle(
@@ -274,7 +304,8 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
             label = "ADB path",
             value = settings.adbPath,
             onValue = { next -> edit { it.copy(adbPath = next) } },
-            description = "Path to adb; leave blank to auto-detect.",
+            description = CAPTURE_ADB_HINT,
+            placeholder = AUTO_DETECTED_PLACEHOLDER,
             onBrowse = state::browseCaptureAdb,
             invalid = "adbPath" in invalid,
             invalidMessage = "path does not point to a file",
@@ -287,8 +318,9 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
             label = "scrcpy path",
             value = settings.scrcpyPath,
             onValue = { next -> edit { it.copy(scrcpyPath = next) } },
-            description = "Optional; only for the native mirror window. Used when Device display is set to a scrcpy window; " +
-                "recording and the in-app mirror work without it.",
+            description = CAPTURE_SCRCPY_HINT,
+            detail = CAPTURE_SCRCPY_DETAIL,
+            placeholder = AUTO_DETECTED_PLACEHOLDER,
             onBrowse = state::browseCaptureScrcpy,
             invalid = "scrcpyPath" in invalid,
             invalidMessage = "path does not point to a file",
@@ -302,40 +334,23 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
         )
         // The buttons sit on the right like every action row; the tool status the last check printed stays under them.
         Column(Modifier.fillMaxWidth()) {
-            SettingsRow(
-                "Check tools",
-                "Recheck tools after changing a path. Live-session diagnostics appear on the capture strip.",
-                anchor = "Recheck tools",
-            ) {
+            SettingsRow("Tool detection", CAPTURE_TOOLS_CHECK_HINT) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     SettingsButton("Recheck tools", state::recheckCaptureTools)
                     SettingsButton("Install guidance", state::openCaptureInstallGuidance, ButtonVariant.Secondary)
                 }
             }
-            state.captureToolStatus?.let { status ->
-                AppText(
-                    status,
-                    color = tc().ts,
-                    fontSize = 10.sp,
-                    fontFamily = MONO,
-                    maxLines = 4,
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 9.dp),
-                )
-            }
+            state.captureToolStatus?.let { status -> SettingsNoteRow(status) }
         }
     }
     // The macOS in-app mirror is always the native one, so there is nothing to opt into there.
     if (!isMacOs) {
         val enabled = state.captureNativeMediaSupport.available && settings.effectiveMirrorMode == CaptureMirrorMode.EMBEDDED
         SettingsGroup("In-app mirror") {
-            SettingsRow(
-                "Hardware-accelerated mirror (experimental)",
-                "Decodes the in-app mirror on the GPU (D3D11 on Windows, VAAPI on Linux). Applies only while the device is shown in the in-app mirror.",
-                enabled = enabled,
-            ) {
+            SettingsRow("Hardware-accelerated mirror", CAPTURE_HARDWARE_MIRROR_HINT, enabled = enabled) {
                 SettingsToggle(
                     checked = settings.hardwareMirror && enabled,
-                    label = "Hardware-accelerated mirror (experimental)",
+                    label = "Hardware-accelerated mirror",
                     onChange = { next -> edit { it.copy(hardwareMirror = next) } },
                     reclaimFocus = reclaimFocus,
                     enabled = enabled,
@@ -346,7 +361,7 @@ internal fun CaptureToolsSettingsSection(state: AppState, reclaimFocus: () -> Un
     }
 }
 
-/** Settings › Capture & video › Limits and snapshots: the recording's numbers and saved format, how big a session may grow, snapshot file names. */
+/** Settings › Capture & video › Limits & snapshots: the recording's numbers and saved format, how big a session may grow, snapshot file names. */
 @Composable
 internal fun CaptureLimitsSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val settings = state.settings.captureSettings
@@ -355,26 +370,22 @@ internal fun CaptureLimitsSettingsSection(state: AppState, reclaimFocus: () -> U
         // Applies to the recorded file, the in-app mirror and the scrcpy window alike (scrcpy max_size).
         CaptureNumberRow(
             "Max size", settings.maxSize, MIN_CAPTURE_SIZE..MAX_CAPTURE_SIZE, "px",
-            description = "Longest side in pixels; larger screens are scaled down, keeping the aspect ratio. 0 = full device resolution.",
+            description = CAPTURE_MAX_SIZE_HINT,
         ) { next -> edit { it.copy(maxSize = next) } }
         CaptureNumberRow(
             "Max FPS", settings.maxFps, MIN_CAPTURE_FPS..MAX_CAPTURE_FPS, "fps",
-            description = "Frame-rate cap for the screen recording.",
+            description = CAPTURE_MAX_FPS_HINT,
         ) { next -> edit { it.copy(maxFps = next) } }
         // The preset picker is on the main page; typing numbers here simply turns it to Custom. The size those numbers imply sits beside them.
         CaptureNumberRow(
             "Bitrate", settings.bitrateMbps, MIN_CAPTURE_BITRATE_MBPS..MAX_CAPTURE_BITRATE_MBPS, "Mbps",
-            description = "Video bitrate of the screen recording. Typing numbers here turns the quality preset to Custom.\n" +
-                formatCaptureSizeEstimate(settings.captureSizeEstimate()),
+            description = CAPTURE_BITRATE_HINT + "\n" + formatCaptureSizeEstimate(settings.captureSizeEstimate()),
             anchor = "Bitrate Mbps",
         ) { next -> edit { it.copy(bitrateMbps = next) } }
         // Recording itself always stays Matroska (crash-safe while it's still growing - see FfmpegCaptureVideoExporter's own module doc); this
         // only picks the container Save snapshot/Save ZIP remux into. MP4 plays natively in more places (QuickTime, phones, browsers) but audio
         // capture isn't supported there yet, hence the second sentence.
-        SettingsRow(
-            "Saved video format",
-            "Applies to Save snapshot / Save ZIP, not the live recording. MP4 opens more widely; capturing with audio still exports as MKV.",
-        ) {
+        SettingsRow("Saved video format", CAPTURE_SAVED_FORMAT_HINT, detail = CAPTURE_SAVED_FORMAT_DETAIL) {
             SettingsSegmented(
                 options = listOf("MP4", "MKV"),
                 selectedIndices = setOf(CaptureVideoContainer.entries.indexOf(settings.videoContainer)),
@@ -389,12 +400,12 @@ internal fun CaptureLimitsSettingsSection(state: AppState, reclaimFocus: () -> U
     SettingsGroup("Storage", modifier = Modifier.settingsAnchor("Storage")) {
         CaptureLongRow(
             "Session limit", settings.sessionLimitBytes / CAPTURE_GIB, 1L..Long.MAX_VALUE / CAPTURE_GIB, "GiB",
-            description = "Largest size a single capture session may grow to.",
+            description = CAPTURE_SESSION_LIMIT_HINT,
             anchor = "Session limit GiB",
         ) { next -> edit { it.copy(sessionLimitBytes = next * CAPTURE_GIB) } }
         CaptureLongRow(
             "Reserve", settings.freeSpaceReserveBytes / CAPTURE_GIB, 0L..Long.MAX_VALUE / CAPTURE_GIB, "GiB",
-            description = "Free disk space left untouched while capturing.",
+            description = CAPTURE_RESERVE_HINT,
             anchor = "Reserve GiB",
         ) { next -> edit { it.copy(freeSpaceReserveBytes = next * CAPTURE_GIB) } }
     }
@@ -404,7 +415,7 @@ internal fun CaptureLimitsSettingsSection(state: AppState, reclaimFocus: () -> U
             label = "Filename template",
             value = settings.filenameTemplate,
             onValue = { next -> edit { it.copy(filenameTemplate = next) } },
-            description = "Placeholders: {device}, {start}, {range}, {counter}.",
+            description = CAPTURE_FILENAME_TEMPLATE_HINT,
             invalid = templateError != null,
             invalidMessage = templateError ?: "template is invalid",
         )
@@ -412,7 +423,7 @@ internal fun CaptureLimitsSettingsSection(state: AppState, reclaimFocus: () -> U
             label = "Label",
             value = settings.label,
             onValue = { next -> edit { it.copy(label = next) } },
-            description = "The label is stored in the capture archive.",
+            description = CAPTURE_LABEL_HINT,
         )
     }
 }
@@ -426,21 +437,18 @@ internal fun CaptureMarkIssueSettingsSection(state: AppState, reclaimFocus: () -
         CaptureLongRow(
             "Before the press", settings.markerPreMs / CAPTURE_MARKER_MS_PER_SECOND,
             MIN_MARKER_WINDOW_SECONDS.toLong()..MAX_MARKER_WINDOW_SECONDS.toLong(), "s",
-            description = "Log window kept before pressing Mark issue.",
+            description = CAPTURE_MARKER_BEFORE_HINT,
             anchor = "Before, seconds",
         ) { next -> edit { it.copy(markerPreMs = next * CAPTURE_MARKER_MS_PER_SECOND) } }
         CaptureLongRow(
             "After the press", settings.markerPostMs / CAPTURE_MARKER_MS_PER_SECOND,
             MIN_MARKER_WINDOW_SECONDS.toLong()..MAX_MARKER_WINDOW_SECONDS.toLong(), "s",
-            description = "Log window kept after pressing Mark issue.",
+            description = CAPTURE_MARKER_AFTER_HINT,
             anchor = "After, seconds",
         ) { next -> edit { it.copy(markerPostMs = next * CAPTURE_MARKER_MS_PER_SECOND) } }
     }
     SettingsGroup("Note") {
-        SettingsRow(
-            "Take a screenshot on Mark issue",
-            "Adds a device screenshot to the marker note.",
-        ) {
+        SettingsRow("Take a screenshot on Mark issue", CAPTURE_MARKER_SCREENSHOT_HINT) {
             SettingsToggle(
                 checked = settings.markerScreenshot,
                 label = "Take a screenshot on Mark issue",
@@ -451,15 +459,14 @@ internal fun CaptureMarkIssueSettingsSection(state: AppState, reclaimFocus: () -
         }
         // markerNotesInSnapshot has no reader yet - Phase 4 (snapshot archive export/import) is the consumer and isn't implemented in this
         // phase. The setting and this row exist now so that phase only has to add the export-time gate, not another settings round-trip.
-        SettingsRow(
-            "Include markers in saved snapshots",
-            "Snapshot export does not use this setting yet.",
-        ) {
+        // Shown but off-limits until a snapshot export reads it: the stored value is kept, the switch cannot be changed meanwhile.
+        SettingsRow("Include markers in saved snapshots", CAPTURE_MARKER_SNAPSHOT_HINT, enabled = false) {
             SettingsToggle(
                 checked = settings.markerNotesInSnapshot,
                 label = "Include markers in saved snapshots",
                 onChange = { next -> edit { it.copy(markerNotesInSnapshot = next) } },
                 reclaimFocus = reclaimFocus,
+                enabled = false,
                 testTag = CapturePageTags.MARKER_IN_SNAPSHOT,
             )
         }
@@ -472,11 +479,7 @@ internal fun CaptureVideoPlaybackSettingsSection(state: AppState, reclaimFocus: 
     val settings = state.settings
     val edit = captureEdit(state)
     SettingsGroup("Playback") {
-        SettingsRow(
-            "Video follow readout",
-            "Shows the “video → log → holding at …” diagnostic line under the video transport bar, explaining exactly what Follow is " +
-                "doing at the current playhead position.",
-        ) {
+        SettingsRow("Video follow readout", CAPTURE_FOLLOW_READOUT_HINT, detail = CAPTURE_FOLLOW_READOUT_DETAIL) {
             SettingsToggle(
                 checked = settings.showVideoFollowReadout,
                 label = "Video follow readout",
@@ -487,9 +490,9 @@ internal fun CaptureVideoPlaybackSettingsSection(state: AppState, reclaimFocus: 
         }
         SettingsRow(
             "Double-click seeks on new links",
-            "The default for a newly linked log/video anchor. Each video link can then be toggled independently from its header; this " +
-                "does not affect existing links or Follow.",
+            CAPTURE_DOUBLE_CLICK_HINT,
             anchor = "New video links:\ndouble-click seeks",
+            detail = CAPTURE_DOUBLE_CLICK_DETAIL,
         ) {
             SettingsToggle(
                 checked = settings.enableDoubleClickVideoSeekOnLink,
@@ -503,7 +506,7 @@ internal fun CaptureVideoPlaybackSettingsSection(state: AppState, reclaimFocus: 
     SettingsGroup("Live mirror") {
         CaptureNumberRow(
             "Live audio volume", settings.captureSettings.liveAudioVolume, MIN_LIVE_AUDIO_VOLUME..MAX_LIVE_AUDIO_VOLUME, "%",
-            description = "Volume for the embedded mirror's speaker toggle (device audio played live on this computer).",
+            description = CAPTURE_LIVE_VOLUME_HINT,
             anchor = "Live audio volume %",
         ) { next -> edit { it.copy(liveAudioVolume = next) } }
     }

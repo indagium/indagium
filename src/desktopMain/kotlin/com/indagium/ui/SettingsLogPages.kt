@@ -9,13 +9,34 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 
 // Settings › Log view and Settings › Search & filters: rows of switches, steppers and dropdowns in titled groups. Issue categories and
 // Source code are in SettingsSourcePages.kt.
 
-private val SELECTOR_WIDTH = 168.dp
-private val WIDE_SELECTOR_WIDTH = 200.dp
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val LOG_ROW_NUMBERS_HINT = "A gutter with each row's original number. It stays put when you filter or fold rows."
+internal const val LOG_ROW_WRAPPING_HINT = "Auto fits long lines to the panel. Fixed wraps at a column and scrolls sideways."
+internal const val LOG_ROW_WRAPPING_DETAIL = LOG_ROW_WRAPPING_HINT + " Hold Shift while scrolling if a trackpad swipe doesn't scroll sideways."
+internal const val LOG_WRAP_AT_HINT = "The column Fixed wrapping breaks lines at, from 80 to 20,000."
+internal const val LOG_PROCESS_NAMES_HINT = "New tabs show names from “Start proc” lines instead of PIDs. A tab's own pick resets every session."
+internal const val LOG_CRASH_ROWS_HINT = "Colour every row of an expanded crash group, not just its header."
+internal const val LOG_ERROR_ROWS_HINT = "Tint every Error-level row in every tab. A tab with its own style keeps it until you reset it."
+internal const val LOG_OPEN_WITH_ORIGINAL_HINT = "New files start with the unfiltered Original panel visible."
+internal const val LOG_MINIMAP_HINT = "Replace the scrollbar with a miniature of the file, coloured by level. Click it to jump."
+internal const val LOG_FOLLOW_LIVE_HINT = "Stay on the newest line while live-watching. Scrolling up pauses, scrolling to the end resumes."
+internal const val SEARCH_OPENS_HINT = "Find highlights matches and hides nothing. Tags and Regex focus that filter and hide other rows."
+internal const val SEARCH_SCOPE_HINT = "Which field Find opens in. Ctrl/Cmd+Alt+F always opens Unfiltered, and compare mode uses Filtered."
+internal const val SEARCH_ALSO_ORIGINAL_HINT = "Reveal the unfiltered Original panel whenever Ctrl/Cmd+F opens. Single-tab view only."
+internal const val SEARCH_LINK_SPLIT_HINT =
+    "Clicking a filtered row selects and scrolls to it in Original too, and Find can mirror a match. Off keeps each panel local."
+internal const val SEARCH_MOST_USED_TAGS_HINT = "How many frequent tags are offered as quick picks."
+internal const val SEARCH_LIST_HEIGHT_HINT = "Visible rows in the filter panel's lists before they scroll."
+internal const val SEARCH_REGEX_SUMMARY_HINT = "Show the Tags-mode selectors above the Regex field. For reference only; it doesn't filter."
+internal const val SEARCH_SCROLL_MARGIN_HINT = "Rows kept visible above and below the selection when moving with the arrow keys."
+
+private const val WRAP_MIN_COLUMNS = 80
+private const val WRAP_MAX_COLUMNS = 20_000
+private const val WRAP_COLUMNS_DIGITS = 5
 
 private val MOST_USED_TAG_LIMITS = listOf(0, 3, 5, 10, 20)
 private val FILTER_LIST_ROW_LIMITS = listOf(3, 5, 8, 10, 15)
@@ -35,6 +56,8 @@ internal object LogPageTags {
     const val MOST_USED_TAGS = "setting-most-used-tags"
     const val LIST_HEIGHT = "setting-filter-list-rows"
     const val SCROLL_MARGIN = "setting-keyboard-scroll-margin"
+    const val ROW_WRAP_MODE = "setting-row-wrap-mode"
+    const val ROW_WRAP_COLUMNS = "setting-row-wrap-columns"
 }
 
 /**
@@ -91,11 +114,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     var errorStyleExpanded by remember { mutableStateOf(false) }
 
     SettingsGroup("Rows") {
-        SettingsRow(
-            "Row numbers",
-            "A gutter with each row's original number. It stays put when you filter or fold rows.",
-            anchor = "Row number",
-        ) {
+        SettingsRow("Row numbers", LOG_ROW_NUMBERS_HINT) {
             SettingsToggle(
                 checked = settings.showRowNumbers,
                 label = "Row numbers",
@@ -105,23 +124,21 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
             )
         }
         // AWT has no horizontal mouse-wheel axis, so Compose Desktop only produces a horizontal scroll delta while Shift is held
-        // (ui/LinuxHorizontalScroll.kt bridges a Linux trackpad's two-finger swipe); hence the Shift tip.
-        SettingsRow(
-            "Row wrapping",
-            "Auto fits long lines to the panel. Fixed wraps at a column and scrolls sideways; hold Shift while scrolling if a trackpad " +
-                "swipe doesn't scroll sideways.",
-        ) {
-            RowWrapControl(
-                auto = settings.autoLogRowWrap,
-                wrapChars = settings.logRowWrapLimitChars,
-                onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
-                onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
+        // (ui/LinuxHorizontalScroll.kt bridges a Linux trackpad's two-finger swipe); hence the Shift tip in the hover hint.
+        SettingsRow("Row wrapping", LOG_ROW_WRAPPING_HINT, detail = LOG_ROW_WRAPPING_DETAIL) {
+            SettingsSegmented(
+                options = listOf("Auto", "Fixed"),
+                selectedIndices = setOf(if (settings.autoLogRowWrap) 0 else 1),
+                onToggle = { index ->
+                    val auto = index == 0
+                    if (auto != settings.autoLogRowWrap) state.updateSettings { it.copy(autoLogRowWrap = auto) }
+                    reclaimFocus()
+                },
+                modifier = Modifier.testTag(LogPageTags.ROW_WRAP_MODE),
             )
         }
-        SettingsRow(
-            "Process names in new tabs",
-            "New tabs show names from “Start proc” lines instead of PIDs. Each tab can still switch on its own, but its pick resets every session.",
-        ) {
+        WrapColumnsRow(state)
+        SettingsRow("Process names in new tabs", LOG_PROCESS_NAMES_HINT) {
             SettingsToggle(
                 checked = settings.showProcessNamesInNewTabs,
                 label = "Process names in new tabs",
@@ -132,7 +149,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         }
     }
     SettingsGroup("Highlights") {
-        SettingsRow("Crash rows", "Colour every row of an expanded crash group, not just its header.") {
+        SettingsRow("Crash rows", LOG_CRASH_ROWS_HINT) {
             SettingsToggle(
                 checked = settings.highlightEntireCrashGroup,
                 label = "Crash rows",
@@ -141,10 +158,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 testTag = LogPageTags.CRASH_ROWS,
             )
         }
-        SettingsRow(
-            "Error rows",
-            "Tint every Error-level row in every tab. A tab with its own style keeps it until you reset it.",
-        ) {
+        SettingsRow("Error rows", LOG_ERROR_ROWS_HINT) {
             ErrorRowsSettingControl(
                 style = settings.errorHighlightStyle,
                 styleExpanded = errorStyleExpanded,
@@ -158,11 +172,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         }
     }
     SettingsGroup("Panels and live logs") {
-        SettingsRow(
-            "Open files with Original",
-            "New files start with the unfiltered Original panel visible.",
-            anchor = "Original panel",
-        ) {
+        SettingsRow("Open files with Original", LOG_OPEN_WITH_ORIGINAL_HINT, anchor = "Original panel") {
             SettingsToggle(
                 checked = settings.openNewFilesWithUnfiltered,
                 label = "Open files with Original",
@@ -171,7 +181,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 testTag = LogPageTags.OPEN_WITH_ORIGINAL,
             )
         }
-        SettingsRow("Minimap", "Replace the scrollbar with a miniature of the file, coloured by level. Click it to jump.") {
+        SettingsRow("Minimap", LOG_MINIMAP_HINT) {
             SettingsToggle(
                 checked = settings.showMinimap,
                 label = "Minimap",
@@ -180,10 +190,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 testTag = LogPageTags.MINIMAP,
             )
         }
-        SettingsRow(
-            "Follow live logs",
-            "Stay on the newest line while live-watching. Scrolling up pauses, scrolling to the end resumes.",
-        ) {
+        SettingsRow("Follow live logs", LOG_FOLLOW_LIVE_HINT) {
             SettingsToggle(
                 checked = settings.autoScrollWhileTailing,
                 label = "Follow live logs",
@@ -200,12 +207,8 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
 internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val settings = state.settings
     SettingsGroup("Ctrl/Cmd+F") {
-        SettingsRow(
-            "Opens",
-            "Find highlights matches and hides nothing. Tags and Regex focus that filter and hide other rows.",
-            anchor = "Ctrl/Cmd+F opens",
-        ) {
-            Box(Modifier.width(SELECTOR_WIDTH)) {
+        SettingsRow("Opens", SEARCH_OPENS_HINT, anchor = "Ctrl/Cmd+F opens") {
+            Box(Modifier.width(SETTINGS_FIELD_SHORT)) {
                 CtrlFTargetSelector(
                     selected = settings.ctrlFTarget,
                     onSelected = { target -> state.updateSettings { it.copy(ctrlFTarget = target) } },
@@ -213,12 +216,8 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
                 )
             }
         }
-        SettingsRow(
-            "Find searches",
-            "Which field Find opens in. Ctrl/Cmd+Alt+F always opens Unfiltered, and compare mode uses Filtered.",
-            anchor = "Search scope behaviour",
-        ) {
-            Box(Modifier.width(WIDE_SELECTOR_WIDTH)) {
+        SettingsRow("Find searches", SEARCH_SCOPE_HINT, anchor = "Search scope behaviour") {
+            Box(Modifier.width(SETTINGS_FIELD_SHORT)) {
                 SearchScopeBehaviorSelector(
                     selected = settings.searchScopeBehavior,
                     onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
@@ -226,11 +225,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
                 )
             }
         }
-        SettingsRow(
-            "Also show Original",
-            "Reveal the unfiltered Original panel whenever Ctrl/Cmd+F opens. Single-tab view only.",
-            anchor = "Ctrl/Cmd+F also shows Original",
-        ) {
+        SettingsRow("Also show Original", SEARCH_ALSO_ORIGINAL_HINT, anchor = "Ctrl/Cmd+F also shows Original") {
             SettingsToggle(
                 checked = settings.openUnfilteredOnCtrlF,
                 label = "Also show Original",
@@ -239,10 +234,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
                 testTag = LogPageTags.ALSO_SHOW_ORIGINAL,
             )
         }
-        SettingsRow(
-            "Link split selection and Find",
-            "Clicking a filtered row selects and scrolls to it in Original too, and Find can mirror a match. Off keeps each panel local.",
-        ) {
+        SettingsRow("Link split selection and Find", SEARCH_LINK_SPLIT_HINT) {
             SettingsToggle(
                 checked = settings.syncSplitPanelSelectionAndScroll,
                 label = "Link split selection and Find",
@@ -253,7 +245,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
         }
     }
     SettingsGroup("Filter panel") {
-        SettingsRow("Most-used tags", "How many frequent tags are offered as quick picks.") {
+        SettingsRow("Most-used tags", SEARCH_MOST_USED_TAGS_HINT) {
             SettingsStepper(
                 options = MOST_USED_TAG_LIMITS,
                 value = settings.mostUsedTagLimit,
@@ -261,7 +253,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
                 modifier = Modifier.testTag(LogPageTags.MOST_USED_TAGS),
             )
         }
-        SettingsRow("List height", "Visible rows in the filter panel's lists before they scroll.", anchor = "Filter list rows") {
+        SettingsRow("List height", SEARCH_LIST_HEIGHT_HINT, anchor = "Filter list rows") {
             SettingsStepper(
                 options = FILTER_LIST_ROW_LIMITS,
                 value = settings.filterListRows,
@@ -269,10 +261,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
                 modifier = Modifier.testTag(LogPageTags.LIST_HEIGHT),
             )
         }
-        SettingsRow(
-            "Regex summary",
-            "Show the Tags-mode selectors above the Regex field. For reference only; it doesn't filter.",
-        ) {
+        SettingsRow("Regex summary", SEARCH_REGEX_SUMMARY_HINT) {
             SettingsToggle(
                 checked = settings.showRegexFilterSummary,
                 label = "Regex summary",
@@ -283,11 +272,7 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
         }
     }
     SettingsGroup("Keyboard") {
-        SettingsRow(
-            "Scroll margin",
-            "Rows kept visible above and below the selection when moving with the arrow keys.",
-            anchor = "Keyboard scroll margin",
-        ) {
+        SettingsRow("Scroll margin", SEARCH_SCROLL_MARGIN_HINT, anchor = "Keyboard scroll margin") {
             SettingsStepper(
                 options = SCROLL_MARGINS,
                 value = settings.navScrollMargin,
@@ -295,5 +280,26 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
                 modifier = Modifier.testTag(LogPageTags.SCROLL_MARGIN),
             )
         }
+    }
+}
+
+/** "Wrap at": the column Fixed wrapping breaks at. Dependent on the Row wrapping choice: dimmed and locked while it is Auto, the value is kept. */
+@Composable
+private fun WrapColumnsRow(state: AppState) {
+    val settings = state.settings
+    var text by remember(settings.logRowWrapLimitChars) { mutableStateOf(settings.logRowWrapLimitChars.toString()) }
+    SettingsRow("Wrap at", LOG_WRAP_AT_HINT, indent = true, enabled = !settings.autoLogRowWrap) {
+        SettingsNumberField(
+            value = text,
+            onValueChange = { digits ->
+                text = digits
+                digits.toIntOrNull()?.let { limit ->
+                    state.updateSettings { it.copy(logRowWrapLimitChars = limit.coerceIn(WRAP_MIN_COLUMNS, WRAP_MAX_COLUMNS)) }
+                }
+            },
+            unit = "columns",
+            maxDigits = WRAP_COLUMNS_DIGITS,
+            testTag = LogPageTags.ROW_WRAP_COLUMNS,
+        )
     }
 }

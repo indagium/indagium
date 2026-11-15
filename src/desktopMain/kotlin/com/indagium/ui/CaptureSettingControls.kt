@@ -5,10 +5,12 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -20,6 +22,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -185,7 +191,10 @@ private fun CaptureVideoCodecControl(
     }
 }
 
-/** The H.264 / AV1 segments of the recording codec picker, shared by the launcher's panel and the Settings page row. */
+/**
+ * The H.264 / AV1 segments of the recording codec picker, shared by the launcher's panel and the Settings page row. [settingsStyle] draws
+ * them as the Settings pages' own segmented control (26dp, one outline) instead of the launcher's.
+ */
 @Composable
 internal fun CaptureVideoCodecSegments(
     settings: CaptureSettings,
@@ -193,17 +202,19 @@ internal fun CaptureVideoCodecSegments(
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
     fillWidth: Boolean = false,
+    settingsStyle: Boolean = false,
 ) {
-    SegmentedControl(
-        options = CaptureVideoCodec.entries.map { it.label },
-        selectedIndices = setOf(CaptureVideoCodec.entries.indexOf(settings.videoCodec)),
-        onToggle = { index ->
-            edit { it.copy(videoCodec = CaptureVideoCodec.entries[index]) }
-            onReclaimFocus()
-        },
-        modifier = modifier,
-        fillWidth = fillWidth,
-    )
+    val options = CaptureVideoCodec.entries.map { it.label }
+    val selected = setOf(CaptureVideoCodec.entries.indexOf(settings.videoCodec))
+    val onToggle = { index: Int ->
+        edit { it.copy(videoCodec = CaptureVideoCodec.entries[index]) }
+        onReclaimFocus()
+    }
+    if (settingsStyle) {
+        SettingsSegmented(options, selected, onToggle, modifier)
+    } else {
+        SegmentedControl(options = options, selectedIndices = selected, onToggle = onToggle, modifier = modifier, fillWidth = fillWidth)
+    }
 }
 
 /**
@@ -300,6 +311,8 @@ internal fun CaptureMicrophonePicker(
     edit: CaptureSettingsEdit,
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
+    // The Settings pages' popup (the same list as every Settings dropdown) instead of the launcher's narrow menu.
+    settingsStyle: Boolean = false,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     var microphones by remember { mutableStateOf<List<DesktopMicrophone>?>(null) }
@@ -349,44 +362,54 @@ internal fun CaptureMicrophonePicker(
             },
             modifier = Modifier.fillMaxWidth(),
             minWidth = 0.dp,
-        ) { _, popupOffset ->
+        ) { fieldWidth, popupOffset ->
             Popup(
-                alignment = Alignment.TopStart,
+                alignment = if (settingsStyle) Alignment.TopEnd else Alignment.TopStart,
                 offset = popupOffset,
                 onDismissRequest = { menuExpanded = false; onReclaimFocus() },
                 properties = PopupProperties(focusable = true),
             ) {
                 Column(
-                    Modifier.widthIn(min = 190.dp, max = 250.dp)
-                        .background(colors.p, RoundedCornerShape(7.dp))
-                        .border(1.dp, colors.br, RoundedCornerShape(7.dp))
-                        .padding(vertical = 4.dp),
+                    if (settingsStyle) {
+                        Modifier.widthIn(min = fieldWidth, max = SETTINGS_MIC_POPUP_MAX_WIDTH).width(IntrinsicSize.Max)
+                            .shadow(8.dp, SETTINGS_MIC_POPUP_SHAPE)
+                            .background(colors.p, SETTINGS_MIC_POPUP_SHAPE)
+                            .border(1.dp, colors.br, SETTINGS_MIC_POPUP_SHAPE)
+                            .padding(4.dp)
+                    } else {
+                        Modifier.widthIn(min = 190.dp, max = 250.dp)
+                            .background(colors.p, RoundedCornerShape(7.dp))
+                            .border(1.dp, colors.br, RoundedCornerShape(7.dp))
+                            .padding(vertical = 4.dp)
+                    },
+                    verticalArrangement = if (settingsStyle) Arrangement.spacedBy(2.dp) else Arrangement.Top,
                 ) {
-                    MicrophoneOption("Off", settings.microphoneDeviceId == MICROPHONE_OFF_ID) {
+                    MicrophoneOption("Off", settings.microphoneDeviceId == MICROPHONE_OFF_ID, settingsStyle = settingsStyle) {
                         edit { it.copy(microphoneDeviceId = MICROPHONE_OFF_ID) }
                         menuExpanded = false
                         onReclaimFocus()
                     }
-                    MicrophoneOption("System default", settings.microphoneDeviceId == MICROPHONE_DEFAULT_ID) {
+                    MicrophoneOption("System default", settings.microphoneDeviceId == MICROPHONE_DEFAULT_ID, settingsStyle = settingsStyle) {
                         edit { it.copy(microphoneDeviceId = MICROPHONE_DEFAULT_ID) }
                         menuExpanded = false
                         onReclaimFocus()
                     }
                     microphones.orEmpty().forEach { microphone ->
-                        MicrophoneOption(microphone.label, settings.microphoneDeviceId == microphone.id) {
+                        MicrophoneOption(microphone.label, settings.microphoneDeviceId == microphone.id, settingsStyle = settingsStyle) {
                             edit { it.copy(microphoneDeviceId = microphone.id) }
                             menuExpanded = false
                             onReclaimFocus()
                         }
                     }
                     when {
-                        scanning -> MicrophoneOption("Loading microphones…", active = false, enabled = false)
+                        scanning -> MicrophoneOption("Loading microphones…", active = false, enabled = false, settingsStyle = settingsStyle)
                         enumerationFailure != null -> MicrophoneOption(
                             enumerationFailure ?: "Microphone list unavailable",
                             active = false,
                             enabled = false,
+                            settingsStyle = settingsStyle,
                         )
-                        microphones.isNullOrEmpty() -> MicrophoneOption("No microphones found", active = false, enabled = false)
+                        microphones.isNullOrEmpty() -> MicrophoneOption("No microphones found", active = false, enabled = false, settingsStyle = settingsStyle)
                     }
                 }
             }
@@ -394,9 +417,42 @@ internal fun CaptureMicrophonePicker(
     }
 }
 
+private val SETTINGS_MIC_POPUP_SHAPE = RoundedCornerShape(8.dp)
+private val SETTINGS_MIC_OPTION_SHAPE = RoundedCornerShape(5.dp)
+private val SETTINGS_MIC_POPUP_MAX_WIDTH = 320.dp
+
 @Composable
-private fun MicrophoneOption(label: String, active: Boolean, enabled: Boolean = true, onClick: () -> Unit = {}) {
+private fun MicrophoneOption(
+    label: String,
+    active: Boolean,
+    enabled: Boolean = true,
+    settingsStyle: Boolean = false,
+    onClick: () -> Unit = {},
+) {
     val colors = tc()
+    if (settingsStyle) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().clip(SETTINGS_MIC_OPTION_SHAPE),
+            baseBg = if (active) colors.abg else Color.Transparent,
+            hoverEnabled = enabled,
+            onClick = onClick.takeIf { enabled },
+        ) {
+            AppText(
+                label,
+                color = when {
+                    !enabled -> colors.ts
+                    active -> colors.ac
+                    else -> colors.tx
+                },
+                fontSize = 11.sp,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
+        return
+    }
     HoverBox(
         modifier = Modifier.fillMaxWidth(),
         hoverEnabled = enabled,
@@ -663,7 +719,7 @@ internal fun CaptureVideoQualityControl(
     CaptureSizeEstimateLine(settings)
 }
 
-/** The preset segments of the video quality picker, shared by the launcher's panel and the Settings page row. */
+/** The preset segments of the video quality picker, shared by the launcher's panel and the Settings page row ([settingsStyle]: the Settings control). */
 @Composable
 internal fun CaptureVideoQualitySegments(
     settings: CaptureSettings,
@@ -671,18 +727,20 @@ internal fun CaptureVideoQualitySegments(
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
     fillWidth: Boolean = false,
+    settingsStyle: Boolean = false,
 ) {
     val preset = settings.videoPreset()
-    SegmentedControl(
-        options = CaptureVideoPreset.entries.map { it.label },
-        selectedIndices = setOfNotNull(preset?.let { CaptureVideoPreset.entries.indexOf(it) }),
-        onToggle = { index ->
-            edit { it.withVideoPreset(CaptureVideoPreset.entries[index]) }
-            onReclaimFocus()
-        },
-        modifier = modifier,
-        fillWidth = fillWidth,
-    )
+    val options = CaptureVideoPreset.entries.map { it.label }
+    val selected = setOfNotNull(preset?.let { CaptureVideoPreset.entries.indexOf(it) })
+    val onToggle = { index: Int ->
+        edit { it.withVideoPreset(CaptureVideoPreset.entries[index]) }
+        onReclaimFocus()
+    }
+    if (settingsStyle) {
+        SettingsSegmented(options, selected, onToggle, modifier)
+    } else {
+        SegmentedControl(options = options, selectedIndices = selected, onToggle = onToggle, modifier = modifier, fillWidth = fillWidth)
+    }
 }
 
 /** "1280 px · 30 fps · 8 Mbps" for a preset, or "Custom — ..." with the stored numbers when they match none. */
@@ -721,21 +779,26 @@ internal fun CaptureBufferModeControl(settings: CaptureSettings, edit: CaptureSe
     if (settings.bufferMode == CaptureBufferMode.CUSTOM) CaptureCustomBufferPicker(settings, edit)
 }
 
-/** The Default / All / Custom segments of the buffer mode picker, shared by the launcher's panel and the Settings page row. */
+/**
+ * The Default / All / Custom segments of the buffer mode picker, shared by the launcher's panel and the Settings page row
+ * ([settingsStyle]: the Settings control).
+ */
 @Composable
 internal fun CaptureBufferModeSegments(
     settings: CaptureSettings,
     edit: CaptureSettingsEdit,
     modifier: Modifier = Modifier,
     fillWidth: Boolean = false,
+    settingsStyle: Boolean = false,
 ) {
-    SegmentedControl(
-        options = listOf("Default", "All", "Custom"),
-        selectedIndices = setOf(CaptureBufferMode.entries.indexOf(settings.bufferMode)),
-        onToggle = { index -> edit { it.copy(bufferMode = CaptureBufferMode.entries[index]) } },
-        modifier = modifier,
-        fillWidth = fillWidth,
-    )
+    val options = listOf("Default", "All", "Custom")
+    val selected = setOf(CaptureBufferMode.entries.indexOf(settings.bufferMode))
+    val onToggle = { index: Int -> edit { it.copy(bufferMode = CaptureBufferMode.entries[index]) } }
+    if (settingsStyle) {
+        SettingsSegmented(options, selected, onToggle, modifier)
+    } else {
+        SegmentedControl(options = options, selectedIndices = selected, onToggle = onToggle, modifier = modifier, fillWidth = fillWidth)
+    }
 }
 
 /** One line saying what the current buffer mode captures. */
@@ -753,9 +816,33 @@ private fun CaptureCustomBufferPicker(settings: CaptureSettings, edit: CaptureSe
     CaptureBufferChecks(settings, edit)
 }
 
-/** The buffer checkboxes (three per row) and the "choose at least one" error; the picker without its label. */
+/**
+ * The buffer checkboxes (three per row) and the "choose at least one" error; the picker without its label. [settingsStyle] draws the
+ * Settings checkbox, flush with the text edge of its row, instead of the launcher's inset [CheckRow].
+ */
 @Composable
-internal fun CaptureBufferChecks(settings: CaptureSettings, edit: CaptureSettingsEdit) {
+internal fun CaptureBufferChecks(settings: CaptureSettings, edit: CaptureSettingsEdit, settingsStyle: Boolean = false) {
+    if (settingsStyle) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            CAPTURE_BUFFER_NAMES.chunked(CAPTURE_BUFFER_GRID_COLUMNS).forEach { rowNames ->
+                Row(Modifier.fillMaxWidth()) {
+                    rowNames.forEach { name ->
+                        SettingsCheckbox(
+                            checked = name in settings.buffers,
+                            label = name,
+                            onChange = { edit { it.copy(buffers = toggleCaptureBuffer(it.buffers, name)) } },
+                            modifier = Modifier.weight(1f),
+                            testTag = "capture-buffer-$name",
+                        )
+                    }
+                }
+            }
+            if (settings.buffers.isEmpty()) {
+                AppText("Choose at least one buffer for Custom mode.", color = DANGER_RED, fontSize = 11.sp)
+            }
+        }
+        return
+    }
     CAPTURE_BUFFER_NAMES.chunked(CAPTURE_BUFFER_GRID_COLUMNS).forEach { rowNames ->
         Row(Modifier.fillMaxWidth()) {
             rowNames.forEach { name ->

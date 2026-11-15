@@ -56,7 +56,7 @@ class ErrorHighlightStyleTest {
 
     @Test
     fun vocabularyHelperLineShowsTheCountWithTheRightPluralOrTheDuplicateWarning() {
-        assertEquals("No saved words", vocabularyHelperText("", emptyList()))
+        assertEquals("No words yet.", vocabularyHelperText("", emptyList()))
         assertEquals("1 word", vocabularyHelperText("", listOf("Indagium")))
         assertEquals("2 words", vocabularyHelperText("", listOf("Indagium", "Logcat")))
         assertEquals("2 words", vocabularyHelperText("new", listOf("Indagium", "Logcat")))

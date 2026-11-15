@@ -11,9 +11,11 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -69,6 +71,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -848,6 +851,59 @@ internal fun SettingsNoteRow(text: String, error: Boolean = false, modifier: Mod
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
         )
     }
+}
+
+/**
+ * A card row that holds only actions, right-aligned like the control column of every other row: the commit button of an explicit-save form
+ * (a [ButtonVariant.Primary] [SettingsButton], last), or the buttons that act on the rows above it.
+ */
+@Composable
+internal fun SettingsActionRow(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
+}
+
+/**
+ * The one way a Settings page shows a path: mono secondary text on one line, cut in the middle ([middleEllipsis]) when it does not fit, and,
+ * for a folder that is the computed default, a dim "· default" in the interface font after it. Give [modifier] a weight or width to bound it.
+ */
+@Composable
+internal fun SettingsPathText(path: String, modifier: Modifier = Modifier, isDefault: Boolean = false) {
+    val tc = tc()
+    val measurer = rememberTextMeasurer()
+    val style = remember { TextStyle(fontSize = 11.sp, fontFamily = MONO) }
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        BoxWithConstraints(Modifier.weight(1f, fill = false)) {
+            val maxWidth = constraints.maxWidth
+            val shown = remember(path, maxWidth, style) { middleEllipsis(path, maxWidth) { measurer.measure(it, style).size.width } }
+            AppText(shown, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, maxLines = 1)
+        }
+        if (isDefault) AppText("· default", color = tc.td, fontSize = 11.sp, fontFamily = UI, maxLines = 1)
+    }
+}
+
+/**
+ * [text] as it is when [widthOf] says it fits in [maxWidth], else the longest start-and-end of it that fits with a "…" between them (the end
+ * gets the larger share: a path is told apart by its last segments).
+ */
+internal fun middleEllipsis(text: String, maxWidth: Int, widthOf: (String) -> Int): String {
+    if (widthOf(text) <= maxWidth) return text
+
+    fun cut(kept: Int): String {
+        val head = kept * 2 / 5
+        return text.take(head) + "…" + text.takeLast(kept - head)
+    }
+    var fits = 0
+    var tooLong = text.length
+    while (fits + 1 < tooLong) {
+        val mid = (fits + tooLong) / 2
+        if (widthOf(cut(mid)) <= maxWidth) fits = mid else tooLong = mid
+    }
+    return cut(fits)
 }
 
 /** A small accent pill with a [text] (a status such as "Running" or an edition name); [dot] adds a leading status dot. */

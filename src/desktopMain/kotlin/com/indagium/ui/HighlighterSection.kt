@@ -60,6 +60,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -530,35 +531,34 @@ internal fun ErrorRowsSettingControl(
                 label = "Error rows",
                 testTag = "error-highlight-global-switch",
             )
-            Box {
-                AppButton(
-                    if (styleExpanded) "Style ▾" else "Style ▸",
-                    onClick = { onStyleExpandedChange(!styleExpanded) },
-                    variant = ButtonVariant.Secondary,
-                    modifier = Modifier.testTag("error-highlight-global-style-toggle"),
-                    leadingContent = { Box(Modifier.size(12.dp).background(style.color, CORNER_SM)) },
-                )
-                if (styleExpanded) {
-                    // Focusable, so Esc and an outside click reach this layer first; the colour and font popups opened
-                    // inside it are layers above it, so a click inside them is not an outside click here and Esc
-                    // closes the innermost popup first.
-                    Popup(
-                        popupPositionProvider = ErrorRowsStylePopupPosition(with(density) { ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING.roundToPx() }),
-                        onDismissRequest = { onStyleExpandedChange(false) },
-                        properties = PopupProperties(focusable = true),
-                        onPreviewKeyEvent = { event ->
-                            if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
-                                onStyleExpandedChange(false)
-                                true
-                            } else {
-                                false
-                            }
-                        },
-                    ) {
-                        // The outer padding leaves room for the shadow, which a popup layer would otherwise clip.
-                        Box(Modifier.width(popupWidth + ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING * 2).padding(ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING)) {
-                            ErrorRowsStylePanel(style = style, palette = palette, onChange = onChange)
+            // The Style button is a 26dp field like every Settings popup opener: the colour swatch, the word and the expand icon.
+            SettingsDropdownField(
+                text = "Style",
+                open = styleExpanded,
+                onClick = { onStyleExpandedChange(!styleExpanded) },
+                minWidth = 96.dp,
+                testTag = "error-highlight-global-style-toggle",
+                leading = { Box(Modifier.size(12.dp).background(style.color, CORNER_SM)) },
+            ) { _, _ ->
+                // Focusable, so Esc and an outside click reach this layer first; the colour and font popups opened
+                // inside it are layers above it, so a click inside them is not an outside click here and Esc
+                // closes the innermost popup first.
+                Popup(
+                    popupPositionProvider = ErrorRowsStylePopupPosition(with(density) { ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING.roundToPx() }),
+                    onDismissRequest = { onStyleExpandedChange(false) },
+                    properties = PopupProperties(focusable = true),
+                    onPreviewKeyEvent = { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                            onStyleExpandedChange(false)
+                            true
+                        } else {
+                            false
                         }
+                    },
+                ) {
+                    // The outer padding leaves room for the shadow, which a popup layer would otherwise clip.
+                    Box(Modifier.width(popupWidth + ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING * 2).padding(ERROR_ROWS_STYLE_POPUP_SHADOW_PADDING)) {
+                        ErrorRowsStylePanel(style = style, palette = palette, onChange = onChange)
                     }
                 }
             }
@@ -567,11 +567,11 @@ internal fun ErrorRowsSettingControl(
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText(
                     if (tabOverrideCount == 1) "1 tab uses its own style" else "$tabOverrideCount tabs use their own style",
-                    color = tc.td,
-                    fontSize = 10.sp,
+                    color = tc.ts,
+                    fontSize = 11.sp,
                     modifier = Modifier.testTag("error-highlight-override-count"),
                 )
-                AppButton(
+                SettingsButton(
                     "Reset tabs",
                     onClick = onResetTabOverrides,
                     variant = ButtonVariant.Ghost,
@@ -849,6 +849,8 @@ internal fun HighlighterStyleControls(
     wide: Boolean = false,
 ) {
     val tc = tc()
+    // The Settings dialog's editor uses the Settings control height; the filter panel's compact one stays 25dp.
+    val controlHeight = if (wide) SETTINGS_CONTROL_HEIGHT else 25.dp
     FlowRow(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -879,6 +881,7 @@ internal fun HighlighterStyleControls(
             },
             groupTestTag = "$testTagPrefix-background-group",
             toggleTestTag = "$testTagPrefix-background-toggle",
+            height = controlHeight,
         )
         HighlighterStyleColorControl(
             label = if (wide) "Text" else "Fg",
@@ -908,6 +911,7 @@ internal fun HighlighterStyleControls(
             },
             groupTestTag = "$testTagPrefix-foreground-group",
             toggleTestTag = "$testTagPrefix-foreground-toggle",
+            height = controlHeight,
         )
         HighlighterStyleCycleButton(
             label = "Bold",
@@ -916,6 +920,7 @@ internal fun HighlighterStyleControls(
             testTag = "$testTagPrefix-bold-cycle",
             fontWeight = FontWeight.Bold,
             onChange = onChange.onBold,
+            size = controlHeight,
         )
         HighlighterStyleCycleButton(
             label = "Italic",
@@ -924,6 +929,7 @@ internal fun HighlighterStyleControls(
             testTag = "$testTagPrefix-italic-cycle",
             fontStyle = FontStyle.Italic,
             onChange = onChange.onItalic,
+            size = controlHeight,
         )
         SearchableFontDropdown(
             label = null,
@@ -940,7 +946,7 @@ internal fun HighlighterStyleControls(
         AppText("Preview", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         AppText(
             "Bold ${styleOverrideName(state.bold)} · Italic ${styleOverrideName(state.italic)}",
-            color = tc.td,
+            color = if (wide) tc.ts else tc.td,
             fontSize = if (wide) 10.sp else 9.sp,
             modifier = Modifier.testTag("$testTagPrefix-style-state"),
         )
@@ -970,6 +976,7 @@ private fun HighlighterStyleColorControl(
     onEnableAndOpen: () -> Unit,
     groupTestTag: String,
     toggleTestTag: String,
+    height: Dp = 25.dp,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(6.dp)
@@ -983,13 +990,13 @@ private fun HighlighterStyleColorControl(
     }
     TooltipArea(tooltip = { ToolbarTooltip(tooltipText, maxLines = 3) }) {
         Box(
-            Modifier.height(25.dp)
+            Modifier.height(height)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false }
                 .testTag(groupTestTag),
         ) {
             Row(
-                Modifier.height(25.dp).clip(shape)
+                Modifier.height(height).clip(shape)
                     .background(
                         when {
                             hovered -> tc.hv
@@ -1001,7 +1008,7 @@ private fun HighlighterStyleColorControl(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
-                    Modifier.size(width = 24.dp, height = 25.dp)
+                    Modifier.size(width = 24.dp, height = height)
                         .clickable {
                             if (enabled) onPickerOpenChange(!pickerOpen) else onEnableAndOpen()
                         }
@@ -1042,7 +1049,7 @@ private fun HighlighterStyleColorControl(
                     }
                 }
                 Box(
-                    Modifier.height(25.dp)
+                    Modifier.height(height)
                         .clickable(onClick = onToggleEnabled)
                         .semantics {
                             contentDescription = targetName
@@ -1070,6 +1077,7 @@ private fun HighlighterStyleCycleButton(
     fontWeight: FontWeight? = null,
     fontStyle: FontStyle? = null,
     onChange: (Boolean?) -> Unit,
+    size: Dp = 25.dp,
 ) {
     val tc = tc()
     val currentLabel = styleOverrideName(value)
@@ -1077,7 +1085,7 @@ private fun HighlighterStyleCycleButton(
         tooltip = { ToolbarTooltip("$label $currentLabel. Click to cycle Default, On, and Off.") },
     ) {
         Box(
-            Modifier.size(25.dp).clip(RoundedCornerShape(6.dp))
+            Modifier.size(size).clip(RoundedCornerShape(6.dp))
                 .background(if (value == true) tc.ac.copy(alpha = .12f) else tc.p2)
                 .border(1.dp, if (value == true) tc.ac.copy(alpha = .65f) else tc.br, RoundedCornerShape(6.dp))
                 .clickable {

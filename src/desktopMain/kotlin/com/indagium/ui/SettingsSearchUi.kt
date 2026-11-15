@@ -219,13 +219,10 @@ internal fun SettingsSearchResults(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (results.isEmpty()) {
-                AppText(
-                    "No settings match “$shown”", color = tc.tx, fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold, maxLines = 2,
-                )
-                AppText(
-                    "Try fewer or shorter words, or a related word such as “folder”, “theme” or “font”.",
-                    color = tc.td, fontSize = 11.sp, maxLines = 2,
+                // The one empty-state box of the Settings pages: what was asked, then what to try.
+                SettingsEmptyState(
+                    "No settings match “$shown”. Try fewer or shorter words, or a related word such as “folder”, “theme” or “font”.",
+                    testTag = "settings-search-empty",
                 )
             } else {
                 AppText(
@@ -236,11 +233,11 @@ internal fun SettingsSearchResults(
                     val inPage = results.filter { it.page == page }
                     if (inPage.isEmpty()) return@forEach
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        // The group-title style of the pages themselves; a sub-page's heading names its parent too.
                         AppText(
-                            // A sub-page's heading names its parent too.
-                            (page.parent?.let { "${it.title} › " }.orEmpty() + page.title).uppercase(), color = tc.td, fontSize = 10.sp,
-                            fontFamily = UI, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(bottom = 2.dp),
+                            page.parent?.let { "${it.title} › " }.orEmpty() + page.title, color = tc.ts, fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 2.dp, bottom = 2.dp),
                         )
                         inPage.forEach { entry -> SettingsSearchResultRow(entry, tokens, onOpen) }
                     }
@@ -255,23 +252,26 @@ internal fun SettingsSearchResults(
     }
 }
 
+/** [text] with the parts that match any of [tokens] on a [background] of their own. */
+private fun highlightMatches(text: String, tokens: List<String>, background: androidx.compose.ui.graphics.Color) = buildAnnotatedString {
+    var pos = 0
+    for (range in matchRanges(text, tokens)) {
+        append(text.substring(pos, range.first))
+        withStyle(SpanStyle(background = background)) { append(text.substring(range.first, range.last + 1)) }
+        pos = range.last + 1
+    }
+    append(text.substring(pos))
+}
+
 @Composable
 private fun SettingsSearchResultRow(entry: SettingsSearchEntry, tokens: List<String>, onOpen: (SettingsSearchEntry) -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(6.dp)
     val label = entry.label.replace('\n', ' ')
-    val highlighted = remember(label, tokens, tc.searchMatchBg) {
-        buildAnnotatedString {
-            var pos = 0
-            for (range in matchRanges(label, tokens)) {
-                append(label.substring(pos, range.first))
-                withStyle(SpanStyle(background = tc.searchMatchBg)) { append(label.substring(range.first, range.last + 1)) }
-                pos = range.last + 1
-            }
-            append(label.substring(pos))
-        }
-    }
+    val highlighted = remember(label, tokens, tc.searchMatchBg) { highlightMatches(label, tokens, tc.searchMatchBg) }
+    // A result that matches only in its description marks the match there.
+    val highlightedHint = remember(entry.hint, tokens, tc.searchMatchBg) { highlightMatches(entry.hint, tokens, tc.searchMatchBg) }
     Row(
         Modifier.fillMaxWidth()
             .background(if (hovered) tc.hv else tc.p2.copy(alpha = 0f), shape)
@@ -287,7 +287,10 @@ private fun SettingsSearchResultRow(entry: SettingsSearchEntry, tokens: List<Str
                 highlighted, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
-            AppText(entry.hint, color = tc.ts, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            androidx.compose.material3.Text(
+                highlightedHint, color = tc.ts, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                fontFamily = LocalUiFontFamily.current,
+            )
         }
         AppText("${entry.page.breadcrumb} ›", color = tc.td, fontSize = 10.sp, fontFamily = UI, maxLines = 1)
     }

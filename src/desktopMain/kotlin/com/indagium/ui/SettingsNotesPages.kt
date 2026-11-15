@@ -36,8 +36,28 @@ import com.indagium.proofread.normalizeProofreadingVocabularyWord
 // Settings › Notes & writing and Settings › Copy & export: how notes are written and proofread, what copying includes and masks, and how
 // exported notes are named.
 
-private val FORMAT_DROPDOWN_WIDTH = 168.dp
-private val PREFIX_FIELD_WIDTH = 168.dp
+// The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
+internal const val NOTES_NUMBER_BLOCKS_HINT = "Put 1, 2, 3… in front of each block of a note."
+internal const val NOTES_LOG_EXCERPTS_HINT = "How log lines are written in a note: indented, Jira wiki {code} or Jira Cloud code block."
+internal const val NOTES_INLINE_MARKDOWN_HINT = "Note and caption text shows rendered in the Notes panel; click it to edit the source."
+internal const val NOTES_DIAGRAM_ACTION_HINT = "What the diagram toolbar's quick button adds: a snapshot or a linked note."
+internal const val NOTES_DIAGRAM_ACTION_DETAIL = "What the diagram toolbar's quick button adds. The workspace always offers both snapshot and " +
+    "linked notes in its menu."
+internal const val NOTES_PROOFREADING_HINT = "In notes and captions. Checked on this computer; nothing changes until you pick a suggestion."
+internal const val NOTES_SPELLING_HINT = "American or British English rules for the suggestions."
+internal const val NOTES_VOCABULARY_HINT = "Words the checker should accept, such as app, class or tag names. Used while English proofreading is on."
+internal const val COPY_NOTE_FORMAT_HINT = "Used by the main Copy button. A one-time pick from the Copy menu doesn't change it."
+internal const val COPY_PID_TID_HINT = "Also in filtered exports. New annotations capture their own field choices."
+internal const val COPY_PID_AS_NAME_HINT = "Uses names learned from the log. Available only while PID and TID is on."
+internal const val COPY_ROW_NUMBER_HINT = "Only while the row-number gutter is visible."
+internal const val COPY_TIME_DELTA_HINT = "Only while the tab's Δt column is visible and the log view can calculate it."
+internal const val COPY_DIAGRAM_EXPORT_HINT =
+    "Image works anywhere; Source keeps editable Mermaid or PlantUML text. Existing notes keep their own choice."
+internal const val COPY_SOURCE_LINE_LABEL_HINT = "The word in front of the log name in a note's source line, for example “From app.log”."
+internal const val COPY_MASK_HINT = "Swap names, hosts or IDs for a replacement before they reach the clipboard."
+internal const val COPY_MASK_RULES_NOTE = "Rules replace case-sensitive whole words in the listed order when copying a note — " +
+    "{code:java} block markers are never touched."
+
 private val MASK_REMOVE_WIDTH = 68.dp
 
 /** Test tags of the Notes & writing and Copy & export controls that have no tag of their own. */
@@ -64,7 +84,7 @@ internal object NotesPageTags {
 internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val settings = state.settings
     SettingsGroup("Note blocks") {
-        SettingsRow("Number blocks", "Put 1, 2, 3… in front of each block of a note.") {
+        SettingsRow("Number blocks", NOTES_NUMBER_BLOCKS_HINT) {
             SettingsToggle(
                 checked = settings.numberAnnotationBlocks,
                 label = "Number blocks",
@@ -73,7 +93,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
                 testTag = NotesPageTags.NUMBER_BLOCKS,
             )
         }
-        SettingsRow("Log excerpts", "How log lines are wrapped inside a note: plain indent or a Jira code block.", anchor = "Log blocks") {
+        SettingsRow("Log excerpts", NOTES_LOG_EXCERPTS_HINT, anchor = "Log blocks") {
             val styles = AnnotationLogBlockStyle.entries
             SettingsSegmented(
                 options = listOf("Indented", "Jira wiki", "Jira Cloud"),
@@ -83,11 +103,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
                 segmentHorizontalPadding = 8.dp,
             )
         }
-        SettingsRow(
-            "Show Markdown formatted",
-            "Note and caption text shows rendered in the Notes panel; click it to edit the source.",
-            anchor = "Inline Markdown",
-        ) {
+        SettingsRow("Show Markdown formatted", NOTES_INLINE_MARKDOWN_HINT, anchor = "Inline Markdown") {
             SettingsToggle(
                 checked = settings.renderAnnotationMarkdownInline,
                 label = "Show Markdown formatted",
@@ -96,11 +112,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
                 testTag = NotesPageTags.INLINE_MARKDOWN,
             )
         }
-        SettingsRow(
-            "Diagram to note",
-            "What the diagram toolbar's quick button adds. The workspace always offers both snapshot and linked notes in its menu.",
-            anchor = "Diagram note action",
-        ) {
+        SettingsRow("Diagram to note", NOTES_DIAGRAM_ACTION_HINT, detail = NOTES_DIAGRAM_ACTION_DETAIL, anchor = "Diagram note action") {
             SettingsSegmented(
                 options = listOf("Snapshot", "Link"),
                 selectedIndices = setOf(if (settings.diagramLinkedNotePrimary) 1 else 0),
@@ -111,11 +123,7 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
         }
     }
     SettingsGroup("Proofreading") {
-        SettingsRow(
-            "Check English spelling and grammar",
-            "In notes and captions. Checked on this computer; nothing changes until you pick a suggestion.",
-            anchor = "English proofreading",
-        ) {
+        SettingsRow("Check English spelling and grammar", NOTES_PROOFREADING_HINT, anchor = "English proofreading") {
             SettingsToggle(
                 checked = settings.proofreading.enabled,
                 label = "Check English spelling and grammar",
@@ -124,7 +132,8 @@ internal fun NotesWritingSettingsSection(state: AppState, reclaimFocus: () -> Un
                 testTag = NotesPageTags.PROOFREADING,
             )
         }
-        SettingsRow("Spelling", "American or British English rules for the suggestions.", anchor = "English variant", indent = true) {
+        // Dependent on the switch above: dimmed and locked while proofreading is off, the choice is kept.
+        SettingsRow("Spelling", NOTES_SPELLING_HINT, anchor = "English variant", indent = true, enabled = settings.proofreading.enabled) {
             SettingsSegmented(
                 options = listOf("US", "UK"),
                 selectedIndices = setOf(if (settings.proofreading.language == "en-GB") 1 else 0),
@@ -147,7 +156,7 @@ internal fun isVocabularyDuplicate(typed: String, words: List<String>): Boolean 
 /** The one helper line under the vocabulary field: the duplicate warning while the typed word is already saved, else the word count. */
 internal fun vocabularyHelperText(typed: String, words: List<String>): String = when {
     isVocabularyDuplicate(typed, words) -> "Already in your vocabulary."
-    words.isEmpty() -> "No saved words"
+    words.isEmpty() -> "No words yet."
     words.size == 1 -> "1 word"
     else -> "${words.size} words"
 }
@@ -164,9 +173,9 @@ private fun ProofreadingVocabularyManager(state: AppState) {
     val listShape = RoundedCornerShape(6.dp)
     SettingsStackedRow(
         "Personal vocabulary",
-        "Words the checker should accept, such as app, class or tag names. Used while English proofreading is on.",
-        indent = true,
-        // Not dimmed or locked while proofreading is off: the words stay editable and are kept for when it is turned back on.
+        NOTES_VOCABULARY_HINT,
+        // Not indented, dimmed or locked: it does not depend on the switch above. The words stay editable while proofreading is off and are
+        // kept for when it is turned back on.
         modifier = Modifier.testTag("proofreading-vocabulary-manager"),
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -200,8 +209,8 @@ private fun ProofreadingVocabularyManager(state: AppState) {
             } else {
                 AppText(
                     vocabularyHelperText(query, words),
-                    color = if (duplicate) tc.ts else tc.td,
-                    fontSize = 10.sp,
+                    color = tc.ts,
+                    fontSize = 11.sp,
                     modifier = Modifier.testTag("proofreading-vocabulary-helper"),
                 )
             }
@@ -240,7 +249,7 @@ private fun ProofreadingVocabularyManager(state: AppState) {
                             }
                         }
                         if (visible.isEmpty()) {
-                            AppText("No matching words", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
+                            AppText("No matching words", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp))
                         }
                     }
                     Box(Modifier.matchParentSize()) {
@@ -266,28 +275,19 @@ private fun addVocabularyWord(state: AppState, raw: String) {
 internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val settings = state.settings
     SettingsGroup("Copying") {
-        SettingsRow(
-            "Note format",
-            "Used by the main Copy button. A one-time pick from the Copy menu doesn't change it.",
-            anchor = "Copy default",
-        ) {
+        SettingsRow("Note format", COPY_NOTE_FORMAT_HINT, anchor = "Copy default") {
             SettingsDropdown(
                 options = AnnotationCopyFormat.entries,
                 selected = settings.annotationCopyFormat,
                 label = { format -> format.label },
                 onSelect = { format -> state.updateSettings { it.copy(annotationCopyFormat = format) } },
                 testTag = NotesPageTags.COPY_FORMAT,
-                minWidth = FORMAT_DROPDOWN_WIDTH,
                 onInteraction = reclaimFocus,
             )
         }
     }
     SettingsGroup("Included in copied rows") {
-        SettingsRow(
-            "PID and TID",
-            "Also in filtered exports. New annotations capture their own field choices.",
-            anchor = "Pid/Tid copy",
-        ) {
+        SettingsRow("PID and TID", COPY_PID_TID_HINT, anchor = "Pid/Tid copy") {
             SettingsToggle(
                 checked = settings.copyPidTid,
                 label = "PID and TID",
@@ -299,7 +299,7 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
         // The stored choice is untouched while PID and TID is off: the row only stops being editable and dims.
         SettingsRow(
             "Process name instead of PID",
-            "Uses names learned from the log. Available only while PID and TID is on.",
+            COPY_PID_AS_NAME_HINT,
             anchor = "Pid copy as name",
             indent = true,
             enabled = settings.copyPidTid,
@@ -313,7 +313,7 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 testTag = NotesPageTags.COPY_PID_AS_NAME,
             )
         }
-        SettingsRow("Row number", "Only while the row-number gutter is visible.", anchor = "Row number copy") {
+        SettingsRow("Row number", COPY_ROW_NUMBER_HINT, anchor = "Row number copy") {
             SettingsToggle(
                 checked = settings.copyRowNumber,
                 label = "Row number",
@@ -322,11 +322,7 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
                 testTag = NotesPageTags.COPY_ROW_NUMBER,
             )
         }
-        SettingsRow(
-            "Time delta (Δt)",
-            "Only while the tab's Δt column is visible and the log view can calculate it.",
-            anchor = "Time delta copy",
-        ) {
+        SettingsRow("Time delta", COPY_TIME_DELTA_HINT, anchor = "Time delta copy") {
             SettingsToggle(
                 checked = settings.copyTimeDelta,
                 label = "Time delta",
@@ -336,13 +332,23 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
             )
         }
     }
-    SettingsGroup("Masking") { MaskWordsRows(state, reclaimFocus) }
+    SettingsGroup(
+        "Masking",
+        trailing = if (settings.maskWordOnCopy) {
+            {
+                SettingsButton(
+                    "Add pair",
+                    onClick = { state.updateSettings { it.copy(copyMaskRules = it.copyMaskRules + CopyMaskRule()) } },
+                    variant = ButtonVariant.Secondary,
+                    modifier = Modifier.testTag(NotesPageTags.MASK_ADD),
+                )
+            }
+        } else {
+            null
+        },
+    ) { MaskWordsRows(state, reclaimFocus) }
     SettingsGroup("Exported notes") {
-        SettingsRow(
-            "New diagram notes",
-            "Image works anywhere; Source keeps editable Mermaid or PlantUML text. Existing notes keep their own choice.",
-            anchor = "Diagram export",
-        ) {
+        SettingsRow("New diagram notes", COPY_DIAGRAM_EXPORT_HINT, anchor = "Diagram export") {
             SettingsSegmented(
                 options = listOf("Image", "Source"),
                 selectedIndices = setOf(if (settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
@@ -358,11 +364,12 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
             "Source line label",
             "Preview: ${settings.annotationPrefixLabel.trim().ifBlank { "From" }} app.log",
             anchor = "Annotation file prefix",
+            detail = COPY_SOURCE_LINE_LABEL_HINT,
         ) {
             SettingsTextField(
                 settings.annotationPrefixLabel,
                 { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
-                Modifier.width(PREFIX_FIELD_WIDTH),
+                Modifier.width(SETTINGS_FIELD_SHORT),
                 placeholder = "From",
                 testTag = NotesPageTags.PREFIX_FIELD,
             )
@@ -371,62 +378,40 @@ internal fun CopyExportSettingsSection(state: AppState, reclaimFocus: () -> Unit
 }
 
 /**
- * The masking group's rows: the switch with its Add pair button, and while it is on the word / replacement pairs under it, as one card
- * row so no divider falls between the switch and its table.
+ * The masking group's rows: the switch, and while it is on the word / replacement pairs under it, as one card row with the rule that
+ * says how they apply, so no divider falls between the switch and its table. The Add pair button is in the group's header.
  */
 @Composable
 private fun MaskWordsRows(state: AppState, reclaimFocus: () -> Unit) {
     val tc = tc()
     val settings = state.settings
-    Column(Modifier.fillMaxWidth()) {
-        SettingsRow(
-            "Mask words when copying a note",
-            "Swap names, hosts or IDs for a replacement before they reach the clipboard.",
-            anchor = "Mask word on copy",
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (settings.maskWordOnCopy) {
-                    SettingsButton(
-                        "Add pair",
-                        onClick = { state.updateSettings { it.copy(copyMaskRules = it.copyMaskRules + CopyMaskRule()) } },
-                        variant = ButtonVariant.Secondary,
-                        modifier = Modifier.testTag(NotesPageTags.MASK_ADD),
-                    )
-                }
-                SettingsToggle(
-                    checked = settings.maskWordOnCopy,
-                    label = "Mask words when copying a note",
-                    onChange = { next -> state.updateSettings { it.copy(maskWordOnCopy = next) } },
-                    reclaimFocus = reclaimFocus,
-                    testTag = NotesPageTags.MASK_SWITCH,
-                )
-            }
-        }
-        if (settings.maskWordOnCopy) {
-            Column(
-                Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
-                    AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
-                    Spacer(Modifier.width(MASK_REMOVE_WIDTH))
-                }
-                if (settings.copyMaskRules.isEmpty()) {
-                    SettingsEmptyState("No pairs yet. Add one to mask text when copying a note.")
-                } else {
+    SettingsRow("Mask words when copying a note", COPY_MASK_HINT, anchor = "Mask word on copy") {
+        SettingsToggle(
+            checked = settings.maskWordOnCopy,
+            label = "Mask words when copying a note",
+            onChange = { next -> state.updateSettings { it.copy(maskWordOnCopy = next) } },
+            reclaimFocus = reclaimFocus,
+            testTag = NotesPageTags.MASK_SWITCH,
+        )
+    }
+    if (settings.maskWordOnCopy) {
+        Column(Modifier.fillMaxWidth()) {
+            if (settings.copyMaskRules.isEmpty()) {
+                SettingsEmptyState("No pairs yet.", asRow = true)
+            } else {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // The column names only head a list that has rows.
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                        AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(MASK_REMOVE_WIDTH))
+                    }
                     SettingsScrollableRows {
                         settings.copyMaskRules.forEachIndexed { index, rule -> MaskRuleRow(state, index, rule) }
                     }
                 }
-                AppText(
-                    "Rules replace case-sensitive whole words in the listed order when copying a note — " +
-                        "{code:java} block markers are never touched.",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    maxLines = 2,
-                )
             }
+            SettingsNoteRow(COPY_MASK_RULES_NOTE)
         }
     }
 }

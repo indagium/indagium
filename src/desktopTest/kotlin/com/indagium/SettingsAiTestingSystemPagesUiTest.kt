@@ -162,8 +162,8 @@ class SettingsAiTestingSystemPagesUiTest {
         openPage(state, SettingsPage.AiCommands)
         rule.onNodeWithTag(SETTINGS_EMPTY_STATE_TAG).assertExists()
         rule.onNodeWithText("No commands yet.").assertExists()
-        // The Add command row does not say it a second time.
-        rule.onNodeWithText("Reusable prompts for Actions and /name in the chat box.").assertExists()
+        // The page description says what a command is, once; the group's header button adds one.
+        rule.onNodeWithText("Reusable prompts you can run from Actions or by typing /name in the chat box.").assertExists()
 
         assertNull(state.saveCustomAiCommand("timeline", "Build a timeline."))
         rule.waitForIdle()
@@ -407,7 +407,12 @@ class SettingsAiTestingSystemPagesUiTest {
         state.updateSettings { it.copy(tracker = it.tracker.copy(mcpUrl = "", name = "")) }
         openPage(state, SettingsPage.IssueTracker)
 
-        rule.onNodeWithTag(TestingPageTags.TRACKER_NAME).performScrollTo().performTextInput("Jira")
+        // The name and URL belong to the switch: dimmed and locked while the tracker is off, their values kept.
+        rule.onNodeWithTag(TestingPageTags.TRACKER_NAME).performScrollTo().assertIsNotEnabled()
+        rule.onNodeWithTag(TestingPageTags.TRACKER_URL).assertIsNotEnabled()
+        click(TestingPageTags.TRACKER_ENABLE)
+        rule.onNodeWithTag(TestingPageTags.TRACKER_NAME).performScrollTo().assertIsEnabled()
+        rule.onNodeWithTag(TestingPageTags.TRACKER_NAME).performTextInput("Jira")
         rule.waitForIdle()
         assertEquals("Jira", state.settings.tracker.name)
 
@@ -434,7 +439,7 @@ class SettingsAiTestingSystemPagesUiTest {
             "Analysis artifacts folder",
             "Capture sessions folder",
             "Snapshots folder",
-            "Saved captures folder (Save ZIP)",
+            "Saved captures folder",
         ).forEach { rule.onNodeWithText(it).assertExists() }
         listOf("Test suites folder", "Test runs folder", "Issues folder").forEach { rule.onNodeWithText(it).assertDoesNotExist() }
 
@@ -448,7 +453,10 @@ class SettingsAiTestingSystemPagesUiTest {
         openPage(state, SettingsPage.Storage)
         rule.onNodeWithText("Temporary data").assertExists()
         rule.onNodeWithText("App data").assertExists()
-        rule.onNodeWithText("Reset app data").assertExists()
+        rule.onNodeWithText("Return to defaults").assertExists()
+        // A button that confirms first says so with an ellipsis, and a row is not named after its button.
+        rule.onNodeWithText("Clear temporary data…").assertExists()
+        rule.onNodeWithText("Reset app data…").assertExists()
 
         assertFalse(state.cacheClearConfirmOpen)
         click(SystemPageTags.CLEAR_TEMP)
