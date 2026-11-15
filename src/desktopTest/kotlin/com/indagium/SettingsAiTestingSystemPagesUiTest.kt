@@ -4,8 +4,11 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -17,6 +20,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import com.indagium.ai.CustomAiCommand
+import com.indagium.edition.Edition
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AppSettings
 import com.indagium.testing.model.JudgeMode
@@ -374,18 +378,22 @@ class SettingsAiTestingSystemPagesUiTest {
     }
 
     @Test
-    fun theJudgeDropdownPicksTheModeAndRevealsTheProfileRow() {
+    fun theJudgeSegmentsPickTheModeAndRevealTheProfileRow() {
         val state = newState()
         state.updateSettings { it.copy(testing = it.testing.copy(defaultJudgeMode = JudgeMode.OFF.wire)) }
         openPage(state, SettingsPage.TestRuns)
         rule.onAllNodesWithTag(TestingPageTags.JUDGE_PROFILE).assertCountEquals(0)
 
-        click(TestingPageTags.JUDGE)
-        rule.onNodeWithTag("${TestingPageTags.JUDGE}-option-${JudgeMode.EVERY_STEP.ordinal}").performClick()
-        rule.waitForIdle()
+        click("${TestingPageTags.JUDGE}-option-${JudgeMode.EVERY_STEP.ordinal}")
 
         assertEquals(JudgeMode.EVERY_STEP, state.settings.testing.judgeMode)
+        rule.onNodeWithTag("${TestingPageTags.JUDGE}-option-${JudgeMode.EVERY_STEP.ordinal}").assertIsSelected()
+        rule.onNodeWithTag("${TestingPageTags.JUDGE}-option-${JudgeMode.OFF.ordinal}").assertIsNotSelected()
         rule.onNodeWithTag(TestingPageTags.JUDGE_PROFILE).assertExists()
+
+        click("${TestingPageTags.JUDGE}-option-${JudgeMode.OFF.ordinal}")
+        assertEquals(JudgeMode.OFF, state.settings.testing.judgeMode)
+        rule.onAllNodesWithTag(TestingPageTags.JUDGE_PROFILE).assertCountEquals(0)
     }
 
     // ---- Issue tracker ----
@@ -534,6 +542,22 @@ class SettingsAiTestingSystemPagesUiTest {
         rule.onNodeWithText("GitHub repository").assertExists()
         rule.onNodeWithText("Support the project").assertExists()
         rule.onNodeWithText("License agreement").assertExists()
+    }
+
+    @Test
+    fun theDevelopmentSwitchSegmentsChangeTheEditionAndMarkTheCurrentOne() {
+        val state = newState()
+        openPage(state, SettingsPage.About)
+        val current = state.editionService.current.value
+        Edition.entries.forEach { edition ->
+            rule.onNode(hasText(edition.label) and hasAnyAncestor(hasTestTag(SystemPageTags.EDITION_SWITCH))).assertExists()
+        }
+        rule.onNodeWithTag("${SystemPageTags.EDITION_SWITCH}-${current.name}").assertIsSelected()
+        val other = Edition.entries.first { it != current }
+        click("${SystemPageTags.EDITION_SWITCH}-${other.name}")
+        assertEquals(other, state.editionService.current.value)
+        rule.onNodeWithTag("${SystemPageTags.EDITION_SWITCH}-${other.name}").assertIsSelected()
+        rule.onNodeWithTag("${SystemPageTags.EDITION_SWITCH}-${current.name}").assertIsNotSelected()
     }
 
     @Test

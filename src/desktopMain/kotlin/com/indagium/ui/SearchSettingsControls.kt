@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.indagium.model.CtrlFTarget
 import com.indagium.model.SearchScopeBehavior
@@ -42,23 +43,24 @@ internal fun SearchScopeBehaviorSelector(
     )
 }
 
-/** Ctrl+F destination shared by Settings and setup; legacy MESSAGE_RULE remains routable but hidden. */
+/**
+ * Ctrl+F destination shared by Settings and setup: "Find bar | Tags | Regex" as toggle buttons. A legacy MESSAGE_RULE (not offered, still
+ * routable) highlights no segment. [onInteraction] lets a host restore its keyboard focus after a click.
+ */
 @Composable
 internal fun CtrlFTargetSelector(
     selected: CtrlFTarget,
     onSelected: (CtrlFTarget) -> Unit,
     onInteraction: () -> Unit = {},
 ) {
-    // A legacy MESSAGE_RULE (not offered) shows the first label, as before, and highlights no option.
-    SettingsDropdown(
-        options = CTRL_F_TARGETS,
-        selected = selected,
-        label = { CTRL_F_LABELS.getOrElse(CTRL_F_TARGETS.indexOf(it)) { CTRL_F_LABELS.first() } },
-        onSelect = onSelected,
-        testTag = "ctrl-f-target-selector",
-        modifier = Modifier.fillMaxWidth(),
-        minWidth = 0.dp,
-        optionTag = { "ctrl-f-target-option-${it.name.lowercase()}" },
-        onInteraction = onInteraction,
+    SettingsSegmented(
+        options = CTRL_F_LABELS,
+        selectedIndices = setOfNotNull(CTRL_F_TARGETS.indexOf(selected).takeIf { it >= 0 }),
+        onToggle = { index ->
+            onSelected(CTRL_F_TARGETS[index])
+            onInteraction()
+        },
+        modifier = Modifier.testTag("ctrl-f-target-selector"),
+        segmentModifier = { index -> Modifier.testTag("ctrl-f-target-option-${CTRL_F_TARGETS[index].name.lowercase()}") },
     )
 }

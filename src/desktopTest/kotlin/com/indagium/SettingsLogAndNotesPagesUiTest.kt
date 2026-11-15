@@ -3,8 +3,10 @@ package com.indagium
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -160,12 +162,41 @@ class SettingsLogAndNotesPagesUiTest {
     fun theFindSelectorsKeepTheirTagsAndWriteTheirSettings() {
         val state = AppState()
         openPage(state, SettingsPage.SearchFilters)
-        click("ctrl-f-target-selector")
-        clickOption("ctrl-f-target-option-tags")
+        click("ctrl-f-target-option-tags")
         assertEquals(com.indagium.model.CtrlFTarget.TAGS, state.settings.ctrlFTarget)
         click("search-scope-behavior-selector")
         clickOption("search-scope-behavior-option-two_searches")
         assertEquals(com.indagium.model.SearchScopeBehavior.TWO_SEARCHES, state.settings.searchScopeBehavior)
+    }
+
+    @Test
+    fun theCtrlFSegmentsSetTheTargetAndALegacyRuleTargetHighlightsNone() {
+        val state = AppState()
+        openPage(state, SettingsPage.SearchFilters)
+        // Three toggle buttons, not a dropdown: every choice is on the page before anything is clicked.
+        listOf("Find bar", "Tags", "Regex").forEach { label ->
+            rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag("ctrl-f-target-selector"))).assertExists()
+        }
+        val targets = listOf(
+            "find_bar" to com.indagium.model.CtrlFTarget.FIND_BAR,
+            "tags" to com.indagium.model.CtrlFTarget.TAGS,
+            "keyword_regex" to com.indagium.model.CtrlFTarget.KEYWORD_REGEX,
+        )
+        targets.forEach { (name, target) ->
+            click("ctrl-f-target-option-$name")
+            assertEquals(target, state.settings.ctrlFTarget, name)
+            targets.forEach { (other, _) ->
+                val segment = rule.onNodeWithTag("ctrl-f-target-option-$other")
+                if (other == name) segment.assertIsSelected() else segment.assertIsNotSelected()
+            }
+        }
+        // A legacy "message rule" target is not offered: no segment is highlighted, and nothing is rewritten until one is clicked.
+        state.updateSettings { it.copy(ctrlFTarget = com.indagium.model.CtrlFTarget.MESSAGE_RULE) }
+        rule.waitForIdle()
+        targets.forEach { (other, _) -> rule.onNodeWithTag("ctrl-f-target-option-$other").assertIsNotSelected() }
+        assertEquals(com.indagium.model.CtrlFTarget.MESSAGE_RULE, state.settings.ctrlFTarget)
+        click("ctrl-f-target-option-tags")
+        assertEquals(com.indagium.model.CtrlFTarget.TAGS, state.settings.ctrlFTarget)
     }
 
     // ---- Issue categories ----

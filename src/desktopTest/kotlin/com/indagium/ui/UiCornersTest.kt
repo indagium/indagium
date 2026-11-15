@@ -13,14 +13,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
-import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
 import com.indagium.model.AppSettings
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
@@ -229,7 +231,7 @@ class ShapeStyleUiTest {
     }
 }
 
-/** Settings > Appearance > Corners: the Tiles picker and the Toolbar dropdown (with "Same as tiles") each write their own fields. */
+/** Settings > Appearance > Corners: the Tiles and Toolbar dropdowns (the Toolbar one with "Same as tiles") each write their own fields. */
 @OptIn(ExperimentalTestApi::class)
 class ShapeStyleSettingUiTest {
     @get:Rule
@@ -252,10 +254,16 @@ class ShapeStyleSettingUiTest {
         autoExportNotes = false,
     )
 
-    private fun chooseTile(label: String) {
-        rule.onNode(hasContentDescription(label) and hasAnyAncestor(hasTestTag(SHAPE_STYLE_CONTROL_TAG))).performClick()
+    private fun chooseTile(style: ShapeStyle) {
+        rule.onNodeWithTag(SHAPE_STYLE_CONTROL_TAG).performClick()
         rule.waitForIdle()
+        rule.onNodeWithTag("$SHAPE_STYLE_CONTROL_TAG-${style.name}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag(SHAPE_STYLE_CONTROL_TAG).assertTextContains(shapeStyleLabel(style))
     }
+
+    private fun assertSample(ownerTag: String, style: ShapeStyle?) =
+        rule.onNode(hasTestTag(shapeSampleTag(style)) and hasAnyAncestor(hasTestTag(ownerTag)), useUnmergedTree = true).assertExists()
 
     private fun chooseToolbar(style: ShapeStyle?) {
         rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).performClick()
@@ -265,12 +273,12 @@ class ShapeStyleSettingUiTest {
     }
 
     @Test
-    fun theTilesPickerShowsTheFiveStylesWithTheirDescriptionAndWritesEachChoice() {
+    fun theTilesDropdownListsTheFiveStylesWithTheirDescriptionAndWritesEachChoice() {
         directory = createTempDirectory("shape-style-setting").toFile()
         state = newState()
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
-                Box(Modifier.size(700.dp, 200.dp)) {
+                Box(Modifier.size(700.dp, 320.dp)) {
                     Column {
                         ShapeStyleSetting(state)
                         ToolbarShapeSetting(state)
@@ -281,24 +289,65 @@ class ShapeStyleSettingUiTest {
         rule.waitForIdle()
         rule.onNodeWithText("How round tiles are. Theme default keeps each theme's own shapes.").assertExists()
         rule.onNodeWithText("Corners of the toolbar's button groups and the Layout menu button.").assertExists()
+        rule.onNodeWithTag(SHAPE_STYLE_CONTROL_TAG).assertTextContains("Theme default")
+        rule.onNodeWithTag(SHAPE_STYLE_CONTROL_TAG).performClick()
+        rule.waitForIdle()
         ShapeStyle.entries.forEach { style ->
             rule.onNodeWithTag("$SHAPE_STYLE_CONTROL_TAG-${style.name}").assertExists()
         }
+        rule.onNodeWithTag("$SHAPE_STYLE_CONTROL_TAG-${ShapeStyle.THEME.name}").performClick()
+        rule.waitForIdle()
         assertEquals(ShapeStyle.THEME, state.settings.shapeStyle)
-        val choices = listOf(
-            "Square" to ShapeStyle.SQUARE,
-            "Soft" to ShapeStyle.SOFT,
-            "Rounded" to ShapeStyle.ROUNDED,
-            "Round" to ShapeStyle.ROUND,
-            "Theme default" to ShapeStyle.THEME,
-        )
-        choices.forEach { (label, style) ->
-            chooseTile(label)
-            assertEquals(style, state.settings.shapeStyle, label)
+        val choices = listOf(ShapeStyle.SQUARE, ShapeStyle.SOFT, ShapeStyle.ROUNDED, ShapeStyle.ROUND, ShapeStyle.THEME)
+        choices.forEach { style ->
+            chooseTile(style)
+            assertEquals(style, state.settings.shapeStyle, style.name)
             assertEquals(ShapeStyle.THEME, state.settings.toolbarShapeStyle, "the toolbar's own style is untouched")
             assertTrue(state.settings.toolbarShapeFollowsTiles, "a Tiles choice never detaches the toolbar")
             assertEquals(style, state.settings.effectiveToolbarShapeStyle, "the toolbar follows the tiles")
         }
+    }
+
+    @Test
+    fun tilesAndToolbarAreTheSameDropdownControlWithACornerSampleBeforeEveryOption() {
+        directory = createTempDirectory("shape-style-same-control").toFile()
+        state = newState()
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Box(Modifier.size(700.dp, 400.dp)) {
+                    Column {
+                        ShapeStyleSetting(state)
+                        ToolbarShapeSetting(state)
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+        // Closed, both are one dropdown field (not a row of toggle buttons): the same size, right edge and height.
+        rule.onNodeWithText("Square").assertDoesNotExist()
+        val tiles = rule.onNodeWithTag(SHAPE_STYLE_CONTROL_TAG).getBoundsInRoot()
+        val toolbar = rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).getBoundsInRoot()
+        assertEquals(tiles.width, toolbar.width, "the same width")
+        assertEquals(tiles.height, toolbar.height, "the same height")
+        assertEquals(tiles.right, toolbar.right, "the same right edge")
+        // Each field shows a sample before its name: Tiles its style's corner, Toolbar the link glyph of "Same as tiles".
+        assertSample(SHAPE_STYLE_CONTROL_TAG, ShapeStyle.THEME)
+        assertSample(TOOLBAR_SHAPE_CONTROL_TAG, null)
+
+        rule.onNodeWithTag(SHAPE_STYLE_CONTROL_TAG).performClick()
+        rule.waitForIdle()
+        ShapeStyle.entries.forEach { style -> assertSample("$SHAPE_STYLE_CONTROL_TAG-${style.name}", style) }
+        rule.onNodeWithTag("$SHAPE_STYLE_CONTROL_TAG-${ShapeStyle.SOFT.name}").performClick()
+        rule.waitForIdle()
+        assertSample(SHAPE_STYLE_CONTROL_TAG, ShapeStyle.SOFT)
+
+        rule.onNodeWithTag(TOOLBAR_SHAPE_CONTROL_TAG).performClick()
+        rule.waitForIdle()
+        assertSample("$TOOLBAR_SHAPE_CONTROL_TAG-option-SAME_AS_TILES", null)
+        ShapeStyle.entries.forEach { style -> assertSample("$TOOLBAR_SHAPE_CONTROL_TAG-option-${style.name}", style) }
+        rule.onNodeWithTag("$TOOLBAR_SHAPE_CONTROL_TAG-option-${ShapeStyle.ROUND.name}").performClick()
+        rule.waitForIdle()
+        assertSample(TOOLBAR_SHAPE_CONTROL_TAG, ShapeStyle.ROUND)
     }
 
     @Test

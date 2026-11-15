@@ -4,6 +4,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -14,8 +17,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.indagium.model.LinuxFilePickerMode
@@ -28,7 +29,7 @@ import com.indagium.ui.holiday.ThemeSettingsBlock
 // and corner pieces are separate composables (AppearanceSystemFontSelectors, ShapeStyleSetting, ToolbarShapeSetting) because tests and the
 // setup assistant render them on their own; each emits rows for a SettingsGroup, or stands alone as a plain row.
 
-/** Test tag of the Tiles corner picker. */
+/** Test tag of the Tiles corner dropdown. */
 internal const val SHAPE_STYLE_CONTROL_TAG = "shape-style"
 
 /** Test tag of the Toolbar corner dropdown. */
@@ -60,10 +61,7 @@ internal fun shapeStyleLabel(style: ShapeStyle): String = when (style) {
     ShapeStyle.ROUND -> "Round"
 }
 
-/** The short label of a segment of the Tiles picker (the full [shapeStyleLabel] is the segment's accessibility label). */
-private fun shapeStyleTileLabel(style: ShapeStyle): String = if (style == ShapeStyle.THEME) "Theme" else shapeStyleLabel(style)
-
-/** The radius, in dp, of the 14x9 sample drawn on a segment of the picker: a picture of the corner, not the real tile radius. */
+/** The radius, in dp, of the 14x9 sample drawn before a corner option: a picture of the corner, not the real tile radius. */
 private fun shapeSampleRadiusDp(style: ShapeStyle): Float = when (style) {
     ShapeStyle.THEME -> SAMPLE_RADIUS_ROUNDED
     ShapeStyle.SQUARE -> 0f
@@ -186,37 +184,35 @@ private fun LogFontRow(state: AppState, onInteraction: () -> Unit) {
     }
 }
 
-/** The Tiles row: how round the tiles are, for every theme (ui/UiCorners.kt), as a segmented control whose segments draw their corner. */
+/**
+ * The Tiles row: how round the tiles are, for every theme (ui/UiCorners.kt), as the same corner dropdown the Toolbar row uses
+ * ([ShapeStyleDropdown]). The field and every option show a small sample of the corner before the name.
+ */
 @Composable
-internal fun ShapeStyleSetting(state: AppState) {
-    val styles = ShapeStyle.entries
+internal fun ShapeStyleSetting(state: AppState, onInteraction: () -> Unit = {}) {
     SettingsRow("Tiles", SHAPE_STYLE_HINT, anchor = "Shape style") {
-        SettingsSegmented(
-            options = styles.map(::shapeStyleTileLabel),
-            selectedIndices = setOf(styles.indexOf(state.settings.shapeStyle)),
-            onToggle = { index -> state.updateSettings { it.copy(shapeStyle = styles[index]) } },
-            modifier = Modifier.testTag(SHAPE_STYLE_CONTROL_TAG),
-            segmentModifier = { index ->
-                Modifier.testTag("$SHAPE_STYLE_CONTROL_TAG-${styles[index].name}").semantics { contentDescription = shapeStyleLabel(styles[index]) }
-            },
-            segmentLeading = { index, color -> ShapeSample(styles[index], color) },
+        ShapeStyleDropdown(
+            options = ShapeStyle.entries,
+            selected = state.settings.shapeStyle,
+            onSelect = { style -> if (style != null) state.updateSettings { it.copy(shapeStyle = style) } },
+            testTag = SHAPE_STYLE_CONTROL_TAG,
+            optionTag = { style -> "$SHAPE_STYLE_CONTROL_TAG-${style?.name}" },
+            onInteraction = onInteraction,
         )
     }
 }
 
 /**
  * The Toolbar row: how round the toolbar's button groups and the Layout menu button are (ui/UiCorners.kt). "Same as tiles" follows the
- * Tiles row; any style picked here stands on its own.
+ * Tiles row (a link glyph, not a corner, since it has no corner of its own); any style picked here stands on its own.
  */
 @Composable
 internal fun ToolbarShapeSetting(state: AppState, onInteraction: () -> Unit = {}) {
-    val options: List<ShapeStyle?> = listOf(null) + ShapeStyle.entries
     val settings = state.settings
     SettingsRow("Toolbar", TOOLBAR_SHAPE_HINT, anchor = "Toolbar shape") {
-        SettingsDropdown(
-            options = options,
+        ShapeStyleDropdown(
+            options = listOf(null) + ShapeStyle.entries,
             selected = if (settings.toolbarShapeFollowsTiles) null else settings.toolbarShapeStyle,
-            label = { style -> style?.let(::shapeStyleLabel) ?: "Same as tiles" },
             onSelect = { style ->
                 state.updateSettings {
                     if (style == null) it.copy(toolbarShapeFollowsTiles = true) else it.copy(toolbarShapeStyle = style, toolbarShapeFollowsTiles = false)
@@ -229,10 +225,50 @@ internal fun ToolbarShapeSetting(state: AppState, onInteraction: () -> Unit = {}
     }
 }
 
-// A 14x9dp rectangle with that style's corner, drawn in the segment's label colour (dashed for "Theme default", which has no corner of its own).
+/** A null option is "Same as tiles". */
+private fun shapeOptionLabel(style: ShapeStyle?): String = style?.let(::shapeStyleLabel) ?: "Same as tiles"
+
+/** The one corner dropdown of the Tiles and Toolbar rows: a corner sample before each option's name, in the list and in the closed field. */
 @Composable
-private fun ShapeSample(style: ShapeStyle, color: Color) {
-    Canvas(Modifier.size(SHAPE_SAMPLE_WIDTH, SHAPE_SAMPLE_HEIGHT)) {
+private fun ShapeStyleDropdown(
+    options: List<ShapeStyle?>,
+    selected: ShapeStyle?,
+    onSelect: (ShapeStyle?) -> Unit,
+    testTag: String,
+    optionTag: (ShapeStyle?) -> String,
+    onInteraction: () -> Unit,
+) {
+    val tc = tc()
+    SettingsDropdown(
+        options = options,
+        selected = selected,
+        label = ::shapeOptionLabel,
+        onSelect = onSelect,
+        testTag = testTag,
+        optionTag = optionTag,
+        onInteraction = onInteraction,
+        leading = { ShapeOptionSample(selected, tc.tx) },
+        optionLeading = { style, color -> ShapeOptionSample(style, color) },
+    )
+}
+
+/** Test tag of the picture before an option: the corner sample of a style, or the link glyph of "Same as tiles" (a null [style]). */
+internal fun shapeSampleTag(style: ShapeStyle?): String = "shape-sample-${style?.name ?: "SAME_AS_TILES"}"
+
+@Composable
+private fun ShapeOptionSample(style: ShapeStyle?, color: Color) {
+    val tag = Modifier.testTag(shapeSampleTag(style))
+    if (style == null) {
+        Icon(Icons.Outlined.Link, contentDescription = null, tint = color, modifier = tag.size(SHAPE_SAMPLE_WIDTH))
+    } else {
+        ShapeSample(style, color, tag)
+    }
+}
+
+// A 14x9dp rectangle with that style's corner, drawn in the label's colour (dashed for "Theme default", which has no corner of its own).
+@Composable
+private fun ShapeSample(style: ShapeStyle, color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(SHAPE_SAMPLE_WIDTH, SHAPE_SAMPLE_HEIGHT)) {
         val width = 1.25.dp.toPx()
         val inset = width / 2f
         val sampleSize = Size(size.width - width, size.height - width)
@@ -256,7 +292,7 @@ internal fun AppearanceSettingsSection(state: AppState, reclaimFocus: () -> Unit
         if (isLinuxOs) LinuxFilePickerRow(state)
     }
     SettingsGroup("Corners") {
-        ShapeStyleSetting(state)
+        ShapeStyleSetting(state, reclaimFocus)
         ToolbarShapeSetting(state, reclaimFocus)
     }
 }

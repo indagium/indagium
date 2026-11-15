@@ -208,13 +208,11 @@ internal fun SearchFiltersSettingsSection(state: AppState, reclaimFocus: () -> U
     val settings = state.settings
     SettingsGroup("Ctrl/Cmd+F") {
         SettingsRow("Opens", SEARCH_OPENS_HINT, anchor = "Ctrl/Cmd+F opens") {
-            Box(Modifier.width(SETTINGS_FIELD_SHORT)) {
-                CtrlFTargetSelector(
-                    selected = settings.ctrlFTarget,
-                    onSelected = { target -> state.updateSettings { it.copy(ctrlFTarget = target) } },
-                    onInteraction = reclaimFocus,
-                )
-            }
+            CtrlFTargetSelector(
+                selected = settings.ctrlFTarget,
+                onSelected = { target -> state.updateSettings { it.copy(ctrlFTarget = target) } },
+                onInteraction = reclaimFocus,
+            )
         }
         SettingsRow("Find searches", SEARCH_SCOPE_HINT, anchor = "Search scope behaviour") {
             Box(Modifier.width(SETTINGS_FIELD_SHORT)) {

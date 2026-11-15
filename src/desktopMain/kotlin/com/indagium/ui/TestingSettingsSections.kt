@@ -158,14 +158,16 @@ internal fun TestRunsSettingsSection(state: AppState, reclaimFocus: () -> Unit) 
     val profiles = state.settings.aiProviderProfiles
     SettingsGroup("New runs") {
         SettingsRow("Judge", TESTING_JUDGE_HINT, anchor = "Default judge") {
-            SettingsDropdown(
-                options = JudgeMode.entries,
-                selected = testing.judgeMode,
-                label = { it.label },
-                onSelect = { mode -> updateTesting(state) { it.copy(defaultJudgeMode = mode.wire) } },
-                testTag = TestingPageTags.JUDGE,
-                minWidth = FIELD_WIDTH,
-                onInteraction = reclaimFocus,
+            val modes = JudgeMode.entries
+            SettingsSegmented(
+                options = modes.map(JudgeMode::label),
+                selectedIndices = setOf(modes.indexOf(testing.judgeMode)),
+                onToggle = { index ->
+                    updateTesting(state) { it.copy(defaultJudgeMode = modes[index].wire) }
+                    reclaimFocus()
+                },
+                modifier = Modifier.testTag(TestingPageTags.JUDGE),
+                segmentModifier = { index -> Modifier.testTag("${TestingPageTags.JUDGE}-option-$index") },
             )
         }
         if (testing.judgeMode != JudgeMode.OFF) {

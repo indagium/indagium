@@ -231,7 +231,6 @@ class SetupAssistantUiTest {
             assertEquals(behavior, state.settings.searchScopeBehavior)
         }
 
-        rule.onNodeWithTag("ctrl-f-target-selector").performClick()
         rule.onNodeWithTag("ctrl-f-target-option-tags").performClick()
         rule.waitForIdle()
         assertEquals(CtrlFTarget.TAGS, state.settings.ctrlFTarget)

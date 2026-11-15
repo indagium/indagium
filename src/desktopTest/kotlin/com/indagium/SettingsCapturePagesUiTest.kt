@@ -8,6 +8,9 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -227,14 +230,17 @@ class SettingsCapturePagesUiTest {
     }
 
     @Test
-    fun theDeviceDisplayDropdownStoresTheChosenMode() {
+    fun theDeviceDisplaySegmentsStoreTheChosenMode() {
         val state = AppState()
         openCapturePage(state)
         assertEquals(CaptureMirrorMode.EMBEDDED, capture(state).mirrorMode)
-        click(CapturePageTags.DEVICE_DISPLAY)
-        rule.onNodeWithTag("${CapturePageTags.DEVICE_DISPLAY}-option-1").performClick()
-        rule.waitForIdle()
+        listOf("In-app mirror", "scrcpy window", "Off").forEach { label ->
+            rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(CapturePageTags.DEVICE_DISPLAY))).assertExists()
+        }
+        click("${CapturePageTags.DEVICE_DISPLAY}-option-1")
         assertEquals(CaptureMirrorMode.EXTERNAL, capture(state).mirrorMode)
+        rule.onNodeWithTag("${CapturePageTags.DEVICE_DISPLAY}-option-1").assertIsSelected()
+        rule.onNodeWithTag("${CapturePageTags.DEVICE_DISPLAY}-option-0").assertIsNotSelected()
         rule.onNodeWithTag(CapturePageTags.DEVICE_DISPLAY).assertExists()
     }
 

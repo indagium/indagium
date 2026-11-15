@@ -1,17 +1,22 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -61,6 +66,29 @@ class SettingsDropdownUiTest {
         rule.onNodeWithText("BETA").assertExists()
         // One call for opening, one for the pick.
         assertEquals(2, interactions)
+    }
+
+    @Test
+    fun optionLeadingDrawsBeforeEachOptionAndLeadingBeforeTheClosedField() {
+        rule.setContent {
+            SettingsDropdown(
+                options = choices,
+                selected = "beta",
+                label = { it },
+                onSelect = {},
+                testTag = "dd",
+                leading = { Box(Modifier.size(10.dp).testTag("field-picture")) },
+                optionLeading = { option, _ -> Box(Modifier.size(10.dp).testTag("picture-$option")) },
+            )
+        }
+        rule.onNode(hasTestTag("field-picture") and hasAnyAncestor(hasTestTag("dd")), useUnmergedTree = true).assertExists()
+        rule.onNodeWithTag("picture-alpha", useUnmergedTree = true).assertDoesNotExist()
+
+        rule.onNodeWithTag("dd").performClick()
+        rule.waitForIdle()
+        choices.forEachIndexed { index, option ->
+            rule.onNode(hasTestTag("picture-$option") and hasAnyAncestor(hasTestTag("dd-option-$index")), useUnmergedTree = true).assertExists()
+        }
     }
 
     @Test

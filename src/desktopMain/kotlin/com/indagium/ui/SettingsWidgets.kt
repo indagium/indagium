@@ -568,6 +568,8 @@ internal fun SettingsPageHeader(groupLabel: String, title: String, description: 
  * dim note after an option's label (why it is unavailable, or what it means). A click on the field right after a dismiss is ignored
  * for 200 ms, because the popup's outside-click dismiss and the field's own click would otherwise cancel out. [onInteraction] runs
  * after every toggle, dismiss and pick so the host can reclaim keyboard focus that the clicked field or the popup took.
+ * [leading] is a picture before the closed field's text; [optionLeading] draws one before each option's label, in the label's colour
+ * (a choice that is also pictured, like a corner sample; give both so the field and the list agree).
  */
 @Composable
 internal fun <T> SettingsDropdown(
@@ -585,6 +587,7 @@ internal fun <T> SettingsDropdown(
     enabled: Boolean = true,
     leading: (@Composable () -> Unit)? = null,
     placeholder: String? = null,
+    optionLeading: (@Composable (option: T, color: Color) -> Unit)? = null,
 ) {
     val tc = tc()
     var open by remember { mutableStateOf(false) }
@@ -652,6 +655,7 @@ internal fun <T> SettingsDropdown(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            optionLeading?.invoke(option, if (active) tc.ac else tc.tx)
                             AppText(
                                 label(option),
                                 color = if (active) tc.ac else tc.tx,

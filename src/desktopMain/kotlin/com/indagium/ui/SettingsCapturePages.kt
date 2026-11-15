@@ -154,13 +154,16 @@ internal fun CaptureVideoSettingsSection(state: AppState, reclaimFocus: () -> Un
             CAPTURE_DEVICE_DISPLAY_HINT + deviceDisplayNote(settings, nativeMediaSupport, scrcpyAvailable)?.let { "\n$it" }.orEmpty(),
             anchor = "Device display",
         ) {
-            SettingsDropdown(
-                options = CaptureMirrorMode.entries,
-                selected = shownMode,
-                label = ::deviceDisplayLabel,
-                onSelect = { mode -> edit { it.withMirrorMode(mode) } },
-                testTag = CapturePageTags.DEVICE_DISPLAY,
-                onInteraction = reclaimFocus,
+            val modes = CaptureMirrorMode.entries
+            SettingsSegmented(
+                options = modes.map(::deviceDisplayLabel),
+                selectedIndices = setOf(modes.indexOf(shownMode)),
+                onToggle = { index ->
+                    edit { it.withMirrorMode(modes[index]) }
+                    reclaimFocus()
+                },
+                modifier = Modifier.testTag(CapturePageTags.DEVICE_DISPLAY),
+                segmentModifier = { index -> Modifier.testTag("${CapturePageTags.DEVICE_DISPLAY}-option-$index") },
             )
         }
     }

@@ -670,14 +670,16 @@ private fun EditionGroup(state: AppState, reclaimFocus: () -> Unit) {
         SettingsRow("Edition", editionSummary(edition)) { SettingsBadge(edition.label) }
         if (state.editionService.devSwitchAllowed()) {
             SettingsRow("Development switch", "Changes the edition for this run only.") {
-                SettingsDropdown(
-                    options = Edition.entries,
-                    selected = edition,
-                    label = { it.label },
-                    onSelect = { candidate -> state.editionService.setForDev(candidate) },
-                    testTag = SystemPageTags.EDITION_SWITCH,
-                    optionTag = { "${SystemPageTags.EDITION_SWITCH}-${it.name}" },
-                    onInteraction = reclaimFocus,
+                val editions = Edition.entries
+                SettingsSegmented(
+                    options = editions.map(Edition::label),
+                    selectedIndices = setOf(editions.indexOf(edition)),
+                    onToggle = { index ->
+                        state.editionService.setForDev(editions[index])
+                        reclaimFocus()
+                    },
+                    modifier = Modifier.testTag(SystemPageTags.EDITION_SWITCH),
+                    segmentModifier = { index -> Modifier.testTag("${SystemPageTags.EDITION_SWITCH}-${editions[index].name}") },
                 )
             }
         }
