@@ -1,6 +1,8 @@
 package com.indagium.utils
 
+import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
+import com.indagium.model.displaySeverityText
 import java.util.Collections
 
 private data class RegexKey(val pattern: String, val ignoreCase: Boolean)
@@ -119,10 +121,131 @@ private class DeadlineCharSequence(
 private fun deadlineWrap(haystack: String, regexContext: RegexEvaluationContext): CharSequence =
     DeadlineCharSequence(haystack, System.nanoTime() + regexContext.matchBudgetNanos)
 
+/** The parser-precomputed profile projection. A non-null result marks a profile-rendered row,
+ * including profiles whose selected column list is intentionally empty. */
+internal fun profileDisplayColumns(entry: LogEntry): List<LogDisplayField>? =
+    entry.recordMetadata?.takeIf { it.usesProfilePresentation }?.displayColumns
+
+internal fun isProfileProcessIdColumn(id: String): Boolean = id == "process_id" || id == "pid"
+
+internal fun isProfileThreadIdColumn(id: String): Boolean = id == "thread_id" || id == "tid"
+
+internal fun isProfileProcessThreadColumn(id: String): Boolean =
+    isProfileProcessIdColumn(id) || isProfileThreadIdColumn(id)
+
+internal data class ProfileDisplayTextProjection(
+    val text: String,
+    val sourceProcessIdRange: Pair<Int, Int>? = null,
+    val renderedProcessIdRange: Pair<Int, Int>? = null,
+    val sourceSegments: List<ProfileTextOffsetSegment> = emptyList(),
+    val renderedFields: List<ProfileRenderedFieldRange> = emptyList(),
+)
+
+internal data class ProfileRenderedFieldRange(
+    val id: String,
+    val start: Int,
+    val end: Int,
+)
+
+internal data class ProfileTextOffsetSegment(
+    val sourceStart: Int,
+    val sourceEnd: Int,
+    val renderedStart: Int,
+    val renderedEnd: Int,
+) {
+    fun remap(offset: Int): Int = when {
+        offset <= sourceStart -> renderedStart
+        offset >= sourceEnd -> renderedEnd
+        sourceEnd - sourceStart == renderedEnd - renderedStart -> renderedStart + offset - sourceStart
+        else -> renderedStart
+    }
+}
+
+internal fun ProfileDisplayTextProjection.remapOffset(offset: Int): Int {
+    sourceSegments.firstOrNull { offset <= it.sourceEnd }?.let { return it.remap(offset) }
+    return text.length
+}
+
+internal fun profileDisplayTextProjection(
+    columns: List<LogDisplayField>,
+    processDisplayName: String? = null,
+    includeProcessThread: Boolean = true,
+): ProfileDisplayTextProjection {
+    val text = StringBuilder()
+    val source = StringBuilder()
+    var hasSourceColumn = false
+    var hasRenderedColumn = false
+    var sourceProcessIdRange: Pair<Int, Int>? = null
+    var renderedProcessIdRange: Pair<Int, Int>? = null
+    val sourceSegments = mutableListOf<ProfileTextOffsetSegment>()
+    val renderedFields = mutableListOf<ProfileRenderedFieldRange>()
+
+    fun appendSource(value: String, renderedValue: String?) {
+        val sourceStart = source.length
+        val renderedStart = text.length
+        source.append(value)
+        renderedValue?.let(text::append)
+        sourceSegments += ProfileTextOffsetSegment(
+            sourceStart = sourceStart,
+            sourceEnd = source.length,
+            renderedStart = renderedStart,
+            renderedEnd = text.length,
+        )
+    }
+
+    columns.forEach { column ->
+        if (column.value.isBlank()) return@forEach
+        val includeColumn = includeProcessThread || !isProfileProcessThreadColumn(column.id)
+        if (hasSourceColumn) {
+            appendSource(PROFILE_FIELD_SEPARATOR, PROFILE_FIELD_SEPARATOR.takeIf { includeColumn && hasRenderedColumn })
+        }
+        val sourceFieldStart = source.length
+        val sourceValueStart = sourceFieldStart + column.label.length + 1
+        val sourceField = "${column.label}=${column.value}"
+        hasSourceColumn = true
+
+        if (!includeColumn) {
+            appendSource(sourceField, null)
+            return@forEach
+        }
+        val renderedFieldStart = text.length
+        appendSource("${column.label}=", "${column.label}=")
+        val renderedValueStart = text.length
+        val replacement = processDisplayName?.takeIf {
+            isProfileProcessIdColumn(column.id) && it.isNotBlank() && it != column.value
+        }
+        appendSource(column.value, replacement ?: column.value)
+        if (replacement != null) {
+            sourceProcessIdRange = sourceValueStart to sourceValueStart + column.value.length
+            renderedProcessIdRange = renderedValueStart to text.length
+        }
+        renderedFields += ProfileRenderedFieldRange(column.id, renderedFieldStart, text.length)
+        hasRenderedColumn = true
+    }
+    return ProfileDisplayTextProjection(
+        text = text.toString(),
+        sourceProcessIdRange = sourceProcessIdRange,
+        renderedProcessIdRange = renderedProcessIdRange,
+        sourceSegments = sourceSegments,
+        renderedFields = renderedFields,
+    )
+}
+
+internal fun profileDisplayText(
+    columns: List<LogDisplayField>,
+    processDisplayName: String? = null,
+    includeProcessThread: Boolean = true,
+): String = profileDisplayTextProjection(columns, processDisplayName, includeProcessThread).text
+
+private const val PROFILE_FIELD_SEPARATOR = "  "
+
+internal fun profileDisplayText(entry: LogEntry): String? =
+    profileDisplayColumns(entry)?.let { profileDisplayText(it) }
+
 // This is the exact text presented by LogViewer. Keyword-regex filtering and its visual
-// highlight must use one representation so punctuation at the tag/message boundary cannot make
-// a row match without highlighting it (or vice versa).
-internal fun visibleLogLineText(entry: LogEntry): String = buildString {
+// highlight must use one representation so punctuation at field boundaries cannot make a row
+// match without highlighting it (or vice versa).
+internal fun visibleLogLineText(entry: LogEntry): String = profileDisplayText(entry) ?: buildString {
     append(entry.ts)
     if (entry.pid > 0) {
         append("  ")
@@ -131,7 +254,7 @@ internal fun visibleLogLineText(entry: LogEntry): String = buildString {
         append(entry.tid.toString().padStart(5))
     }
     append("  ")
-    append(entry.level.key)
+    append(entry.displaySeverityText)
     append("  ")
     append(entry.tag)
     append(": ")
@@ -334,4 +457,33 @@ internal fun regexFullyMatches(
     return regexContext.evaluate(pattern, ignoreCase, timedOutResult = false) {
         compiled.matches(deadlineWrap(text, regexContext))
     }
+}
+
+/** Capture groups from a profile regex through the same cancellation/deadline wrapper as filters. */
+internal fun boundedRegexGroups(text: String, pattern: String, fullMatch: Boolean = false): List<String?>? {
+    val compiled = regexCache.getOrPut(RegexKey(pattern, false)) { runCatching { Regex(pattern) } }.getOrNull() ?: return null
+    val context = RegexEvaluationContext()
+    return context.evaluate(pattern, false, timedOutResult = null) {
+        val bounded = deadlineWrap(text, context)
+        val match = if (fullMatch) compiled.matchEntire(bounded) else compiled.find(bounded)
+        match?.groups?.map { it?.value }
+    }
+}
+
+/** One profile-parse operation shares a single 100ms budget and timeout counter across records. */
+internal class BoundedProfileRegexMatcher(pattern: String) {
+    private val compiled = regexCache.getOrPut(RegexKey(pattern, false)) { runCatching { Regex(pattern) } }.getOrNull()
+    private val context = RegexEvaluationContext()
+    val timedOut: Boolean get() = context.hasTimedOut
+
+    fun groups(text: String, fullMatch: Boolean = false): List<String?>? {
+        val regex = compiled ?: return null
+        return context.evaluate(patternKey, false, timedOutResult = null) {
+            val bounded = deadlineWrap(text, context)
+            val match = if (fullMatch) regex.matchEntire(bounded) else regex.find(bounded)
+            match?.groups?.map { it?.value }
+        }
+    }
+
+    private val patternKey: String = "profile:${compiled?.pattern.orEmpty()}"
 }

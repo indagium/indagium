@@ -1,6 +1,7 @@
 package com.indagium.utils
 
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormatProfile
 import com.indagium.model.VIDEO_FILE_EXTENSIONS
 import org.apache.commons.compress.archivers.ArchiveEntry
 import org.apache.commons.compress.archivers.ArchiveInputStream
@@ -13,6 +14,7 @@ import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
+import java.util.concurrent.CancellationException
 
 // Applies to extractZipCandidate/extractSevenZCandidate, which fully materialize a candidate's
 // decompressed content into a List<LogEntry> in memory (unlike openZipCandidateStream/
@@ -77,6 +79,11 @@ data class ZipLogCandidate(
 data class ArchiveScan(val logCandidates: List<ZipLogCandidate>, val videoCandidates: List<ZipLogCandidate>)
 
 private val LOG_EXTENSIONS = setOf("txt", "log")
+
+// Extensions that only ever hold line-oriented structured logs. They are offered as text
+// candidates on name alone (content still has to sniff as text); the format profile is detected
+// when the entry is parsed. Plain .json/.csv stay out: most of those in an archive are not logs.
+private val STRUCTURED_LOG_EXTENSIONS = setOf("jsonl", "ndjson", "logfmt", "dmesg", "syslog")
 private val ANR_EXTENSIONS = setOf("", "txt", "trace", "traces")
 
 // Extensions that name-gate a sniff when a candidate doesn't already match one of the legacy
@@ -92,7 +99,8 @@ internal enum class CandidateContent { DLT, TEXT, OTHER }
  * [classifyLogContent]'s doc).
  */
 internal fun sniffLogContentKind(stream: InputStream, fileName: String? = null): LogContentKind {
-    val sample = runCatching { stream.readNBytes(CONTENT_SNIFF_BYTES) }.getOrElse { return LogContentKind.OTHER }
+    val sample = runCatching { stream.readNBytes(CONTENT_SNIFF_BYTES) }.onFailure(::rethrowArchiveCancellation)
+        .getOrElse { return LogContentKind.OTHER }
     val atEof = sample.size < CONTENT_SNIFF_BYTES
     return classifyLogContent(sample, atEof, fileName)
 }
@@ -108,7 +116,7 @@ internal fun sniffCandidateContent(stream: InputStream, fileName: String? = null
 /** Bounded content sniff for direct-file routing (binary DLT and DLT Viewer exports). */
 fun isLikelyDltSourceFile(file: File): Boolean = file.isFile && runCatching {
     file.inputStream().use { sniffCandidateContent(it, file.name) == CandidateContent.DLT }
-}.getOrDefault(false)
+}.onFailure(::rethrowArchiveCancellation).getOrDefault(false)
 
 // Content-sniffed, not extension-gated — same "open by content" philosophy as isLikelyTextFile.
 // Delegates to detectArchiveFormat's magic-byte-detect-then-validate pipeline (ArchiveFormat.kt)
@@ -165,6 +173,7 @@ private fun scanZip(zipFile: File, budget: ScanBudget, logs: MutableList<ZipLogC
     runCatching {
         openCommonsZip(zipFile).use { zf ->
             for (entry in zf.entries.asSequence()) {
+                checkParserCancellation()
                 if (budget.remaining <= 0) break
                 if (entry.isDirectory) continue
                 budget.remaining--
@@ -178,13 +187,14 @@ private fun scanZip(zipFile: File, budget: ScanBudget, logs: MutableList<ZipLogC
                 }
             }
         }
-    }
+    }.onFailure(::rethrowArchiveCancellation)
 }
 
 private fun scanSevenZ(archiveFile: File, budget: ScanBudget, logs: MutableList<ZipLogCandidate>, videos: MutableList<ZipLogCandidate>) {
     runCatching {
         sevenZFile(archiveFile).use { sevenZ ->
             for (entry in sevenZ.entries) {
+                checkParserCancellation()
                 if (budget.remaining <= 0) break
                 if (entry.isDirectory) continue
                 budget.remaining--
@@ -198,7 +208,7 @@ private fun scanSevenZ(archiveFile: File, budget: ScanBudget, logs: MutableList<
                 }
             }
         }
-    }
+    }.onFailure(::rethrowArchiveCancellation)
 }
 
 private fun scanSequential(
@@ -234,13 +244,14 @@ private fun scanNestedTar(
     logs: MutableList<ZipLogCandidate>,
     videos: MutableList<ZipLogCandidate>,
 ) {
-    val tar = runCatching { TarArchiveInputStream(outerStream) }.getOrNull() ?: return
+    val tar = runCatching { TarArchiveInputStream(outerStream) }.onFailure(::rethrowArchiveCancellation).getOrNull() ?: return
     // Same shared-stream rule as forEachSequentialEntry: never close an individual entry's stream
     // here, always advance via getNextEntry(). tar itself is never explicitly closed — it wraps
     // outerStream, which belongs to (and is closed by) the enclosing ZipFile/SevenZFile entry
     // iteration in scanZip/scanSevenZ, not to this function.
     while (budget.remaining > 0) {
-        val entry = runCatching { tar.getNextEntry() }.getOrNull() ?: break
+        checkParserCancellation()
+        val entry = runCatching { tar.getNextEntry() }.onFailure(::rethrowArchiveCancellation).getOrNull() ?: break
         if (entry.isDirectory) continue
         budget.remaining--
         val nestedPath = "$outerEntryPath!${entry.name}"
@@ -306,7 +317,7 @@ internal fun candidateKindFromContent(entryPath: String, sniff: () -> LogContent
     val lowerPath = entryPath.lowercase()
     val lowerName = name.lowercase()
     val ext = name.substringAfterLast('.', missingDelimiterValue = "").lowercase()
-    val isTextFile = ext == "txt"
+    val isTextFile = ext == "txt" || ext in STRUCTURED_LOG_EXTENSIONS
     val looksLikeLog = name.contains("log", ignoreCase = true) && (ext.isEmpty() || ext in LOG_EXTENSIONS)
     val inAnrDir = lowerPath.contains("/anr/") || lowerPath.startsWith("anr/")
     val looksLikeAnrTrace = lowerName.startsWith("anr_") ||
@@ -315,7 +326,7 @@ internal fun candidateKindFromContent(entryPath: String, sniff: () -> LogContent
     val looksLikeAnr = (inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext in ANR_EXTENSIONS)
 
     if (looksLikeLog || looksLikeAnr || isTextFile) {
-        val kind = runCatching(sniff).getOrDefault(LogContentKind.OTHER)
+        val kind = runCatching(sniff).onFailure(::rethrowArchiveCancellation).getOrDefault(LogContentKind.OTHER)
         return when {
             kind.isDlt() -> ZipLogCandidateKind.DLT
             kind != LogContentKind.TEXT -> null
@@ -326,7 +337,7 @@ internal fun candidateKindFromContent(entryPath: String, sniff: () -> LogContent
     }
 
     if (ext !in SNIFF_GATED_EXTENSIONS) return null
-    val kind = runCatching(sniff).getOrDefault(LogContentKind.OTHER)
+    val kind = runCatching(sniff).onFailure(::rethrowArchiveCancellation).getOrDefault(LogContentKind.OTHER)
     return if (ext == "csv") {
         if (kind == LogContentKind.DLT_VIEWER_CSV) ZipLogCandidateKind.DLT else null
     } else {
@@ -424,11 +435,20 @@ fun extractCandidateResult(
     zipFile: File,
     candidate: ZipLogCandidate,
     maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
+): ParsedLog = extractCandidateResultWithProfiles(zipFile, candidate, maxEntryBytes, emptyList())
+
+/** Extracts through the selected format profile while keeping archive byte limits and source IDs. */
+fun extractCandidateResultWithProfiles(
+    zipFile: File,
+    candidate: ZipLogCandidate,
+    maxEntryBytes: Long,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile? = null,
 ): ParsedLog =
     when (val format = detectArchiveFormat(zipFile)) {
-        ArchiveFormat.Zip -> extractZipCandidate(zipFile, candidate, maxEntryBytes)
-        ArchiveFormat.SevenZ -> extractSevenZCandidate(zipFile, candidate, maxEntryBytes)
-        is ArchiveFormat.Sequential -> extractSequentialCandidate(zipFile, format, candidate, maxEntryBytes)
+        ArchiveFormat.Zip -> extractZipCandidate(zipFile, candidate, maxEntryBytes, profiles, profile)
+        ArchiveFormat.SevenZ -> extractSevenZCandidate(zipFile, candidate, maxEntryBytes, profiles, profile)
+        is ArchiveFormat.Sequential -> extractSequentialCandidate(zipFile, format, candidate, maxEntryBytes, profiles, profile)
         else -> ParsedLog(com.indagium.model.LogFormat.LOGCAT, emptyList())
     }
 
@@ -440,18 +460,30 @@ fun openArchiveCandidateStream(archiveFile: File, candidate: ZipLogCandidate): I
         else -> null
     }
 
-private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): ParsedLog {
+private fun extractZipCandidate(
+    zipFile: File,
+    candidate: ZipLogCandidate,
+    maxEntryBytes: Long,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile?,
+): ParsedLog {
     val nested = splitNestedEntryPath(candidate.entryPath)
     val result = runCatching {
         openCommonsZip(zipFile).use { zf ->
             if (nested != null) {
                 val (outerPath, innerPath) = nested
                 val outerEntry = zf.getEntry(outerPath) ?: return@use emptyParsedLog()
-                extractNestedTarEntry(zf.getInputStream(outerEntry), innerPath, maxEntryBytes)
+                extractNestedTarEntry(
+                    zf.getInputStream(outerEntry), innerPath, maxEntryBytes, profiles, profile,
+                    "${zipFile.absolutePath}!${candidate.entryPath}",
+                )
             } else {
                 val entry = zf.getEntry(candidate.entryPath) ?: return@use emptyParsedLog()
                 BoundedInputStream(zf.getInputStream(entry), maxEntryBytes).use { stream ->
-                    parseLogContent(stream, fileName = candidate.entryPath.substringAfterLast('/'))
+                    parseLogContent(
+                        stream, fileName = candidate.entryPath.substringAfterLast('/'), profile = profile, profiles = profiles,
+                        sourceClockId = "${zipFile.absolutePath}!${candidate.entryPath}",
+                    )
                 }
             }
         }
@@ -460,28 +492,42 @@ private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate, maxEn
     // has already passed the bounded content sniff; silently converting an identifiable v2 frame
     // into an empty LOGCAT tab would hide the parser's actionable unsupported-version error.
     result.exceptionOrNull()?.let { error ->
+        rethrowArchiveCancellation(error)
         if (error is ArchiveBudgetExceededException || candidate.kind == ZipLogCandidateKind.DLT) throw error
     }
     return result.getOrDefault(emptyParsedLog())
 }
 
-private fun extractSevenZCandidate(archiveFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): ParsedLog {
+private fun extractSevenZCandidate(
+    archiveFile: File,
+    candidate: ZipLogCandidate,
+    maxEntryBytes: Long,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile?,
+): ParsedLog {
     val nested = splitNestedEntryPath(candidate.entryPath)
     val result = runCatching {
         sevenZFile(archiveFile).use { sevenZ ->
             if (nested != null) {
                 val (outerPath, innerPath) = nested
                 val outerEntry = sevenZ.entries.firstOrNull { it.name == outerPath } ?: return@use emptyParsedLog()
-                extractNestedTarEntry(sevenZ.getInputStream(outerEntry), innerPath, maxEntryBytes)
+                extractNestedTarEntry(
+                    sevenZ.getInputStream(outerEntry), innerPath, maxEntryBytes, profiles, profile,
+                    "${archiveFile.absolutePath}!${candidate.entryPath}",
+                )
             } else {
                 val entry = sevenZ.entries.firstOrNull { it.name == candidate.entryPath } ?: return@use emptyParsedLog()
                 BoundedInputStream(sevenZ.getInputStream(entry), maxEntryBytes).use { stream ->
-                    parseLogContent(stream, fileName = candidate.entryPath.substringAfterLast('/'))
+                    parseLogContent(
+                        stream, fileName = candidate.entryPath.substringAfterLast('/'), profile = profile, profiles = profiles,
+                        sourceClockId = "${archiveFile.absolutePath}!${candidate.entryPath}",
+                    )
                 }
             }
         }
     }
     result.exceptionOrNull()?.let { error ->
+        rethrowArchiveCancellation(error)
         if (error is ArchiveBudgetExceededException || candidate.kind == ZipLogCandidateKind.DLT) throw error
     }
     return result.getOrDefault(emptyParsedLog())
@@ -492,6 +538,8 @@ private fun extractSequentialCandidate(
     format: ArchiveFormat.Sequential,
     candidate: ZipLogCandidate,
     maxEntryBytes: Long,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile?,
 ): ParsedLog {
     val result = runCatching {
         openSequentialArchive(file, format).use { archive ->
@@ -505,11 +553,15 @@ private fun extractSequentialCandidate(
                 // premature close could truncate away. Not `.use {}`'d separately — the outer
                 // openSequentialArchive(...).use{} below already closes `archive` (and therefore
                 // this wrapper's delegate) once the lambda returns.
-                parseLogContent(BoundedInputStream(archive, maxEntryBytes), fileName = candidate.entryPath.substringAfterLast('/'))
+                parseLogContent(
+                    BoundedInputStream(archive, maxEntryBytes), fileName = candidate.entryPath.substringAfterLast('/'),
+                    profile = profile, profiles = profiles, sourceClockId = "${file.absolutePath}!${candidate.entryPath}",
+                )
             }
         }
     }
     result.exceptionOrNull()?.let { error ->
+        rethrowArchiveCancellation(error)
         if (error is ArchiveBudgetExceededException || candidate.kind == ZipLogCandidateKind.DLT) throw error
     }
     return result.getOrDefault(emptyParsedLog())
@@ -518,7 +570,14 @@ private fun extractSequentialCandidate(
 // Reads forward until [innerPath] is found inside the tar wrapped around [outerStream] (an already
 // -open entry stream from the enclosing zip/7z), then parses just that entry — the same "terminal
 // read, safe to close the shared stream now" reasoning as extractSequentialCandidate above.
-private fun extractNestedTarEntry(outerStream: InputStream, innerPath: String, maxEntryBytes: Long): ParsedLog =
+private fun extractNestedTarEntry(
+    outerStream: InputStream,
+    innerPath: String,
+    maxEntryBytes: Long,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile?,
+    sourceClockId: String,
+): ParsedLog =
     TarArchiveInputStream(outerStream).use { tar ->
         val found = findTarEntry(tar, innerPath)
         if (found == null) {
@@ -527,7 +586,10 @@ private fun extractNestedTarEntry(outerStream: InputStream, innerPath: String, m
             // Not `.use {}`'d separately — see extractSequentialCandidate's identical note on why
             // wrapping `tar` itself (rather than a fresh per-entry stream) is safe for this,
             // the terminal read, and why the outer `.use {}` above is enough cleanup on its own.
-            parseLogContent(BoundedInputStream(tar, maxEntryBytes), fileName = innerPath.substringAfterLast('/'))
+            parseLogContent(
+                BoundedInputStream(tar, maxEntryBytes), fileName = innerPath.substringAfterLast('/'),
+                profile = profile, profiles = profiles, sourceClockId = sourceClockId,
+            )
         }
     }
 
@@ -561,7 +623,7 @@ private fun openZipCandidateStream(zipFile: File, candidate: ZipLogCandidate): I
             }
         }
     }
-}.getOrNull()
+}.onFailure(::rethrowArchiveCancellation).getOrNull()
 
 private fun openSevenZCandidateStream(archiveFile: File, candidate: ZipLogCandidate): InputStream? = runCatching {
     val sevenZ = sevenZFile(archiveFile)
@@ -591,7 +653,7 @@ private fun openSevenZCandidateStream(archiveFile: File, candidate: ZipLogCandid
             }
         }
     }
-}.getOrNull()
+}.onFailure(::rethrowArchiveCancellation).getOrNull()
 
 private fun openSequentialCandidateStream(file: File, format: ArchiveFormat.Sequential, candidate: ZipLogCandidate): InputStream? = runCatching {
     val archive = openSequentialArchive(file, format)
@@ -606,10 +668,21 @@ private fun openSequentialCandidateStream(file: File, format: ArchiveFormat.Sequ
         // is exactly right here.
         archive
     }
-}.getOrNull()
+}.onFailure(::rethrowArchiveCancellation).getOrNull()
+
+private fun rethrowArchiveCancellation(failure: Throwable) {
+    when (failure) {
+        is CancellationException -> throw failure
+        is InterruptedException -> {
+            Thread.currentThread().interrupt()
+            throw CancellationException("Archive log parsing was interrupted.").apply { initCause(failure) }
+        }
+    }
+}
 
 private fun findTarEntry(tar: TarArchiveInputStream, entryName: String): TarArchiveEntry? {
     while (true) {
+        checkParserCancellation()
         val entry = tar.getNextEntry() ?: return null
         if (!entry.isDirectory && entry.name == entryName) return entry
     }
@@ -617,6 +690,7 @@ private fun findTarEntry(tar: TarArchiveInputStream, entryName: String): TarArch
 
 private fun findSequentialEntry(archive: ArchiveInputStream<out ArchiveEntry>, entryPath: String): ArchiveEntry? {
     while (true) {
+        checkParserCancellation()
         val entry = archive.getNextEntry() ?: return null
         if (!entry.isDirectory && entry.name == entryPath) return entry
     }

@@ -17,6 +17,7 @@ import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FormatColorFill
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Schema
@@ -53,9 +54,7 @@ import com.indagium.proofread.EnglishProofreadingService
 import com.indagium.proofread.normalizeProofreadingVocabulary
 import com.indagium.source.SourceCodeView
 import com.indagium.ui.holiday.*
-import com.indagium.utils.ArchiveFormat
-import com.indagium.utils.detectArchiveFormat
-import com.indagium.utils.isUtf16LogFile
+import com.indagium.utils.hasRecordDetails
 import com.indagium.utils.tidMapProcessLabel
 import com.indagium.video.formatVideoTimeShort
 import com.indagium.voice.VoiceInputControllerFactory
@@ -75,7 +74,7 @@ internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recen
 private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
     state.ctx != null || state.tabCtx != null || state.addAnnRequest != null ||
         state.pendingZipPicker != null || state.pendingFolderPicker != null ||
-        state.sourceCodeView != null || state.caseLibraryTabId != null ||
+        state.sourceCodeView != null || state.recordDetailsEntry != null || state.caseLibraryTabId != null ||
         state.customCommandEditorTarget != null || state.sourceFolderInfoEditorTarget != null ||
         state.recentNotesMenuOpen || (state.recentMenuOpen && state.recentFiles.isNotEmpty())
 
@@ -651,22 +650,27 @@ fun App(
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
                         val annotationIds = ctx.annotationCapture?.rows?.map { it.id } ?: selectedIds.sorted().ifEmpty { listOf(ctx.entryId) }
                         val selCount = selectedIds.size
+                        val ctxCapabilities = state.logCapabilitiesForTab(ctxTab)
+                        val foldingStatus = ctxCapabilities[LogCapability.MANUAL_FOLDING]
+                        val canUseManualFolding = foldingStatus?.availability != CapabilityAvailability.UNAVAILABLE
                         // manualCollapseAvailability re-derives a range (and re-scans every existing
                         // manual block) each call — remember it per menu-open so unrelated
                         // recompositions of this scope (e.g. AI sidebar state ticking) don't re-pay
                         // that cost. Keyed on ctxTab + entryId + selectedIds so a genuine change to
                         // any of those (new manual block, selection edited from another panel while
                         // the menu is open) still recomputes.
-                        val canCollapseToStart = remember(ctxTab, ctx.entryId) {
-                            manualCollapseAvailability(ctxTab, ctx.entryId, ManualCollapseDirection.TO_START) ==
+                        val canCollapseToStart = remember(ctxTab, ctx.entryId, canUseManualFolding) {
+                            canUseManualFolding &&
+                                manualCollapseAvailability(ctxTab, ctx.entryId, ManualCollapseDirection.TO_START) ==
                                 ManualCollapseAvailability.AVAILABLE
                         }
-                        val canCollapseToEnd = remember(ctxTab, ctx.entryId) {
-                            manualCollapseAvailability(ctxTab, ctx.entryId, ManualCollapseDirection.TO_END) ==
+                        val canCollapseToEnd = remember(ctxTab, ctx.entryId, canUseManualFolding) {
+                            canUseManualFolding &&
+                                manualCollapseAvailability(ctxTab, ctx.entryId, ManualCollapseDirection.TO_END) ==
                                 ManualCollapseAvailability.AVAILABLE
                         }
-                        val canCollapseSelection = remember(ctxTab, ctx.entryId, selectedIds) {
-                            selectedIds.size > 1 &&
+                        val canCollapseSelection = remember(ctxTab, ctx.entryId, selectedIds, canUseManualFolding) {
+                            canUseManualFolding && selectedIds.size > 1 &&
                                 manualCollapseAvailability(
                                     ctxTab,
                                     selectedIds.minOrNull() ?: ctx.entryId,
@@ -682,13 +686,17 @@ fun App(
                         // exactly the same "is a map active, does it match this row" facts.
                         val activeTidMap = ctxTab.tidMap
                         val tidMapTargetHere = TidMapTarget(entry.pid, entry.tid)
+                        val processMapStatus = ctxCapabilities[LogCapability.PROCESS_MAP]
+                        val canUseProcessMap = processMapStatus?.availability != CapabilityAvailability.UNAVAILABLE
+                        val processNamesStatus = ctxCapabilities[LogCapability.PROCESS_NAMES]
+                        val canUseProcessNames = processNamesStatus?.availability != CapabilityAvailability.UNAVAILABLE
                         // Same availability rules the merged "Process" block itself computes below
                         // (run{} block, before the CtxMenuEntry.ProcessActions add()) — duplicated
                         // here, like every other conditional block's height cost, so the height
                         // estimate and the entries agree on exactly the same facts.
-                        val hasShowMapAction = entry.pid > 0 && activeTidMap?.target?.pid != tidMapTargetHere.pid
-                        val hasHideMapAction = activeTidMap != null
-                        val hasNameAction = ctxTab.analysis.processNames[entry.pid] != null
+                        val hasShowMapAction = canUseProcessMap && entry.pid > 0 && activeTidMap?.target?.pid != tidMapTargetHere.pid
+                        val hasHideMapAction = canUseProcessMap && activeTidMap != null
+                        val hasNameAction = canUseProcessNames && ctxTab.analysis.processNames[entry.pid] != null
                         // Estimate full menu height from items that will actually render:
                         //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
                         //   + labeled row-block(64) [sequence actions] + 1 item(32) [Add as sequence]
@@ -722,7 +730,8 @@ fun App(
                             (if (hasProcessSecondRow) 28 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
-                            (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
+                            (if (entry.hasRecordDetails()) 32 else 0) +
+                            (if (state.settings.sourceFolders.isNotEmpty()) 76 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
@@ -734,7 +743,9 @@ fun App(
                         // Resolved once per menu open (cheap — indexed lookup) rather than per
                         // item, so both the enabled/disabled source actions below and their
                         // onClick agree on the same match list.
-                        val srcMatches = if (state.settings.sourceFolders.isEmpty()) {
+                        val sourceLookupStatus = ctxCapabilities[LogCapability.SOURCE_LOOKUP]
+                        val canUseSourceLookup = sourceLookupStatus?.availability != CapabilityAvailability.UNAVAILABLE
+                        val srcMatches = if (state.settings.sourceFolders.isEmpty() || !canUseSourceLookup) {
                             emptyList()
                         } else {
                             state.resolveForLine(ctx.tabId, ctx.entryId)
@@ -843,6 +854,15 @@ fun App(
                                         state.seq3Sessions.begin(ctx.tabId, selectedIds.toSet())
                                     },
                                 )
+                                // Only for rows that carry parsed fields or a raw record (profile formats), never Logcat.
+                                if (entry.hasRecordDetails()) {
+                                    add(
+                                        CtxMenuEntry.Action(Icons.Outlined.Info, "Record details…") {
+                                            state.ctx = null
+                                            state.recordDetailsEntry = entry
+                                        },
+                                    )
+                                }
                                 add(CtxMenuEntry.Divider)
                             }
                             // Collapse actions — own block. Every entry is conditional on
@@ -896,11 +916,12 @@ fun App(
                             // not render" rule the pre-merge Threads block already followed for a
                             // pid-less row with no map active.
                             run {
-                                val onShowMap = (activeTidMap?.target?.pid != tidMapTargetHere.pid)
+                                val onShowMap = (canUseProcessMap && activeTidMap?.target?.pid != tidMapTargetHere.pid)
                                     .takeIf { it && entry.pid > 0 }
                                     ?.let { { state.toggleTidMap(ctx.tabId, entry.pid, entry.tid); state.ctx = null } }
-                                val onHideMap = activeTidMap?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
-                                val processName = ctxTab.analysis.processNames[entry.pid]
+                                val onHideMap = activeTidMap?.takeIf { canUseProcessMap }
+                                    ?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
+                                val processName = ctxTab.analysis.processNames[entry.pid].takeIf { canUseProcessNames }
                                 val currentlyShown = when (ctxTab.processNameMode) {
                                     ProcessNameMode.OFF -> false
                                     ProcessNameMode.ALL -> true
@@ -947,23 +968,44 @@ fun App(
                             run {
                                 val attachedVideo = ctxTab.attachedVideo
                                 if (attachedVideo != null) {
-                                    val videoController = state.videoController(ctxTab.id)
-                                    val mappedMs = state.logIdToVideoMs(ctxTab, entry.id)
-                                    val hasValidMappedPosition = mappedMs?.let { state.isVideoPositionValid(ctxTab, it) } == true
-                                    add(
-                                        CtxMenuEntry.VideoActions(
-                                            linkLabel = "Link to ${formatVideoTimeShort(videoController?.positionMs ?: 0L)}",
-                                            onLink = {
-                                                videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
-                                                state.ctx = null
-                                            },
-                                            showEnabled = hasValidMappedPosition,
-                                            onShow = {
-                                                mappedMs?.takeIf { state.isVideoPositionValid(ctxTab, it) }?.let { ms -> videoController?.seek(ms) }
-                                                state.ctx = null
-                                            },
-                                        ),
-                                    )
+                                    val videoStatus = ctxCapabilities[LogCapability.VIDEO_LINKING]
+                                    if (videoStatus?.availability == CapabilityAvailability.UNAVAILABLE) {
+                                        add(
+                                            CtxMenuEntry.Action(
+                                                Icons.Outlined.PlayArrow,
+                                                "Video linking unavailable: ${videoStatus.reason}",
+                                                enabled = false,
+                                            ) {},
+                                        )
+                                    } else {
+                                        val videoController = state.videoController(ctxTab.id)
+                                        val mappedMs = state.logIdToVideoMs(ctxTab, entry.id)
+                                        val hasValidMappedPosition = mappedMs?.let { state.isVideoPositionValid(ctxTab, it) } == true
+                                        if (hasValidMappedPosition) {
+                                            add(
+                                                CtxMenuEntry.VideoActions(
+                                                    linkLabel = "Link to ${formatVideoTimeShort(videoController?.positionMs ?: 0L)}",
+                                                    onLink = {
+                                                        videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
+                                                        state.ctx = null
+                                                    },
+                                                    showEnabled = true,
+                                                    onShow = {
+                                                        mappedMs?.let { ms -> videoController?.seek(ms) }
+                                                        state.ctx = null
+                                                    },
+                                                ),
+                                            )
+                                        } else {
+                                            add(
+                                                CtxMenuEntry.Action(
+                                                    Icons.Outlined.PlayArrow,
+                                                    "No comparable timestamp is available for this row.",
+                                                    enabled = false,
+                                                ) {},
+                                            )
+                                        }
+                                    }
                                     add(CtxMenuEntry.Divider)
                                 }
                             }
@@ -971,27 +1013,50 @@ fun App(
                             // particular line has no resolved call site, the actions still render
                             // disabled rather than disappearing.
                             if (state.settings.sourceFolders.isNotEmpty()) {
-                                add(
-                                    CtxMenuEntry.SourceActions(
-                                        // Both actions resolve a single line (ctx.entryId) regardless of
-                                        // selection — with multiple lines selected there's no single call
-                                        // site to show/open, so disable rather than silently acting on
-                                        // just the right-clicked row.
-                                        enabled = srcMatches.isNotEmpty() && selCount <= 1,
-                                        onShowCode = {
-                                            if (srcMatches.isNotEmpty()) {
-                                                state.sourceCodeView = SourceCodeView(srcMatches)
-                                                state.ctx = null
-                                            }
-                                        },
-                                        onOpenFile = {
-                                            srcMatches.firstOrNull()?.let { match ->
-                                                state.openInEditor(match.site.filePath, match.site.callLine)
-                                                state.ctx = null
-                                            }
-                                        },
-                                    ),
-                                )
+                                if (!canUseSourceLookup) {
+                                    add(
+                                        CtxMenuEntry.Action(
+                                            Icons.Outlined.Visibility,
+                                            "Source lookup unavailable: ${sourceLookupStatus?.reason ?: "No source resolver is configured."}",
+                                            enabled = false,
+                                        ) {},
+                                    )
+                                } else {
+                                    val sourceActionEnabled = srcMatches.isNotEmpty() && selCount <= 1
+                                    add(
+                                        CtxMenuEntry.SourceActions(
+                                            // Both actions resolve a single line (ctx.entryId) regardless of
+                                            // selection — with multiple lines selected there's no single call
+                                            // site to show/open, so disable rather than silently acting on
+                                            // just the right-clicked row.
+                                            enabled = sourceActionEnabled,
+                                            onShowCode = {
+                                                if (sourceActionEnabled) {
+                                                    state.sourceCodeView = SourceCodeView(srcMatches)
+                                                    state.ctx = null
+                                                }
+                                            },
+                                            onOpenFile = {
+                                                if (sourceActionEnabled) {
+                                                    srcMatches.firstOrNull()?.let { match ->
+                                                        state.openInEditor(match.site.filePath, match.site.callLine)
+                                                        state.ctx = null
+                                                    }
+                                                }
+                                            },
+                                        ),
+                                    )
+                                    if (!sourceActionEnabled) {
+                                        add(
+                                            CtxMenuEntry.Action(
+                                                Icons.Outlined.Visibility,
+                                                if (srcMatches.isEmpty()) "No indexed source match for this row."
+                                                else "Select one row to use source lookup.",
+                                                enabled = false,
+                                            ) {},
+                                        )
+                                    }
+                                }
                             }
                         }
                         val selectableEntries = menuEntries.filter {
@@ -1215,28 +1280,20 @@ fun App(
                             onClick = { state.tabCtx = null },
                         ),
                     ) {
-                        // Only a tab backed by a real, currently-existing file can be tailed —
-                        // not a zip-extracted tab (sourcePath is a "zip!entry" pseudo-path, no
-                        // real file to watch), a merged tab (sourcePath is null), or a bare
-                        // compressed log (sourcePath is real, but TailCoordinator.startTailing
-                        // refuses it too — see its doc comment for why appending raw gzip bytes
-                        // makes no sense). Mirrors that same guard so the menu item doesn't even
-                        // offer an action startTailing would silently no-op on. DLT additionally
-                        // uses framed binary records, so its authoritative format must disable
-                        // the menu action even when the source itself is a real plain file.
-                        // A capture tab's sourcePath IS a real, currently-existing plain file, so
-                        // it would otherwise pass every check above — but its tailing is driven by
-                        // the recording itself, not the user. Offering "Stop Live Watching" here
-                        // would freeze the live view while the recorder kept appending underneath
-                        // it, silently desyncing the view from what's actually being recorded.
-                        val canTail = remember(ttab.sourcePath, ttab.logFormat, ttab.captureSessionId) {
-                            val p = ttab.sourcePath
-                            ttab.logFormat != LogFormat.DLT && ttab.captureSessionId == null && p != null && '!' !in p &&
-                                File(p).isFile && detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
-                        }
-                        val canSplit = remember(ttab.sourcePath) {
-                            ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
-                        }
+                        // Keep this action for plain-file source tabs, including profiles and
+                        // encodings that cannot tail; AppState supplies the current capability and
+                        // reason. Archive entries and merged tabs have no watchable source path.
+                        // Capture tabs are omitted because their recording owns the live updates.
+                        val tabCapabilities = state.logCapabilitiesForTab(ttab)
+                        val tailStatus = tabCapabilities[LogCapability.INCREMENTAL_TAIL]
+                        val tailSourcePath = ttab.sourcePath
+                        val hasPlainFileSource = ttab.captureSessionId == null && tailSourcePath != null && '!' !in tailSourcePath
+                        val showTailAction = ttab.captureSessionId == null && (ttab.tailing || hasPlainFileSource)
+                        val canUseTail = ttab.tailing || tailStatus?.availability != CapabilityAvailability.UNAVAILABLE
+                        val splitStatus = tabCapabilities[LogCapability.RECORD_SPLIT]
+                        val hasSplitSource = ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
+                        val showSplitAction = ttab.sourcePath != null && hasSplitSource
+                        val canUseSplit = splitStatus?.availability != CapabilityAvailability.UNAVAILABLE
                         val groupRef = TabRef.Log(ttab.id)
                         val hasGroupActions = !ttab.isCaptureLauncher
                         val groupActionHeight = if (!hasGroupActions) {
@@ -1245,7 +1302,9 @@ fun App(
                             42 + (if (state.tabGroups.isNotEmpty()) 42 else 0) + (if (state.tabGroupOf(groupRef) != null) 42 else 0)
                         }
                         val menuWidth = 200.dp
-                        val estimatedMenuHeight = (268 + groupActionHeight + (if (canTail) 44 else 0) + (if (canSplit) 44 else 0)).dp
+                        val estimatedMenuHeight = (268 + groupActionHeight +
+                            (if (showTailAction) 44 + (if (canUseTail) 0 else 24) else 0) +
+                            (if (showSplitAction) 44 + (if (canUseSplit) 0 else 24) else 0)).dp
                         val x = tctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = tctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
                         Column(
@@ -1279,25 +1338,52 @@ fun App(
                                 },
                             )
                             CtxDivider()
-                            if (canTail) {
+                            if (showTailAction) {
                                 CtxItem(
                                     icon = Icons.Outlined.PlayArrow,
                                     label = if (ttab.tailing) "Stop Live Watching" else "Start Live Watching",
+                                    enabled = canUseTail,
                                     onClick = {
-                                        if (ttab.tailing) state.stopTailing(ttab.id) else state.startTailing(ttab.id)
-                                        state.tabCtx = null
+                                        if (ttab.tailing) {
+                                            state.stopTailing(ttab.id)
+                                            state.tabCtx = null
+                                        } else if (canUseTail) {
+                                            state.startTailing(ttab.id)
+                                            state.tabCtx = null
+                                        }
                                     },
                                 )
+                                if (!canUseTail) {
+                                    AppText(
+                                        tailStatus?.reason ?: "This source cannot be tailed.",
+                                        color = tc.ts,
+                                        fontSize = 9.sp,
+                                        maxLines = 2,
+                                        modifier = Modifier.padding(start = 36.dp, end = 8.dp, bottom = 3.dp),
+                                    )
+                                }
                             }
-                            if (canSplit) {
+                            if (showSplitAction) {
                                 CtxItem(
                                     icon = Icons.Outlined.Layers,
                                     label = "Split…",
+                                    enabled = canUseSplit,
                                     onClick = {
-                                        state.requestSplitForTab(ttab.id)
-                                        state.tabCtx = null
+                                        if (canUseSplit) {
+                                            state.requestSplitForTab(ttab.id)
+                                            state.tabCtx = null
+                                        }
                                     },
                                 )
+                                if (!canUseSplit) {
+                                    AppText(
+                                        splitStatus?.reason ?: "This profile cannot preserve split record boundaries.",
+                                        color = tc.ts,
+                                        fontSize = 9.sp,
+                                        maxLines = 2,
+                                        modifier = Modifier.padding(start = 36.dp, end = 8.dp, bottom = 3.dp),
+                                    )
+                                }
                             }
                             CtxItem(
                                 icon = Icons.AutoMirrored.Outlined.CallMerge,
@@ -2696,6 +2782,15 @@ fun App(
             // ── Source code popup ─────────────────────────────────────
             state.sourceCodeView?.let { view ->
                 SourceCodeDialog(state, view, onDismiss = { state.sourceCodeView = null })
+            }
+
+            state.recordDetailsEntry?.let { recordEntry ->
+                LogRecordDetailsDialog(
+                    entry = recordEntry,
+                    onCopy = state::copyToClipboard,
+                    onDismiss = { state.recordDetailsEntry = null },
+                    onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
+                )
             }
 
             if (state.cacheClearConfirmOpen) {

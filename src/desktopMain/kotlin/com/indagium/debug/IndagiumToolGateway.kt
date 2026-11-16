@@ -93,6 +93,7 @@ internal enum class IndagiumToolActionPolicy { AUTOMATIC, CONFIRMATION_REQUIRED 
 private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     "open_log_file", "split_log_file", "close_tab", "export_analysis",
     "export_filtered_log", "save_annotations", "load_annotations", "merge_tabs", "start_tailing", "stop_tailing",
+    "import_log_format_profiles", "export_log_format_profiles", "reparse_tab_with_log_format_profile",
     "clear_all_notes",
     // reindex_sources kicks off a heavy background disk scan; save_filter_preset persists a preset
     // (and writes the filter backup to disk). set_highlighters / add_manual_collapse / add_sequence

@@ -306,9 +306,11 @@ class AutosaveSchedulerTest {
             base.copy(retraceMappingPath = "/tmp/mapping.txt"),
             base.copy(captureArchivePath = "/tmp/capture.zip"),
             base.copy(errorHighlightStyle = ErrorHighlightStyle(enabled = false)),
+            base.copy(logFormatProfileId = "plain-text"),
+            base.copy(logFormatProfileSnapshot = "{}"),
         )
 
-        assertEquals(17, base.persistedSnapshot().size)
+        assertEquals(21, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

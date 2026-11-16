@@ -189,6 +189,30 @@ The **New** tab is a home screen for opening files and returning to work. Its **
 can be filtered and switched between a grid and list layout; quick filters help narrow the list. The
 layout preference is saved. The toolbar's **▾** menu remains a compact list of the last 30 files.
 
+### Log formats
+
+Indagium reads Android logcat and automotive DLT, and also these text formats: JSON Lines (including Pino, Docker
+json-file and systemd journal exports), syslog (RFC 5424 and RFC 3164), logfmt / Go slog text, Kubernetes CRI
+container logs, Apache/Nginx access logs, `dmesg`, CSV/TSV and plain text. The format is detected from the content.
+Text that matches none of them opens as before, one row per line.
+
+- **Format details** on the tab shows which format was used, how many records parsed, and which features work for
+  this file (for example, a log with no process ids has no thread map). Pick another format there and
+  **Reparse as new tab**; your original tab, its notes and folds stay as they are.
+- If a file matches several formats, a strip above the log asks which one to use.
+- **Settings › Log formats** is where you make your own. For a plain text log, press **New profile**, paste one
+  typical line under **Set up from a sample line**, and say what each column is (level, message, timestamp, tag,
+  process id, thread id, an extra field, or skip). Choose Message for every word of the text; lines with more or fewer
+  words still match. **Use these columns** writes the parsing rule for you, **Preview** shows the result, **Save**
+  keeps it. Level names other than the usual ones (TRACE, DEBUG, INFO, WARN, ERROR, FATAL) go under **Severity
+  mapping**; an unusual date format goes under **Timestamp pattern**. For JSON Lines or CSV, choose that engine and
+  type the key or column name next to each field. The record regex stays editable for unusual layouts. Turn on **Always open these extensions with this format** to tie it to a file
+  extension. Formats can be exported and imported as JSON to share with a team.
+
+Some features depend on what the format contains: level filtering needs a level, time deltas and merging need
+comparable timestamps, crash and ANR detection is for Android logs. A feature that cannot work for a file is hidden
+or shown disabled with the reason.
+
 ### Bug-report archives
 
 Drop a `.zip` or `.7z` Android bug report and Indagium scans it for log candidates — logcat dumps, ANR

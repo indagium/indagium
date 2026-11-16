@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ProcessNameMode
 import com.indagium.utils.computeProcessNames
 import com.indagium.utils.resolveProcessDisplayName
@@ -83,6 +84,23 @@ class ProcessNamesTest {
         val names = computeProcessNames(entries)
 
         assertEquals(emptyMap(), names)
+    }
+
+    @Test
+    fun mappedProfileProcessNameResolvesThroughTheSameDisplayPath() {
+        val entry = LogEntry(
+            1, "2024-02-03T04:05:06Z", LogLevel.I, "worker", "started", pid = 77,
+            recordMetadata = LogRecordMetadata(
+                profileFields = mapOf("process_name" to "com.example.worker"),
+                processIdentity = "77",
+                usesProfilePresentation = true,
+            ),
+        )
+
+        val names = computeProcessNames(listOf(entry))
+
+        assertEquals(mapOf(77 to "com.example.worker"), names)
+        assertEquals("com.example.worker", resolveProcessDisplayName(ProcessNameMode.ALL, names, emptySet(), 77))
     }
 
     @Test

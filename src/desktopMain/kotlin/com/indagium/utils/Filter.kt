@@ -115,7 +115,7 @@ private fun passesExclusions(
     negativeRules: List<PlannedRule>,
     regexContext: RegexEvaluationContext,
 ): Boolean {
-    if (entry.level !in filter.levels) return false
+    if (entry.severityKnown && entry.level !in filter.levels) return false
     // Tag/package exclusion is a Tags-mode-flavored concept — kept out of Regex/Keyword mode so
     // it can't silently narrow results there, matching the same independence as message rules.
     if (filter.mode == FilterMode.TAGS) {
@@ -123,7 +123,7 @@ private fun passesExclusions(
         if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
     }
     if (filter.excludeKw.isNotBlank() &&
-        tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex, regexContext = regexContext)) return false
+        entryContainsKeyword(entry, filter.excludeKw, filter.excludeKwRegex, regexContext)) return false
     return negativeRules.none { planned -> ruleScopeMatches(entry, planned.rule) && matchesRule(entry, planned, regexContext) }
 }
 
@@ -169,15 +169,21 @@ internal fun resolvePidTidTokens(
             raw += token
         } else if (token.startsWith(TAG_PID_TOKEN_PREFIX) && token.length > TAG_PID_TOKEN_PREFIX.length) {
             tagPids[token.substring(TAG_PID_TOKEN_PREFIX.length)]?.let { namedPids += it }
-        } else if (processNames.isNotEmpty()) {
-            for ((pid, name) in processNames) if (name == token) namedPids += pid
+        } else if (token.startsWith(TAG_PID_TOKEN_PREFIX)) {
+            // A bare "tag:" names no tag; it is not a process identity either.
+            continue
+        } else {
+            raw += token
+            if (processNames.isNotEmpty()) for ((pid, name) in processNames) if (name == token) namedPids += pid
         }
     }
     return PidTidTokens(raw, namedPids)
 }
 
 internal fun matchesPidTidTokens(entry: LogEntry, tokens: PidTidTokens): Boolean =
-    tokens.rawTokens.any { it == entry.pid.toString() || it == entry.tid.toString() } || entry.pid in tokens.namedPids
+    tokens.rawTokens.any {
+        it == entry.pid.toString() || it == entry.tid.toString() || it == entry.processIdentity || it == entry.threadIdentity
+    } || entry.pid in tokens.namedPids
 
 private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
     when (filter.mode) {
@@ -204,11 +210,24 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexConte
                 true
             } else if (filter.kwRegex) {
                 containsPattern(visibleLogLineText(entry), filter.kwText, regex = true, regexContext = regexContext)
+            } else if (entry.recordMetadata?.usesProfilePresentation == true) {
+                containsPattern(visibleLogLineText(entry), filter.kwText, regex = false, regexContext = regexContext)
             } else {
                 tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex, regexContext = regexContext)
             }
         }
     }
+
+private fun entryContainsKeyword(
+    entry: LogEntry,
+    pattern: String,
+    isRegex: Boolean,
+    regexContext: RegexEvaluationContext,
+): Boolean = if (entry.recordMetadata?.usesProfilePresentation == true) {
+    containsPattern(visibleLogLineText(entry), pattern, regex = isRegex, regexContext = regexContext)
+} else {
+    tagMsgContainsPattern(entry.tag, entry.msg, pattern, isRegex, regexContext = regexContext)
+}
 
 // internal (not private): AppState's tag-prefix/specific-class conflict detector (Wave 2.2) needs
 // the exact same "does this tag fall under this prefix" rule passesTagOrKeywordFilter uses above,

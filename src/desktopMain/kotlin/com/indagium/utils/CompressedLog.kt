@@ -15,6 +15,9 @@ data class CompressedLogParse(
     val entries: List<LogEntry>,
     val uncompressedBytes: Long,
     val format: com.indagium.model.LogFormat = com.indagium.model.LogFormat.LOGCAT,
+    val profile: com.indagium.model.LogFormatProfile? = null,
+    val diagnostics: List<String> = emptyList(),
+    val sourceClockId: String? = null,
 )
 
 // Counts bytes as they pass through, purely for CompressedLogParse.uncompressedBytes — unlike
@@ -50,12 +53,28 @@ fun openCompressedLogStream(file: File, compressorName: String): InputStream =
 // a bare compressed log deserves the identical zip-bomb protection an archive entry already has,
 // not a weaker one just because it arrived without a container around it.
 fun parseCompressedLog(file: File, compressorName: String, maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): CompressedLogParse {
+    return parseCompressedLogWithProfile(file, compressorName, maxBytes, null, emptyList())
+}
+
+fun parseCompressedLogWithProfile(
+    file: File,
+    compressorName: String,
+    maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
+    profile: com.indagium.model.LogFormatProfile? = null,
+    profiles: List<com.indagium.model.LogFormatProfile> = emptyList(),
+): CompressedLogParse {
     val bounded = BoundedInputStream(openCompressedLogStream(file, compressorName), maxBytes)
     val counting = CountingInputStream(bounded)
     // file.nameWithoutExtension strips only the compressor suffix ("capture.dlt.gz" -> "capture.dlt"),
     // recovering the logical filename the classifier's DLT-v2 name gate cares about.
-    val parsed = parseLogContent(counting, fileName = file.nameWithoutExtension)
-    return CompressedLogParse(parsed.entries, counting.count, parsed.format)
+    val parsed = parseLogContent(
+        counting,
+        fileName = file.nameWithoutExtension,
+        profile = profile,
+        profiles = profiles,
+        sourceClockId = file.absolutePath,
+    )
+    return CompressedLogParse(parsed.entries, counting.count, parsed.format, parsed.profile, parsed.diagnostics, parsed.sourceClockId)
 }
 
 /** Parsed compressed-file result used by AppState so content detection is never inferred from a name. */
@@ -63,12 +82,35 @@ fun parseCompressedLogResult(
     file: File,
     compressorName: String,
     maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
-): ParsedLog = parseCompressedLog(file, compressorName, maxBytes).let { ParsedLog(it.format, it.entries) }
+): ParsedLog = parseCompressedLog(file, compressorName, maxBytes).let {
+    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId)
+}
+
+fun parseCompressedLogResultWithProfiles(
+    file: File,
+    compressorName: String,
+    profiles: List<com.indagium.model.LogFormatProfile>,
+    profile: com.indagium.model.LogFormatProfile? = null,
+    maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
+): ParsedLog = parseCompressedLogWithProfile(file, compressorName, maxBytes, profile, profiles).let {
+    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId)
+}
 
 /** Content-aware file parser. The List-returning [parseLogFile] remains the compatibility seam. */
 fun parseLogFileResult(file: File): ParsedLog = when (val format = detectArchiveFormat(file)) {
     is ArchiveFormat.CompressedFile -> parseCompressedLogResult(file, format.compressorName)
-    else -> file.inputStream().use { parseLogContent(it, fileName = file.name) }
+    else -> file.inputStream().use { parseLogContent(it, fileName = file.name, sourceClockId = file.absolutePath) }
+}
+
+fun parseLogFileResultWithProfiles(
+    file: File,
+    profiles: List<com.indagium.model.LogFormatProfile>,
+    profile: com.indagium.model.LogFormatProfile? = null,
+): ParsedLog = when (val format = detectArchiveFormat(file)) {
+    is ArchiveFormat.CompressedFile -> parseCompressedLogResultWithProfiles(file, format.compressorName, profiles, profile)
+    else -> file.inputStream().use {
+        parseLogContent(it, fileName = file.name, profile = profile, profiles = profiles, sourceClockId = file.absolutePath)
+    }
 }
 
 // The one hook that makes bare compressed logs "just work" everywhere a plain file already did:

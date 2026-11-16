@@ -7,6 +7,7 @@ import java.time.format.DateTimeFormatter
 data class MergeSourceFile(val tag: String, val entries: List<LogEntry>)
 
 private val TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+private const val NANOS_PER_MILLISECOND = 1_000_000L
 
 // LogEntry.ts never carries a date: LogParser strips the MM-DD prefix during parsing for
 // threadtime/time formats (see LogParserTest — ts is asserted as bare "HH:mm:ss.SSS"), and
@@ -29,13 +30,13 @@ fun parseLogTimeOfDay(ts: String): LocalTime? = runCatching { LocalTime.parse(ts
 // before any known-good timestamp in its source sorts to the front of the whole merge — rare in
 // practice, since real logcat buffers almost always start with a parseable line.
 fun mergeLogs(sources: List<MergeSourceFile>): List<LogEntry> {
-    data class Timed(val entry: LogEntry, val tag: String, val time: LocalTime?)
+    data class Timed(val entry: LogEntry, val tag: String, val time: Long?)
 
     val timed = mutableListOf<Timed>()
     sources.forEach { source ->
-        var lastKnown: LocalTime? = null
+        var lastKnown: Long? = null
         source.entries.forEach { entry ->
-            val parsed = parseLogTimeOfDay(entry.ts)
+            val parsed = mergeTimeValue(entry, source.tag)
             if (parsed != null) lastKnown = parsed
             timed += Timed(entry, source.tag, parsed ?: lastKnown)
         }
@@ -47,4 +48,16 @@ fun mergeLogs(sources: List<MergeSourceFile>): List<LogEntry> {
     val ordered = timed.sortedWith(compareBy(nullsFirst()) { it.time })
 
     return ordered.mapIndexed { idx, t -> t.entry.copy(id = idx + 1, sourceTag = t.tag) }
+}
+
+private fun mergeTimeValue(entry: LogEntry, sourceClockId: String?): Long? {
+    val parsed = entry.parsedTime ?: canonicalDltParsedTime(entry, sourceClockId)
+    val profileClockSemantics = parsed != null || entry.rawRecord != null ||
+        entry.dltTimestampSource in setOf("storage", "relative", "viewer") ||
+        (entry.recordMetadata?.usesProfilePresentation == true && entry.recordMetadata.usesLegacyClockSemantics.not())
+    if (profileClockSemantics) {
+        return parsed?.epochMillis ?: parsed?.localWallMillis ?: parsed?.relativeMillis
+            ?: parsed?.localTime?.let(::parseLogTimeOfDay)?.toNanoOfDay()?.div(NANOS_PER_MILLISECOND)
+    }
+    return parseLogTimeOfDay(entry.ts)?.toNanoOfDay()?.div(NANOS_PER_MILLISECOND)
 }

@@ -8,6 +8,7 @@ import com.indagium.model.MessageCompositionState
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.FileTailer
 import com.indagium.utils.FilterPlan
+import com.indagium.utils.IncrementalProfileParser
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.appendLogEntries
 import com.indagium.utils.computeMessageTemplates
@@ -19,6 +20,7 @@ import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.mergeMessageTemplates
 import com.indagium.utils.mergeTagPids
 import com.indagium.utils.parseLogcatLines
+import com.indagium.utils.parseProfileLines
 import com.indagium.utils.passesFilter
 import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +28,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -48,6 +51,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // resumeTailing restarts that same instance, so the file's growth while paused is read exactly
     // once, with no duplicate and no gap. A tab is in at most one of activeTails/pausedTails.
     private val pausedTails = ConcurrentHashMap<String, FileTailer>()
+
+    // One parser per tailed tab whose records can span lines (CSV, CRI, multiline regex) or that has any
+    // profile other than Logcat. It lives as long as the tab's tail, pause and resume included, so a
+    // record that straddles two batches, or a pause, is still one row. It is only touched under
+    // AppState.stateLock (appendTailedLines). Logcat tabs have none and keep their own parse.
+    private val parsers = ConcurrentHashMap<String, IncrementalProfileParser>()
 
     // Ownership of a tab's tailer is CLAIMED, never peeked: every transition (start, pause, resume, drain)
     // takes its decision under [ownership], and a claim moves the tailer out of the map it was in
@@ -90,10 +99,16 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // ownership lock below.
         if (isTailOwned(tabId)) return
         val t = appState.tab(tabId) ?: return
-        // DLT is a framed binary stream; FileTailer intentionally emits UTF-8 lines and cannot
-        // preserve partial frames across polls. Until a framed incremental tailer exists, refuse
-        // the action rather than appending corrupted RAW rows.
-        if (t.logFormat == com.indagium.model.LogFormat.DLT) return
+        val profile = appState.pinnedLogFormatProfile(tabId)
+        val engine = profile?.engine
+        // DLT is framed binary; FileTailer supplies text lines only. Every text profile can tail: the ones
+        // whose records span lines keep their state in an IncrementalProfileParser.
+        if (isFramedBinary(t.logFormat, profile)) return
+        // Logcat tabs keep the file checks below as their only gate: a live capture tails through
+        // this same call, and the capability summary reports capture tabs as not user-tailable.
+        if (profile != null && engine != com.indagium.model.LogFormatEngine.LOGCAT &&
+            appState.requireLogCapability(tabId, com.indagium.model.LogCapability.INCREMENTAL_TAIL).isFailure
+        ) return
         val path = t.sourcePath ?: return
         val file = File(path)
         if (!file.isFile) return
@@ -106,6 +121,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // into NULs and split lines at the wrong byte boundary, so static import supports it but
         // live watching remains unavailable until a streaming decoder is designed for it.
         if (isUtf16LogFile(file)) return
+        // A CSV needs its header row again (line 1 is in no later batch); without it there is no tail.
+        val parser = if (profile != null && engine != com.indagium.model.LogFormatEngine.LOGCAT) {
+            IncrementalProfileParser.forFile(profile, t.sourcePath, file) ?: return
+        } else {
+            null
+        }
         val tailer = FileTailer(
             file,
             onNewLines = { newLines -> appendTailedLines(tabId, newLines) },
@@ -114,6 +135,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         )
         synchronized(ownership) {
             if (isTailOwned(tabId)) return
+            if (parser != null) parsers[tabId] = parser
             val job = tailer.start(scope)
             activeTails[tabId] = ActiveTail(tailer, job)
             appState.upTab(tabId) { it.copy(tailing = true) }
@@ -137,10 +159,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // A paused tab (see pauseTailing) is left paused: it is already not tailing, and its saved
     // tailer and truncation marker are what Resume and the capture strip rely on.
     fun stopTailing(tabId: String) {
-        activeTails.remove(tabId)?.job?.cancel()
+        val activeJob = activeTails.remove(tabId)?.job
+        activeJob?.cancel()
         // A pause still joining this tailer loses its claim and gives up.
-        pausing.remove(tabId)?.job?.cancel()
+        val pausingJob = pausing.remove(tabId)?.job
+        pausingJob?.cancel()
         appState.upTab(tabId) { it.copy(tailing = false) }
+        // A tab that was not tailing (already stopped, or paused with its parser kept) has nothing to finish.
+        (activeJob ?: pausingJob)?.let { finishParserAfter(tabId, it) }
         AppLogger.info("tail", "Stopped tailing tab")
         // Content-triggered autosave is suppressed while any tab is actively tailing (see the
         // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
@@ -262,6 +288,8 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         }
         if (paused != null) {
             AppLogger.info("tail", "Stopped a paused tab without draining its backlog")
+            // The record it still holds belongs to the backlog that memory pressure kept out.
+            parsers.remove(tabId)
             stopTailing(tabId)
             return
         }
@@ -269,6 +297,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             if (active != null) {
                 runBlocking { active.job.cancelAndJoin() }
                 active.tailer.drainToEndOfFile(includeTrailingPartialLine) { batch -> appendTailedLines(tabId, batch) }
+                parsers[tabId]?.let { appendTailedLines(tabId, emptyList(), flushing = it) }
             }
             stopTailing(tabId)
         } finally {
@@ -282,6 +311,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         activeTails.remove(tabId)?.job?.cancel()
         pausing.remove(tabId)?.job?.cancel()
         pausedTails.remove(tabId)
+        parsers.remove(tabId)
         analysisDebouncer.cancel(tabId)
     }
 
@@ -289,7 +319,31 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         activeTails.clear()
         pausing.clear()
         pausedTails.clear()
+        parsers.clear()
         analysisDebouncer.clear()
+    }
+
+    private fun isFramedBinary(logFormat: com.indagium.model.LogFormat, profile: com.indagium.model.LogFormatProfile?): Boolean =
+        logFormat == com.indagium.model.LogFormat.DLT || profile?.engine == com.indagium.model.LogFormatEngine.DLT
+
+    // Appends the record a stopped tail still holds, once the tailer's last in-flight batch has landed:
+    // cancel() does not wait for it, and flushing before it would put the held record out of order.
+    // The tab refuses a restart until then, so a new tail cannot overtake the held record.
+    private fun finishParserAfter(tabId: String, tailerJob: Job) {
+        val parser = parsers[tabId] ?: return
+        if (tailerJob.isCompleted) {
+            appendTailedLines(tabId, emptyList(), flushing = parser)
+            return
+        }
+        stopping += tabId
+        scope.launch {
+            try {
+                tailerJob.join()
+                appendTailedLines(tabId, emptyList(), flushing = parser)
+            } finally {
+                stopping -= tabId
+            }
+        }
     }
 
     // Runs on whichever thread FileTailer's coroutine flushes from, unlike most upTab callers
@@ -297,10 +351,18 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // update against any other stateLock-guarded tabs mutation, whether background (another tab's
     // tailing flush, an in-flight openFile/mergeTabs) or UI-thread (toggleGroup, selRow, ... — all
     // upTab callers, and upTab itself is stateLock-guarded).
-    private fun appendTailedLines(tabId: String, newRawLines: List<String>) {
-        if (newRawLines.isEmpty()) return
+    //
+    // [flushing] is a parser being finished on stop: it appends whatever record it still holds, instead of
+    // new lines, and is dropped.
+    @Suppress("CyclomaticComplexMethod") // One locked read-modify-write of the tab; splitting it would hide the lock scope.
+    private fun appendTailedLines(tabId: String, newRawLines: List<String>, flushing: IncrementalProfileParser? = null) {
+        if (newRawLines.isEmpty() && flushing == null) return
         synchronized(appState.stateLock) {
-            val t = appState.tab(tabId) ?: return
+            val parser = flushing ?: parsers[tabId]
+            val t = appState.tab(tabId) ?: run {
+                if (flushing != null) parsers.remove(tabId, flushing)
+                return
+            }
             // Entry ids are strictly increasing by construction (LogParser assigns startId..n,
             // mergeLogs re-ids sequentially, and tailing itself only ever appends from max+1) — an
             // invariant already asserted and relied on at utils/EntryIdMap.kt's dense-guess-then-
@@ -308,7 +370,52 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             // entry's id; scanning the whole (ever-growing) tab with maxOfOrNull on every batch was
             // O(n) per batch, O(n^2) over a long tail session. Do not "fix" this back to maxOfOrNull.
             val nextId = (t.logData.lastOrNull()?.id ?: 0) + 1
-            val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
+            val profile = appState.pinnedLogFormatProfile(tabId)
+            val sourceLineOffset = t.profileSourceLineCount
+                ?: t.logData.lastOrNull()?.sourceEndLine
+                ?: 0L
+            val parsedProfileBatch = when {
+                flushing != null -> flushing.flush(nextId, sourceLineOffset)
+                parser != null -> parser.append(newRawLines, nextId, sourceLineOffset)
+                profile != null -> parseProfileLines(newRawLines, profile, nextId, t.sourcePath, sourceLineOffset)
+                else -> null
+            }
+            if (flushing != null) parsers.remove(tabId, flushing)
+            if (parser != null && parsedProfileBatch != null && parsedProfileBatch.entries.isEmpty()) {
+                // The lines were consumed but their record is still held (or nothing was held): only the
+                // line position moves. An empty batch must not reach the capability merge below.
+                recordConsumedLines(tabId, parsedProfileBatch.sourceLineCount)
+                return
+            }
+            val newEntries = if (profile == null) {
+                parseLogcatLines(newRawLines.asSequence(), startId = nextId)
+            } else {
+                parsedProfileBatch!!.entries
+            }
+            val capabilityProfile = profile ?: appState.defaultLogFormatProfile(t.logFormat)
+            val batchCapabilities = appState.logCapabilitiesFor(capabilityProfile, newEntries, t.sourcePath)
+            val batchClockSignature = com.indagium.model.logFormatClockSignature(capabilityProfile, newEntries, t.sourcePath)
+            val currentClockSignature = t.profileClockSignature
+            val previousTimelineReason = t.logCapabilities[com.indagium.model.LogCapability.TIMELINE]?.reason.orEmpty()
+            val clockWasAlreadyIncompatible = currentClockSignature == null && t.logData.isNotEmpty() &&
+                ("mix" in previousTimelineReason.lowercase() || "source clock" in previousTimelineReason.lowercase() ||
+                    "incompatible clock" in previousTimelineReason.lowercase())
+            val batchHasTime = newEntries.any { entry ->
+                val parsed = entry.parsedTime
+                parsed?.epochMillis != null || parsed?.localWallMillis != null || parsed?.relativeMillis != null ||
+                    parsed?.localTime != null ||
+                    (capabilityProfile.engine == com.indagium.model.LogFormatEngine.LOGCAT && entry.ts.isNotBlank() && entry.tag != "RAW") ||
+                    (capabilityProfile.engine == com.indagium.model.LogFormatEngine.DLT && entry.dltTimestamp != null)
+            }
+            val clockMismatch = batchHasTime && (
+                (currentClockSignature != null && batchClockSignature != null && currentClockSignature != batchClockSignature) ||
+                    batchClockSignature == null || clockWasAlreadyIncompatible
+            )
+            val nextClockSignature = when {
+                clockMismatch -> null
+                batchClockSignature != null -> batchClockSignature
+                else -> currentClockSignature
+            }
             appState.tabs = appState.tabs.map { cur ->
                 if (cur.id == tabId) {
                     // appendLogEntries shares logData's backing array with the previous list when
@@ -317,6 +424,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // each batch, so every `===` cache keyed on logData invalidates exactly as it
                     // did with the old `cur.logData + newEntries` copy.
                     val nextData = appendLogEntries(cur.logData, newEntries)
+                    val nextCapabilities = if (cur.logData.isEmpty() || cur.logCapabilities.isEmpty()) {
+                        batchCapabilities
+                    } else {
+                        mergeTailCapabilities(cur.logCapabilities, batchCapabilities, clockMismatch)
+                    }
                     // logData/rmap/tagCounts stay immediate — cheap, and needed right away for
                     // correct display. The expensive crash/stack-trace scan is debounced below
                     // instead of re-running on every single tail batch (P-04). An analysis that
@@ -380,6 +492,10 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     }
                     cur.copy(
                         logData = nextData,
+                        logCapabilities = nextCapabilities,
+                        profileClockSignature = nextClockSignature,
+                        profileSourceLineCount = parsedProfileBatch?.sourceLineCount ?: cur.profileSourceLineCount,
+                        profileFieldNames = cur.profileFieldNames + newEntries.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet(),
                         rmap = mkRmap(nextData),
                         // largeFileMode is normally decided once at open time from the file's
                         // on-disk byte length (AppState.kt's openFile, LARGE_FILE_MODE_BYTES) and
@@ -422,6 +538,44 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         }
         AppLogger.debug("tail", "Appended ${newRawLines.size} parsed diagnostic rows")
         scheduleTailAnalysisRefresh(tabId)
+    }
+
+    // Caller holds stateLock.
+    private fun recordConsumedLines(tabId: String, sourceLineCount: Long?) {
+        appState.tabs = appState.tabs.map { cur ->
+            if (cur.id == tabId) cur.copy(profileSourceLineCount = sourceLineCount ?: cur.profileSourceLineCount) else cur
+        }
+    }
+
+    private fun mergeTailCapabilities(
+        current: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus>,
+        batch: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus>,
+        clockMismatch: Boolean,
+    ): Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> {
+        if (current.isEmpty()) return batch
+        return current.mapValues { (capability, previous) ->
+            if (clockMismatch && capability in setOf(
+                    com.indagium.model.LogCapability.TIMELINE,
+                    com.indagium.model.LogCapability.DELTA_TIME,
+                    com.indagium.model.LogCapability.MERGE,
+                    com.indagium.model.LogCapability.VIDEO_LINKING,
+                )
+            ) return@mapValues com.indagium.model.LogCapabilityStatus(
+                com.indagium.model.CapabilityAvailability.UNAVAILABLE,
+                "Appended records use a different or incompatible clock.",
+            )
+            val appended = batch[capability] ?: return@mapValues previous
+            when {
+                previous.availability == com.indagium.model.CapabilityAvailability.AVAILABLE &&
+                    appended.availability == com.indagium.model.CapabilityAvailability.AVAILABLE -> previous
+                previous.availability == com.indagium.model.CapabilityAvailability.UNAVAILABLE &&
+                    appended.availability == com.indagium.model.CapabilityAvailability.UNAVAILABLE -> previous
+                else -> com.indagium.model.LogCapabilityStatus(
+                    com.indagium.model.CapabilityAvailability.PARTIAL,
+                    "The parsed prefix or appended records do not all provide this capability.",
+                )
+            }
+        }
     }
 
     // The debounce lives in TailAnalysisDebouncer (cancel-and-relaunch per batch, with a max-wait

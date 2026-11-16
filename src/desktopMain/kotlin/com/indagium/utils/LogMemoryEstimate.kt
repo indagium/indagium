@@ -12,6 +12,9 @@ import kotlin.math.ceil
  */
 const val LOG_HEAP_BYTES_PER_FILE_BYTE: Double = 3.5
 
+/** Generic profile rows retain parsed fields and display projections beside each source record. */
+const val PROFILE_LOG_HEAP_BYTES_PER_FILE_BYTE: Double = 8.0
+
 /** Largest part count a memory-driven split suggestion proposes (matches the dialog's stepper range). */
 private const val MAX_MEMORY_SPLIT_PARTS = 32
 
@@ -21,6 +24,14 @@ data class MemoryShortfall(val neededBytes: Long, val freeBytes: Long)
 /** Estimated resident heap bytes once a file of [fileBytes] is parsed and open in a tab. */
 fun estimatedHeapBytesForLog(fileBytes: Long): Long =
     if (fileBytes <= 0L) 0L else (fileBytes * LOG_HEAP_BYTES_PER_FILE_BYTE).toLong()
+
+/** Estimate for a generic profile parse, whose per-row field maps and display columns cost more. */
+fun estimatedHeapBytesForProfileLog(fileBytes: Long): Long =
+    if (fileBytes <= 0L) 0L else (fileBytes * PROFILE_LOG_HEAP_BYTES_PER_FILE_BYTE).toLong()
+
+/** Shortfall from a caller-computed resident heap estimate. */
+fun memoryShortfallForEstimatedBytes(estimatedBytes: Long, freeBytes: Long): MemoryShortfall? =
+    if (estimatedBytes > freeBytes) MemoryShortfall(estimatedBytes.coerceAtLeast(0L), freeBytes.coerceAtLeast(0L)) else null
 
 /** A [MemoryShortfall] when opening [fileBytes] needs more than [freeBytes] of heap, else null. */
 fun memoryShortfall(fileBytes: Long, freeBytes: Long): MemoryShortfall? {

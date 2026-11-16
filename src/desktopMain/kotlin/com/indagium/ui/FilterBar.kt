@@ -56,8 +56,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.CapabilityAvailability
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
+import com.indagium.model.LogCapability
+import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.RuleTarget
@@ -509,17 +512,23 @@ internal fun filterBarCandidatesStayVisible(fieldFocused: Boolean, candidatesHov
 // computeUnifiedCandidatesSync itself is `internal`, so calling it directly from here is the
 // intended reuse seam.
 @Composable
-private fun rememberBarUnifiedCandidates(tab: LogTab, filter: Filter, msgRuleSearch: String): List<MsgCandidate> {
+private fun rememberBarUnifiedCandidates(
+    tab: LogTab,
+    filter: Filter,
+    msgRuleSearch: String,
+    allowPidRules: Boolean,
+): List<MsgCandidate> {
     var candidates by remember(tab.id, tab.largeFileMode) { mutableStateOf(emptyList<MsgCandidate>()) }
-    LaunchedEffect(tab.id, tab.largeFileMode, filter, msgRuleSearch) {
+    LaunchedEffect(tab.id, tab.largeFileMode, filter, msgRuleSearch, allowPidRules) {
         if (msgRuleSearch.isBlank()) {
             candidates = emptyList()
             return@LaunchedEffect
         }
         val snapshot = tab
-        candidates = withContext(Dispatchers.Default) {
+        val parsedCandidates = withContext(Dispatchers.Default) {
             computeUnifiedCandidatesSync(snapshot, filter, msgRuleSearch) { ensureActive() }
         }
+        candidates = parsedCandidates.filter { allowPidRules || it.target != RuleTarget.PID_TID }
     }
     return candidates
 }
@@ -553,9 +562,13 @@ internal fun FilterBar(
     actions: FilterBarActions,
     logFocusRequester: FocusRequester?,
     modifier: Modifier = Modifier,
+    capabilities: Map<LogCapability, LogCapabilityStatus>? = null,
 ) {
     val tc = tc()
     val filter = tab.filter
+    val effectiveCapabilities = capabilities ?: tab.logCapabilities
+    val componentStatus = tab.profileCapability(LogCapability.COMPONENT_FILTER, effectiveCapabilities)
+    val pidStatus = tab.profileCapability(LogCapability.PID_THREAD_FILTER, effectiveCapabilities)
 
     // The Tags/Regex switcher used to live in a shared top Row here, alongside the residual summary
     // chip. Design feedback moved the switcher onto the input-fields row itself (first element,
@@ -572,10 +585,22 @@ internal fun FilterBar(
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val narrow = maxWidth < NARROW_BAR_WIDTH_DP.dp
             if (filter.mode == FilterMode.TAGS) {
-                TagsModeBarContent(tab, filter, model, actions, narrow, logFocusRequester)
+                TagsModeBarContent(tab, filter, model, actions, narrow, logFocusRequester, componentStatus, pidStatus)
             } else {
                 RegexModeBarContent(tab, filter, model, actions, logFocusRequester)
             }
+        }
+        // The side panel that also shows this notice is hidden while the bar is on, so the bar
+        // says it too; it appears only after a saved filter lost criteria this format lacks.
+        tab.filterNormalizationNotice?.let { notice ->
+            AppText(
+                notice,
+                color = tc.ts,
+                fontSize = 10.sp,
+                maxLines = 2,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp)
+                    .testTag("filter-bar-normalization-notice"),
+            )
         }
     }
 }
@@ -880,8 +905,23 @@ private fun TagsModeBarContent(
     actions: FilterBarActions,
     narrow: Boolean,
     logFocusRequester: FocusRequester?,
+    componentStatus: LogCapabilityStatus?,
+    pidStatus: LogCapabilityStatus?,
 ) {
     fun refocusLog() { runCatching { logFocusRequester?.requestFocus() } }
+    val componentUnavailable = componentStatus?.availability == CapabilityAvailability.UNAVAILABLE
+    val canFilterByProcess = pidStatus?.availability != CapabilityAvailability.UNAVAILABLE
+    val capabilityNotes = buildList {
+        componentStatus?.takeIf { it.availability == CapabilityAvailability.PARTIAL }?.let {
+            add("Component values partial" to it.reason)
+        }
+        pidStatus?.takeIf { it.availability == CapabilityAvailability.UNAVAILABLE }?.let {
+            add("PID filtering unavailable" to it.reason)
+        }
+        pidStatus?.takeIf { it.availability == CapabilityAvailability.PARTIAL }?.let {
+            add("PID coverage partial" to it.reason)
+        }
+    }
 
     // Hoisted here (rather than created inside TagAndPkgField/MessageRuleField) so each field's own
     // trailing badge (TagFieldBadge/MessageFieldBadge) can refocus the SAME FocusRequester the field
@@ -913,15 +953,47 @@ private fun TagsModeBarContent(
         }
         val fields: @Composable () -> Unit = {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Box(Modifier.weight(1f)) { TagAndPkgField(tab, filter, model, actions, tagFr, msgFr, tagPopup) }
+                if (componentUnavailable) {
+                    FilterBarCapabilityHint(
+                        label = "Component filters unavailable",
+                        reason = componentStatus?.reason.orEmpty(),
+                        modifier = Modifier.weight(1f),
+                        testTag = "filter-bar-component-unavailable",
+                    )
+                } else {
+                    Box(Modifier.weight(1f)) {
+                        TagAndPkgField(tab, filter, model, actions, tagFr, msgFr, tagPopup, canFilterByProcess)
+                    }
+                }
                 TagFieldBadge(tab, filter, actions, tagFr, tagPopup)
+                if (!componentUnavailable && capabilityNotes.isNotEmpty()) {
+                    FilterBarCapabilityHint(
+                        label = capabilityNotes.joinToString(" · ") { it.first },
+                        reason = capabilityNotes.joinToString("\n") { it.second },
+                        modifier = Modifier.widthIn(max = 145.dp),
+                        testTag = "filter-bar-pid-capability",
+                    )
+                }
             }
         }
         // Message field's own row also carries the residual "+ …" chip at its trailing end (after
         // the msg badge) — see FilterBarResidualChip's doc for why it moved here off its own row.
         val msgField: @Composable () -> Unit = {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Box(Modifier.weight(1f)) { MessageRuleField(tab, filter, model, actions, logFocusRequester, msgFr, msgPopup) }
+                Box(Modifier.weight(1f)) {
+                    MessageRuleField(
+                        tab,
+                        filter,
+                        model,
+                        actions,
+                        logFocusRequester,
+                        msgFr,
+                        msgPopup,
+                        allowPidRules = canFilterByProcess,
+                        allowComponentScopes = !componentUnavailable,
+                        componentUnavailableReason = componentStatus?.reason.orEmpty(),
+                    )
+                }
                 MessageFieldBadge(tab, filter, actions, msgFr, msgPopup)
                 FilterBarResidualChip(filter, actions, logFocusRequester)
             }
@@ -952,6 +1024,26 @@ private fun TagsModeBarContent(
 }
 
 @Composable
+private fun FilterBarCapabilityHint(
+    label: String,
+    reason: String,
+    modifier: Modifier = Modifier,
+    testTag: String,
+) {
+    val tc = tc()
+    TooltipArea(tooltip = { ToolbarTooltip(reason, maxLines = 3) }, modifier = modifier) {
+        AppText(
+            label,
+            color = tc.td,
+            fontSize = 9.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag(testTag),
+        )
+    }
+}
+
+@Composable
 private fun TagAndPkgField(
     tab: LogTab,
     filter: Filter,
@@ -962,6 +1054,7 @@ private fun TagAndPkgField(
     // to it — matches the panel's tag field (FilterPanel.kt:1164: `Key.Tab -> { msgRuleFr... }`).
     nextFr: FocusRequester,
     popup: MutableState<FilterFieldPopup>,
+    canFilterByProcess: Boolean,
 ) {
     val tc = tc()
     // Fix 3 (panel parity): unlike the other fields here, this one no longer has an Escape path
@@ -1015,6 +1108,9 @@ private fun TagAndPkgField(
             if (!fieldFocused && !candidatesHovered) showCandidates = false
         }
     }
+    LaunchedEffect(canFilterByProcess) {
+        if (!canFilterByProcess) pidPopover.close()
+    }
 
     val candidates = remember(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit) {
         combinedTagCandidates(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit)
@@ -1027,10 +1123,11 @@ private fun TagAndPkgField(
     LaunchedEffect(candidates, pidPopover.tag, pidPopover.packagePrefixScope) { pidPopover.closeIfMissing(candidates) }
     TagPidPopoverScanEffect(pidPopover, tab)
 
-    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean = candidate?.let { (value, isPackage) ->
-        if (isPackage) packagePrefixHasPids[value] == true
-        else !tab.analysis.tagPids[value].isNullOrEmpty()
-    } ?: false
+    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean = canFilterByProcess &&
+        (candidate?.let { (value, isPackage) ->
+            if (isPackage) packagePrefixHasPids[value] == true
+            else !tab.analysis.tagPids[value].isNullOrEmpty()
+        } == true)
 
     // Escape is the panel's explicit cancel path: clear the query, clear the debounced search
     // immediately, and hide candidates even though the field itself keeps focus. The field's
@@ -1252,18 +1349,22 @@ private fun TagAndPkgField(
                                                 )
                                             }
                                             Box(Modifier.width(26.dp), contentAlignment = Alignment.Center) {
-                                                TagPidSlot(
-                                                    tag = value,
-                                                    state = pidPopover,
-                                                    hasPids = packagePrefixHasPids[value] == true,
-                                                    rowSelected = isRowSelected,
-                                                    kbd = isRowSelected && selectedAction == TAG_ACTION_PID,
-                                                    positionProvider = remember(dropdownLeftPx, dropdownRightPx) {
-                                                        RightOfEdgePositionProvider(dropdownRightPx, dropdownLeftPx)
-                                                    },
-                                                    buttonModifier = Modifier.testTag("filter-bar-tags-candidate-$idx-pid"),
-                                                    packagePrefixScope = true,
-                                                )
+                                                if (canFilterByProcess) {
+                                                    TagPidSlot(
+                                                        tag = value,
+                                                        state = pidPopover,
+                                                        hasPids = packagePrefixHasPids[value] == true,
+                                                        rowSelected = isRowSelected,
+                                                        kbd = isRowSelected && selectedAction == TAG_ACTION_PID,
+                                                        positionProvider = remember(dropdownLeftPx, dropdownRightPx) {
+                                                            RightOfEdgePositionProvider(dropdownRightPx, dropdownLeftPx)
+                                                        },
+                                                        buttonModifier = Modifier.testTag("filter-bar-tags-candidate-$idx-pid"),
+                                                        packagePrefixScope = true,
+                                                    )
+                                                } else {
+                                                    Spacer(Modifier.size(20.dp))
+                                                }
                                             }
                                             val incKbd = isRowSelected && selectedAction == 0
                                             Box(
@@ -1358,17 +1459,21 @@ private fun TagAndPkgField(
                                                 (tab.analysis.tagCounts[value] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO,
                                                 modifier = Modifier.width(26.dp), overflow = TextOverflow.Clip,
                                             )
-                                            TagPidSlot(
-                                                tag = value,
-                                                state = pidPopover,
-                                                hasPids = !tab.analysis.tagPids[value].isNullOrEmpty(),
-                                                rowSelected = isRowSelected,
-                                                kbd = isRowSelected && selectedAction == TAG_ACTION_PID,
-                                                positionProvider = remember(dropdownLeftPx, dropdownRightPx) {
-                                                    RightOfEdgePositionProvider(dropdownRightPx, dropdownLeftPx)
-                                                },
-                                                buttonModifier = Modifier.testTag("filter-bar-tags-candidate-$idx-pid"),
-                                            )
+                                            if (canFilterByProcess) {
+                                                TagPidSlot(
+                                                    tag = value,
+                                                    state = pidPopover,
+                                                    hasPids = !tab.analysis.tagPids[value].isNullOrEmpty(),
+                                                    rowSelected = isRowSelected,
+                                                    kbd = isRowSelected && selectedAction == TAG_ACTION_PID,
+                                                    positionProvider = remember(dropdownLeftPx, dropdownRightPx) {
+                                                        RightOfEdgePositionProvider(dropdownRightPx, dropdownLeftPx)
+                                                    },
+                                                    buttonModifier = Modifier.testTag("filter-bar-tags-candidate-$idx-pid"),
+                                                )
+                                            } else {
+                                                Spacer(Modifier.size(20.dp))
+                                            }
                                             val incKbd = isRowSelected && selectedAction == 0
                                             Box(
                                                 Modifier.size(20.dp)
@@ -1434,6 +1539,9 @@ private fun MessageRuleField(
     logFocusRequester: FocusRequester?,
     fr: FocusRequester,
     popup: MutableState<FilterFieldPopup>,
+    allowPidRules: Boolean,
+    allowComponentScopes: Boolean,
+    componentUnavailableReason: String,
 ) {
     val tc = tc()
 
@@ -1499,15 +1607,20 @@ private fun MessageRuleField(
     LaunchedEffect(msgRuleScopeOpen) {
         if (msgRuleScopeOpen) runCatching { msgRuleScopeFr.requestFocus() }
     }
-    val candidates = rememberBarUnifiedCandidates(tab, filter, search)
+    val candidates = rememberBarUnifiedCandidates(tab, filter, search, allowPidRules)
 
     // computeRelevantScopeTagsSync is `internal` in FilterPanel.kt; its own composable wrapper
     // (rememberRelevantScopeTags) is `private` to that file, so this is a bar-local copy of the
     // same "stale but usable" wrapper shape, calling the shared sync function directly — the same
     // reuse seam rememberBarUnifiedCandidates above already uses for computeUnifiedCandidatesSync.
-    val relevantScopeTags = rememberBarRelevantScopeTags(tab, pendingMessageRule)
-    val scopeOptionTags = remember(model.sortedTags, relevantScopeTags) {
-        if (relevantScopeTags.isNullOrEmpty()) model.sortedTags else model.sortedTags.filter { it in relevantScopeTags }
+    val relevantScopeTags = if (allowComponentScopes) {
+        rememberBarRelevantScopeTags(tab, pendingMessageRule)
+    } else {
+        null
+    }
+    val scopeOptionTags = remember(model.sortedTags, relevantScopeTags, allowComponentScopes) {
+        if (!allowComponentScopes) emptyList()
+        else if (relevantScopeTags.isNullOrEmpty()) model.sortedTags else model.sortedTags.filter { it in relevantScopeTags }
     }
     val msgRuleScopeOptions = remember(scopeOptionTags, msgRuleScopeSearch) {
         messageRuleScopeOptions(scopeOptionTags, msgRuleScopeSearch)
@@ -1571,7 +1684,9 @@ private fun MessageRuleField(
     // contextual candidate (tag/message-boundary match) commits directly, scoped to its own tag,
     // with no scope-chooser detour.
     fun commitContextualMessageRule(include: Boolean, candidate: MsgCandidate) {
-        actions.onAddMessageRule(include, candidate.pattern, false, candidate.tag, null, candidate.target)
+        val tag = candidate.tag.takeIf { allowComponentScopes }
+        val target = candidate.target.takeIf { allowPidRules || it != RuleTarget.PID_TID } ?: RuleTarget.MESSAGE
+        actions.onAddMessageRule(include, candidate.pattern, false, tag, null, target)
         selectedIdx = -1
         selectedAction = 0
         runCatching { fr.requestFocus() }
@@ -1653,7 +1768,12 @@ private fun MessageRuleField(
                                         // Bug 2 fix: typed (non-candidate) input must open the scope
                                         // chooser — matching FilterPanel.kt:1450-1454 — not commit
                                         // an unscoped "all tags" rule directly.
-                                        val spec = messageRuleInputSpec(input, regexMode = filter.kwInTagRegex)
+                                        val parsedSpec = messageRuleInputSpec(input, regexMode = filter.kwInTagRegex)
+                                        val spec = if (allowPidRules || parsedSpec.target != RuleTarget.PID_TID) {
+                                            parsedSpec
+                                        } else {
+                                            parsedSpec.copy(target = RuleTarget.MESSAGE)
+                                        }
                                         openMessageRuleScopeChooser(selectedAction == 0, spec.pattern, spec.regex, spec.target)
                                     } else {
                                         return@onPreviewKeyEvent false
@@ -1931,85 +2051,95 @@ private fun MessageRuleField(
                                             )
                                         }
                                     }
-                                    InlineField(
-                                        msgRuleScopeSearch,
-                                        { msgRuleScopeSearch = it; msgRuleScopeSelectedIdx = 0 },
-                                        "scope tag or prefix…",
-                                        Modifier.fillMaxWidth()
-                                            .testTag("filter-bar-message-scope-input")
-                                            .focusRequester(msgRuleScopeFr)
-                                            .onPreviewKeyEvent { ev ->
-                                                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                                                when (ev.key) {
-                                                    Key.DirectionDown -> {
-                                                        msgRuleScopeSelectedIdx =
-                                                            (msgRuleScopeSelectedIdx + 1).coerceAtMost(msgRuleScopeOptions.lastIndex)
-                                                        true
+                                    if (allowComponentScopes) {
+                                        InlineField(
+                                            msgRuleScopeSearch,
+                                            { msgRuleScopeSearch = it; msgRuleScopeSelectedIdx = 0 },
+                                            "scope tag or prefix…",
+                                            Modifier.fillMaxWidth()
+                                                .testTag("filter-bar-message-scope-input")
+                                                .focusRequester(msgRuleScopeFr)
+                                                .onPreviewKeyEvent { ev ->
+                                                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                                    when (ev.key) {
+                                                        Key.DirectionDown -> {
+                                                            msgRuleScopeSelectedIdx =
+                                                                (msgRuleScopeSelectedIdx + 1).coerceAtMost(msgRuleScopeOptions.lastIndex)
+                                                            true
+                                                        }
+                                                        Key.DirectionUp -> {
+                                                            msgRuleScopeSelectedIdx = (msgRuleScopeSelectedIdx - 1).coerceAtLeast(0)
+                                                            true
+                                                        }
+                                                        Key.Enter, Key.NumPadEnter -> {
+                                                            msgRuleScopeOptions.getOrNull(msgRuleScopeSelectedIdx)?.let { commitPendingMessageRule(it) }
+                                                            true
+                                                        }
+                                                        Key.Escape -> { cancelPendingMessageRule(); true }
+                                                        else -> false
                                                     }
-                                                    Key.DirectionUp -> {
-                                                        msgRuleScopeSelectedIdx = (msgRuleScopeSelectedIdx - 1).coerceAtLeast(0)
-                                                        true
-                                                    }
-                                                    Key.Enter, Key.NumPadEnter -> {
-                                                        msgRuleScopeOptions.getOrNull(msgRuleScopeSelectedIdx)?.let { commitPendingMessageRule(it) }
-                                                        true
-                                                    }
-                                                    Key.Escape -> { cancelPendingMessageRule(); true }
-                                                    else -> false
-                                                }
-                                            },
-                                        onClear = { msgRuleScopeSearch = ""; msgRuleScopeSelectedIdx = 0 },
-                                    )
-                                    ScrollableItems(
-                                        searchedMsgRuleScopeOptions.size,
-                                        maxDp = 140,
-                                        scrollToIndex = msgRuleScopeSelectedIdx - 1,
-                                    ) {
-                                        searchedMsgRuleScopeOptions.forEachIndexed { idx, scope ->
-                                            val optionIndex = idx + 1
-                                            HoverBox(
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
-                                                    .testTag("filter-bar-message-scope-option-$optionIndex"),
-                                                baseBg = if (msgRuleScopeSelectedIdx == optionIndex) tc.abg else Color.Transparent,
-                                                hoverBg = tc.hv,
-                                                onClick = { commitPendingMessageRule(scope) },
-                                            ) {
-                                                Row(
-                                                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                },
+                                            onClear = { msgRuleScopeSearch = ""; msgRuleScopeSelectedIdx = 0 },
+                                        )
+                                        ScrollableItems(
+                                            searchedMsgRuleScopeOptions.size,
+                                            maxDp = 140,
+                                            scrollToIndex = msgRuleScopeSelectedIdx - 1,
+                                        ) {
+                                            searchedMsgRuleScopeOptions.forEachIndexed { idx, scope ->
+                                                val optionIndex = idx + 1
+                                                HoverBox(
+                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                                        .testTag("filter-bar-message-scope-option-$optionIndex"),
+                                                    baseBg = if (msgRuleScopeSelectedIdx == optionIndex) tc.abg else Color.Transparent,
+                                                    hoverBg = tc.hv,
+                                                    onClick = { commitPendingMessageRule(scope) },
                                                 ) {
-                                                    AppText(
-                                                        when {
-                                                            scope.isAll -> "all"
-                                                            scope.packagePrefix != null -> "pkg"
-                                                            else -> "tag"
-                                                        },
-                                                        color = tc.td,
-                                                        fontSize = 9.sp,
-                                                        fontFamily = UI,
-                                                        fontWeight = FontWeight.SemiBold,
-                                                        modifier = Modifier.width(26.dp),
-                                                    )
-                                                    FullTextHint(
-                                                        scope.label,
-                                                        modifier = Modifier.weight(1f),
-                                                        forceShow = msgRuleScopeSelectedIdx == optionIndex,
-                                                    ) { onTextLayout ->
+                                                    Row(
+                                                        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                    ) {
                                                         AppText(
-                                                            scope.label,
-                                                            color = if (msgRuleScopeSelectedIdx == optionIndex) tc.tx else tc.ts,
-                                                            fontSize = 11.sp,
-                                                            fontFamily = MONO,
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            overflow = TextOverflow.Ellipsis,
-                                                            maxLines = 1,
-                                                            onTextLayout = onTextLayout,
+                                                            when {
+                                                                scope.isAll -> "all"
+                                                                scope.packagePrefix != null -> "pkg"
+                                                                else -> "tag"
+                                                            },
+                                                            color = tc.td,
+                                                            fontSize = 9.sp,
+                                                            fontFamily = UI,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            modifier = Modifier.width(26.dp),
                                                         )
+                                                        FullTextHint(
+                                                            scope.label,
+                                                            modifier = Modifier.weight(1f),
+                                                            forceShow = msgRuleScopeSelectedIdx == optionIndex,
+                                                        ) { onTextLayout ->
+                                                            AppText(
+                                                                scope.label,
+                                                                color = if (msgRuleScopeSelectedIdx == optionIndex) tc.tx else tc.ts,
+                                                                fontSize = 11.sp,
+                                                                fontFamily = MONO,
+                                                                modifier = Modifier.fillMaxWidth(),
+                                                                overflow = TextOverflow.Ellipsis,
+                                                                maxLines = 1,
+                                                                onTextLayout = onTextLayout,
+                                                            )
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
+                                    } else {
+                                        AppText(
+                                            "Component scopes unavailable: $componentUnavailableReason",
+                                            color = tc.ts,
+                                            fontSize = 10.sp,
+                                            maxLines = 2,
+                                            modifier = Modifier.testTag("filter-bar-message-scope-unavailable"),
+                                        )
                                     }
                                 }
                             }

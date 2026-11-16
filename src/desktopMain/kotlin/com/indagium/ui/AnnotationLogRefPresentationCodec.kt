@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import com.indagium.model.AnnBlock
+import com.indagium.model.LogDisplayField
 
 /** Positional codec for the presentation field appended to LogRef block tokens. */
 internal object AnnotationLogRefPresentationCodec {
@@ -18,6 +19,10 @@ internal object AnnotationLogRefPresentationCodec {
                 row.timeDeltaText.orEmpty(),
                 row.displayedProcessName.orEmpty(),
                 row.processNameCandidate.orEmpty(),
+                row.displayColumns.joinToString(";") { column ->
+                    tokenFields(column.id, column.label, column.value).b64()
+                },
+                row.profileProjectionPresent.toString(),
             ).b64()
         },
     )
@@ -41,6 +46,15 @@ internal object AnnotationLogRefPresentationCodec {
                 timeDeltaText = rowFields.getOrElse(2) { "" }.takeIf { it.isNotEmpty() },
                 displayedProcessName = rowFields.getOrElse(3) { "" }.takeIf { it.isNotEmpty() },
                 processNameCandidate = rowFields.getOrElse(4) { "" }.takeIf { it.isNotEmpty() },
+                displayColumns = rowFields.getOrNull(5)?.takeIf { it.isNotBlank() }
+                    ?.split(";")
+                    ?.mapNotNull { encodedColumn ->
+                        runCatching {
+                            val column = encodedColumn.unb64().tokenFields()
+                            LogDisplayField(column[0], column[1], column[2])
+                        }.getOrNull()
+                    }.orEmpty(),
+                profileProjectionPresent = rowFields.getOrNull(6)?.toBoolean() ?: false,
             )
         }
         AnnBlock.LogRefPresentation(options, rows, deltaAvailable = fields[5].toBoolean())

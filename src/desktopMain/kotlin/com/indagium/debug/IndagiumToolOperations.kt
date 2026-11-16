@@ -12,13 +12,18 @@ import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toSource
 import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.model.AnnBlock
+import com.indagium.model.CapabilityAvailability
 import com.indagium.model.CrashSite
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
+import com.indagium.model.LogCapability
+import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
+import com.indagium.model.LogFormatEngine
+import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
@@ -30,6 +35,7 @@ import com.indagium.model.RuleTarget
 import com.indagium.model.SavedFilter
 import com.indagium.model.SequenceDef
 import com.indagium.model.TemplateGranularity
+import com.indagium.model.displaySeverityText
 import com.indagium.source.SourceDeclaration
 import com.indagium.source.SourceFileSnapshot
 import com.indagium.source.SourceMatch
@@ -48,14 +54,27 @@ import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.computeItems
 import com.indagium.utils.computeMessageTemplates
 import com.indagium.utils.containsPattern
+import com.indagium.utils.decodeLogFormatProfiles
 import com.indagium.utils.foldTemplates
 import com.indagium.utils.indexOfEntryId
 import com.indagium.utils.isSupportedArchiveFile
 import com.indagium.utils.listArchiveLogCandidates
+import com.indagium.utils.logFormatProfileBundleJson
+import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.newId
 import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.viewDefiningKey
 import com.indagium.utils.visibleEntries
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -118,6 +137,9 @@ private const val DEFAULT_SEQUENCE_OCCURRENCE_LIMIT = 100
 private const val MAX_SEQUENCE_OCCURRENCE_LIMIT = 500
 private const val DEFAULT_LOG_COMPOSITION_LIMIT = 50
 private const val MAX_LOG_COMPOSITION_LIMIT = 500
+private const val MAX_PROFILE_IMPORT_BYTES = 4 * 1024 * 1024
+private const val MAX_PROFILE_PREVIEW_CHARS = 2 * 1024 * 1024
+private const val MAX_PROFILE_PREVIEW_ROWS = 200
 
 /**
  * Transport-neutral AppState operations behind the Indagium MCP catalog.
@@ -138,20 +160,34 @@ private const val MAX_LOG_COMPOSITION_LIMIT = 500
 internal class IndagiumToolOperations(
     private val appState: AppState,
 ) {
+    private data class LogFormatRowContext(
+        val includeDltMetadata: Boolean,
+        val profile: LogFormatProfile? = null,
+        val capabilities: Map<LogCapability, LogCapabilityStatus> = emptyMap(),
+        val profileError: String? = null,
+    )
+
     private val coreOperationHandlers: Map<String, (Map<String, Any?>) -> Any?> = mapOf(
         "list_tabs" to { listTabs() },
+        "list_log_format_profiles" to { listLogFormatProfiles() },
+        "get_log_format_profile" to { a -> getLogFormatProfile(a.str("profileId") ?: "") },
+        "preview_log_format_profile" to { a ->
+            previewLogFormatProfileRoute(a.str("profileId") ?: "", a.str("sample") ?: "", a.anyInt("limit") ?: 50)
+        },
+        "import_log_format_profiles" to { a -> importLogFormatProfilesRoute(a.str("json") ?: "", a.str("conflictPolicy") ?: "") },
+        "export_log_format_profiles" to { a -> exportLogFormatProfilesRoute(a.strList("profileIds") ?: emptyList(), a.str("path")) },
         "get_memory_status" to { memoryStatus() },
         "open_log_file" to { a ->
             openLogFile(
                 a.str("path") ?: "", a.str("entryPath"), a.str("splitMode"),
-                a.str("destinationDir"), a.str("postfix") ?: "part", a.anyInt("partCount"),
+                a.str("destinationDir"), a.str("postfix") ?: "part", a.anyInt("partCount"), a.str("profileId"),
             )
         },
         "preview_split_log_file" to { a -> splitPreviewRoute(a.str("path") ?: "", a.str("entryPath")) },
         "split_log_file" to { a ->
             splitLogRoute(
                 a.str("path") ?: "", a.str("entryPath"), a.str("destinationDir"),
-                a.str("postfix") ?: "part", a.anyInt("partCount"),
+                a.str("postfix") ?: "part", a.anyInt("partCount"), a.str("profileId"),
             )
         },
         "close_tab" to { a -> closeTab(a.str("tabId") ?: "") },
@@ -281,6 +317,9 @@ internal class IndagiumToolOperations(
         coreOperationHandlers + testSuiteOperations.handlers + testRunOperations.handlers
 
     private val rowDependentSuspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
+        "reparse_tab_with_log_format_profile" to { a ->
+            reparseTabWithLogFormatProfileRoute(a.str("tabId") ?: "", a.str("profileId") ?: "")
+        },
         "resolve_log_source" to { a ->
             val tabId = a.str("tabId")
             val lineId = a.anyInt("lineId")
@@ -657,7 +696,302 @@ internal class IndagiumToolOperations(
             "levels" to t.filter.levels.map { it.key.toString() },
             "tailing" to t.tailing,
             "logFormat" to t.logFormat.name,
-        ) + pausedRowFields(t)
+        ) + logFormatMetadata(t) + pausedRowFields(t)
+    }
+
+    private fun listLogFormatProfiles(): Map<String, Any?> = mapOf(
+        "profiles" to appState.availableLogFormatProfiles().map(::profileSummary),
+    )
+
+    private fun getLogFormatProfile(profileId: String): Map<String, Any?> {
+        if (profileId.isBlank()) return mapOf("error" to "missing profileId")
+        val profile = appState.logFormatProfile(profileId) ?: return mapOf("error" to "no such log format profile: $profileId")
+        return profileSummary(profile) + mapOf("definition" to profileDefinition(profile))
+    }
+
+    private fun profileSummary(profile: LogFormatProfile): Map<String, Any?> = mapOf(
+        "id" to profile.id,
+        "name" to profile.name,
+        "description" to profile.description,
+        "revision" to profile.revision,
+        "schemaVersion" to profile.schemaVersion,
+        "engine" to profile.engine.name,
+        "readOnly" to profile.readOnly,
+        "fieldMappings" to profile.fieldMappings.mapKeys { it.key.name }.mapValues { it.value },
+        "attributes" to profile.attributes.map { attribute ->
+            mapOf(
+                "id" to attribute.id,
+                "label" to attribute.label,
+                "source" to attribute.source,
+                "type" to attribute.type.name,
+                "visibleByDefault" to attribute.visibleByDefault,
+            )
+        },
+        "detection" to mapOf(
+            "extensions" to profile.detection.extensions,
+            "headerContains" to profile.detection.headerContains,
+            "contentRegex" to profile.detection.contentRegex,
+        ),
+        "declaredFields" to profileFieldDescriptors(profile),
+    )
+
+    private fun profileDefinition(profile: LogFormatProfile): Map<String, Any?> {
+        val decoded = jsonElementToValue(Json.parseToJsonElement(logFormatProfileJson(profile))) as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        return decoded.entries.associate { (key, value) -> key.toString() to value } + ("readOnly" to profile.readOnly)
+    }
+
+    private fun profileFieldDescriptors(profile: LogFormatProfile): List<Map<String, Any?>> = buildList {
+        val builtInRoles = when (profile.engine) {
+            com.indagium.model.LogFormatEngine.LOGCAT,
+            com.indagium.model.LogFormatEngine.DLT,
+            com.indagium.model.LogFormatEngine.JSON_LINES,
+            com.indagium.model.LogFormatEngine.SYSLOG_RFC5424,
+            com.indagium.model.LogFormatEngine.SYSLOG_RFC3164 -> setOf(
+                com.indagium.model.LogFieldRole.TIMESTAMP,
+                com.indagium.model.LogFieldRole.SEVERITY,
+                com.indagium.model.LogFieldRole.COMPONENT,
+                com.indagium.model.LogFieldRole.MESSAGE,
+            )
+            com.indagium.model.LogFormatEngine.REGEX,
+            com.indagium.model.LogFormatEngine.CSV,
+            com.indagium.model.LogFormatEngine.PLAIN_TEXT,
+            com.indagium.model.LogFormatEngine.LOGFMT,
+            com.indagium.model.LogFormatEngine.CRI -> profile.fieldMappings.keys
+        }
+        (builtInRoles + profile.fieldMappings.keys).forEach { role ->
+            add(
+                mapOf(
+                    "name" to role.name,
+                    "role" to role.name,
+                    "source" to profile.fieldMappings[role],
+                    "type" to "CANONICAL",
+                    "declared" to (role in profile.fieldMappings),
+                ),
+            )
+        }
+        profile.attributes.forEach { attribute ->
+            add(
+                mapOf(
+                    "name" to attribute.id,
+                    "label" to attribute.label,
+                    "source" to attribute.source,
+                    "type" to attribute.type.name,
+                    "custom" to true,
+                ),
+            )
+        }
+    }
+
+    private fun actualFieldDescriptors(profile: LogFormatProfile, names: Set<String>): List<Map<String, Any?>> {
+        val attributesById = profile.attributes.associateBy { it.id }
+        val rolesByName = com.indagium.model.LogFieldRole.entries.associateBy { it.name }
+        return names.sorted().map { name ->
+            val attribute = attributesById[name]
+            val role = rolesByName[name]
+            when {
+                attribute != null -> mapOf(
+                    "name" to attribute.id,
+                    "label" to attribute.label,
+                    "source" to attribute.source,
+                    "type" to attribute.type.name,
+                    "custom" to true,
+                )
+                role != null -> mapOf(
+                    "name" to name,
+                    "role" to name,
+                    "source" to profile.fieldMappings[role],
+                    "type" to "CANONICAL",
+                    "declared" to (role in profile.fieldMappings),
+                )
+                else -> mapOf("name" to name, "type" to "SOURCE_FIELD")
+            }
+        }
+    }
+
+    private fun jsonElementToValue(value: JsonElement): Any? = when (value) {
+        JsonNull -> null
+        is JsonObject -> value.entries.associate { (key, item) -> key to jsonElementToValue(item) }
+        is JsonArray -> value.map(::jsonElementToValue)
+        is JsonPrimitive -> when {
+            value.isString -> value.content
+            value.booleanOrNull != null -> value.booleanOrNull
+            value.longOrNull != null -> value.longOrNull
+            value.doubleOrNull != null -> value.doubleOrNull
+            else -> value.contentOrNull
+        }
+    }
+
+    private fun previewLogFormatProfileRoute(profileId: String, sample: String, requestedLimit: Int): Map<String, Any?> {
+        if (profileId.isBlank()) return mapOf("error" to "missing profileId")
+        if (sample.length > MAX_PROFILE_PREVIEW_CHARS) {
+            return mapOf("error" to "sample exceeds the $MAX_PROFILE_PREVIEW_CHARS character preview limit")
+        }
+        val profile = appState.logFormatProfile(profileId) ?: return mapOf("error" to "no such log format profile: $profileId")
+        val parsed = runCatching { appState.previewLogFormatProfile(profile, sample) }
+            .getOrElse { return mapOf("error" to (it.message ?: "could not parse sample")) }
+        val limit = requestedLimit.coerceIn(1, MAX_PROFILE_PREVIEW_ROWS)
+        val context = profileContext(profile)
+        return mapOf(
+            "profile" to profileSummary(profile),
+            "recordCount" to parsed.entries.size,
+            "returnedCount" to minOf(parsed.entries.size, limit),
+            "truncated" to (parsed.entries.size > limit),
+            "rows" to parsed.entries.take(limit).map { rowMap(it, context, fields = null, compact = false) },
+            "diagnostics" to parsed.diagnostics,
+            "availableFields" to actualFieldDescriptors(profile, parsed.profileFieldNames),
+            "declaredFields" to profileFieldDescriptors(profile),
+            "capabilities" to capabilityStatuses(parsed.capabilities),
+        )
+    }
+
+    private fun importLogFormatProfilesRoute(rawJson: String, conflictPolicy: String): Map<String, Any?> {
+        if (rawJson.isBlank()) return mapOf("error" to "missing profile JSON")
+        if (rawJson.toByteArray(Charsets.UTF_8).size > MAX_PROFILE_IMPORT_BYTES) {
+            return mapOf("error" to "profile JSON exceeds the $MAX_PROFILE_IMPORT_BYTES byte limit")
+        }
+        val updateConflicts = when (conflictPolicy.uppercase()) {
+            "RENAME" -> false
+            "UPDATE" -> true
+            else -> return mapOf("error" to "conflictPolicy must be RENAME or UPDATE")
+        }
+        val parsed = runCatching { decodeLogFormatProfiles(rawJson) }
+            .getOrElse { return mapOf("error" to (it.message ?: "profile import failed")) }
+        val imported = appState.applyImportedLogFormatProfiles(parsed, updateConflicts)
+            .getOrElse { return mapOf("error" to (it.message ?: "profile import failed")) }
+        return mapOf(
+            "ok" to true,
+            "conflictPolicy" to conflictPolicy.uppercase(),
+            "importedCount" to imported.size,
+            "profiles" to imported.map(::profileSummary),
+        )
+    }
+
+    private fun exportLogFormatProfilesRoute(profileIds: List<String>, path: String?): Map<String, Any?> {
+        if (profileIds.isEmpty()) return mapOf("error" to "provide at least one profileId")
+        if (profileIds.distinct().size != profileIds.size) return mapOf("error" to "profileIds must be unique")
+        val profiles = profileIds.map { id ->
+            appState.logFormatProfile(id) ?: return mapOf("error" to "no such log format profile: $id")
+        }
+        val json = logFormatProfileBundleJson(profiles)
+        val output = path?.takeIf(String::isNotBlank)?.let(::File)
+        if (output != null) {
+            appState.writeLogFormatProfilesFile(output, profiles).getOrElse {
+                return mapOf("error" to (it.message ?: "could not export profiles"))
+            }
+        }
+        return mapOf("ok" to true, "profileCount" to profiles.size, "profiles" to profiles.map(::profileSummary), "json" to json) +
+            (output?.let { mapOf("path" to it.absolutePath) } ?: emptyMap())
+    }
+
+    private suspend fun reparseTabWithLogFormatProfileRoute(tabId: String, profileId: String): Map<String, Any?> {
+        val result: Result<LogTab> = when {
+            tabId.isBlank() -> Result.failure(IllegalArgumentException("missing tabId"))
+            profileId.isBlank() -> Result.failure(IllegalArgumentException("missing profileId"))
+            appState.tab(tabId) == null -> Result.failure(IllegalArgumentException("no such tab: $tabId"))
+            appState.logFormatProfile(profileId) == null ->
+                Result.failure(IllegalArgumentException("no such log format profile: $profileId"))
+            else -> runCatching {
+                val newTabId = appState.reparseTabWithLogFormatProfileAwait(tabId, profileId)
+                    ?: error(appState.logFormatProfileError ?: "Could not reparse the source.")
+                appState.tab(newTabId) ?: error("The reparsed tab was not published.")
+            }
+        }
+        return result.fold(
+            onSuccess = { newTab ->
+                mapOf(
+                    "ok" to true,
+                    "sourceTabId" to tabId,
+                    "tabId" to newTab.id,
+                    "filename" to newTab.filename,
+                    "entryCount" to newTab.logData.size,
+                    "logFormat" to newTab.logFormat.name,
+                ) + logFormatMetadata(newTab)
+            },
+            onFailure = { mapOf("error" to (it.message ?: "Could not reparse the source.")) },
+        )
+    }
+
+    private fun profileContext(profile: LogFormatProfile): LogFormatRowContext = LogFormatRowContext(
+        includeDltMetadata = profile.engine == com.indagium.model.LogFormatEngine.DLT,
+        profile = profile,
+        capabilities = emptyMap(),
+    )
+
+    private fun logFormatMetadata(tab: LogTab, context: LogFormatRowContext? = null): Map<String, Any?> {
+        val pinResult = if (context == null) appState.pinnedLogFormatProfileResult(tab.id) else null
+        val pinned = context?.profile ?: pinResult?.getOrNull()
+        val profile = pinned ?: tab.logFormatProfileId?.takeIf { tab.logFormatProfileSnapshot == null }?.let(appState::logFormatProfile)
+        if (profile == null) {
+            return if (tab.logFormatProfileSnapshot != null) {
+                mapOf(
+                    "logFormatProfileId" to tab.logFormatProfileId,
+                    "logFormatProfileError" to (context?.profileError ?: pinResult?.exceptionOrNull()?.message
+                        ?: "The pinned profile snapshot is invalid; the current registry definition was not substituted."),
+                )
+            } else {
+                emptyMap()
+            }
+        }
+        return mapOf(
+            "logFormatProfileId" to profile.id,
+            "logFormatProfileRevision" to profile.revision,
+            "logFormatProfile" to profileDefinition(profile),
+            "logFormatDiagnostics" to tab.logFormatDiagnostics,
+            "availableFields" to actualFieldDescriptors(profile, tab.profileFieldNames),
+            "declaredFields" to profileFieldDescriptors(profile),
+            "customAttributes" to profile.attributes.map { it.id },
+            "capabilities" to capabilityStatuses(tab.logCapabilities),
+        ) + if (tab.logFormatCandidateIds.isEmpty()) emptyMap() else mapOf("formatCandidates" to tab.logFormatCandidateIds)
+    }
+
+    private fun capabilityStatuses(statuses: Map<LogCapability, LogCapabilityStatus>): Map<String, Any?> =
+        statuses.entries.associate { (capability, status) ->
+            capability.name to mapOf("availability" to status.availability.name, "reason" to status.reason)
+        }
+
+    private fun rowContext(tab: LogTab): LogFormatRowContext {
+        val pinResult = appState.pinnedLogFormatProfileResult(tab.id)
+        val profile = pinResult.getOrNull()
+            ?: tab.logFormatProfileId?.takeIf { tab.logFormatProfileSnapshot == null }?.let(appState::logFormatProfile)
+        val capabilities = tab.logCapabilities
+        return LogFormatRowContext(tab.logFormat == LogFormat.DLT, profile, capabilities, pinResult.exceptionOrNull()?.message)
+    }
+
+    private fun unsupportedCapability(
+        tabId: String,
+        capability: LogCapability,
+        requireComplete: Boolean = false,
+    ): Map<String, Any?>? {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val context = rowContext(tab)
+        context.profileError?.let { error ->
+            return mapOf("error" to "The tab's pinned log format profile is invalid: $error")
+        }
+        // Logcat tabs keep each tool's own checks and messages; the capability gate is for the
+        // other formats, where a tool would otherwise run on fields that were never parsed.
+        val engine = context.profile?.engine
+        if (engine == LogFormatEngine.LOGCAT || (engine == null && tab.logFormat == LogFormat.LOGCAT)) return null
+        if (tab.logFormatProfileId != null) {
+            appState.requireLogCapability(tabId, capability).exceptionOrNull()?.let { error ->
+                return mapOf(
+                    "error" to "${capability.name} is unsupported for this log format: ${error.message ?: "capability unavailable"}",
+                    "capability" to capability.name,
+                    "reason" to (error.message ?: "capability unavailable"),
+                )
+            }
+        }
+        val status = context.capabilities[capability] ?: return null
+        return if (status.availability == CapabilityAvailability.UNAVAILABLE ||
+            (requireComplete && status.availability != CapabilityAvailability.AVAILABLE)
+        ) {
+            mapOf(
+                "error" to "${capability.name} is unsupported for this log format: ${status.reason}",
+                "capability" to capability.name,
+                "reason" to status.reason,
+            )
+        } else {
+            null
+        }
     }
 
     /**
@@ -692,21 +1026,37 @@ internal class IndagiumToolOperations(
         destinationDir: String?,
         postfix: String,
         partCount: Int?,
+        profileId: String?,
     ): Map<String, Any?> {
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
+        if (profileId != null && appState.logFormatProfile(profileId) == null) {
+            return mapOf("error" to "no such log format profile: $profileId")
+        }
         val file = File(path)
         if (!file.exists()) return mapOf("error" to "file not found: $path")
-        if (isSupportedArchiveFile(file)) return openZipRoute(file, entryPath, splitMode, destinationDir, postfix, partCount)
+        if (isSupportedArchiveFile(file)) return openZipRoute(file, entryPath, splitMode, destinationDir, postfix, partCount, profileId)
         if (splitMode.equals("split", ignoreCase = true)) {
-            return splitLogRoute(path, entryPath = null, destinationDir = destinationDir, postfix = postfix, partCount = partCount)
+            return splitLogRoute(
+                path,
+                entryPath = null,
+                destinationDir = destinationDir,
+                postfix = postfix,
+                partCount = partCount,
+                profileId = profileId,
+            )
         }
         val absPath = file.absolutePath
         val errorBefore = appState.openError
-        val tabId = if (splitMode.equals("open_as_is", ignoreCase = true)) appState.openFileAsIs(file) else appState.openFile(file)
+        val tabId = when {
+            profileId != null ->
+                appState.openFileWithLogFormatProfile(file, profileId, bypassSplitPrompt = splitMode.equals("open_as_is", ignoreCase = true))
+            splitMode.equals("open_as_is", ignoreCase = true) -> appState.openFileAsIs(file)
+            else -> appState.openFile(file)
+        }
         appState.pendingSplitPrompt?.sources?.firstOrNull { source ->
             source is SplitSource.RealFile && source.file.absolutePath == absPath
         }?.let { source ->
-            return splitSourceToMap(source)
+            return splitSourceToMap(source) + (profileId?.let { mapOf("profileId" to it) } ?: emptyMap())
         }
         // (ARCH-3) openFile/openFileAsIs already return the specific tabId this call triggered (or
         // reused, via the "already open" dedup fast path) — scope the wait to that tab instead of
@@ -716,7 +1066,12 @@ internal class IndagiumToolOperations(
         awaitLoad(tabId)
         val tab = appState.tab(tabId)
             ?: return mapOf("error" to withOpenErrorDetail("file did not load: $path", errorBefore))
-        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "logFormat" to tab.logFormat.name)
+        return mapOf(
+            "tabId" to tab.id,
+            "filename" to tab.filename,
+            "entryCount" to tab.logData.size,
+            "logFormat" to tab.logFormat.name,
+        ) + logFormatMetadata(tab)
     }
 
     // Mirrors the UI's single/multi-candidate split (AppState.openZipFile): a lone candidate
@@ -731,6 +1086,7 @@ internal class IndagiumToolOperations(
         destinationDir: String?,
         postfix: String,
         partCount: Int?,
+        profileId: String?,
     ): Map<String, Any?> {
         val candidates = listArchiveLogCandidates(file)
         if (candidates.isEmpty()) return mapOf("error" to "no candidate log files found in zip: ${file.path}")
@@ -738,13 +1094,21 @@ internal class IndagiumToolOperations(
             entryPath != null -> candidates.find { it.entryPath == entryPath }
                 ?: return mapOf("error" to "no such entry in zip: $entryPath")
             candidates.size == 1 -> candidates.first()
-            else -> return mapOf("needsSelection" to true, "candidates" to candidates.map { zipCandidateToMap(it) })
+            else -> return mapOf("needsSelection" to true, "candidates" to candidates.map { zipCandidateToMap(it) }) +
+                (profileId?.let { mapOf("profileId" to it) } ?: emptyMap())
         }
         if (splitMode.equals("split", ignoreCase = true)) {
-            return splitLogRoute(file.absolutePath, target.entryPath, destinationDir, postfix, partCount)
+            return splitLogRoute(file.absolutePath, target.entryPath, destinationDir, postfix, partCount, profileId)
         }
         val errorBefore = appState.openError
-        val tabId = if (splitMode.equals("open_as_is", ignoreCase = true)) {
+        val tabId = if (profileId != null) {
+            appState.openArchiveEntryWithLogFormatProfile(
+                file,
+                target,
+                profileId,
+                bypassSplitPrompt = splitMode.equals("open_as_is", ignoreCase = true),
+            )
+        } else if (splitMode.equals("open_as_is", ignoreCase = true)) {
             appState.openZipEntryAsIs(file, target)
         } else {
             appState.openZipEntries(file, listOf(target)).firstOrNull()
@@ -754,7 +1118,7 @@ internal class IndagiumToolOperations(
                 source.archiveFile.absolutePath == file.absolutePath &&
                 source.candidate.entryPath == target.entryPath
         }?.let { source ->
-            return splitSourceToMap(source)
+            return splitSourceToMap(source) + (profileId?.let { mapOf("profileId" to it) } ?: emptyMap())
         }
         // (ARCH-3) See openLogFile's matching comment above — scope to the specific tabId
         // openZipEntryAsIs/openZipEntries already hand back, instead of the global isLoading flag.
@@ -764,17 +1128,29 @@ internal class IndagiumToolOperations(
         awaitLoad(tabId)
         val tab = appState.tab(tabId)
             ?: return mapOf("error" to withOpenErrorDetail("entry did not load: ${target.entryPath}", errorBefore))
-        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "logFormat" to tab.logFormat.name)
+        return mapOf(
+            "tabId" to tab.id,
+            "filename" to tab.filename,
+            "entryCount" to tab.logData.size,
+            "logFormat" to tab.logFormat.name,
+        ) + logFormatMetadata(tab)
     }
 
+    @Suppress("ReturnCount") // Each early return reports a specific split-source/capability refusal.
     private fun splitLogRoute(
         path: String,
         entryPath: String?,
         destinationDir: String?,
         postfix: String,
         partCount: Int?,
+        profileId: String? = null,
     ): Map<String, Any?> {
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
+        val profile = profileId?.let { appState.logFormatProfile(it) }
+        if (profileId != null && profile == null) return mapOf("error" to "no such log format profile: $profileId")
+        profile?.let(::profileSplitUnsupportedReason)?.let { reason ->
+            return mapOf("error" to reason, "capability" to LogCapability.RECORD_SPLIT.name, "reason" to reason)
+        }
         val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
         if (appState.isUnsplittableSource(source)) {
             return mapOf(
@@ -792,10 +1168,16 @@ internal class IndagiumToolOperations(
             appState.cancelSplitPrompt()
         }
         val before = appState.tabs.size
-        val result = appState.splitSourceAndOpenWithinMemory(source, destination, postfix, count, shortfall)
+        val result = appState.splitSourceAndOpenWithinMemory(source, destination, postfix, count, shortfall, profile = profile)
         awaitLoad()
         val openedTabs = appState.tabs.drop(before).map { tab ->
-            mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "sourcePath" to tab.sourcePath)
+            mapOf(
+                "tabId" to tab.id,
+                "filename" to tab.filename,
+                "entryCount" to tab.logData.size,
+                "sourcePath" to tab.sourcePath,
+                "logFormat" to tab.logFormat.name,
+            ) + logFormatMetadata(tab)
         }
         return mapOf(
             "ok" to true,
@@ -807,9 +1189,21 @@ internal class IndagiumToolOperations(
             mapOf(
                 "unopenedPaths" to result.unopened.map { it.absolutePath },
                 "unopenedReason" to "Not opened because the parts would not all fit in free memory; " +
-                    "open them with open_log_file once memory is free.",
+                    "open them with open_log_file once memory is free." +
+                    (profileId?.let { " Reuse profileId '$it' to keep the same parser." } ?: ""),
             )
         }
+    }
+
+    private fun profileSplitUnsupportedReason(profile: LogFormatProfile): String? = when (profile.engine) {
+        com.indagium.model.LogFormatEngine.CSV, com.indagium.model.LogFormatEngine.CRI ->
+            "Record splitting is unavailable for ${profile.name}: multiline/partial records can cross file boundaries."
+        com.indagium.model.LogFormatEngine.REGEX -> if (profile.multilineStartPattern.isNotBlank()) {
+            "Record splitting is unavailable for ${profile.name}: multiline records cannot be split safely."
+        } else {
+            null
+        }
+        else -> null
     }
 
     // The memory shortfall behind [source]'s split prompt: the pending prompt's own when one holds
@@ -857,6 +1251,7 @@ internal class IndagiumToolOperations(
         if (tabIds.size < 2) return mapOf("error" to "need at least 2 tabIds to merge")
         val missing = tabIds.filter { appState.tab(it) == null }
         if (missing.isNotEmpty()) return mapOf("error" to "no such tab(s): ${missing.joinToString(", ")}")
+        tabIds.forEach { id -> unsupportedCapability(id, LogCapability.MERGE, requireComplete = true)?.let { return it } }
         val beforeCount = appState.tabs.size
         val errorBefore = appState.openError
         appState.mergeTabs(tabIds, newTabName)
@@ -879,6 +1274,7 @@ internal class IndagiumToolOperations(
     // growth.
     private fun startTailingRoute(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        unsupportedCapability(tabId, LogCapability.INCREMENTAL_TAIL)?.let { return it }
         appState.startTailing(tabId)
         return mapOf("tabId" to tabId, "tailing" to (appState.tab(tabId)?.tailing ?: tab.tailing))
     }
@@ -897,6 +1293,7 @@ internal class IndagiumToolOperations(
     // a resolve that ran but simply found nothing is NOT an error, it's `{ matches: [] }`, so a
     // client can tell "misconfigured" apart from "configured correctly, no match for this line."
     private fun resolveLogSourceRoute(a: Map<String, Any?>, loadedRowTab: LogTab? = null): Map<String, Any?> {
+        if (loadedRowTab != null) unsupportedCapability(loadedRowTab.id, LogCapability.SOURCE_LOOKUP)?.let { return it }
         if (appState.settings.sourceFolders.isEmpty()) {
             return mapOf("error" to "no source folders configured — add one in Settings → Source code")
         }
@@ -1555,7 +1952,7 @@ internal class IndagiumToolOperations(
     private fun setFilter(tabId: String, body: Map<String, Any?>): Map<String, Any?> {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
-
+        requestedFilterCapabilityError(tabId, body)?.let { return it }
         val parsed = parseFilterUpdate(body)
             .getOrElse { return mapOf("error" to (it.message ?: "invalid filter update")) }
 
@@ -1566,6 +1963,20 @@ internal class IndagiumToolOperations(
             put("filter", filterToMap(appState.tab(tabId)!!.filter))
             parsed.modeWarning?.let { put("warning", it) }
         }
+    }
+
+    private fun requestedFilterCapabilityError(tabId: String, body: Map<String, Any?>): Map<String, Any?>? {
+        val messageRulesUseComponents = (body["messageRules"] as? List<*>)
+            .orEmpty().filterIsInstance<Map<*, *>>()
+            .any { (it["tag"] as? String).orEmpty().isNotBlank() || (it["packagePrefix"] as? String).orEmpty().isNotBlank() }
+        val componentFilterRequested = messageRulesUseComponents || listOf("activeTags", "excludeTags", "pkgPrefixes", "excludePkgPrefixes")
+            .any { key -> body.strList(key).orEmpty().isNotEmpty() }
+        val requestedCapabilities = buildList {
+            if ("levels" in body) add(LogCapability.SEVERITY_FILTER)
+            if (componentFilterRequested) add(LogCapability.COMPONENT_FILTER)
+            if (!body.str("pidTidFilter").isNullOrBlank()) add(LogCapability.PID_THREAD_FILTER)
+        }
+        return requestedCapabilities.firstNotNullOfOrNull { unsupportedCapability(tabId, it) }
     }
 
     // Bundles every value-constrained field set_filter validates up front, so a bad value is a
@@ -1748,14 +2159,15 @@ internal class IndagiumToolOperations(
 
     private fun getVisibleLines(tabId: String, limit: Int, offset: Int, fields: Set<String>?, compact: Boolean): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val rowContext = rowContext(tab)
         val items = computeItems(tab, true)
         return mapOf(
             "tabId" to tabId,
             "totalCount" to items.size,
             "items" to items.drop(offset).take(limit).map {
-                projectItem(logItemToMap(it, tab.logFormat == LogFormat.DLT), fields, compact)
+                projectItem(logItemToMap(it, rowContext), fields, compact)
             },
-        )
+        ) + logFormatMetadata(tab, rowContext)
     }
 
     // Unfiltered context around a single line, read straight from the tab's parsed entries — so it
@@ -1766,10 +2178,11 @@ internal class IndagiumToolOperations(
         if (idx < 0) return mapOf("error" to "no such line id $lineId in tab $tabId")
         val from = (idx - before.coerceAtLeast(0)).coerceAtLeast(0)
         val to = (idx + after.coerceAtLeast(0)).coerceAtMost(tab.logData.lastIndex)
+        val rowContext = rowContext(tab)
         return mapOf(
             "tabId" to tabId, "lineId" to lineId,
-            "lines" to (from..to).map { rowMap(tab.logData[it], tab.logFormat == LogFormat.DLT, fields, compact) },
-        )
+            "lines" to (from..to).map { rowMap(tab.logData[it], rowContext, fields, compact) },
+        ) + logFormatMetadata(tab, rowContext)
     }
 
     // Distinct dotted tag-prefixes present in the full file, with counts — mirrors get_tags so a
@@ -2104,6 +2517,7 @@ internal class IndagiumToolOperations(
     // `partial: true` and `analyzedThroughId` saying that rows after that id are not analysed yet.
     private fun getCrashSites(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        unsupportedCapability(tabId, LogCapability.ANDROID_ISSUES)?.let { return it }
         val analysis = tab.analysis
         if (analysis.pending) return mapOf("tabId" to tabId, "sites" to emptyList<Map<String, Any?>>(), "pending" to true)
         val sites = analysis.crashSites.map { crashSiteToMap(it) }
@@ -2121,6 +2535,7 @@ internal class IndagiumToolOperations(
     // target position.
     private fun getVideoFrameRoute(tabId: String, lineId: Int?, videoMs: Long?): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        unsupportedCapability(tabId, LogCapability.VIDEO_LINKING)?.let { return it }
         if (tab.attachedVideo == null) return mapOf("error" to "no video attached to tab: $tabId")
         val targetMs = when {
             videoMs != null -> videoMs
@@ -2358,31 +2773,58 @@ internal class IndagiumToolOperations(
 
     // Deliberately no `else` branch, so adding a new LogItem variant is a compile error here,
     // not a silently-missing DTO field.
-    private fun logItemToMap(item: LogItem, includeDltMetadata: Boolean): Map<String, Any?> = when (item) {
+    private fun logItemToMap(item: LogItem, context: LogFormatRowContext): Map<String, Any?> = when (item) {
         is LogItem.Row -> mapOf(
             "type" to "Row", "id" to item.entry.id, "ts" to item.entry.ts,
-            "level" to item.entry.level.key.toString(), "tag" to item.entry.tag,
+            "level" to item.entry.displaySeverityText, "tag" to item.entry.tag,
             "msg" to item.entry.msg, "pid" to item.entry.pid, "tid" to item.entry.tid,
             "indent" to item.indent,
-        ) + dltEntryToMap(item.entry, includeDltMetadata)
+        ) + logEntryMetadataToMap(item.entry, context) + dltEntryToMap(item.entry, context.includeDltMetadata)
         is LogItem.SeqHeader -> mapOf(
             "type" to "SeqHeader", "id" to item.entry.id, "gid" to item.gid,
-            "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
+            "ts" to item.entry.ts, "level" to item.entry.displaySeverityText,
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "indent" to item.indent, "expanded" to item.expanded, "count" to item.count,
-        ) + dltEntryToMap(item.entry, includeDltMetadata)
+        ) + logEntryMetadataToMap(item.entry, context) + dltEntryToMap(item.entry, context.includeDltMetadata)
         is LogItem.ManualHeader -> mapOf(
             "type" to "ManualHeader", "id" to item.entry.id, "gid" to item.gid,
-            "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
+            "ts" to item.entry.ts, "level" to item.entry.displaySeverityText,
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "expanded" to item.expanded, "count" to item.count,
-        ) + dltEntryToMap(item.entry, includeDltMetadata)
+        ) + logEntryMetadataToMap(item.entry, context) + dltEntryToMap(item.entry, context.includeDltMetadata)
         is LogItem.StackTraceHeader -> mapOf(
             "type" to "StackTraceHeader", "id" to item.entry.id, "gid" to item.gid,
-            "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
+            "ts" to item.entry.ts, "level" to item.entry.displaySeverityText,
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "indent" to item.indent, "expanded" to item.expanded, "count" to item.count,
-        ) + dltEntryToMap(item.entry, includeDltMetadata)
+        ) + logEntryMetadataToMap(item.entry, context) + dltEntryToMap(item.entry, context.includeDltMetadata)
+    }
+
+    private fun logEntryMetadataToMap(entry: LogEntry, context: LogFormatRowContext): Map<String, Any?> {
+        val recordMetadata = entry.recordMetadata ?: return emptyMap()
+        val attributes = context.profile?.attributes.orEmpty().mapNotNull { attribute ->
+            recordMetadata.profileFields[attribute.id]?.let { attribute.id to it }
+        }.toMap()
+        return mapOf(
+            "severityKnown" to entry.severityKnown,
+            "profileFields" to recordMetadata.profileFields,
+            "customAttributes" to attributes,
+            "originalSeverity" to entry.originalSeverity,
+            "rawRecord" to entry.rawRecord,
+            "sourceStartLine" to entry.sourceStartLine,
+            "sourceEndLine" to entry.sourceEndLine,
+            "processIdentity" to entry.processIdentity,
+            "threadIdentity" to entry.threadIdentity,
+            "canonicalTimestamp" to entry.parsedTime?.let { time ->
+                mapOf(
+                    "original" to time.original,
+                    "epochMillis" to time.epochMillis,
+                    "localTime" to time.localTime,
+                    "relativeMillis" to time.relativeMillis,
+                    "clockIdentity" to time.clockIdentity,
+                )
+            },
+        )
     }
 
     private fun dltEntryToMap(entry: LogEntry, includeDltMetadata: Boolean): Map<String, Any?> = if (includeDltMetadata) mapOf(
@@ -2461,8 +2903,8 @@ internal class IndagiumToolOperations(
         }
     }
 
-    private fun rowMap(entry: LogEntry, includeDltMetadata: Boolean, fields: Set<String>?, compact: Boolean): Map<String, Any?> =
-        projectItem(logItemToMap(LogItem.Row(entry, 0), includeDltMetadata), fields, compact)
+    private fun rowMap(entry: LogEntry, context: LogFormatRowContext, fields: Set<String>?, compact: Boolean): Map<String, Any?> =
+        projectItem(logItemToMap(LogItem.Row(entry, 0), context), fields, compact)
 
     private fun zipCandidateToMap(candidate: ZipLogCandidate): Map<String, Any?> = mapOf(
         "entryPath" to candidate.entryPath,

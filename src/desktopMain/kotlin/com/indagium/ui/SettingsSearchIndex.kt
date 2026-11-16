@@ -730,6 +730,64 @@ private fun issues() = listOf(
     ),
 )
 
+private fun logFormats() = listOf(
+    entry(
+        SettingsPage.LogFormats, "Log format profiles",
+        "Choose a parser engine, map fields and time, preview records, and import or export versioned profile JSON.",
+        listOf("jsonl", "ndjson", "csv", "tsv", "syslog", "regex", "parser", "severity", "timestamp", "custom format", "built-in", "duplicate"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Parser engine",
+        "Choose Logcat, DLT, plain text, regex, JSON Lines, CSV, or syslog parsing.",
+        listOf("logcat", "dlt", "plain text", "regex parser", "json lines", "csv", "tsv", "syslog"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Always open these extensions with this format",
+        "Open files with the listed extensions with this profile, without content detection.",
+        listOf("file association", "extension", "default format", "always use"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Content detection regex",
+        "Add an optional safe regular expression that helps identify matching log files.",
+        listOf("file detection", "match file", "content regex", "automatic parser selection"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Timestamp interpretation",
+        "Set whether time is automatic, ISO 8601, custom, epoch, time of day, or elapsed time.",
+        listOf("epoch seconds", "milliseconds", "microseconds", "nanoseconds", "timezone", "relative clock", "elapsed time"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Severity mapping",
+        "Map source severity names to normalized verbose, debug, info, warning, error, or assert levels.",
+        listOf("level", "severity", "warn", "fatal", "trace", "debug"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Extra attributes",
+        "Add typed fields and choose which fields appear as columns.",
+        listOf("custom fields", "attributes", "columns", "container", "request id", "trace id", "http path"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Default columns",
+        "Choose which parsed fields are visible by default; hidden columns do not change capabilities.",
+        listOf("visible columns", "show columns", "table columns", "presentation"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Compatible analyzers",
+        "Choose analyzers that understand this profile's records.",
+        listOf("android crash", "analyzer", "issue analysis"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Issue rules",
+        "Add safe regular-expression rules that find named issues in parsed records.",
+        listOf("custom issue", "regex", "crash rule", "issue category"),
+    ),
+    entry(
+        SettingsPage.LogFormats, "Sample records",
+        "Preview a bounded sample and inspect parsed fields and capability coverage before saving.",
+        listOf("preview", "sample", "unmatched", "coverage", "capabilities"),
+    ),
+)
+
 private fun testing() = listOf(
     entry(
         SettingsPage.TestRuns, "Default judge",
@@ -808,7 +866,7 @@ private fun issueTracker() = listOf(
 
 internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> =
     general() + appearance() + appearanceShapes() + editorBehavior() + exportAnnotations() + capture() +
-        automation() + aiProviders() + voiceInput() + customAiCommands() + sourceCode() + issues() + testing() + issueTracker()
+        automation() + aiProviders() + voiceInput() + customAiCommands() + sourceCode() + issues() + logFormats() + testing() + issueTracker()
 
 // Bidirectional groups of interchangeable words. A query token that equals (or, from 3 letters on,
 // is a prefix of) a member also matches every other member of its group.

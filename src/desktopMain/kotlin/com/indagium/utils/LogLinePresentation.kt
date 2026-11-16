@@ -7,6 +7,8 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogItem
 import com.indagium.model.LogTab
 import com.indagium.model.ProcessNameMode
+import com.indagium.model.displayLevelAndComponent
+import com.indagium.model.displaySeverityText
 import com.indagium.model.entry
 
 /**
@@ -70,9 +72,17 @@ fun presentLogLine(
     context: LogLinePresentationContext? = null,
     allowProcessName: Boolean = true,
 ): String {
-    val fields = buildList {
+    val prefix = buildList {
         if (settings.copyRowNumber && settings.showRowNumbers) add(entry.id.toString())
         context?.deltaFor(entry)?.let(::add)
+    }
+    val profileColumns = profileDisplayColumns(entry)
+    if (profileColumns != null) {
+        val processName = copiedProfileProcessName(tab, entry, settings, allowProcessName)
+        val profileText = profileDisplayText(profileColumns, processName, settings.copyPidTid)
+        return (prefix + profileText.takeIf(String::isNotEmpty).orEmpty()).filter(String::isNotEmpty).joinToString("  ")
+    }
+    val legacyFields = buildList {
         add(entry.ts)
         if (settings.copyPidTid && entry.pid > 0) {
             val displayPid = if (settings.copyPidAsName && allowProcessName) {
@@ -82,10 +92,10 @@ fun presentLogLine(
             }
             add("$displayPid ${entry.tid}")
         }
-        add("${entry.level.key}/${entry.tag}")
+        add(entry.displayLevelAndComponent)
         add(entry.msg)
     }
-    return fields.joinToString("  ")
+    return (prefix + legacyFields).joinToString("  ")
 }
 
 /** Markdown keeps the familiar bold timestamp/level treatment while drawing its metadata from
@@ -100,6 +110,18 @@ fun presentLogLineMarkdown(
     val prefix = buildList {
         if (settings.copyRowNumber && settings.showRowNumbers) add(entry.id.toString())
         context?.deltaFor(entry)?.let(::add)
+    }
+    val profileColumns = profileDisplayColumns(entry)
+    if (profileColumns != null) {
+        val processName = copiedProfileProcessName(tab, entry, settings, allowProcessName)
+        val profileText = profileDisplayText(profileColumns, processName, settings.copyPidTid)
+        val prefixText = prefix.joinToString("  ")
+        return buildString {
+            if (prefixText.isNotEmpty()) append("**[$prefixText]**  ")
+            append(profileText)
+        }
+    }
+    val legacyPrefix = (prefix + buildList {
         add(entry.ts)
         if (settings.copyPidTid && entry.pid > 0) {
             val displayPid = if (settings.copyPidAsName && allowProcessName) {
@@ -109,8 +131,19 @@ fun presentLogLineMarkdown(
             }
             add("$displayPid ${entry.tid}")
         }
-    }.joinToString("  ")
-    return "**[$prefix] `${entry.level.key}/${entry.tag}`:** ${entry.msg}"
+    }).joinToString("  ")
+    return "**[$legacyPrefix] `${entry.displayLevelAndComponent}`:** ${entry.msg}"
+}
+
+private fun copiedProfileProcessName(
+    tab: LogTab,
+    entry: LogEntry,
+    settings: AppSettings,
+    allowProcessName: Boolean,
+): String? = if (settings.copyPidTid && settings.copyPidAsName && allowProcessName && entry.pid > 0) {
+    tab.analysis.processNames[entry.pid]
+} else {
+    null
 }
 
 /**
@@ -160,6 +193,8 @@ fun captureAnnotationLogRef(
             timeDeltaText = deltaText,
             displayedProcessName = displayed,
             processNameCandidate = candidate,
+            displayColumns = entry.recordMetadata?.displayColumns.orEmpty(),
+            profileProjectionPresent = entry.recordMetadata?.usesProfilePresentation == true,
         )
     }
     return AnnBlock.LogRefCapture(
@@ -231,11 +266,22 @@ fun freezeLegacyLogRefPresentation(
             logId = entry.id,
             rowNumberText = entry.id.toString(),
             processNameCandidate = candidate,
+            displayColumns = entry.recordMetadata?.displayColumns.orEmpty(),
+            profileProjectionPresent = entry.recordMetadata?.usesProfilePresentation == true,
         )
     },
 )
 
 private const val UNKNOWN_ANNOTATION_DELTA = "—"
+
+private fun annotationProcessName(
+    row: AnnBlock.LogRefRowPresentation?,
+    options: AnnBlock.LogRefPresentationOptions,
+): String? = if (options.processName) {
+    row?.displayedProcessName ?: row?.processNameCandidate.takeIf { options.allProcessNameCandidates }
+} else {
+    null
+}
 
 /** One renderer for every annotation surface. A snapshotted block never reads live settings,
  * selections, or process-name maps; those values have already been copied into its presentation. */
@@ -245,19 +291,28 @@ fun presentAnnotationLogLine(
 ): String {
     val options = presentation.options
     val row = presentation.row(entry.id)
+    val profileColumns = when {
+        row?.profileProjectionPresent == true -> row.displayColumns
+        entry.recordMetadata?.usesProfilePresentation == true -> entry.recordMetadata.displayColumns
+        else -> null
+    }
+    if (profileColumns != null) {
+        val processName = annotationProcessName(row, options).takeIf { options.pidTid }
+        val profileText = profileDisplayText(profileColumns, processName, includeProcessThread = options.pidTid)
+        val prefix = buildList {
+            if (options.rowNumber) add(row?.rowNumberText ?: entry.id.toString())
+            if (options.timeDelta) add(row?.timeDeltaText ?: UNKNOWN_ANNOTATION_DELTA)
+        }
+        return (prefix + profileText.takeIf(String::isNotEmpty).orEmpty()).filter(String::isNotEmpty).joinToString("  ")
+    }
     return buildList {
         if (options.rowNumber) add(row?.rowNumberText ?: entry.id.toString())
         if (options.timeDelta) add(row?.timeDeltaText ?: UNKNOWN_ANNOTATION_DELTA)
         add(entry.ts)
         if (options.pidTid && entry.pid > 0) {
-            val name = if (options.processName) {
-                row?.displayedProcessName ?: row?.processNameCandidate.takeIf { options.allProcessNameCandidates }
-            } else {
-                null
-            }
-            add("${name ?: entry.pid} ${entry.tid}")
+            add("${annotationProcessName(row, options) ?: entry.pid} ${entry.tid}")
         }
-        add("${entry.level.key}/${entry.tag}")
+        add(entry.displayLevelAndComponent)
         add(entry.msg)
     }.joinToString("  ")
 }
@@ -277,9 +332,22 @@ fun presentAnnotationLogLine(
 /** The CSV schema follows the same visible-column order while retaining the stable minimal
  * `ts,level,tag,msg` form when every optional copy setting is off. */
 fun filteredCsvHeader(tab: LogTab, settings: AppSettings): List<String> = buildList {
+    val hasProfileSchema = tab.profileProjectionSchemaPresent
     if (settings.copyRowNumber && settings.showRowNumbers) add("row_number")
     if (settings.copyTimeDelta && tab.showTimeDelta) add("time_delta")
-    add("ts")
+    if (hasProfileSchema) {
+        tab.profileDisplayColumns.forEach { column ->
+            if (settings.copyPidTid || !isProfileProcessThreadColumn(column.id)) {
+                add(column.label)
+                if (settings.copyPidTid && settings.copyPidAsName && isProfileProcessIdColumn(column.id)) {
+                    add("pid_name")
+                }
+            }
+        }
+    } else {
+        add("ts")
+    }
+    if (hasProfileSchema) return@buildList
     if (settings.copyPidTid) {
         add("pid")
         add("tid")
@@ -304,8 +372,28 @@ fun filteredCsvValues(
     settings: AppSettings,
     context: LogLinePresentationContext,
 ): List<String> = buildList {
+    val hasProfileSchema = tab.profileProjectionSchemaPresent
     if (settings.copyRowNumber && settings.showRowNumbers) add(entry.id.toString())
     if (settings.copyTimeDelta && tab.showTimeDelta) add(context.deltaFor(entry).orEmpty())
+    val profileColumns = profileDisplayColumns(entry)
+    if (hasProfileSchema) {
+        val valuesById = profileColumns?.associate { it.id to it.value }
+        tab.profileDisplayColumns.forEach { column ->
+            if (settings.copyPidTid || !isProfileProcessThreadColumn(column.id)) {
+                add(
+                    if (profileColumns != null) {
+                        valuesById?.get(column.id).orEmpty()
+                    } else {
+                        legacyProfileColumnValue(entry, column.id)
+                    },
+                )
+                if (settings.copyPidTid && settings.copyPidAsName && isProfileProcessIdColumn(column.id)) {
+                    add(tab.analysis.processNames[entry.pid].takeIf { entry.pid > 0 }.orEmpty())
+                }
+            }
+        }
+        return@buildList
+    }
     add(entry.ts)
     if (settings.copyPidTid) {
         if (entry.pid > 0) {
@@ -320,7 +408,7 @@ fun filteredCsvValues(
             if (settings.copyPidAsName) add("")
         }
     }
-    add(entry.level.key.toString())
+    add(entry.displaySeverityText)
     add(entry.tag)
     if (tab.logFormat == com.indagium.model.LogFormat.DLT) {
         add(entry.dltEcuId.orEmpty())
@@ -331,4 +419,32 @@ fun filteredCsvValues(
         add(entry.dltTimestampSource.orEmpty())
     }
     add(entry.msg)
+}
+
+/** DLT metadata columns a merged profile schema keeps; ids match [legacyProfileColumnValue]. */
+internal val DLT_EXPORT_COLUMNS: List<com.indagium.model.LogDisplayField> = listOf(
+    "dlt_ecu_id",
+    "dlt_app_id",
+    "dlt_context_id",
+    "dlt_message_type",
+    "dlt_timestamp",
+    "dlt_timestamp_source",
+).map { com.indagium.model.LogDisplayField(it, it, "") }
+
+private fun legacyProfileColumnValue(entry: LogEntry, id: String): String = when (id) {
+    "timestamp" -> entry.ts
+    "severity" -> entry.displaySeverityText
+    "component" -> entry.tag
+    "message" -> entry.msg
+    "process_id" -> entry.pid.takeIf { it > 0 }?.toString().orEmpty()
+    "thread_id" -> entry.tid.takeIf { it > 0 }?.toString().orEmpty()
+    "dlt_ecu_id" -> entry.dltEcuId.orEmpty()
+    "dlt_app_id" -> entry.dltAppId.orEmpty()
+    "dlt_context_id" -> entry.dltContextId.orEmpty()
+    "dlt_message_type" -> entry.dltMessageType.orEmpty()
+    "dlt_timestamp" -> entry.dltTimestamp?.toString().orEmpty()
+    "dlt_timestamp_source" -> entry.dltTimestampSource.orEmpty()
+    else -> entry.recordMetadata?.displayFields?.get(id)
+        ?: entry.profileFields[id]
+        ?: ""
 }

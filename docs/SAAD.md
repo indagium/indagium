@@ -1141,11 +1141,11 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
 
 ### 6.7 The Settings dialog
 
-Settings is 18 pages in 7 groups (`SettingsGroupKind`: Workspace, Reading logs, Notes, Devices, AI, Testing, System), modelled by the `SettingsPage` enum
+Settings is 19 pages in 7 groups (`SettingsGroupKind`: Workspace, Reading logs, Notes, Devices, AI, Testing, System), modelled by the `SettingsPage` enum
 (`ui/SettingsPages.kt`; it replaced the old flat `SettingsSection`). A page has a title, icon, group, one-line description and an optional `parent`: the four
 Capture sub-pages (`CaptureTools`, `CaptureLimits`, `CaptureMarkIssue`, `CaptureVideoPlayback`) have no nav item, the nav highlights their parent
 (`navPage`), they show a "‹ Capture & video" back link, and `breadcrumb` reads `Group › Parent › Sub-page`. The pages are, in nav order: General, Appearance,
-Tabs & toolbar | Log view, Search & filters, Issue categories, Source code | Notes & writing, Copy & export | Capture & video | Providers, Commands,
+Tabs & toolbar | Log view, Search & filters, Issue categories, Log formats, Source code | Notes & writing, Copy & export | Capture & video | Providers, Commands,
 Voice input | Test runs, Issue tracker | Storage & files, Integrations, About.
 
 - **Shell.** `SettingsDialog` (`ui/SettingsDialog.kt`, 960 x 812 dp clamped to the window with a 24 dp margin) is a header, a 216 dp nav with the search field, the
@@ -6002,6 +6002,119 @@ when nothing is on, the app is capturing or playing video, or the window has no 
 5. Nothing else: `HolidayThemeContractTest` iterates the registry and checks palette contrast in dark and light, a complete icon set, unique effect
    ids, valid dates, a scene that stays inside its span at several sizes and positive design sizes. The Layout menu, Settings, search, codec,
    overlay, tab strip and toolbar need no edit.
+
+## 28. Log format profiles
+
+A **log format profile** is a data-only description of how to read one log layout: which parser engine to use, how to find the
+fields, what they mean, and how to show them. Built-in formats and user formats are the same kind of object. Do not confuse them
+with workspace profiles, which hold appearance and layout.
+
+### 28.1 Engines and profiles
+
+| Piece | Where | Role |
+|---|---|---|
+| `LogFormatEngine` | `model/LogFormatProfile.kt` | The parsing mechanics: `LOGCAT`, `DLT`, `PLAIN_TEXT`, `REGEX`, `JSON_LINES`, `CSV`, `SYSLOG_RFC5424`, `SYSLOG_RFC3164`, `LOGFMT`, `CRI`. Names are serialized; never rename one. |
+| `LogFormatProfile` | same | Identity (`id`, `name`, `revision`, `schemaVersion`), engine, `LogFormatDetection`, field mappings by `LogFieldRole`, extra `LogFormatAttribute`s, time and severity rules, visible columns, compatible analyzers, profile-only issue rules. |
+| Built-ins | `BUILTIN_LOG_FORMAT_PROFILES` + `model/AdditionalBuiltinLogFormats.kt` | Read-only: Android Logcat, Automotive DLT, Plain text, JSON Lines, Syslog 5424/3164, Pino, Docker json-file, systemd journal JSON, dmesg, HTTP Common/Combined, logfmt, Kubernetes CRI. A user duplicates one to change it. |
+| Custom | `AppSettings.customLogFormatProfiles` (JSON settings only) | At most 200. Edited in Settings › Log formats (`ui/SettingsLogFormats.kt`). |
+| Codec | `utils/LogFormatProfileCodec.kt` | Strict JSON read/write and `validateLogFormatProfile`. Every decode or validation failure is an `IllegalArgumentException`. |
+| Parsers | `utils/LogFormatProfiles.kt`, `utils/AdditionalLogFormatEngines.kt` | The generic engines. Logcat and DLT keep their own optimized parsers (`LogParser`, `DltParser`) and are only wrapped. |
+
+The editor's "Set up from a sample line" panel (`ui/LogFormatColumnBuilderPanel.kt`, logic in `utils/LogFormatColumnBuilder.kt`)
+cuts one pasted line into pieces, guesses what each is, and writes the `REGEX` engine's pattern, capture numbers and
+timestamp kind from the user's choice per column, so a text format needs no hand-written regex.
+
+A profile holds no code. An imported profile can name engines and analyzers; this build decides whether it can honour them.
+
+### 28.2 Choosing a profile
+
+`parseLogContent` (`utils/DltParser.kt`) is the one entry point for files, compressed logs, archive entries, restore and MCP.
+Binary DLT classification is checked first and always wins. For text, `selectTextProfile` picks in this order:
+
+1. The profile requested for this open or reparse.
+2. A custom profile whose `detection.alwaysUseForExtensions` is on and whose extensions include the file's. Duplicating or
+   importing a profile never turns this on.
+3. A custom profile whose header hints or content regex match the sample (extension is only a tie-break).
+4. A confident built-in signature (structured JSON log keys, syslog headers, CRI, logfmt, HTTP access, dmesg).
+5. The Logcat parser. Text it does not recognise stays as `RAW` rows, exactly as before profiles existed; an empty file must
+   stay on Logcat because a live capture starts as one.
+
+When several profiles tie at step 2, 3 or 4, the file opens as **Plain text**, `ParsedLog.candidateProfileIds` lists the tied
+profiles, and the tab shows a chooser strip (`ui/LogFormatChooser.kt`). `AppState.resolveLogFormatCandidate` reparses with the
+chosen profile and closes the plain-text tab if it had no notes, folds or selection. Generic JSON or CSV is never guessed to be
+a log.
+
+Archive scanning (`candidateKindFromContent` in `utils/BugReportZip.kt`) also offers `.jsonl`, `.ndjson`, `.logfmt`, `.dmesg`
+and `.syslog` entries as text candidates.
+
+### 28.3 Rows
+
+Rows are still `LogEntry`. Profile-only data hangs off one nullable reference, `LogEntry.recordMetadata` (`LogRecordMetadata`):
+the parsed fields, the display columns, the original severity text and whether it was understood, `ParsedTime`, the raw record
+and its source line span, and string process/thread identities. Logcat rows carry `null` there, so their memory cost did not
+change. An unparsed Logcat line is a plain `RAW` row at Info level, filtered as Info, as it always was.
+
+Field maps are `CompactFieldMap`: two arrays, with the key array shared by all rows of the same shape, and short repeated
+values (levels, logger names, status codes) shared within one parse. Measured on 300,000 rows: Logcat about 250 bytes of heap
+per row, plain text about 450, JSON Lines about 1,200 (it keeps the raw line as well as the fields). `estimatedHeapBytesForProfileLog`
+budgets 8 bytes of heap per file byte for these formats.
+
+Limits per record: 256 KB of text, 128 fields, 4,096 characters per field value. A record that breaks its format is kept as raw
+text and counted in the tab's diagnostics; nothing is dropped.
+
+### 28.4 Time and severity
+
+`ParsedTime` keeps the original text and one of: absolute epoch milliseconds, wall-clock milliseconds without a zone, a time of
+day, or milliseconds on a relative clock, plus a clock identity. Two rows are comparable only inside one clock domain
+(`logFormatClockSignature`). Delta, timeline, merge and video linking use that. Merging Logcat tabs keeps the old time-of-day
+rule; merging anything else needs equal clock signatures; DLT never merges with text.
+
+Severity is normalized to `LogLevel` for filtering, and the source value is kept. A row whose severity is absent or unknown has
+`severityKnown = false`: it shows its original text (or nothing) and passes every level filter instead of posing as Info.
+
+### 28.5 Capabilities
+
+`deriveLogCapabilities` computes, per tab, a `LogCapabilityStatus` (available, partial, unavailable, with a reason) for each
+`LogCapability` from the engine and from what was actually parsed, never from a switch in the profile. `AppState.logCapabilitiesForTab`
+adds source checks (a tail needs a plain UTF-8 file, source lookup needs an index). The filter panel, filter bar and toolbar hide
+or disable what a tab cannot do (`ui/LogFormatAvailability.kt`); MCP tools refuse with the reason.
+
+Live tailing of a profile tab goes through one `IncrementalProfileParser` (`utils/IncrementalProfileParser.kt`) per tailed tab, kept in
+`TailCoordinator` for as long as the tail lasts, pause and resume included. It drives the same record machines as the whole-file
+parse (`CsvRecordMachine`, `RegexRecordMachine`, `CriRecordAssembler`), so any split of a file into batches yields the rows the whole
+file would, with absolute source lines. It holds an open CSV quote, the CSV header row (read again from line 1 of the file when the
+tail starts), a multiline regex record until the next start line arrives, and CRI partial fragments; stopping the tail appends what
+it still holds. Engines whose record is one line delegate to `parseProfileLines`. DLT is refused, and Logcat tails through
+`parseLogcatLines` without a parser.
+
+Logcat tabs are deliberately not gated by this: their tools keep their own checks and messages, saved filters are never trimmed
+for them, and the capture tailer starts regardless of the summary. Android crash and ANR analysis runs for the Logcat engine or
+a profile that lists the `android-crash` analyzer (`buildLogAnalysis`).
+
+### 28.6 Persistence
+
+- A tab pins its profile: tab token fields 17 to 20 hold the profile id, the exact profile JSON (`logFormatProfileSnapshot`),
+  whether a profile column schema exists, and the column headers. A restored tab is parsed with its snapshot, so editing or
+  deleting the library profile never reinterprets an open investigation. Changing the format always reparses into a **new tab**.
+- Notes keep rows by value; the note row token gained appended fields for the profile metadata.
+- Profile files and the MCP export use an envelope, `{"format":"indagium-log-format-profiles","bundleVersion":1,"profiles":[...]}`.
+  The importer also reads a bare array or a single profile. Import validates everything before changing the library, offers
+  Update existing or Import as copy, and never overwrites a built-in id.
+
+### 28.7 Security
+
+Profile regexes are user input that runs on every line. `validateSafeProfileRegex` rejects patterns over 512 characters,
+backreferences, lookbehind and nested repetition, and matching goes through `BoundedProfileRegexMatcher` (`utils/TextMatch.kt`)
+with a shared time budget; when it runs out, the remaining records are kept raw. Profile ids, attribute ids and extensions are
+restricted to safe characters, and sizes are bounded (see the constants at the top of the codec).
+
+### 28.8 Known limits
+
+- Live tailing is refused for DLT only. A tail that starts while a multiline regex record is still growing at the end of the file
+  treats the lines that complete it as a record of their own.
+- Splitting is refused for CRI.
+- There is no generic filter on arbitrary profile fields yet; they are searchable as text and visible in columns and over MCP.
+- JSON rows still cost about five times a Logcat row.
 
 ## Related documents
 

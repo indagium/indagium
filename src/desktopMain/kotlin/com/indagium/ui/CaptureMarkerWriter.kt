@@ -131,7 +131,11 @@ internal class LaneNotes(initial: Annotations = Annotations()) : MarkerNotesTarg
             // while leaving optional presentation fields disabled until a user edits the note.
             options = AnnBlock.LogRefPresentationOptions(),
             rows = frozenRows.map { entry ->
-                AnnBlock.LogRefRowPresentation(logId = entry.id, rowNumberText = entry.id.toString())
+                AnnBlock.LogRefRowPresentation(
+                    logId = entry.id,
+                    rowNumberText = entry.id.toString(),
+                    displayColumns = entry.recordMetadata?.displayColumns.orEmpty(),
+                )
             },
             deltaAvailable = false,
         )

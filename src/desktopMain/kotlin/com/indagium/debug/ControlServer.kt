@@ -80,7 +80,12 @@ internal val STRUCTURAL_ITEM_KEYS = setOf("type", "id", "gid", "expanded", "coun
 internal val COMPACT_DROP_KEYS = setOf("pid", "tid", "indent")
 
 // Entry-derived columns a client may whitelist via `fields` (structural keys are always kept).
-internal val ROW_FIELD_KEYS = listOf("id", "ts", "level", "tag", "msg", "pid", "tid", "indent")
+internal val ROW_FIELD_KEYS = listOf(
+    "id", "ts", "level", "tag", "msg", "pid", "tid", "indent",
+    "severityKnown", "originalSeverity", "profileFields", "customAttributes", "canonicalTimestamp",
+    "rawRecord", "sourceStartLine", "sourceEndLine", "processIdentity", "threadIdentity",
+    "dltEcuId", "dltAppId", "dltContextId", "dltMessageType", "dltTimestamp", "dltTimestampSource",
+)
 
 // Table-driven set_filter field application: each entry is (body key, Filter.copy(...) setter).
 // Applying these via a loop keeps applyFilterUpdate's own branching to one `forEach` per type
@@ -110,6 +115,8 @@ internal fun isEmptyOrZero(v: Any?): Boolean = when (v) {
     null -> true
     is String -> v.isEmpty()
     is Number -> v.toDouble() == 0.0
+    is Collection<*> -> v.isEmpty()
+    is Map<*, *> -> v.isEmpty()
     else -> false
 }
 
@@ -937,14 +944,14 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "contains exactly one candidate log, that one opens automatically; if it contains none, " +
             "returns an error; if it contains several, returns { needsSelection: true, candidates: " +
             "[...] } without opening anything — call again with the same path plus entryPath set to " +
-            "one candidate's entryPath to open that one. Oversized sources, and sources that would not " +
+            "one candidate's entryPath, keeping profileId if supplied, to open that one. Oversized sources, and sources that would not " +
             "fit in the free heap, return { needsSplit: true, ... } instead of opening (memoryShortfall " +
             "{ neededBytes, freeBytes } appears when memory is part of the reason, with " +
             "suggestedPartCount >= 2); use split_log_file to split and open parts, or splitMode " +
-            "open_as_is to open it anyway.",
+            "open_as_is to open it anyway. Pass profileId from list_log_format_profiles to parse with a selected format.",
         schema(
             "path" to "string", "entryPath" to "string", "splitMode" to "string",
-            "destinationDir" to "string", "postfix" to "string", "partCount" to "integer",
+            "destinationDir" to "string", "postfix" to "string", "partCount" to "integer", "profileId" to "string",
             required = listOf("path"),
         ),
     ),
@@ -963,10 +970,11 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "the destination directory, and open the generated parts as tabs. Existing outputs are " +
             "not overwritten. When the source would not fit in the free heap (memoryShortfall is " +
             "returned) the default partCount is at least 2, every part is written, but only as many " +
-            "parts as fit are opened as tabs; the rest are listed in unopenedPaths and stay on disk.",
+            "parts as fit are opened as tabs; the rest are listed in unopenedPaths and stay on disk. " +
+            "Pass profileId to parse each opened part with a selected profile; unsafe record engines return an error.",
         schema(
             "path" to "string", "entryPath" to "string", "destinationDir" to "string",
-            "postfix" to "string", "partCount" to "integer", required = listOf("path"),
+            "postfix" to "string", "partCount" to "integer", "profileId" to "string", required = listOf("path"),
         ),
     ),
     McpTool("close_tab", "Close the tab with the given id.", schema("tabId" to "string", required = listOf("tabId"))),
@@ -1038,7 +1046,9 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Read the currently rendered log items for a tab — after filtering and sequence/manual-" +
             "collapse/stack-trace folding, i.e. what a user would actually see. Each item has a " +
             "`type` (Row, SeqHeader, ManualHeader, or StackTraceHeader). Use `fields` and/or " +
-            "`compact` to shrink the payload when you only need some columns.",
+            "`compact` to shrink the payload when you only need some columns. Profile-parsed rows also " +
+            "include original severity/known status, canonical timestamp, custom attributes, raw record, " +
+            "source line span, and process/thread identity when present.",
         schema(
             "tabId" to "string", "limit" to "integer", "offset" to "integer",
             "fields" to "array", "compact" to "boolean", required = listOf("tabId"),
@@ -1055,7 +1065,8 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Read raw log lines around a given line id, IGNORING the active filter and all folding — " +
             "the reliable way to see what surrounds a filtered line without touching the tab's " +
             "filter. Returns `before` lines before and `after` lines after the line (defaults 10/10), " +
-            "in original file order. Supports the same `fields`/`compact` projection as get_visible_lines.",
+            "in original file order. Supports the same `fields`/`compact` projection as get_visible_lines, " +
+            "including profile metadata fields when the tab uses a log format profile.",
         schema(
             "tabId" to "string", "lineId" to "integer", "before" to "integer", "after" to "integer",
             "fields" to "array", "compact" to "boolean", required = listOf("tabId", "lineId"),
@@ -1829,7 +1840,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Check a device capture, marker, or snapshot operation by operationId.",
         schema("operationId" to "string", required = listOf("operationId")),
     ),
-) + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS + ISSUE_MCP_TOOLS
+) + LOG_FORMAT_MCP_TOOLS + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS + ISSUE_MCP_TOOLS
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
 // escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.

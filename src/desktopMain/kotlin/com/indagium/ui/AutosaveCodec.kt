@@ -10,6 +10,8 @@ import com.indagium.ui.holiday.putHolidaySettings
 import com.indagium.ui.holiday.withHolidaySettingsFrom
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.logFormatProfilesFromJson
+import com.indagium.utils.logFormatProfilesJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -42,6 +44,13 @@ internal const val MAX_LOG_ROW_WRAP_LIMIT_CHARS = 20_000
 internal const val DEFAULT_LOG_ROW_WRAP_LIMIT_CHARS = 480
 private const val LEGACY_SETTINGS_OPEN_UNFILTERED_ON_CTRL_F_OFFSET = 17
 private const val LEGACY_SETTINGS_MCP_ALLOW_BROWSER_CLIENTS_OFFSET = 18
+
+// Positions of the append-only profile fields in an annotation LogEntry token and in a tab token.
+private const val ANN_ENTRY_SOURCE_START_LINE_INDEX = 17
+private const val ANN_ENTRY_LOCAL_WALL_MILLIS_INDEX = 23
+private const val ANN_ENTRY_USES_PROFILE_PRESENTATION_INDEX = 25
+private const val ANN_ENTRY_USES_LEGACY_CLOCK_INDEX = 26
+private const val TAB_TOKEN_LOG_FORMAT_PROFILE_ID_INDEX = 17
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
 internal fun String.jsonStr(): String = buildString {
@@ -701,7 +710,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("setupAssistantRevision", setupAssistantRevision)
     put("lastSeenWhatsNewVersion", lastSeenWhatsNewVersion)
     put("lastSeenHolidayAnnouncementVersion", lastSeenHolidayAnnouncementVersion)
-    put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
+    putCustomProfiles(this@settingsJson)
     put("captureMirrorLayouts", captureMirrorLayoutsJson(captureMirrorLayouts))
     lastCaptureMirrorLayout?.let { put("lastCaptureMirrorLayout", captureMirrorLayoutJson(it)) }
     // Appended last, JSON form only (see TestingSettingsCodec.kt). The tracker's access token is never part of settings.
@@ -718,6 +727,11 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     // Tests workspace tiling, JSON form only (see TestsLayoutSettingsJson.kt).
     putTestsWorkspaceLayoutSettings(this@settingsJson)
 }.toString()
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.putCustomProfiles(settings: AppSettings) {
+    put("customWorkspaceProfiles", customProfilesToJson(settings.customWorkspaceProfiles))
+    put("customLogFormatProfiles", Json.parseToJsonElement(logFormatProfilesJson(settings.customLogFormatProfiles)))
+}
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
     info.forEach { (path, value) ->
@@ -1080,6 +1094,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         lastSeenWhatsNewVersion = o.stringOrNull("lastSeenWhatsNewVersion").orEmpty(),
         lastSeenHolidayAnnouncementVersion = o.stringOrNull("lastSeenHolidayAnnouncementVersion").orEmpty(),
         customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
+        customLogFormatProfiles = o["customLogFormatProfiles"]?.let { logFormatProfilesFromJson(it.toString()) }.orEmpty(),
         tracker = trackerSettingsFromJson(o["tracker"]),
         testing = testingSettingsFromJson(o["testing"]),
         workflowAiSelections = o.workflowAiSelectionsFromJson(),
@@ -1475,12 +1490,62 @@ private fun String.encodedList(): List<String> =
 private fun String.encodedSet(): Set<String> = encodedList().toSet()
 
 private fun LogEntry.toAnnToken(): String =
-    listOf(id.toString(), ts, level.key.toString(), tag, msg, pid.toString(), tid.toString())
+    (listOf(id.toString(), ts, level.key.toString(), tag, msg, pid.toString(), tid.toString()) +
+        if (recordMetadata != null || dayOfYear != NO_DATE) {
+            listOf(
+                dayOfYear.toString(),
+                originalSeverity.orEmpty(),
+                severityKnown.toString(),
+                profileFields.entries.joinToString(",") { "${it.key.b64()}:${it.value.b64()}" },
+                parsedTime?.original.orEmpty(),
+                parsedTime?.epochMillis?.toString().orEmpty(),
+                parsedTime?.localTime.orEmpty(),
+                parsedTime?.clockIdentity.orEmpty(),
+                parsedTime?.relativeMillis?.toString().orEmpty(),
+                rawRecord.orEmpty(),
+                sourceStartLine?.toString().orEmpty(),
+                sourceEndLine?.toString().orEmpty(),
+                processIdentity.orEmpty(),
+                threadIdentity.orEmpty(),
+                (recordMetadata != null).toString(),
+                recordMetadata?.displayFields?.entries?.joinToString(",") { "${it.key.b64()}:${it.value.b64()}" }.orEmpty(),
+                parsedTime?.localWallMillis?.toString().orEmpty(),
+                recordMetadata?.displayColumns?.joinToString(",") { "${it.id.b64()}:${it.label.b64()}:${it.value.b64()}" }.orEmpty(),
+                recordMetadata?.usesProfilePresentation?.toString().orEmpty(),
+                recordMetadata?.usesLegacyClockSemantics?.toString().orEmpty(),
+            )
+        } else {
+            emptyList()
+        })
         .joinToString("|") { it.b64() }
 
 private fun String.toLogEntryFromAnnToken(): LogEntry? = runCatching {
     val p = split("|").map { it.unb64() }
     if (p.size < 5) return@runCatching null
+    val profileFields = p.getOrNull(10)?.takeIf { it.isNotBlank() }?.split(",")?.mapNotNull { pair ->
+        val separator = pair.indexOf(':')
+        if (separator <= 0) null else runCatching { pair.substring(0, separator).unb64() to pair.substring(separator + 1).unb64() }.getOrNull()
+    }?.toMap().orEmpty()
+    val parsedTime = p.getOrNull(11)?.takeIf { it.isNotBlank() }?.let { original ->
+        ParsedTime(
+            original = original,
+            epochMillis = p.getOrNull(12)?.toLongOrNull(),
+            localTime = p.getOrNull(13)?.takeIf { it.isNotBlank() },
+            clockIdentity = p.getOrNull(14)?.takeIf { it.isNotBlank() },
+            relativeMillis = p.getOrNull(15)?.toLongOrNull(),
+            localWallMillis = p.getOrNull(ANN_ENTRY_LOCAL_WALL_MILLIS_INDEX)?.toLongOrNull(),
+        )
+    }
+    val displayFields = p.getOrNull(22)?.takeIf { it.isNotBlank() }?.split(",")?.mapNotNull { pair ->
+        val separator = pair.indexOf(':')
+        if (separator <= 0) null else runCatching { pair.substring(0, separator).unb64() to pair.substring(separator + 1).unb64() }.getOrNull()
+    }?.toMap().orEmpty()
+    val displayColumns = p.getOrNull(24)?.takeIf { it.isNotBlank() }?.split(",")?.mapNotNull { token ->
+        val parts = token.split(":")
+        if (parts.size != 3) null else runCatching {
+            LogDisplayField(parts[0].unb64(), parts[1].unb64(), parts[2].unb64())
+        }.getOrNull()
+    }.orEmpty()
     LogEntry(
         id = p[0].toIntOrNull() ?: 0,
         ts = p[1],
@@ -1489,6 +1554,22 @@ private fun String.toLogEntryFromAnnToken(): LogEntry? = runCatching {
         msg = p[4],
         pid = p.getOrNull(5)?.toIntOrNull() ?: 0,
         tid = p.getOrNull(6)?.toIntOrNull() ?: 0,
+        dayOfYear = p.getOrNull(7)?.toShortOrNull() ?: NO_DATE,
+        recordMetadata = if (p.getOrNull(21)?.toBooleanStrictOrNull() == true) LogRecordMetadata(
+            profileFields = profileFields,
+            displayFields = displayFields,
+            displayColumns = displayColumns,
+            originalSeverity = p.getOrNull(8)?.takeIf { it.isNotBlank() },
+            severityKnown = p.getOrNull(9)?.toBooleanStrictOrNull() ?: true,
+            parsedTime = parsedTime,
+            rawRecord = p.getOrNull(16)?.takeIf { it.isNotBlank() },
+            sourceStartLine = p.getOrNull(ANN_ENTRY_SOURCE_START_LINE_INDEX)?.toLongOrNull(),
+            sourceEndLine = p.getOrNull(18)?.toLongOrNull(),
+            processIdentity = p.getOrNull(19)?.takeIf { it.isNotBlank() },
+            threadIdentity = p.getOrNull(20)?.takeIf { it.isNotBlank() },
+            usesProfilePresentation = p.getOrNull(ANN_ENTRY_USES_PROFILE_PRESENTATION_INDEX)?.toBooleanStrictOrNull() ?: false,
+            usesLegacyClockSemantics = p.getOrNull(ANN_ENTRY_USES_LEGACY_CLOCK_INDEX)?.toBooleanStrictOrNull() ?: false,
+        ) else null,
     )
 }.getOrNull()
 
@@ -1699,6 +1780,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
+    logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1853,6 +1935,16 @@ internal fun LogTab.tabToken(): String {
         // Trailing field (position 16): per-tab Error-row style override. Blank means inherit the
         // global setting, so legacy tokens keep the default enabled red tint.
         errorHighlightStyle?.errorHighlightStyleToken().orEmpty(),
+        // Trailing fields (17–18): the profile identity and exact definition used for this tab.
+        // Snapshot pinning prevents later global profile edits from changing restored rows.
+        logFormatProfileId.orEmpty(),
+        logFormatProfileSnapshot.orEmpty(),
+        // Trailing field (19): whether filtered CSV uses an explicit profile schema. This remains
+        // distinct from an empty column list, which is a valid user-selected projection.
+        profileProjectionSchemaPresent.toString(),
+        // Trailing field (20): ordered schema for mixed-profile merged tabs, which intentionally
+        // have no single profile snapshot from which their export schema could be rebuilt.
+        profileDisplayColumns.joinToString(",") { tokenFields(it.id, it.label).b64() },
     )
 }
 
@@ -1868,6 +1960,10 @@ internal sealed interface RestoredTabLoadResult {
         val largeFileMode: Boolean,
         val logFormat: LogFormat = LogFormat.LOGCAT,
         val captureArchive: com.indagium.capture.ImportedCapture? = null,
+        val profile: LogFormatProfile? = null,
+        val diagnostics: List<String> = emptyList(),
+        val profileClockSignature: String? = null,
+        val sourceLineCount: Long? = null,
     ) : RestoredTabLoadResult
 
     data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult
@@ -1943,6 +2039,15 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             captureArchivePath = captureArchivePath,
             // Field index 16 (append-only); missing or invalid means inherit the global setting.
             errorHighlightStyle = p.getOrNull(16)?.takeIf { it.isNotBlank() }?.errorHighlightStyleFromToken(),
+            logFormatProfileId = p.getOrNull(TAB_TOKEN_LOG_FORMAT_PROFILE_ID_INDEX)?.takeIf { it.isNotBlank() },
+            logFormatProfileSnapshot = p.getOrNull(18)?.takeIf { it.isNotBlank() },
+            profileProjectionSchemaPresent = p.getOrNull(19)?.toBooleanStrictOrNull() ?: false,
+            profileDisplayColumns = p.getOrNull(20)?.takeIf { it.isNotBlank() }?.split(",")?.mapNotNull { encoded ->
+                runCatching {
+                    val fields = encoded.unb64().tokenFields()
+                    LogDisplayField(fields[0], fields[1], "")
+                }.getOrNull()
+            }.orEmpty(),
         ),
         source,
     )

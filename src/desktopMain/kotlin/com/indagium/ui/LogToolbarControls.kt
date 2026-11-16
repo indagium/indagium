@@ -58,10 +58,17 @@ internal const val LOG_TOOLBAR_OVERFLOW_TAG = "log-toolbar-overflow"
 /** Test tag of the overflow menu row for [id] (a [LogToolbarItem.id]). */
 internal fun logToolbarOverflowItemTag(id: String): String = "log-toolbar-overflow-item-$id"
 
+internal data class LogToolbarDeltaTime(
+    val enabled: Boolean = true,
+    val unavailableReason: String? = null,
+    val partialReason: String? = null,
+)
+
 /** What the toolbar controls show. */
 internal class LogToolbarView(
     val tiled: Boolean,
     val showTimeDelta: Boolean,
+    val deltaTime: LogToolbarDeltaTime = LogToolbarDeltaTime(),
     val showUnfiltered: Boolean,
     val searchActive: Boolean,
     /** Null when the host has no filter bar toggle. */
@@ -137,9 +144,11 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         // the other stateful toggle here, signals its state via label text instead — "Δt on/off"
         // has no comparably natural alternate label, so a filled/tinted button is the toggle cue).
         AppButton(
-            "Δt",
+            if (model.view.deltaTime.partialReason != null) "Δt partial" else "Δt",
             onClick = model.actions.onToggleTimeDelta,
             variant = if (model.view.showTimeDelta) ButtonVariant.Primary else ButtonVariant.Secondary,
+            enabled = model.view.deltaTime.enabled,
+            tooltip = model.view.deltaTime.unavailableReason ?: model.view.deltaTime.partialReason,
             modifier = ring(LogToolbarItem.TIME_DELTA),
         )
     }
@@ -313,7 +322,12 @@ private fun OverflowRow(item: LogToolbarItem, model: LogToolbarModel, dismiss: (
             label = if (model.view.filterBarVisible == true) "Hide filter bar" else "Show filter bar"
             enabled = true; on = model.view.filterBarVisible == true; action = { model.actions.onToggleFilterBar?.invoke() }
         }
-        LogToolbarItem.TIME_DELTA -> { label = "Time delta (Δt)"; enabled = true; on = model.view.showTimeDelta; action = model.actions.onToggleTimeDelta }
+        LogToolbarItem.TIME_DELTA -> {
+            label = if (model.view.deltaTime.partialReason != null) "Time delta (Δt) · partial" else "Time delta (Δt)"
+            enabled = model.view.deltaTime.enabled
+            on = model.view.showTimeDelta
+            action = model.actions.onToggleTimeDelta
+        }
         LogToolbarItem.SEARCH -> { label = "Search"; enabled = true; on = model.view.searchActive; action = model.actions.onOpenSearch }
         LogToolbarItem.EXPAND_ALL -> { label = "Expand all"; enabled = model.view.canExpandAll; on = false; action = model.actions.onExpandAll }
         LogToolbarItem.COLLAPSE_ALL -> { label = "Collapse all"; enabled = model.view.canCollapseAll; on = false; action = model.actions.onCollapseAll }
@@ -322,20 +336,31 @@ private fun OverflowRow(item: LogToolbarItem, model: LogToolbarModel, dismiss: (
             enabled = true; on = model.view.showUnfiltered; action = model.actions.onToggleUnfiltered
         }
     }
-    HoverBox(
-        modifier = Modifier.fillMaxWidth().testTag(logToolbarOverflowItemTag(item.id)),
-        hoverEnabled = enabled,
-        onClick = if (enabled) ({ dismiss(); action() }) else null,
-    ) {
-        AppText(
-            label,
-            color = when {
-                !enabled -> tc.td.copy(.5f)
-                on -> tc.ac
-                else -> tc.tx
-            },
-            fontSize = 11.sp,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-        )
+    val tooltip = when (item) {
+        LogToolbarItem.TIME_DELTA -> model.view.deltaTime.unavailableReason ?: model.view.deltaTime.partialReason
+        else -> null
+    }
+    val row: @Composable () -> Unit = {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().testTag(logToolbarOverflowItemTag(item.id)),
+            hoverEnabled = enabled,
+            onClick = if (enabled) ({ dismiss(); action() }) else null,
+        ) {
+            AppText(
+                label,
+                color = when {
+                    !enabled -> tc.td.copy(.5f)
+                    on -> tc.ac
+                    else -> tc.tx
+                },
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+        }
+    }
+    if (tooltip != null) {
+        TooltipArea(tooltip = { ToolbarTooltip(tooltip) }, modifier = Modifier.fillMaxWidth()) { row() }
+    } else {
+        row()
     }
 }

@@ -65,7 +65,9 @@ class IndagiumToolGatewayTest {
     @Test
     fun catalogHasEveryCurrentToolExactlyOnce() {
         val expected = setOf(
-            "list_tabs", "get_memory_status", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
+            "list_tabs", "list_log_format_profiles", "get_log_format_profile", "preview_log_format_profile",
+            "import_log_format_profiles", "export_log_format_profiles", "reparse_tab_with_log_format_profile",
+            "get_memory_status", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",

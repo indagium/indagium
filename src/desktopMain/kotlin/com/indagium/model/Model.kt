@@ -60,7 +60,49 @@ data class LogEntry(
     // smallest type that fits and is absorbed by the object's alignment padding. Appended last so
     // every positional LogEntry(...) construction keeps compiling.
     val dayOfYear: Short = NO_DATE,
+    // Exactly one nullable reference for optional profile data; legacy Logcat rows avoid a map or
+    // metadata object allocation. See LogRecordMetadata for profile-only fields.
+    val recordMetadata: LogRecordMetadata? = null,
+) {
+    val profileFields: Map<String, String> get() = recordMetadata?.profileFields.orEmpty()
+    val originalSeverity: String? get() = recordMetadata?.originalSeverity
+    val severityKnown: Boolean get() = recordMetadata?.severityKnown ?: true
+    val parsedTime: ParsedTime? get() = recordMetadata?.parsedTime
+    val rawRecord: String? get() = recordMetadata?.rawRecord
+    val sourceStartLine: Long? get() = recordMetadata?.sourceStartLine
+    val sourceEndLine: Long? get() = recordMetadata?.sourceEndLine
+    val processIdentity: String? get() = recordMetadata?.processIdentity
+    val threadIdentity: String? get() = recordMetadata?.threadIdentity
+}
+
+data class LogRecordMetadata(
+    val profileFields: Map<String, String> = emptyMap(),
+    val displayFields: Map<String, String> = emptyMap(),
+    val displayColumns: List<LogDisplayField> = emptyList(),
+    val originalSeverity: String? = null,
+    val severityKnown: Boolean = true,
+    val parsedTime: ParsedTime? = null,
+    val rawRecord: String? = null,
+    val sourceStartLine: Long? = null,
+    val sourceEndLine: Long? = null,
+    val processIdentity: String? = null,
+    val threadIdentity: String? = null,
+    /** True when [displayColumns] is the intentional profile projection, including an empty one. */
+    val usesProfilePresentation: Boolean = false,
+    /** Logcat/DLT profile rows retain the legacy source-clock and rollover interpretation. */
+    val usesLegacyClockSemantics: Boolean = false,
 )
+
+/** Immutable per-row projection, captured once during parsing for consistent display and export. */
+data class LogDisplayField(val id: String, val label: String, val value: String)
+
+val UNKNOWN_SEVERITY_METADATA = LogRecordMetadata(severityKnown = false, usesLegacyClockSemantics = true)
+
+val LogEntry.displaySeverityText: String
+    get() = if (severityKnown) level.key.toString() else originalSeverity.orEmpty()
+
+val LogEntry.displayLevelAndComponent: String
+    get() = listOf(displaySeverityText, tag).filter(String::isNotBlank).joinToString("/")
 
 // ── Sequences ──────────────────────────────────────────────────────
 data class SequenceDef(
@@ -467,6 +509,10 @@ sealed class AnnBlock {
         val displayedProcessName: String? = null,
         /** Name candidate captured even if the source view was showing numeric PIDs. */
         val processNameCandidate: String? = null,
+        /** Frozen profile-specific columns shown with this row when the reference was captured. */
+        val displayColumns: List<LogDisplayField> = emptyList(),
+        /** Distinguishes an intentionally empty profile projection from a legacy row snapshot. */
+        val profileProjectionPresent: Boolean = false,
     )
 
     data class LogRefPresentation(
@@ -977,6 +1023,16 @@ data class LogTab(
     // VideoAttachment.captureSourcePath/captureOffsetMs; restore reparses that compact descriptor
     // after the log rows exist instead of embedding millions of mapping rows in the tab token.
     val captureTimeline: CaptureTimeline? = null,
+    // A tab pins the exact profile definition used to interpret its records. This protects an
+    // investigation from later edits/removal of the global profile and is append-only in autosave.
+    val logFormatProfileId: String? = null,
+    val logFormatProfileSnapshot: String? = null,
+    val logFormatDiagnostics: List<String> = emptyList(),
+    val logCapabilities: Map<LogCapability, LogCapabilityStatus> = emptyMap(),
+    val profileFieldNames: Set<String> = emptySet(),
+    val profileClockSignature: String? = null,
+    /** Profile column headers are kept even for empty files so exporters can produce a header row. */
+    val profileDisplayColumns: List<LogDisplayField> = emptyList(),
     // Links this tab to a live capture recording session (ui/CaptureCoordinator.kt), if it's the
     // tab streaming one. Session-only, like tailing/search/tidMap above — deliberately ABSENT from
     // AutosaveCodec's tabToken()/tabShellFromToken()/persistedSnapshot(). A capture cannot survive
@@ -1041,6 +1097,17 @@ data class LogTab(
     // Null means inherit the global error-row style until the first local edit. Reset removes the
     // override. Serialized in the append-only final tab-token field.
     val errorHighlightStyle: ErrorHighlightStyle? = null,
+    /** True when the tab's CSV schema comes from profile projections, including an empty schema. */
+    val profileProjectionSchemaPresent: Boolean = false,
+    /** Number of physical source lines parsed so tail batches retain absolute line provenance. */
+    val profileSourceLineCount: Long? = null,
+    /** Transient explanation when a saved filter used fields unavailable in this profile. */
+    val filterNormalizationNotice: String? = null,
+    /**
+     * Session-only: profile ids that tied when the format was detected, so the tab can offer a chooser.
+     * Deliberately absent from AutosaveCodec; a restored tab never asks again.
+     */
+    val logFormatCandidateIds: List<String> = emptyList(),
 )
 
 /** Copy presentation preferences captured when a legacy note is opened/restored. */
@@ -1709,6 +1776,8 @@ data class AppSettings(
     // (ui/ChromeSettingsJson.kt), appended last. A file without the key reads as `toolbarShapeStyle == shapeStyle`, so an existing
     // toolbar keeps its look. Read the style that applies through [effectiveToolbarShapeStyle].
     val toolbarShapeFollowsTiles: Boolean = true,
+    /** User-managed log formats (Settings → Log formats); JSON-only, built-ins are code-owned. */
+    val customLogFormatProfiles: List<LogFormatProfile> = emptyList(),
 )
 
 /** The corner style the toolbar is actually drawn with: the tiles' style while it follows them, else its own. */

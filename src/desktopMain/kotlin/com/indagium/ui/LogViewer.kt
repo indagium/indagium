@@ -58,6 +58,7 @@ import com.indagium.debug.AppLogger
 import com.indagium.model.*
 import com.indagium.utils.HlSpan
 import com.indagium.utils.OrderedIntSet
+import com.indagium.utils.ProfileDisplayTextProjection
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.asLogEntryView
 import com.indagium.utils.cachedSeqGroupsFor
@@ -69,9 +70,14 @@ import com.indagium.utils.formatDelta
 import com.indagium.utils.formatSignedDelta
 import com.indagium.utils.isAppendOnlyExtensionOf
 import com.indagium.utils.isKloggStyle
+import com.indagium.utils.isProfileProcessIdColumn
+import com.indagium.utils.isProfileThreadIdColumn
 import com.indagium.utils.kloggVariedColors
 import com.indagium.utils.passesFilter
+import com.indagium.utils.profileDisplayColumns
+import com.indagium.utils.profileDisplayTextProjection
 import com.indagium.utils.regexRanges
+import com.indagium.utils.remapOffset
 import com.indagium.utils.resolveLineHighlight
 import com.indagium.utils.resolveProcessDisplayName
 import com.indagium.utils.visibleLogLineText
@@ -94,6 +100,7 @@ private const val CTX_MENU_KEYBOARD_X_DP = 60f
 private const val LOADING_GRACE_MS = 250L
 private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 private const val DOUBLE_CLICK_WINDOW_MS = 500L
+internal const val UNKNOWN_SEVERITY_TEXT_COLOR_ARGB = 0xFF8B949E
 
 // Upper bound for awaitExpandedAt below — the recompute it waits on has no fixed budget of its own
 // (LOADING_GRACE_MS only governs when the LOADING line starts showing, not how long the compute is
@@ -933,6 +940,45 @@ internal fun buildFullLineAnnotation(
  *  does) — LogRow paints the row background/stripe from it. */
 internal data class LogLineRender(val text: AnnotatedString, val wholeLine: Highlighter?)
 
+private fun renderedRangeRemapper(
+    entry: LogEntry,
+    profileProjection: ProfileDisplayTextProjection?,
+    pidFieldWidth: Int,
+    showPidTid: Boolean,
+): (Pair<Int, Int>) -> Pair<Int, Int> {
+    val pidFieldDelta = pidFieldWidth - 5
+    val pidFieldStart = entry.ts.length + 2
+    val pidFieldEndVisible = pidFieldStart + 5
+    return { range ->
+        when {
+            profileProjection != null -> remapProfileProcessIdRange(range, profileProjection)
+            entry.pid <= 0 -> range
+            !showPidTid -> remapHiddenPidTidRange(range, entry.ts.length)
+            else -> remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
+        }
+    }
+}
+
+private fun remapProfileProcessIdRange(
+    range: Pair<Int, Int>,
+    projection: ProfileDisplayTextProjection,
+): Pair<Int, Int> {
+    val source = projection.sourceProcessIdRange
+    val rendered = projection.renderedProcessIdRange
+    if (source == null || rendered == null) {
+        return projection.remapOffset(range.first) to projection.remapOffset(range.second)
+    }
+    return when {
+        range.second <= source.first || range.first >= source.second ->
+            projection.remapOffset(range.first) to projection.remapOffset(range.second)
+        else -> {
+            val start = if (range.first < source.first) projection.remapOffset(range.first) else rendered.first
+            val end = if (range.second > source.second) projection.remapOffset(range.second) else rendered.second
+            start to end
+        }
+    }
+}
+
 // Same rendering as buildFullLineAnnotation, but also reports the whole-line highlighter so LogRow
 // can tint the row. [suppressLineTextColor] drops a klogg whole-line rule's foreground colour (LogRow
 // passes it for selected and crash rows, whose own backgrounds must stay readable); the tint itself
@@ -974,6 +1020,10 @@ internal fun buildLogLineRender(
     // there in practice, not just in the common case — see the OFF-byte-identical test coverage in
     // ProcessNameRenderingTest.
     val lineText = visibleLogLineText(entry)
+    val profileColumns = profileDisplayColumns(entry)
+    val profileProjection = profileColumns?.let {
+        profileDisplayTextProjection(it, processDisplay, includeProcessThread = showPidTid)
+    }
     val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext, errorHighlightStyle)
     // A klogg whole-line rule recolours every character of the row through the base colours below,
     // so it survives wrapping (visualLogLineForWrapLimit rebuilds lines from these same spans).
@@ -981,53 +1031,70 @@ internal fun buildLogLineRender(
     val lineTextColor = wholeLineRule?.textColor?.takeUnless { suppressLineTextColor }
     val text = buildAnnotatedString {
         val foregroundRanges = mutableListOf<Pair<Int, Int>>()
-        appendTsPidTid(
-            entry,
-            lineTextColor ?: tsColor,
-            lineTextColor ?: pidColor,
-            processDisplay,
-            pidFieldWidth,
-            foregroundRanges,
-            cellBg,
-            showPidTid,
-        )
-        append("  ")
-        appendTrackedForegroundRange(
-            foregroundRanges,
-            SpanStyle(color = lineTextColor ?: entry.level.defaultColor, fontWeight = FontWeight.Bold),
-        ) {
-            append(entry.level.key.toString())
+        if (profileProjection != null) {
+            append(profileProjection.text)
+            profileProjection.renderedFields.forEach { field ->
+                val isSeverity = isProfileSeverityColumn(field.id)
+                val color = lineTextColor ?: profileFieldColor(
+                    field.id,
+                    entry,
+                    tsColor,
+                    pidColor,
+                    tagColor,
+                    msgColor,
+                )
+                val style = if (isSeverity) {
+                    SpanStyle(color = color, fontWeight = FontWeight.Bold)
+                } else {
+                    SpanStyle(color = color)
+                }
+                addStyle(style, field.start, field.end)
+                foregroundRanges += field.start to field.end
+            }
+        } else {
+            appendTsPidTid(
+                entry,
+                lineTextColor ?: tsColor,
+                lineTextColor ?: pidColor,
+                processDisplay,
+                pidFieldWidth,
+                foregroundRanges,
+                cellBg,
+                showPidTid,
+            )
+            append("  ")
+            appendTrackedForegroundRange(
+                foregroundRanges,
+                SpanStyle(
+                    color = lineTextColor ?: if (entry.severityKnown) entry.level.defaultColor else Color(UNKNOWN_SEVERITY_TEXT_COLOR_ARGB),
+                    fontWeight = FontWeight.Bold,
+                ),
+            ) {
+                append(entry.displaySeverityText)
+            }
+            append("  ")
+            appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = lineTextColor ?: tagColor)) {
+                append(entry.tag)
+                append(":")
+            }
+            append(" ")
+            appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = lineTextColor ?: msgColor)) { append(entry.msg) }
         }
-        append("  ")
-        appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = lineTextColor ?: tagColor)) {
-            append(entry.tag)
-            append(":")
-        }
-        append(" ")
-        appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = lineTextColor ?: msgColor)) { append(entry.msg) }
-        val pidFieldDelta = pidFieldWidth - 5
-        val pidFieldStart = entry.ts.length + 2
-        val pidFieldEndVisible = pidFieldStart + 5
-
-        fun remap(range: Pair<Int, Int>): Pair<Int, Int> = when {
-            entry.pid <= 0 -> range
-            !showPidTid -> remapHiddenPidTidRange(range, entry.ts.length)
-            else -> remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
-        }
+        val remap = renderedRangeRemapper(entry, profileProjection, pidFieldWidth, showPidTid)
         val renderedLength = length
         val highlighterStyles = lineHighlight.spans.mapNotNull { span ->
-            remappedRange(span.start to span.end, renderedLength, ::remap)?.let { range ->
+            remappedRange(span.start to span.end, renderedLength, remap)?.let { range ->
                 RenderedHighlightStyle(range.first, range.second, highlightSpanStyle(span, lineText))
             }
         }
         val keywordRanges = keywordRegexFilter?.let { filter ->
-            remappedRanges(keywordRegexHighlightRanges(lineText, filter, regexContext), renderedLength, ::remap)
+            remappedRanges(keywordRegexHighlightRanges(lineText, filter, regexContext), renderedLength, remap)
         }.orEmpty()
         val searchRanges = searchHighlight?.takeIf { it.query.isNotEmpty() }?.let { search ->
             remappedRanges(
                 regexRanges(lineText, search.query, ignoreCase = !search.caseSensitive, regexContext = regexContext),
                 renderedLength,
-                ::remap,
+                remap,
             )
         }.orEmpty()
         val boundaries = styleBoundaries(
@@ -1058,6 +1125,23 @@ internal fun buildLogLineRender(
     }
     return LogLineRender(text, lineHighlight.wholeLine)
 }
+
+private fun profileFieldColor(
+    id: String,
+    entry: LogEntry,
+    timestampColor: Color,
+    processColor: Color,
+    componentColor: Color,
+    messageColor: Color,
+): Color = when {
+    id == "timestamp" || id == "time" || id == "ts" -> timestampColor
+    isProfileProcessIdColumn(id) || isProfileThreadIdColumn(id) -> processColor
+    isProfileSeverityColumn(id) -> if (entry.severityKnown) entry.level.defaultColor else Color(UNKNOWN_SEVERITY_TEXT_COLOR_ARGB)
+    id == "component" || id == "tag" -> componentColor
+    else -> messageColor
+}
+
+private fun isProfileSeverityColumn(id: String): Boolean = id == "severity" || id == "level"
 
 private data class RenderedHighlightStyle(val start: Int, val end: Int, val style: SpanStyle)
 
@@ -1293,6 +1377,12 @@ internal fun LogViewer(
     // no-op keeps preview/test call sites that don't wire it unaffected, same as the other optional
     // callbacks below.
     onToggleTimeDelta: () -> Unit = {},
+    /** Live source/config-aware availability supplied by FileView; null keeps preview callers working. */
+    deltaTimeStatus: LogCapabilityStatus? = null,
+    /** Live process-name availability supplied by BoundLogViewer; null keeps legacy tabs unchanged. */
+    processNamesStatus: LogCapabilityStatus? = null,
+    /** Source/config-aware filter availability supplied by BoundLogViewer for the horizontal bar. */
+    filterBarCapabilities: Map<LogCapability, LogCapabilityStatus>? = null,
     onOpenSearch: () -> Unit = {},
     onToggleRowNumbers: () -> Unit = {},
     onToggleMinimap: () -> Unit = {},
@@ -1416,6 +1506,11 @@ internal fun LogViewer(
     // in this file that key on the tailed-growth size. any{} short-circuits on the first match,
     // so this only re-pays a full scan repeatedly for tabs that genuinely have zero pid/tid data.
     val hasPidTid = remember(tab.id, totalCnt) { tab.logData.any { it.pid > 0 } }
+    val effectiveDeltaTimeStatus = deltaTimeStatus ?: tab.profileCapability(LogCapability.DELTA_TIME)
+    val deltaTimeEnabled = effectiveDeltaTimeStatus?.availability != CapabilityAvailability.UNAVAILABLE
+    val effectiveProcessNamesStatus = processNamesStatus ?: tab.profileCapability(LogCapability.PROCESS_NAMES)
+    val processNamesEnabled = effectiveProcessNamesStatus?.availability != CapabilityAvailability.UNAVAILABLE
+    val renderedProcessNameMode = if (processNamesEnabled) tab.processNameMode else ProcessNameMode.OFF
     // Change 3 (process-names rework): the uniform pid-FIELD character width every row's pid cell
     // (LogRow) — and ColHeader's own "PID" box — pads to, so TID/LVL/TAG/MESSAGE line up on every
     // row once the feature is on. Computed once per tab here (not per row: pidFieldCharWidth scans
@@ -1425,8 +1520,8 @@ internal fun LogViewer(
     // rationale as hasPidTid's own totalCnt key above — and on manualProcessNamePicks too, since
     // MANUAL now sizes to only the picked pids (pidFieldCharWidth's own doc), so picking or hiding
     // one must recompute this the same way learning a new name does.
-    val pidFieldChars = remember(tab.id, tab.analysis.processNames, tab.manualProcessNamePicks, tab.processNameMode) {
-        pidFieldCharWidth(tab.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks)
+    val pidFieldChars = remember(tab.id, tab.analysis.processNames, tab.manualProcessNamePicks, renderedProcessNameMode) {
+        pidFieldCharWidth(renderedProcessNameMode, tab.analysis.processNames, tab.manualProcessNamePicks)
     }
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
@@ -1454,7 +1549,7 @@ internal fun LogViewer(
         if (filterBarVisible != null && onToggleFilterBar != null) {
             add(LogViewerToolbarAction("filter-bar", true, onToggleFilterBar))
         }
-        add(LogViewerToolbarAction("time-delta", true, onToggleTimeDelta))
+        add(LogViewerToolbarAction("time-delta", deltaTimeEnabled, onToggleTimeDelta))
         add(LogViewerToolbarAction("search", true, onOpenSearch))
         add(LogViewerToolbarAction("expand-all", canExpandAll, onExpandAll))
         add(LogViewerToolbarAction("collapse-all", canCollapseAll, onCollapseAll))
@@ -1527,6 +1622,13 @@ internal fun LogViewer(
                     LogToolbarView(
                         tiled = tiles != null,
                         showTimeDelta = tab.showTimeDelta,
+                        deltaTime = LogToolbarDeltaTime(
+                            enabled = deltaTimeEnabled,
+                            unavailableReason = effectiveDeltaTimeStatus
+                                ?.takeIf { it.availability == CapabilityAvailability.UNAVAILABLE }?.reason,
+                            partialReason = effectiveDeltaTimeStatus
+                                ?.takeIf { it.availability == CapabilityAvailability.PARTIAL }?.reason,
+                        ),
                         showUnfiltered = tab.showUnfiltered,
                         searchActive = filteredSearch.active || unfilteredSearch.active,
                         filterBarVisible = filterBarVisible,
@@ -1559,6 +1661,10 @@ internal fun LogViewer(
                     showMinimap = settings.showMinimap,
                     processNameMode = tab.processNameMode,
                     manualProcessNamePicks = tab.manualProcessNamePicks,
+                    processNamesEnabled = processNamesEnabled,
+                    processNamesReason = effectiveProcessNamesStatus?.takeIf {
+                        it.availability != CapabilityAvailability.AVAILABLE
+                    }?.reason,
                     onToggleRowNumbers = { toolbarContextMenuOpen = false; onToggleRowNumbers() },
                     onToggleMinimap = { toolbarContextMenuOpen = false; onToggleMinimap() },
                     onSetProcessNameMode = { mode -> toolbarContextMenuOpen = false; onSetProcessNameMode(mode) },
@@ -2035,7 +2141,7 @@ internal fun LogViewer(
                                             deltaSelectionAnchored = deltaAnchorEntryId != null,
                                             timeDeltaChars = timeDeltaChars,
                                             hasTidMap = effectiveTab.tidMap != null,
-                                            processNameMode = tab.processNameMode,
+                                            processNameMode = renderedProcessNameMode,
                                             pidFieldChars = pidFieldChars,
                                             showPidTid = showPidTid,
                                             searchHighlight = if (isSearchMatch) {
@@ -2706,6 +2812,7 @@ internal fun LogViewer(
                         tab = tab,
                         model = filterBar,
                         actions = filterBarActions,
+                        capabilities = filterBarCapabilities,
                         logFocusRequester = focusRequester,
                     )
                 }
@@ -2973,6 +3080,7 @@ internal fun LogViewer(
                         tab = tab,
                         model = filterBar,
                         actions = filterBarActions,
+                        capabilities = filterBarCapabilities,
                         logFocusRequester = focusRequester,
                     )
                 }
@@ -3564,7 +3672,15 @@ private fun LogRow(
     // pixel-identical to before this feature existed. entry.pid <= 0 rows (RAW-fallback lines,
     // LogParser's own convention) are never in processNames to begin with, so they fall out of this
     // the same way they already fall out of the pid/tid segment entirely (see buildFullLineAnnotation).
-    val processDisplay = if (showPidTid) {
+    val profileHasVisiblePid = profileDisplayColumns(entry)?.any { column ->
+        column.value.isNotBlank() && isProfileProcessIdColumn(column.id)
+    } == true
+    val canDisplayProcessName = if (entry.recordMetadata?.usesProfilePresentation == true) {
+        profileHasVisiblePid
+    } else {
+        showPidTid && entry.rawRecord == null
+    }
+    val processDisplay = if (canDisplayProcessName) {
         resolveProcessDisplayName(processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, entry.pid)
     } else {
         null
@@ -3574,7 +3690,8 @@ private fun LogRow(
     // shouldShowProcessNamePopup's own doc). False for OFF, for every row without a name, and for
     // the common case of a name that already fits — which is what keeps the pointer-tracking/layout
     // capture below from doing any work on the vast majority of rows even when a mode is on.
-    val showsElidedName = shouldShowProcessNamePopup(processDisplay, pidFieldChars)
+    val showsElidedName = entry.recordMetadata?.usesProfilePresentation != true &&
+        shouldShowProcessNamePopup(processDisplay, pidFieldChars)
     val latestShowsElidedName by rememberUpdatedState(showsElidedName)
     // The pid field's exact horizontal pixel span in THIS row's own rendered text layout — written
     // once by the BasicTextField's onTextLayout below via TextLayoutResult.getBoundingBox (see
@@ -3641,7 +3758,7 @@ private fun LogRow(
     val wholeLineHl = lineRender.wholeLine
     val wholeLineBgHl = wholeLineHl?.takeIf { it.backgroundEnabled }
 
-    val levelColor = entry.level.defaultColor
+    val levelColor = if (entry.severityKnown) entry.level.defaultColor else Color(UNKNOWN_SEVERITY_TEXT_COLOR_ARGB)
     // crash group > whole-line highlight > hover. Imported klogg alpha stays intact; native
     // whole-line backgrounds use a light wash and a stronger color stripe. Selection is not in this
     // chain: it is an overlay above the content (selectionOverlay below), so the wash stays under it.
@@ -4438,7 +4555,7 @@ private fun SeqHeaderRow(
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
-        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.ts}  ${item.entry.displaySeverityText}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         ScopeTidBadge(item.scopeTid, sc, mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
@@ -4551,7 +4668,7 @@ private fun ManualHeaderRow(
             ManualCollapseDirection.RANGE -> "Collapsed selection"
         }
         AppText(label, color = sc, fontSize = 11.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
-        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.ts}  ${item.entry.displaySeverityText}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
@@ -4665,7 +4782,7 @@ private fun StackTraceHeaderRow(
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
-        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.ts}  ${item.entry.displaySeverityText}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
@@ -4753,6 +4870,8 @@ private fun ToolbarOptionsPopup(
     showMinimap: Boolean,
     processNameMode: ProcessNameMode,
     manualProcessNamePicks: Set<Int>,
+    processNamesEnabled: Boolean,
+    processNamesReason: String?,
     onToggleRowNumbers: () -> Unit,
     onToggleMinimap: () -> Unit,
     onSetProcessNameMode: (ProcessNameMode) -> Unit,
@@ -4795,16 +4914,30 @@ private fun ToolbarOptionsPopup(
             // never entered from here — it's only ever entered by picking an individual process
             // from a row's context menu (see Change 2/CtxProcessActions) — so this toggle only ever
             // needs to represent "off" vs "some names showing," not the full three-way state.
-            HoverBox(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = { onSetProcessNameMode(toggledProcessNameMode(processNameMode, manualProcessNamePicks)) },
-            ) {
-                AppText(
-                    if (processNamesVisible(processNameMode, manualProcessNamePicks)) "Hide process names" else "Show process names",
-                    color = tc.tx,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                )
+            val processNameAction: @Composable () -> Unit = {
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth(),
+                    hoverEnabled = processNamesEnabled,
+                    onClick = if (processNamesEnabled) {
+                        { onSetProcessNameMode(toggledProcessNameMode(processNameMode, manualProcessNamePicks)) }
+                    } else {
+                        null
+                    },
+                ) {
+                    AppText(
+                        if (processNamesVisible(processNameMode, manualProcessNamePicks)) "Hide process names" else "Show process names",
+                        color = if (processNamesEnabled) tc.tx else tc.td.copy(alpha = 0.55f),
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    )
+                }
+            }
+            if (processNamesReason != null) {
+                TooltipArea(tooltip = { ToolbarTooltip(processNamesReason, maxLines = 3) }) {
+                    processNameAction()
+                }
+            } else {
+                processNameAction()
             }
         }
     }

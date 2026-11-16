@@ -11,6 +11,7 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.util.concurrent.CancellationException
 import java.util.zip.ZipFile
 import org.apache.commons.compress.archivers.zip.ZipFile as CommonsZipFile
 
@@ -258,16 +259,34 @@ internal fun <T> forEachSequentialEntry(
     maxEntries: Int,
     visit: (name: String, size: Long, isDirectory: Boolean, stream: InputStream) -> T?,
 ): List<T> {
-    val archive = runCatching { openSequentialArchive(file, format) }.getOrElse { return emptyList() }
+    checkParserCancellation()
+    val archive = runCatching { openSequentialArchive(file, format) }
+        .onFailure(::rethrowArchiveInterruption)
+        .getOrElse { return emptyList() }
     val results = mutableListOf<T>()
     archive.use { stream ->
         var examined = 0
         while (examined < maxEntries) {
-            val entry = runCatching { stream.getNextEntry() }.getOrNull() ?: break
+            checkParserCancellation()
+            val entry = runCatching { stream.getNextEntry() }
+                .onFailure(::rethrowArchiveInterruption)
+                .getOrNull() ?: break
             examined++
-            val result = runCatching { visit(entry.name, entry.size, entry.isDirectory, stream) }.getOrNull()
+            val result = runCatching { visit(entry.name, entry.size, entry.isDirectory, stream) }
+                .onFailure(::rethrowArchiveInterruption)
+                .getOrNull()
             if (result != null) results += result
         }
     }
     return results
+}
+
+private fun rethrowArchiveInterruption(failure: Throwable) {
+    when (failure) {
+        is CancellationException -> throw failure
+        is InterruptedException -> {
+            Thread.currentThread().interrupt()
+            throw CancellationException("Archive iteration was interrupted.").apply { initCause(failure) }
+        }
+    }
 }

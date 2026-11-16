@@ -1,8 +1,14 @@
 package com.indagium.utils
 
+import com.indagium.model.LogFormatEngine
+import com.indagium.model.LogFormatProfile
+import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.io.PushbackInputStream
+import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
 import kotlin.math.max
 
 const val SPLIT_PROMPT_BYTES: Long = 500L * 1024L * 1024L
@@ -92,6 +98,185 @@ internal fun splitStreamToFiles(
         }
     }
     return outputFiles
+}
+
+/** Split CSV logical rows and multiline-regex records without cutting through a record. */
+@Suppress("CyclomaticComplexMethod", "TooGenericExceptionCaught") // One record state machine; the catch cleans up and rethrows.
+internal fun splitProfileRecordsToFiles(
+    input: InputStream,
+    outputFiles: List<File>,
+    sourceSizeBytes: Long,
+    profile: LogFormatProfile,
+): List<File> {
+    require(profile.engine == LogFormatEngine.CSV ||
+        profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank()
+    ) { "This profile does not require record-aware splitting." }
+    require(outputFiles.isNotEmpty()) { "At least one output file is required" }
+    outputFiles.forEach { file ->
+        file.parentFile?.mkdirs()
+        file.writeBytes(ByteArray(0))
+    }
+    val targetBytes = max(1L, (sourceSizeBytes + outputFiles.size - 1) / outputFiles.size)
+    val boundary = profile.multilineStartPattern.takeIf(String::isNotBlank)?.let(::BoundedProfileRegexMatcher)
+    val writer = ProfileRecordSplitWriter(outputFiles, targetBytes)
+    var current = ByteArrayOutputStream()
+    var csvQuoted = false
+    var csvHeader: ByteArray? = null
+    var physicalLine = 0L
+    try {
+        PushbackInputStream(BufferedInputStream(input, SPLIT_BUFFER_BYTES), SPLIT_ENCODING_SAMPLE_BYTES).use { stream ->
+            val prefix = stream.readNBytes(SPLIT_ENCODING_SAMPLE_BYTES)
+            stream.unread(prefix)
+            val (charset, newlineBytes) = splitEncoding(prefix)
+            val lineReader = SplitPhysicalLineReader(stream, newlineBytes)
+            while (true) {
+                val lineBytes = lineReader.next() ?: break
+                physicalLine++
+                val lineText = decodeSplitLine(lineBytes, physicalLine == 1L, charset)
+                if (profile.engine == LogFormatEngine.REGEX &&
+                    current.size() > 0 && boundary?.groups(lineText) != null
+                ) {
+                    writer.writeRecord(current.toByteArray())
+                    current.reset()
+                }
+                current.write(lineBytes)
+                if (profile.engine == LogFormatEngine.CSV) {
+                    csvQuoted = updateSplitCsvQuoteState(lineText, csvQuoted)
+                    if (!csvQuoted) {
+                        val record = current.toByteArray()
+                        if (profile.hasHeader && csvHeader == null) {
+                            csvHeader = record
+                            writer.writeRecord(record)
+                        } else {
+                            writer.writeRecord(record, csvHeader)
+                        }
+                        current.reset()
+                    } else if (current.size() > MAX_PROFILE_SPLIT_RECORD_BYTES) {
+                        val oversized = current.toByteArray()
+                        writer.writeRecord(oversized, csvHeader)
+                        current.reset()
+                        csvQuoted = false
+                    }
+                } else if (current.size() > MAX_PROFILE_SPLIT_RECORD_BYTES) {
+                    // The profile parser has the same bounded-record policy and recovers at a
+                    // physical line after an oversized multiline row.
+                    writer.writeRecord(current.toByteArray())
+                    current.reset()
+                    csvQuoted = false
+                }
+            }
+            if (current.size() > 0) {
+                val record = current.toByteArray()
+                if (profile.engine == LogFormatEngine.CSV && profile.hasHeader && csvHeader == null) {
+                    csvHeader = record
+                    writer.writeRecord(record)
+                } else {
+                    writer.writeRecord(record, csvHeader)
+                }
+            }
+        }
+        writer.close()
+        return outputFiles
+    } catch (failure: Throwable) {
+        runCatching { writer.close() }
+        outputFiles.forEach { it.delete() }
+        throw failure
+    }
+}
+
+private const val MAX_PROFILE_SPLIT_RECORD_BYTES = 1 shl 20
+private const val SPLIT_ENCODING_SAMPLE_BYTES = 8 * 1024
+private const val SPLIT_BYTE_MASK = 0xff
+
+private class SplitPhysicalLineReader(
+    private val input: InputStream,
+    private val newlineBytes: ByteArray,
+) {
+    private val buffer = ByteArray(SPLIT_BUFFER_BYTES)
+    private var cursor = 0
+    private var count = 0
+
+    fun next(): ByteArray? {
+        val line = ByteArrayOutputStream()
+        var previous = -1
+        while (true) {
+            if (cursor >= count) {
+                count = input.read(buffer)
+                cursor = 0
+                if (count < 0) return line.toByteArray().takeIf(ByteArray::isNotEmpty)
+            }
+            val start = cursor
+            while (cursor < count) {
+                val value = buffer[cursor].toInt() and SPLIT_BYTE_MASK
+                cursor++
+                val foundNewline = (newlineBytes.size == 1 && value == (newlineBytes[0].toInt() and SPLIT_BYTE_MASK)) ||
+                    (
+                        newlineBytes.size == 2 && previous == (newlineBytes[0].toInt() and SPLIT_BYTE_MASK) &&
+                            value == (newlineBytes[1].toInt() and SPLIT_BYTE_MASK)
+                    )
+                if (foundNewline) {
+                    line.write(buffer, start, cursor - start)
+                    return line.toByteArray()
+                }
+                previous = value
+            }
+            line.write(buffer, start, cursor - start)
+            require(line.size() <= MAX_PROFILE_SPLIT_RECORD_BYTES) {
+                "A physical line exceeds the 1 MiB safe splitting limit."
+            }
+        }
+    }
+}
+
+private fun splitEncoding(prefix: ByteArray): Pair<Charset, ByteArray> {
+    val charset = detectLogTextEncoding(prefix).charset
+    val newline = when (charset) {
+        StandardCharsets.UTF_16BE -> byteArrayOf(0x00, 0x0A)
+        StandardCharsets.UTF_16LE -> byteArrayOf(0x0A, 0x00)
+        else -> byteArrayOf('\n'.code.toByte())
+    }
+    return charset to newline
+}
+
+private fun decodeSplitLine(bytes: ByteArray, first: Boolean, charset: Charset): String {
+    var text = bytes.toString(charset)
+    text = text.removeSuffix("\n").removeSuffix("\r")
+    return if (first) text.removePrefix("\uFEFF") else text
+}
+
+private fun updateSplitCsvQuoteState(line: String, initiallyQuoted: Boolean): Boolean {
+    var quoted = initiallyQuoted
+    var index = 0
+    while (index < line.length) {
+        if (line[index] == '"') {
+            if (quoted && line.getOrNull(index + 1) == '"') index++ else quoted = !quoted
+        }
+        index++
+    }
+    return quoted
+}
+
+private class ProfileRecordSplitWriter(
+    private val outputFiles: List<File>,
+    private val targetBytes: Long,
+) : AutoCloseable {
+    private var outputIndex = 0
+    private var output = outputFiles[0].outputStream().buffered(SPLIT_BUFFER_BYTES)
+    private var written = 0L
+
+    fun writeRecord(record: ByteArray, repeatedHeader: ByteArray? = null) {
+        if (written > 0 && outputIndex < outputFiles.lastIndex && written + record.size > targetBytes) {
+            output.close()
+            outputIndex++
+            output = outputFiles[outputIndex].outputStream().buffered(SPLIT_BUFFER_BYTES)
+            written = 0L
+            repeatedHeader?.let(output::write)
+        }
+        output.write(record)
+        written += record.size
+    }
+
+    override fun close() = output.close()
 }
 
 private class SplitWriter(

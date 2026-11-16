@@ -395,6 +395,7 @@ internal fun SettingsPageBody(
         SettingsPage.LogView -> LogViewSettingsSection(state, reclaimFocus)
         SettingsPage.SearchFilters -> SearchFiltersSettingsSection(state, reclaimFocus)
         SettingsPage.IssueCategories -> IssueCategoriesSettingsSection(state, reclaimFocus)
+        SettingsPage.LogFormats -> LogFormatSettingsSection(state, reclaimFocus)
         SettingsPage.SourceCode -> SourceCodeSettingsSection(state, reclaimFocus)
         SettingsPage.NotesWriting -> NotesWritingSettingsSection(state, reclaimFocus)
         SettingsPage.CopyExport -> CopyExportSettingsSection(state, reclaimFocus)

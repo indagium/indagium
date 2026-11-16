@@ -26,6 +26,7 @@ import com.indagium.model.ProcessNameMode
 // <digits>:" requirement already excludes it without any special-casing.
 private const val PROC_START_TAG = "ActivityManager"
 private const val PROC_START_EVENT_TAG = "am_proc_start"
+private val PROFILE_PROCESS_NAME_KEYS = setOf("process_name", "processname", "proc_name", "procname", "comm", "executable")
 
 // "Start proc 12345:com.example.app/u0a123 for activity com.example.app/.MainActivity" — captures
 // the pid and everything up to the next '/' (the uid field) as the process name. Process names can
@@ -66,14 +67,23 @@ fun computeProcessNames(logData: List<LogEntry>): Map<Int, String> {
 // than one per failed parse step (detekt LoopWithTooManyJumpStatements). Tag equality is checked
 // first here, exactly as before — the `when` is what keeps every non-proc-start line away from a
 // regex, and the vast majority of a real log never gets past it.
-private fun LogEntry.procStartPidAndName(): Pair<Int, String>? = when (tag) {
-    PROC_START_TAG ->
-        // startsWith gate before the regex: "Start proc " is a cheap prefix check, and
-        // ActivityManager logs plenty of other things.
-        if (msg.startsWith("Start proc ")) PROC_START_MSG_RE.find(msg)?.pidAndName() else null
+private fun LogEntry.procStartPidAndName(): Pair<Int, String>? =
+    profileProcessName()?.let { pid to it } ?: when (tag) {
+        PROC_START_TAG ->
+            // startsWith gate before the regex: "Start proc " is a cheap prefix check, and
+            // ActivityManager logs plenty of other things.
+            if (msg.startsWith("Start proc ")) PROC_START_MSG_RE.find(msg)?.pidAndName() else null
 
-    PROC_START_EVENT_TAG -> PROC_START_EVENT_RE.find(msg)?.pidAndName()
-    else -> null
+        PROC_START_EVENT_TAG -> PROC_START_EVENT_RE.find(msg)?.pidAndName()
+        else -> null
+    }
+
+private fun LogEntry.profileProcessName(): String? {
+    if (pid <= 0) return null
+    return profileFields.entries.firstOrNull { (key, value) ->
+        key.lowercase() in PROFILE_PROCESS_NAME_KEYS &&
+            value.isNotBlank() && value.toLongOrNull() == null
+    }?.value?.trim()?.takeIf(String::isNotBlank)
 }
 
 // Both patterns capture the pid in group 1 and the process name in group 2, so they share this.

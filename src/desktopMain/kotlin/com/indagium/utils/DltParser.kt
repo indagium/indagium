@@ -1,20 +1,51 @@
 package com.indagium.utils
 
+import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormat
+import com.indagium.model.LogFormatEngine
+import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
+import com.indagium.model.LogRecordMetadata
+import com.indagium.model.ParsedTime
+import com.indagium.model.usesCustomLogFormatProjection
 import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** Result of syntax detection and parsing. The old List<LogEntry> parser API remains available. */
-data class ParsedLog(val format: LogFormat, val entries: List<LogEntry>)
+data class ParsedLog(
+    val format: LogFormat,
+    val entries: List<LogEntry>,
+    val profile: LogFormatProfile? = null,
+    val diagnostics: List<String> = emptyList(),
+    val sourceClockId: String? = null,
+    val sourceLineCount: Long? = null,
+    /** Profile ids that tied when detection was ambiguous; empty otherwise. */
+    val candidateProfileIds: List<String> = emptyList(),
+) {
+    val capabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> by lazy {
+        profile?.let { com.indagium.model.deriveLogCapabilities(it, entries, sourceClockId = sourceClockId) }.orEmpty()
+    }
+    val profileFieldNames: Set<String> by lazy {
+        entries.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet()
+    }
+    val profileClockSignature: String? by lazy {
+        profile?.let { com.indagium.model.logFormatClockSignature(it, entries, sourceClockId) }
+    }
+}
 
 private const val DLT_STORAGE_HEADER_SIZE = 16
 private const val DLT_MAX_FRAME_SIZE = 0xffff
@@ -45,6 +76,12 @@ private val DLT_STORAGE_MAGIC = byteArrayOf('D'.code.toByte(), 'L'.code.toByte()
 private val TIME_OUTPUT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
 
 private const val PARSE_LOG_CONTENT_BUFFER_BYTES = 64 * 1024
+private const val DLT_CANCELLATION_INTERVAL = 128
+private const val DLT_SCAN_CANCELLATION_BYTES_PER_STEP = 1024
+private val DLT_VIEWER_TEXT_KINDS = setOf(LogContentKind.DLT_VIEWER_CSV, LogContentKind.DLT_VIEWER_TEXT)
+private const val MILLIS_PER_LOCAL_DAY = 86_400_000L
+private const val DLT_NANOS_PER_MILLISECOND = 1_000_000L
+private const val DLT_VIEWER_SOURCE_PREFIX = "dlt-viewer:"
 
 /**
  * Parse a stream by content. Routes through the shared [classifyLogContent] classifier so this
@@ -52,18 +89,310 @@ private const val PARSE_LOG_CONTENT_BUFFER_BYTES = 64 * 1024
  * prefix of bytes means. [fileName], when known, is used only to gate an ambiguous headerless v2
  * frame (see [classifyLogContent]'s doc) — pass it whenever the caller has one.
  */
-fun parseLogContent(stream: InputStream, startId: Int = 1, fileName: String? = null): ParsedLog {
+fun parseLogContent(
+    stream: InputStream,
+    startId: Int = 1,
+    fileName: String? = null,
+    profile: LogFormatProfile? = null,
+    profiles: List<LogFormatProfile> = emptyList(),
+    sourceClockId: String? = null,
+): ParsedLog {
     val input = if (stream.markSupported()) stream else BufferedInputStream(stream, PARSE_LOG_CONTENT_BUFFER_BYTES)
     input.mark(CONTENT_SNIFF_BYTES + 1)
     val sample = input.readNBytes(CONTENT_SNIFF_BYTES)
     input.reset()
     val atEof = sample.size < CONTENT_SNIFF_BYTES
-    return when (val kind = classifyLogContent(sample, atEof, fileName)) {
-        LogContentKind.DLT_STORAGE -> ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = true, startId = startId))
-        LogContentKind.DLT_RAW -> ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = false, startId = startId))
+    val kind = classifyLogContent(sample, atEof, fileName)
+    val isHardDltKind = kind in setOf(
+        LogContentKind.DLT_STORAGE,
+        LogContentKind.DLT_RAW,
+        LogContentKind.DLT_UNSUPPORTED_V2,
+    )
+    // Binary DLT classification is authoritative even when the filename or selected profile says text.
+    if (isHardDltKind) return parseClassifiedDlt(input, kind, startId, profile, sourceClockId)
+    if (profile == null && kind in DLT_VIEWER_TEXT_KINDS) {
+        return parseClassifiedDlt(input, kind, startId, null, sourceClockId)
+    }
+    if (profile?.engine == LogFormatEngine.DLT && kind in DLT_VIEWER_TEXT_KINDS) {
+        return parseClassifiedDlt(input, kind, startId, profile, sourceClockId)
+    }
+
+    val selection = selectTextProfile(sample, fileName, profile, profiles)
+    return parseTextWithProfile(input, selection.profile, profile, startId, sourceClockId)
+        .withDetectionDiagnostics(selection.diagnostics)
+        .let { if (selection.candidateProfileIds.isEmpty()) it else it.copy(candidateProfileIds = selection.candidateProfileIds) }
+}
+
+private data class TextProfileSelection(
+    val profile: LogFormatProfile,
+    val diagnostics: List<String>,
+    val candidateProfileIds: List<String> = emptyList(),
+)
+
+private const val ASSOCIATION_AMBIGUOUS_DIAGNOSTIC =
+    "Several format profiles are set to always open this file extension; kept as plain text. Choose a profile explicitly."
+
+private fun plainTextProfile(): LogFormatProfile =
+    BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.PLAIN_TEXT }
+
+/** Custom profiles the user pinned to this file's extension (ignoring case and a leading dot). */
+private fun associatedLogProfiles(fileName: String?, profiles: List<LogFormatProfile>): List<LogFormatProfile> {
+    val extension = fileName?.substringAfterLast('.', "")?.takeIf { it.isNotEmpty() } ?: return emptyList()
+    return profiles.filter { candidate ->
+        !candidate.readOnly && candidate.detection.alwaysUseForExtensions &&
+            candidate.detection.extensions.any { it.trimStart('.').equals(extension, ignoreCase = true) }
+    }
+}
+
+private fun selectTextProfile(
+    sample: ByteArray,
+    fileName: String?,
+    requestedProfile: LogFormatProfile?,
+    profiles: List<LogFormatProfile>,
+): TextProfileSelection {
+    if (requestedProfile != null) return TextProfileSelection(requestedProfile, emptyList())
+    val associated = associatedLogProfiles(fileName, profiles)
+    if (associated.size == 1) return TextProfileSelection(associated.single(), emptyList())
+    if (associated.size > 1) {
+        return TextProfileSelection(plainTextProfile(), listOf(ASSOCIATION_AMBIGUOUS_DIAGNOSTIC), associated.map { it.id })
+    }
+    val configured = detectConfiguredLogProfile(sample, fileName, profiles)
+    val additional = if (configured.profile == null && !configured.ambiguous) {
+        detectAdditionalLogProfileResult(sample)
+    } else {
+        null
+    }
+    val selected = configured.profile
+        ?: additional?.profile
+        ?: if (configured.ambiguous || additional?.ambiguous == true) {
+            plainTextProfile()
+        } else {
+            detectBuiltInLogProfile(sample, fileName)
+                ?: detectAndroidDiagnosticProfile(sample)
+                ?: detectStructuredLogcatProfile(sample)
+                // Unrecognised or empty text still goes to the Logcat parser, which keeps each
+                // line as a RAW row: a file that is empty now may be a live capture a moment
+                // later. Plain text is a profile the user picks, and the answer to a tie.
+                ?: BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.LOGCAT }
+        }
+    val candidateIds = when {
+        configured.ambiguous -> configured.candidates.map { it.id }
+        additional?.ambiguous == true -> additional.tiedProfiles.map { it.id }
+        else -> emptyList()
+    }
+    val diagnostics = buildList {
+        if (configured.ambiguous) {
+            add("The sample matches multiple configured format profiles; kept as plain text. Choose a profile explicitly.")
+        }
+        if (additional?.ambiguous == true) {
+            add("The sample matches multiple built-in format profiles; kept as plain text. Choose a profile explicitly.")
+        }
+    }
+    return TextProfileSelection(selected, diagnostics, candidateIds)
+}
+
+private fun parseTextWithProfile(
+    input: InputStream,
+    selectedProfile: LogFormatProfile,
+    requestedProfile: LogFormatProfile?,
+    startId: Int,
+    sourceClockId: String?,
+): ParsedLog {
+    if (selectedProfile.engine != LogFormatEngine.LOGCAT && selectedProfile.engine != LogFormatEngine.DLT) {
+        validateLogFormatProfile(selectedProfile)
+        return input.use { parseProfileLog(it, selectedProfile, startId, sourceClockId) }
+    }
+    if (requestedProfile != null && requestedProfile.engine == LogFormatEngine.LOGCAT) {
+        return input.use { parseTextLog(it, startId) }
+            .withLogcatProfile(requestedProfile)
+            .copy(sourceClockId = sourceClockId)
+    }
+    require(selectedProfile.engine != LogFormatEngine.DLT) { "The input is not a DLT stream." }
+    return input.use { parseTextLog(it, startId) }
+        .withLogcatProfile(selectedProfile)
+        .copy(sourceClockId = sourceClockId)
+}
+
+private fun parseClassifiedDlt(
+    input: InputStream,
+    kind: LogContentKind,
+    startId: Int,
+    requestedProfile: LogFormatProfile?,
+    sourceClockId: String?,
+): ParsedLog {
+    val builtin = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.DLT }
+    val profile = requestedProfile?.takeIf { it.engine == LogFormatEngine.DLT } ?: builtin
+    if (profile !== builtin) validateLogFormatProfile(profile)
+    val parsed = when (kind) {
+        LogContentKind.DLT_STORAGE -> ParsedLog(LogFormat.DLT, parseDltBinary(input, true, startId), profile)
+        LogContentKind.DLT_RAW -> ParsedLog(LogFormat.DLT, parseDltBinary(input, false, startId), profile)
         LogContentKind.DLT_UNSUPPORTED_V2 -> throw IllegalArgumentException("DLT protocol v2 is not supported")
-        LogContentKind.DLT_VIEWER_CSV, LogContentKind.DLT_VIEWER_TEXT -> parseViewerTextLog(input, startId, kind)
-        LogContentKind.TEXT, LogContentKind.OTHER -> parseTextLog(input, startId)
+        LogContentKind.DLT_VIEWER_CSV, LogContentKind.DLT_VIEWER_TEXT ->
+            parseViewerTextLog(input, startId, kind, sourceClockId).copy(profile = profile)
+        LogContentKind.TEXT, LogContentKind.OTHER -> error("The classifier returned a non-DLT kind.")
+    }
+    return parsed.withDltProfile(profile, sourceClockId).copy(sourceClockId = sourceClockId)
+}
+
+private fun ParsedLog.withLogcatProfile(profile: LogFormatProfile): ParsedLog {
+    // A restored tab's snapshot has no read-only flag, so compare the definition instead: an
+    // unmodified built-in must keep plain rows, with no per-row projection.
+    if (profile.id == "android-logcat" && !usesCustomLogFormatProjection(profile)) return copy(profile = profile)
+    return copy(profile = profile, entries = entries.map { entry -> entry.withLogcatProfile(profile) })
+}
+
+private fun ParsedLog.withDltProfile(profile: LogFormatProfile, sourceClockId: String?): ParsedLog {
+    if (profile.id == "automotive-dlt" && !usesCustomLogFormatProjection(profile)) return copy(profile = profile)
+    return copy(profile = profile, entries = entries.map { entry -> entry.withDltProfile(profile, sourceClockId) })
+}
+
+private fun LogEntry.withLogcatProfile(profile: LogFormatProfile): LogEntry {
+    val values = linkedMapOf(
+        "TIMESTAMP" to ts,
+        "SEVERITY" to level.key.toString(),
+        "COMPONENT" to tag,
+        "MESSAGE" to msg,
+        "PROCESS_ID" to pid.takeIf { it != 0 }?.toString().orEmpty(),
+        "THREAD_ID" to tid.takeIf { it != 0 }?.toString().orEmpty(),
+        "timestamp" to ts,
+        "level" to level.key.toString(),
+        "tag" to tag,
+        "message" to msg,
+        "pid" to pid.takeIf { it != 0 }?.toString().orEmpty(),
+        "tid" to tid.takeIf { it != 0 }?.toString().orEmpty(),
+    )
+    val columns = profile.visibleColumns.map { role ->
+        val value = values[role.name].orEmpty()
+        LogDisplayField(role.name.lowercase(), role.profileLabel(), value)
+    } + profile.attributes.filter { it.visibleByDefault }.map { attribute ->
+        LogDisplayField(attribute.id, attribute.label, values[attribute.source].orEmpty())
+    }
+    val previous = recordMetadata ?: LogRecordMetadata()
+    val metadata = previous.copy(
+        profileFields = values.filterValues(String::isNotEmpty) + previous.profileFields,
+        displayColumns = columns,
+        originalSeverity = previous.originalSeverity ?: level.key.toString().takeIf { previous.severityKnown },
+        severityKnown = previous.severityKnown,
+        processIdentity = pid.takeIf { it != 0 }?.toString(),
+        threadIdentity = tid.takeIf { it != 0 }?.toString(),
+        usesProfilePresentation = true,
+        usesLegacyClockSemantics = true,
+    )
+    return copy(recordMetadata = metadata)
+}
+
+private fun LogEntry.withDltProfile(profile: LogFormatProfile, sourceClockId: String?): LogEntry {
+    val values = linkedMapOf(
+        "TIMESTAMP" to ts,
+        "SEVERITY" to level.key.toString(),
+        "COMPONENT" to tag,
+        "MESSAGE" to msg,
+        "PROCESS_ID" to pid.takeIf { it != 0 }?.toString().orEmpty(),
+        "THREAD_ID" to tid.takeIf { it != 0 }?.toString().orEmpty(),
+        "HOST" to dltEcuId.orEmpty(),
+        "SERVICE" to dltAppId.orEmpty(),
+        "CONTAINER" to dltContextId.orEmpty(),
+        "SOURCE" to dltMessageType.orEmpty(),
+        "timestamp" to ts,
+        "level" to level.key.toString(),
+        "severity" to level.key.toString(),
+        "tag" to tag,
+        "message" to msg,
+        "pid" to pid.takeIf { it != 0 }?.toString().orEmpty(),
+        "tid" to tid.takeIf { it != 0 }?.toString().orEmpty(),
+        "ecu" to dltEcuId.orEmpty(),
+        "ecu_id" to dltEcuId.orEmpty(),
+        "dlt_ecu_id" to dltEcuId.orEmpty(),
+        "apid" to dltAppId.orEmpty(),
+        "app_id" to dltAppId.orEmpty(),
+        "ctid" to dltContextId.orEmpty(),
+        "context_id" to dltContextId.orEmpty(),
+        "dlt_type" to dltMessageType.orEmpty(),
+        "message_type" to dltMessageType.orEmpty(),
+        "dlt_timestamp" to dltTimestamp?.toString().orEmpty(),
+        "dlt_timestamp_source" to dltTimestampSource.orEmpty(),
+        "session_id" to pid.takeIf { it != 0 }?.toString().orEmpty(),
+    )
+    profile.fieldMappings.forEach { (role, source) ->
+        values[role.name] = values[source] ?: values.entries.firstOrNull {
+            it.key.equals(source, ignoreCase = true)
+        }?.value.orEmpty()
+    }
+    val extras = profile.attributes.associate { attribute ->
+        attribute.id to (values[attribute.source] ?: values.entries.firstOrNull {
+            it.key.equals(attribute.source, ignoreCase = true)
+        }?.value.orEmpty())
+    }
+    val mappedValues = values.filterValues(String::isNotEmpty) + extras.filterValues(String::isNotEmpty)
+    val columns = profile.visibleColumns.map { role ->
+        LogDisplayField(role.name.lowercase(), role.profileLabel(), values[role.name].orEmpty())
+    } + profile.attributes.filter { it.visibleByDefault }.map { attribute ->
+        LogDisplayField(attribute.id, attribute.label, extras[attribute.id].orEmpty())
+    }
+    val canonicalTime = canonicalDltParsedTime(this, sourceClockId)
+    val parsedTime = canonicalTime?.let { time ->
+        if (time.relativeMillis != null && profile.relativeClock.isNotBlank()) {
+            time.copy(clockIdentity = "relative:${profile.relativeClock}")
+        } else {
+            time
+        }
+    }
+    val metadata = (recordMetadata ?: LogRecordMetadata()).copy(
+        profileFields = mappedValues,
+        displayColumns = columns,
+        parsedTime = parsedTime,
+        originalSeverity = originalSeverity ?: values["SEVERITY"],
+        severityKnown = severityKnown,
+        processIdentity = pid.takeIf { it != 0 }?.toString(),
+        threadIdentity = tid.takeIf { it != 0 }?.toString(),
+        usesProfilePresentation = true,
+        usesLegacyClockSemantics = true,
+    )
+    return copy(recordMetadata = metadata)
+}
+
+private fun LogFieldRole.profileLabel(): String = when (this) {
+    LogFieldRole.TIMESTAMP -> "timestamp"
+    LogFieldRole.SEVERITY -> "level"
+    LogFieldRole.COMPONENT -> "tag"
+    LogFieldRole.MESSAGE -> "message"
+    LogFieldRole.PROCESS_ID -> "pid"
+    LogFieldRole.THREAD_ID -> "tid"
+    else -> name.lowercase().replace('_', ' ')
+}
+
+private fun ParsedLog.withDetectionDiagnostics(extra: List<String>): ParsedLog =
+    if (extra.isEmpty()) this else copy(diagnostics = diagnostics + extra)
+
+private data class ConfiguredLogProfileDetection(
+    val profile: LogFormatProfile? = null,
+    val ambiguous: Boolean = false,
+    val candidates: List<LogFormatProfile> = emptyList(),
+)
+
+private fun detectConfiguredLogProfile(sample: ByteArray, fileName: String?, profiles: List<LogFormatProfile>): ConfiguredLogProfileDetection {
+    if (profiles.isEmpty()) return ConfiguredLogProfileDetection()
+    val sampleText = runCatching { openLogTextReader(ByteArrayInputStream(sample)).use { it.readText() } }.getOrDefault("")
+    val lines = sampleText.lineSequence().take(16).toList()
+    val extension = fileName?.substringAfterLast('.', "")?.lowercase()
+    val matches = profiles.filter { candidate ->
+        if (candidate.readOnly) return@filter false
+        val headerMatch = candidate.detection.headerContains.isNotEmpty() &&
+            candidate.detection.headerContains.all { hint -> sampleText.contains(hint, ignoreCase = true) }
+        val regexMatch = candidate.detection.contentRegex?.let { pattern ->
+            validateLogFormatProfile(candidate)
+            lines.any { line -> boundedRegexGroups(line, pattern) != null }
+        } == true
+        headerMatch || regexMatch
+    }
+    val extensionMatches = matches.filter { candidate ->
+        extension != null && candidate.detection.extensions.any { it.trimStart('.').equals(extension, true) }
+    }
+    val candidates = extensionMatches.takeIf { it.isNotEmpty() } ?: matches
+    return when (candidates.size) {
+        0 -> ConfiguredLogProfileDetection()
+        1 -> ConfiguredLogProfileDetection(profile = candidates.single())
+        else -> ConfiguredLogProfileDetection(ambiguous = true, candidates = candidates)
     }
 }
 
@@ -89,24 +418,39 @@ fun parseDltContent(stream: InputStream, startId: Int = 1): ParsedLog {
 // The DLT-viewer-vs-logcat decision is made once, by classifyLogContent, before either of these
 // runs — parseLogContent dispatches to the right one directly instead of re-detecting here.
 private fun parseTextLog(input: InputStream, startId: Int): ParsedLog =
-    openLogTextReader(input).use { reader -> ParsedLog(LogFormat.LOGCAT, parseLogcatLines(reader.lineSequence(), startId)) }
+    openLogTextReader(input).use { reader -> ParsedLog(LogFormat.LOGCAT, parseLogcatLines(interruptibleLines(reader.lineSequence()), startId)) }
 
-private fun parseViewerTextLog(input: InputStream, startId: Int, kind: LogContentKind): ParsedLog =
+private fun parseViewerTextLog(
+    input: InputStream,
+    startId: Int,
+    kind: LogContentKind,
+    sourceClockId: String? = null,
+): ParsedLog =
     openLogTextReader(input).use { reader ->
-        val lines = reader.lineSequence()
+        val lines = interruptibleLines(reader.lineSequence())
         val entries = if (kind == LogContentKind.DLT_VIEWER_CSV) {
-            parseDltViewerCsv(lines, startId)
+            parseDltViewerCsv(lines, startId, sourceClockId)
         } else {
-            parseDltViewerAsciiLines(lines, startId)
+            parseDltViewerAsciiLines(lines, startId, sourceClockId)
         }
         ParsedLog(LogFormat.DLT, entries)
     }
+
+private fun interruptibleLines(lines: Sequence<String>): Sequence<String> = sequence {
+    var lineCount = 0
+    for (line in lines) {
+        lineCount++
+        if (lineCount % DLT_CANCELLATION_INTERVAL == 0) checkParserCancellation()
+        yield(line)
+    }
+}
 
 // Reads until `target` is full or the stream ends; returns how many bytes actually landed (may be
 // less than target.size on EOF — callers decide whether that's a clean end or a truncation).
 private fun readAvailable(input: InputStream, target: ByteArray, offset: Int = 0): Int {
     var pos = offset
     while (pos < target.size) {
+        checkParserCancellation()
         val n = input.read(target, pos, target.size - pos)
         if (n < 0) break
         if (n == 0) continue
@@ -134,9 +478,11 @@ private fun isStorageMagic(window: ByteArray): Boolean =
 private fun scanForStorageMagic(input: CountingInputStream, seed: ByteArray): Long? {
     val window = ByteArray(4)
     var filled = seed.size.coerceAtMost(4)
+    var scannedBytes = 0
     seed.copyInto(window, 0, 0, filled)
     if (filled == 4 && isStorageMagic(window)) return input.count - 4
     while (true) {
+        if (scannedBytes++ % (DLT_CANCELLATION_INTERVAL * DLT_SCAN_CANCELLATION_BYTES_PER_STEP) == 0) checkParserCancellation()
         val b = input.read()
         if (b < 0) return null
         if (filled < 4) {
@@ -154,7 +500,9 @@ private fun scanForStorageMagic(input: CountingInputStream, seed: ByteArray): Lo
 // unparseable trailing data.
 private fun drainRemaining(input: InputStream) {
     val buffer = ByteArray(PARSE_LOG_CONTENT_BUFFER_BYTES)
+    var chunks = 0
     while (input.read(buffer) >= 0) {
+        if (chunks++ % DLT_CANCELLATION_INTERVAL == 0) checkParserCancellation()
         // discard
     }
 }
@@ -189,6 +537,7 @@ private fun decodeStorageStream(input: CountingInputStream, startId: Int, tagCac
     fun mark(message: String) { entries += LogEntry(id++, "", LogLevel.W, "RAW", message) }
 
     while (true) {
+        checkParserCancellation()
         val scanStart = input.count
         val probe = ByteArray(4)
         val probeRead = readAvailable(input, probe)
@@ -256,6 +605,7 @@ private fun decodeRawStream(input: CountingInputStream, startId: Int, tagCache: 
     fun mark(message: String) { entries += LogEntry(id++, "", LogLevel.W, "RAW", message) }
 
     while (true) {
+        checkParserCancellation()
         val frameHeaderStart = input.count
         val stdHeader = ByteArray(DLT_STANDARD_HEADER_SIZE)
         val stdRead = readAvailable(input, stdHeader)
@@ -446,6 +796,7 @@ private fun decodeDltPayload(payload: ByteArray, argumentCount: Int, msin: Int?,
     var offset = 0
     val rendered = ArrayList<String>(argumentCount)
     for (i in 0 until argumentCount) {
+        if (i % DLT_CANCELLATION_INTERVAL == 0) checkParserCancellation()
         val parseStart = offset
         val parsed = try {
             parseVerboseArgument(payload, offset, msbf)
@@ -704,7 +1055,12 @@ private const val ASCII_FIXED_FIELD_COUNT = 12
  * [intern] lets the real parse path share one tag cache; detection passes the identity function
  * since it only cares whether the result is non-null.
  */
-internal fun parseDltViewerAsciiLine(line: String, id: Int, intern: (String) -> String = { it }): LogEntry? {
+internal fun parseDltViewerAsciiLine(
+    line: String,
+    id: Int,
+    intern: (String) -> String = { it },
+    sourceClockId: String? = null,
+): LogEntry? {
     val tokens = line.split(' ')
     val idx = when {
         tokens.isNotEmpty() && ASCII_DATE.matches(tokens[0]) -> 0
@@ -725,22 +1081,24 @@ internal fun parseDltViewerAsciiLine(line: String, id: Int, intern: (String) -> 
     if (type !in ASCII_TYPES || mode !in ASCII_MODES) return null
     val payloadStart = idx + ASCII_FIXED_FIELD_COUNT
     val payload = if (tokens.size > payloadStart) tokens.subList(payloadStart, tokens.size).joinToString(" ") else ""
+    val fullTimestamp = "${tokens[idx]} $time"
     return buildDltViewerEntry(
         id = id, ts = normalizeViewerTimestamp(time), dltTimestamp = parseViewerUptime(uptime),
         ecu = ecu, app = apid, ctx = ctid, sessionId = session, type = type,
         level = resolveViewerLevel(hasSubtypeColumn = true, type = type, subtype = subtype),
-        payload = payload, intern = intern,
+        payload = payload, intern = intern, timestampText = fullTimestamp, sourceClockId = sourceClockId,
     )
 }
 
-private fun parseDltViewerAsciiLines(lines: Sequence<String>, startId: Int): List<LogEntry> {
+private fun parseDltViewerAsciiLines(lines: Sequence<String>, startId: Int, sourceClockId: String?): List<LogEntry> {
     val tagCache = HashMap<String, String>()
 
     fun intern(value: String) = tagCache.getOrPut(value) { value }
     var id = startId
     return lines.mapNotNull { raw ->
         if (raw.isBlank()) return@mapNotNull null
-        val entry = parseDltViewerAsciiLine(raw.trim(), id, ::intern) ?: LogEntry(id, "", LogLevel.I, "RAW", raw.trimEnd())
+        val entry = parseDltViewerAsciiLine(raw.trim(), id, ::intern, sourceClockId)
+            ?: LogEntry(id, "", LogLevel.I, "RAW", raw.trimEnd())
         id++
         entry
     }.toList()
@@ -773,7 +1131,7 @@ private fun joinQuotedCsvLines(lines: Iterator<String>): Sequence<String> = sequ
     }
 }
 
-private fun parseDltViewerCsv(lines: Sequence<String>, startId: Int): List<LogEntry> {
+private fun parseDltViewerCsv(lines: Sequence<String>, startId: Int, sourceClockId: String?): List<LogEntry> {
     val logical = joinQuotedCsvLines(lines.iterator())
     val tagCache = HashMap<String, String>()
 
@@ -818,6 +1176,7 @@ private fun parseDltViewerCsv(lines: Sequence<String>, startId: Int): List<LogEn
             sessionId = fields.getOrNull(cols.session), type = type,
             level = resolveViewerLevel(hasSubtypeColumn = cols.subtype >= 0, type = type, subtype = subtype),
             payload = fields.getOrNull(cols.payload).orEmpty(), intern = ::intern,
+            timestampText = fields.getOrNull(cols.time), sourceClockId = sourceClockId,
         )
     }
     return entries
@@ -829,6 +1188,7 @@ private fun parseDltViewerCsv(lines: Sequence<String>, startId: Int): List<LogEn
  * session id when it parses as a number; the tag joins ECU/APID/CTID like the binary parser does,
  * falling back to "DLT" when all three are blank.
  */
+@Suppress("LongParameterList") // One parameter per viewer export column; both export forms call it.
 private fun buildDltViewerEntry(
     id: Int,
     ts: String,
@@ -841,6 +1201,8 @@ private fun buildDltViewerEntry(
     level: LogLevel,
     payload: String,
     intern: (String) -> String,
+    timestampText: String? = null,
+    sourceClockId: String? = null,
 ): LogEntry {
     val ecuId = ecu?.trim()?.takeIf(String::isNotEmpty)
     val appId = app?.trim()?.takeIf(String::isNotEmpty)
@@ -849,11 +1211,81 @@ private fun buildDltViewerEntry(
     val dltType = typeNorm?.let { if (it == "nw_trace") "network_trace" else it }
     val tag = intern(listOfNotNull(ecuId, appId, ctxId).joinToString("/").ifBlank { "DLT" })
     val pid = sessionId?.trim()?.toIntOrNull() ?: 0
+    val parsedTime = timestampText?.let { parseDltViewerParsedTime(it, ts, sourceClockId, ecuId) }
     return LogEntry(
         id = id, ts = ts, level = level, tag = tag, msg = payload, pid = pid,
         dltEcuId = ecuId, dltAppId = appId, dltContextId = ctxId, dltMessageType = dltType,
         dltTimestamp = dltTimestamp, dltTimestampSource = "viewer",
+        recordMetadata = parsedTime?.let { time ->
+            LogRecordMetadata(parsedTime = time, usesLegacyClockSemantics = true)
+        },
     )
+}
+
+private fun parseDltViewerParsedTime(
+    original: String,
+    localTime: String,
+    sourceClockId: String?,
+    ecuId: String?,
+): ParsedTime? {
+    val normalized = original.trim().removePrefix("[").removeSuffix("]")
+        .replace('/', '-').replace(' ', 'T')
+    val identity = "$DLT_VIEWER_SOURCE_PREFIX${sourceClockId ?: ecuId ?: "unknown"}"
+    val offset = runCatching { OffsetDateTime.parse(normalized, DateTimeFormatter.ISO_DATE_TIME) }.getOrNull()
+    if (offset != null) {
+        return ParsedTime(original, offset.toInstant().toEpochMilli(), localTime, "absolute-offset")
+    }
+    val localDateTime = runCatching { LocalDateTime.parse(normalized, DateTimeFormatter.ISO_DATE_TIME) }.getOrNull()
+    if (localDateTime != null) {
+        val wallMillis = localDateTime.toLocalDate().toEpochDay() * MILLIS_PER_LOCAL_DAY +
+            localDateTime.toLocalTime().toNanoOfDay() / DLT_NANOS_PER_MILLISECOND
+        return ParsedTime(original, localTime = localTime, clockIdentity = identity, localWallMillis = wallMillis)
+    }
+    val time = runCatching { LocalTime.parse(localTime, TIME_OUTPUT) }.getOrNull() ?: return null
+    val wallMillis = time.toNanoOfDay() / DLT_NANOS_PER_MILLISECOND
+    return ParsedTime(original, localTime = localTime, clockIdentity = identity, localWallMillis = wallMillis)
+}
+
+/** Canonical time domain for DLT rows, without adding per-row metadata to binary fast paths. */
+internal fun canonicalDltParsedTime(entry: LogEntry, sourceClockId: String? = null): ParsedTime? {
+    entry.parsedTime?.let { return it }
+    val identity = "dlt:${sourceClockId ?: "unspecified"}:${entry.dltEcuId ?: "unknown-ecu"}"
+    return when (entry.dltTimestampSource) {
+        "storage" -> parseDltStorageTime(entry)
+        "relative" -> entry.dltTimestamp?.let { uptime ->
+            ParsedTime(
+                original = entry.ts,
+                localTime = entry.ts,
+                clockIdentity = identity,
+                relativeMillis = uptime / TMSP_UNITS_PER_MILLISECOND,
+            )
+        }
+        "viewer" -> parseDltViewerFallback(entry, identity)
+        else -> null
+    }
+}
+
+private fun parseDltStorageTime(entry: LogEntry): ParsedTime? {
+    val seconds = entry.dltTimestamp ?: return null
+    val fractionalMillis = entry.ts.substringAfterLast('.', "").take(3).toLongOrNull() ?: 0L
+    val epochMillis = runCatching { Math.addExact(Math.multiplyExact(seconds, MILLIS_PER_SECOND), fractionalMillis) }
+        .getOrNull() ?: return null
+    return ParsedTime(entry.ts, epochMillis, entry.ts, "absolute-epoch")
+}
+
+private fun parseDltViewerFallback(entry: LogEntry, identity: String): ParsedTime? {
+    val uptime = entry.dltTimestamp
+    if (uptime != null) {
+        return ParsedTime(
+            original = entry.ts,
+            localTime = entry.ts,
+            clockIdentity = identity,
+            relativeMillis = uptime / TMSP_UNITS_PER_MILLISECOND,
+        )
+    }
+    val time = runCatching { LocalTime.parse(entry.ts, TIME_OUTPUT) }.getOrNull() ?: return null
+    val wallMillis = time.toNanoOfDay() / DLT_NANOS_PER_MILLISECOND
+    return ParsedTime(entry.ts, localTime = entry.ts, clockIdentity = identity, localWallMillis = wallMillis)
 }
 
 /**

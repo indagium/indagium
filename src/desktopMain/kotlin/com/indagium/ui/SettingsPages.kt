@@ -115,6 +115,10 @@ internal enum class SettingsPage(
         "Issue categories", Icons.Outlined.Category, SettingsGroupKind.ReadingLogs,
         "Your own regex categories for the Issues list.",
     ),
+    LogFormats(
+        "Log formats", Icons.Outlined.Tune, SettingsGroupKind.ReadingLogs,
+        "Create, preview, import and export the parsers used for log tabs.",
+    ),
     SourceCode(
         "Source code", Icons.Outlined.Code, SettingsGroupKind.ReadingLogs,
         "Register your project's source folders to enable Show in code.",

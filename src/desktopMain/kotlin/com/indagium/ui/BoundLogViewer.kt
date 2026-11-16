@@ -5,6 +5,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import com.indagium.model.CtxMenuState
+import com.indagium.model.LogCapability
 import com.indagium.model.LogTab
 import com.indagium.model.SearchScope
 import com.indagium.model.searchFor
@@ -29,6 +30,16 @@ internal fun BoundLogViewer(
     tiles: LogViewerTiles? = null,
     compare: Boolean = false,
 ) {
+    val profileCapabilities = remember(
+        state,
+        tab.id,
+        tab.logCapabilities,
+        tab.logFormatProfileId,
+        tab.logFormatProfileSnapshot,
+        state.settings.sourceFolders,
+    ) {
+        state.logCapabilitiesForTab(tab)
+    }
     val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
         tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
     }
@@ -69,6 +80,9 @@ internal fun BoundLogViewer(
     LogViewer(
         tab = tab, modifier = modifier,
         settings = state.settings,
+        deltaTimeStatus = profileCapabilities[LogCapability.DELTA_TIME],
+        processNamesStatus = profileCapabilities[LogCapability.PROCESS_NAMES],
+        filterBarCapabilities = profileCapabilities,
         onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
         onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
         onCtxMenu = { id, x, y, sel, panelSel, capture ->

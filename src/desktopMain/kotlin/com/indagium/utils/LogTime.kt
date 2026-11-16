@@ -132,6 +132,7 @@ private fun wrappedDayDistance(fromSlot: Int, toSlot: Int, leap: Boolean): Int {
  *  rows the result is identical to the string form. Otherwise — either side undated — it IS the
  *  string form. Feb 29 counts as a day only when one of the two rows sits on it. */
 fun deltaMillis(prev: LogEntry, cur: LogEntry): Long? {
+    if (prev.hasProfileClockSemantics() || cur.hasProfileClockSemantics()) return profileDeltaMillis(prev, cur)
     val prevMillis = parseMillisOfDay(prev.ts)
     val curMillis = parseMillisOfDay(cur.ts)
     if (prevMillis == TS_UNKNOWN || curMillis == TS_UNKNOWN) return null
@@ -140,6 +141,34 @@ fun deltaMillis(prev: LogEntry, cur: LogEntry): Long? {
     val days = wrappedDayDistance(prev.dayOfYear.toInt(), cur.dayOfYear.toInt(), leap)
     return days * MILLIS_PER_DAY + (curMillis - prevMillis)
 }
+
+private fun profileDeltaMillis(prev: LogEntry, cur: LogEntry): Long? {
+    val prevParsed = resolvedProfileTime(prev) ?: return null
+    val curParsed = resolvedProfileTime(cur) ?: return null
+    val sameClock = prevParsed.clockIdentity == curParsed.clockIdentity
+    return when {
+        prevParsed.epochMillis != null && curParsed.epochMillis != null ->
+            subtractIfRepresentable(curParsed.epochMillis, prevParsed.epochMillis)
+        prevParsed.localWallMillis != null && curParsed.localWallMillis != null && sameClock ->
+            subtractIfRepresentable(curParsed.localWallMillis, prevParsed.localWallMillis)
+        prevParsed.relativeMillis != null && curParsed.relativeMillis != null && sameClock ->
+            subtractIfRepresentable(curParsed.relativeMillis, prevParsed.relativeMillis)
+        prevParsed.localTime != null && curParsed.localTime != null && sameClock ->
+            deltaMillis(prevParsed.localTime, curParsed.localTime)
+        else -> null
+    }
+}
+
+private fun subtractIfRepresentable(end: Long, start: Long): Long? =
+    runCatching { Math.subtractExact(end, start) }.getOrNull()
+
+private fun LogEntry.hasProfileClockSemantics(): Boolean =
+    parsedTime != null || rawRecord != null ||
+        dltTimestampSource in setOf("storage", "relative", "viewer") ||
+        (recordMetadata?.usesProfilePresentation == true && !recordMetadata.usesLegacyClockSemantics)
+
+private fun resolvedProfileTime(entry: LogEntry): com.indagium.model.ParsedTime? =
+    entry.parsedTime ?: canonicalDltParsedTime(entry, entry.sourceTag)
 
 // Cap on how many samples of each kind (applied/suppressed) unrollLogTimeline keeps — the Follow
 // diagnostic dump (AppState.followDiagnostics) only ever shows a handful, and a pathological log
@@ -267,10 +296,56 @@ private fun nextTimelinePointMillis(data: List<LogTimelinePoint>, fromIndex: Int
  * accumulate into a permanent, unbounded corruption of everything after it the way this timeline's
  * running `dayOffset` does, so the failure mode this guards against does not exist there.
  */
-fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline =
-    unrollLogTimeline(data.map { entry ->
+fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
+    val profileRows = data.filter(LogEntry::hasProfileClockSemantics)
+    if (profileRows.isNotEmpty()) return unrollProfileTimeline(profileRows)
+    return unrollLogTimeline(data.map { entry ->
         LogTimelinePoint(entry.id, parseMillisOfDay(entry.ts).takeUnless { it == TS_UNKNOWN }, entry.ts, entry.dayOfYear)
     })
+}
+
+@Suppress("CyclomaticComplexMethod") // Picks one of several mutually exclusive clock domains.
+private fun unrollProfileTimeline(profileRows: List<LogEntry>): UnrolledLogTimeline {
+    val parsed = profileRows.mapNotNull { entry ->
+        resolvedProfileTime(entry)?.takeIf { time ->
+            time.epochMillis != null || time.localWallMillis != null || time.relativeMillis != null || time.localTime != null
+        }?.let { entry to it }
+    }
+    if (parsed.isEmpty()) return emptyUnrolledTimeline()
+    val allEpoch = parsed.all { it.second.epochMillis != null }
+    val allLocalWall = parsed.all { it.second.localWallMillis != null } && parsed.map { it.second.clockIdentity }.distinct().size == 1
+    val allRelative = parsed.all { it.second.relativeMillis != null } && parsed.map { it.second.clockIdentity }.distinct().size == 1
+    if (allEpoch || allLocalWall || allRelative) {
+        val first = when {
+            allEpoch -> parsed.first().second.epochMillis!!
+            allLocalWall -> parsed.first().second.localWallMillis!!
+            else -> parsed.first().second.relativeMillis!!
+        }
+        val values = LinkedHashMap<Int, Long>()
+        parsed.forEach { (entry, time) ->
+            val value = when {
+                allEpoch -> time.epochMillis!!
+                allLocalWall -> time.localWallMillis!!
+                else -> time.relativeMillis!!
+            }
+            val offset = subtractIfRepresentable(value, first) ?: return emptyUnrolledTimeline()
+            values[entry.id] = offset
+        }
+        return UnrolledLogTimeline(values, 0, emptyList(), 0, emptyList(), true)
+    }
+    val localTimes = parsed.all { it.second.epochMillis == null && it.second.relativeMillis == null && it.second.localTime != null }
+    val clocks = parsed.map { it.second.clockIdentity }.distinct()
+    if (localTimes && clocks.size == 1) {
+        val byId = parsed.associate { (entry, time) -> entry.id to time.localTime!! }
+        return unrollLogTimeline(profileRows.map { entry ->
+            val timestamp = byId[entry.id]?.let(::parseMillisOfDay)?.takeUnless { it == TS_UNKNOWN }
+            LogTimelinePoint(entry.id, timestamp, entry.rawRecord.orEmpty(), entry.dayOfYear)
+        })
+    }
+    return emptyUnrolledTimeline()
+}
+
+private fun emptyUnrolledTimeline() = UnrolledLogTimeline(emptyMap(), 0, emptyList(), 0, emptyList(), false)
 
 /**
  * [unrollLogTimeline]'s generalized form for an ordered sequence of entry-id/time points.  The

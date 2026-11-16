@@ -34,11 +34,12 @@ class SettingsSearchTest {
     }
 
     @Test
-    fun theEighteenPagesSitInSevenGroupsInTheNavOrder() {
+    fun theNineteenPagesSitInSevenGroupsInTheNavOrder() {
         val top = SettingsPage.entries.filter { it.parent == null }
         assertEquals(
             listOf(
-                "General", "Appearance", "Tabs & toolbar", "Log view", "Search & filters", "Issue categories", "Source code",
+                "General", "Appearance", "Tabs & toolbar", "Log view", "Search & filters", "Issue categories", "Log formats",
+                "Source code",
                 "Notes & writing", "Copy & export", "Capture & video", "Providers", "Commands", "Voice input",
                 "Test runs", "Issue tracker", "Storage & files", "Integrations", "About",
             ),

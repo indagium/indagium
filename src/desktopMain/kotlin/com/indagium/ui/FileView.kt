@@ -13,6 +13,7 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.RecorderSnapshot
@@ -54,6 +55,16 @@ internal fun BoundFilterPanel(
     host: SectionHost? = null,
 ) {
     if (!state.filterVisible) return
+    val profileCapabilities = remember(
+        state,
+        tab.id,
+        tab.logCapabilities,
+        tab.logFormatProfileId,
+        tab.logFormatProfileSnapshot,
+        state.settings.sourceFolders,
+    ) {
+        state.logCapabilitiesForTab(tab)
+    }
     // Grouped into one data class rather than five more lambdas on this already-~90-parameter
     // call (see LogCompositionActions' own doc) — remember(state, tab.id) so it stays == across
     // recompositions that don't change tab identity, which is what keeps FilterPanel skippable.
@@ -245,6 +256,7 @@ internal fun BoundFilterPanel(
         captureDeviceEventsState = state,
         onCaptureDeviceEventReturnFocus = onCaptureDeviceEventReturnFocus,
         host = host,
+        profileCapabilities = profileCapabilities,
     )
     // Tiled, the splitters between tiles replace this panel's own right-edge divider and its width guard.
     if (host != null && !host.hostsInColumn) return
@@ -290,6 +302,7 @@ internal fun FileView(
         } == true
     val captureDeviceEvents = rememberCaptureDeviceEvents(state, tab)
     var importedRangeEditorOpen by remember(tab.id) { mutableStateOf(false) }
+    var formatDetailsOpen by remember(tab.id) { mutableStateOf(false) }
 
     // The F6 / panel-focus stops for the tiles that are showing, in the layout's reading order. Original and Log are one stop (the log
     // viewer has a single requester), as are all the filter tiles; Video and the Diagram library have no focus target of their own.
@@ -341,6 +354,44 @@ internal fun FileView(
                 onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
                 deviceEvents = captureDeviceEvents,
             )
+        }
+        if (tab.contentState == TabContentState.LOADED) {
+            val pinnedFormat = remember(
+                tab.id,
+                tab.logFormatProfileId,
+                tab.logFormatProfileSnapshot,
+                state.settings.customLogFormatProfiles,
+            ) {
+                runCatching { state.pinnedLogFormatProfile(tab.id) }.getOrNull()
+            }
+            Row(
+                Modifier.fillMaxWidth().background(tc.p2).padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppText(
+                    pinnedFormat?.let { "${it.name} · revision ${it.revision}" }
+                        ?: if (tab.logFormatProfileId != null || tab.logFormatProfileSnapshot != null) {
+                            "Profile details unavailable"
+                        } else if (tab.logFormat == LogFormat.DLT) {
+                            "Automotive DLT · detected automatically"
+                        } else {
+                            "Android Logcat · detected automatically"
+                        },
+                    color = tc.ts,
+                    fontSize = 10.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                )
+                AppButton(
+                    "Format details",
+                    onClick = { formatDetailsOpen = true },
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.testTag("tab-format-details-${tab.id}"),
+                    verticalPadding = 3.dp,
+                )
+            }
+            LogFormatChooserStrip(state, tab, onReturnFocus = { runCatching { logViewerFr.requestFocus() } })
         }
         // The panels (filters, log, Notes, AI, Video) are tiles of one tiling surface; see LogViewTiling.kt. The horizontal filter bar
         // (ui/FilterBar.kt) is part of the log tile's toolbar and independently gated by filterBarVisible.
@@ -421,6 +472,13 @@ internal fun FileView(
                 state = state,
                 sessionId = archiveSession?.id ?: tab.captureSourceSessionId,
                 onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+            )
+        }
+        if (formatDetailsOpen) {
+            LogFormatDetailsDialog(
+                state = state,
+                tabId = tab.id,
+                onDismiss = { formatDetailsOpen = false },
             )
         }
     }

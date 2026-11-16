@@ -29,6 +29,21 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 - `get_memory_status` — JVM heap health: `heapPressure` (`NORMAL`/`WARNING`/`CRITICAL`),
   `heapUsedAfterGcBytes` (the latest GC reading), `heapMaxBytes`, `heapFreeBytesEstimate`, and `pausedCaptureTabs`. Every
   parsed row lives in memory, so check it before opening another large log.
+- `list_log_format_profiles` and `get_log_format_profile` — discover built-in/custom profile IDs and
+  retrieve their data-only definitions. `preview_log_format_profile` parses a bounded sample and
+  reports the mapped rows, extra attributes, diagnostics, and derived capability availability.
+  `import_log_format_profiles` validates a single JSON profile or bundle; pass `conflictPolicy`
+  `RENAME` to preserve existing entries or `UPDATE` to advance a matching custom profile revision.
+  `export_log_format_profiles` returns a JSON bundle (`{"format":"indagium-log-format-profiles","bundleVersion":1,"profiles":[...]}`;
+  import also accepts a bare array or one profile) and can atomically write it to `path`.
+  Pass a `profileId` to `open_log_file` to choose a format while opening, or call
+  `reparse_tab_with_log_format_profile` to create a new tab with that profile while preserving the
+  original tab. `split_log_file` also accepts a profile ID for record-safe engines and parses each
+  opened part with that definition. `list_tabs`, `get_visible_lines`, and `get_line_context` expose a tab's pinned profile,
+  diagnostics, actual fields, and capability reasons. When detection tied between several profiles the tab opens as plain
+  text and reports their ids as `formatCandidates`; reparse with one of them. Profile metadata travels with rows under
+  `profileFields`, `customAttributes`, `canonicalTimestamp`, and source-span/process/thread keys;
+  `severityKnown` and `originalSeverity` distinguish unknown severities from Android levels.
 - `get_visible_lines` — rendered, filtered/folded rows; use `limit`, `offset`, `fields`, and
   `compact` to keep responses small. `get_line_context` — raw surrounding rows for one `lineId`,
   independent of filters/folding.

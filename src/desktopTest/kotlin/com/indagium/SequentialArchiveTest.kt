@@ -1,8 +1,11 @@
 package com.indagium
 
 import com.indagium.utils.ArchiveBudgetExceededException
+import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.extractCandidate
+import com.indagium.utils.forEachSequentialEntry
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.listArchiveVideoCandidates
 import com.indagium.utils.scanArchiveCandidates
@@ -15,6 +18,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.CancellationException
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -183,6 +187,22 @@ class SequentialArchiveTest {
         val candidates = listArchiveLogCandidates(tar, maxEntries = 3)
 
         assertTrue(candidates.size <= 3, "expected at most 3 candidates from a capped scan, got ${candidates.size}")
+    }
+
+    @Test
+    fun sequentialArchiveIterationPropagatesCancellationAndClosesItsStream() {
+        val dir = createTempDirectory("sequential-archive-cancel").toFile()
+        val tar = buildTextTar(dir, "diag.tar", mapOf("main.log" to "plain text"))
+        val format = detectArchiveFormat(tar) as ArchiveFormat.Sequential
+
+        val failure = assertFailsWith<CancellationException> {
+            forEachSequentialEntry(tar, format, maxEntries = 1) { _, _, _, _ ->
+                throw CancellationException("stop archive walk")
+            }
+        }
+
+        assertEquals("stop archive walk", failure.message)
+        assertEquals(listOf("main.log"), listArchiveLogCandidates(tar).map { it.entryPath })
     }
 
     @Test

@@ -1,10 +1,15 @@
 package com.indagium
 
+import com.indagium.model.LogFieldRole
+import com.indagium.model.LogFormatEngine
+import com.indagium.model.LogFormatProfile
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.parseLogcat
+import com.indagium.utils.parseProfileLines
 import com.indagium.utils.planSplitOutputs
 import com.indagium.utils.requiresSplitPrompt
+import com.indagium.utils.splitProfileRecordsToFiles
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
 import java.io.ByteArrayInputStream
@@ -83,6 +88,49 @@ class LogSplitterTest {
             val text = file.readText()
             text.isEmpty() || text.endsWith("\n")
         })
+    }
+
+    @Test
+    fun csvProfileSplitKeepsQuotedMultilineRowsWholeAndRepeatsHeaders() {
+        val profile = LogFormatProfile(
+            id = "split-csv",
+            name = "Split CSV",
+            engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+        )
+        val source = "time,message\n1,\"first line\nsecond line\"\n2,plain\n3,last\n"
+        val directory = createTempDirectory("openlog-profile-csv-split").toFile()
+        val outputs = planSplitOutputs("sample.csv", directory, "part", 3)
+
+        splitProfileRecordsToFiles(ByteArrayInputStream(source.toByteArray()), outputs, source.toByteArray().size.toLong(), profile)
+
+        assertTrue(outputs.drop(1).all { it.readLines().first() == "time,message" })
+        val entries = outputs.flatMap { file -> parseProfileLines(file.readLines(), profile).entries }
+        assertEquals(listOf("first line\nsecond line", "plain", "last"), entries.map { it.msg })
+    }
+
+    @Test
+    fun multilineRegexProfileSplitCutsOnlyAtConfiguredRecordStarts() {
+        val profile = LogFormatProfile(
+            id = "split-regex",
+            name = "Split multiline regex",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "^(\\d+): (.*)$",
+            multilineStartPattern = "^\\d+: ",
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "2"),
+        )
+        val source = "1: first\n  continuation one\n2: second\n  continuation two\n3: third\n"
+        val directory = createTempDirectory("openlog-profile-regex-split").toFile()
+        val outputs = planSplitOutputs("sample.log", directory, "part", 2)
+
+        splitProfileRecordsToFiles(ByteArrayInputStream(source.toByteArray()), outputs, source.toByteArray().size.toLong(), profile)
+
+        val entries = outputs.flatMap { file -> parseProfileLines(file.readLines(), profile).entries }
+        assertEquals(3, entries.size)
+        assertEquals(
+            listOf("1: first\n  continuation one", "2: second\n  continuation two", "3: third"),
+            entries.map { it.rawRecord },
+        )
     }
 
     @Test
