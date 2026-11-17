@@ -4,6 +4,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.RecordFieldNameColor
 import com.indagium.model.TileNode
 import com.indagium.model.ToolbarPlacement
 import kotlinx.serialization.json.JsonArray
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 // The log view's and the compare view's tiling settings (AppSettings.logViewLayout, logViewHidden, logViewCollapsed,
@@ -56,6 +58,9 @@ internal fun JsonObjectBuilder.putLogViewLayoutSettings(settings: AppSettings) {
     put("compareSyncScroll", settings.compareSyncScroll)
     put("customLogViewLayouts", customLogViewLayoutsJson(settings.customLogViewLayouts))
     settings.lastCustomLogViewLayoutId?.let { put("lastCustomLogViewLayoutId", it) }
+    // The record field-name colour (Settings › Log view) rides along: it is a log view setting and AutosaveCodec.kt is at the limit.
+    put("recordFieldNameColor", settings.recordFieldNameColor.name)
+    settings.recordFieldNameCustomArgb?.let { put("recordFieldNameCustomArgb", it) }
 }
 
 // One view's layout and hidden list, decoded and sanitized together. A layout that is absent or malformed stays null; the
@@ -105,5 +110,9 @@ internal fun AppSettings.withLogViewLayoutSettingsFrom(o: JsonObject): AppSettin
         compareSyncScroll = (o["compareSyncScroll"] as? JsonPrimitive)?.booleanOrNull ?: compareSyncScroll,
         customLogViewLayouts = customLayouts,
         lastCustomLogViewLayoutId = validLastCustom,
+        // A file without the key, or with an unknown name, reads as the accent.
+        recordFieldNameColor = RecordFieldNameColor.entries
+            .firstOrNull { it.name == (o["recordFieldNameColor"] as? JsonPrimitive)?.contentOrNull } ?: RecordFieldNameColor.ACCENT,
+        recordFieldNameCustomArgb = (o["recordFieldNameCustomArgb"] as? JsonPrimitive)?.longOrNull,
     )
 }

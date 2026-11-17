@@ -1783,7 +1783,18 @@ data class AppSettings(
     val toolbarShapeFollowsTiles: Boolean = true,
     /** User-managed log formats (Settings → Log formats); JSON-only, built-ins are code-owned. */
     val customLogFormatProfiles: List<LogFormatProfile> = emptyList(),
+    /** Colour of field names in an expanded JSON record and in Message details; a file without the key reads as ACCENT. JSON-only. */
+    val recordFieldNameColor: RecordFieldNameColor = RecordFieldNameColor.ACCENT,
+    /** The picked colour (ARGB) used while [recordFieldNameColor] is CUSTOM; null falls back to the accent. JSON-only. */
+    val recordFieldNameCustomArgb: Long? = null,
 )
+
+/** How the field names of an expanded record are coloured (Settings › Log view › Record field names). */
+enum class RecordFieldNameColor(val label: String) {
+    ACCENT("Accent"),
+    PLAIN("Plain"),
+    CUSTOM("Custom"),
+}
 
 /** The corner style the toolbar is actually drawn with: the tiles' style while it follows them, else its own. */
 val AppSettings.effectiveToolbarShapeStyle: ShapeStyle

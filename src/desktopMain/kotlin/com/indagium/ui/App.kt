@@ -317,6 +317,7 @@ fun App(
         LocalUseMono provides state.settings.fontMono,
         LocalUiFontFamily provides state.settings.resolvedInterfaceFontFamily(),
         LocalLogFontFamily provides state.settings.resolvedLogFontFamily(),
+        LocalRecordFieldNameStyle provides state.settings.recordFieldNameStyle(),
         LocalDensity provides scaledDensity,
         LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
         LocalTextContextMenu provides IndagiumTextContextMenu,

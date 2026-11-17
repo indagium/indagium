@@ -1,7 +1,6 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,15 +13,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.ExpandMore
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -40,8 +36,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.model.AppSettings
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
+import com.indagium.model.RecordFieldNameColor
 
 private const val MAX_JSON_CHARS = 256 * 1024
 private const val MAX_JSON_DEPTH = 32
@@ -57,10 +55,32 @@ private const val KEY_CHAR_WIDTH_DP = 6.7f
 private const val KEY_GAP_DP = 14f
 private const val INDENT_PER_DEPTH_DP = 16
 private val NODE_ROW_HEIGHT = 16.dp
+
+/** Width of a tree row's toggle slot (and of the empty slot of a leaf); the key column maths counts it as 20dp of indent. */
+private val TREE_TOGGLE_WIDTH = 20.dp
 private val HEX_SUMMARY_GAP = 8.dp
 
 /** Width a row gives the disclosure arrow, arrow or not: the 24dp button and its 2dp gap. */
 internal val STRUCTURED_DISCLOSURE_SLOT = 26.dp
+
+/** How a record's field names are coloured: the theme accent, the plain secondary text colour, or a colour the user picked. */
+internal data class RecordFieldNameStyle(val mode: RecordFieldNameColor = RecordFieldNameColor.ACCENT, val custom: Color? = null)
+
+/** The field-name colour setting for the record tree and Message details; [App] provides it from the app settings. */
+internal val LocalRecordFieldNameStyle = staticCompositionLocalOf { RecordFieldNameStyle() }
+
+/** The style the settings ask for; a Custom choice without a stored colour reads as the accent. */
+internal fun AppSettings.recordFieldNameStyle(): RecordFieldNameStyle = RecordFieldNameStyle(
+    mode = recordFieldNameColor,
+    custom = recordFieldNameCustomArgb?.let { Color(it.toInt()) },
+)
+
+/** The colour a field name is drawn in under [style]. */
+internal fun recordFieldNameColor(style: RecordFieldNameStyle, tc: ThemeColors): Color = when (style.mode) {
+    RecordFieldNameColor.ACCENT -> tc.ac
+    RecordFieldNameColor.PLAIN -> tc.ts
+    RecordFieldNameColor.CUSTOM -> style.custom ?: tc.ac
+}
 
 /** Returns the profile/DLT payload eligible for the inline record disclosure. */
 internal fun expandableRecordSource(entry: LogEntry, logFormat: LogFormat): String? {
@@ -195,6 +215,7 @@ private fun StructuredContainerRows(
     // One key column for the whole tree (keyColumnDp, measured from the row's own start), so every
     // value starts at the same x whatever its depth; a row already spends depth * indent of it.
     val keyWidth = (keyColumnDp - depth * INDENT_PER_DEPTH_DP).dp
+    val keyColor = recordFieldNameColor(LocalRecordFieldNameStyle.current, tc)
     children.forEach { (label, child) ->
         val childPath = "$path/$label"
         val container = child is StructuredJsonValue.ObjectValue || child is StructuredJsonValue.ArrayValue
@@ -212,26 +233,22 @@ private fun StructuredContainerRows(
             verticalAlignment = Alignment.Top,
         ) {
             if (expandable) {
-                Box(
-                    Modifier.size(width = 20.dp, height = NODE_ROW_HEIGHT)
-                        .clickable { expanded = !expanded }
+                // The same rounded-hover chevron as the log row's record arrow and the group headers.
+                CollapseChevron(
+                    expanded = expanded,
+                    color = tc.ts,
+                    onClick = { expanded = !expanded },
+                    modifier = Modifier.size(width = TREE_TOGGLE_WIDTH, height = NODE_ROW_HEIGHT)
+                        .semantics { contentDescription = if (expanded) "Collapse $label" else "Expand $label" }
                         .testTag("structured-record-node-toggle-${pathTag(childPath)}"),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
-                        contentDescription = if (expanded) "Collapse $label" else "Expand $label",
-                        tint = tc.ts,
-                        modifier = Modifier.size(14.dp),
-                    )
-                }
+                )
             } else {
                 // Same height as a toggle, so rows with and without one are evenly spaced.
-                Spacer(Modifier.size(width = 20.dp, height = NODE_ROW_HEIGHT))
+                Spacer(Modifier.size(width = TREE_TOGGLE_WIDTH, height = NODE_ROW_HEIGHT))
             }
             AppText(
                 label,
-                color = tc.ts,
+                color = keyColor,
                 fontSize = 11.sp,
                 fontFamily = mono,
                 fontWeight = FontWeight.Medium,

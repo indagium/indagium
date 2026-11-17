@@ -385,6 +385,11 @@ private fun editorBehavior() = listOf(
         listOf("pid", "proc", "process"),
     ),
     entry(
+        SettingsPage.LogView, "Record field names",
+        LOG_RECORD_FIELD_NAMES_HINT,
+        listOf("json", "record", "field", "key", "colour", "color", "accent", "message details", "structured"),
+    ),
+    entry(
         SettingsPage.CaptureVideoPlayback, "Video follow readout",
         CAPTURE_FOLLOW_READOUT_HINT,
         listOf("video", "sync", "playhead"),

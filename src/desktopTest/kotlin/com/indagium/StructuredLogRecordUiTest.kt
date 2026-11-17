@@ -36,6 +36,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.model.AppSettings
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFieldRole
@@ -45,17 +46,22 @@ import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
+import com.indagium.model.RecordFieldNameColor
 import com.indagium.model.TidMapState
 import com.indagium.model.TidMapTarget
 import com.indagium.ui.AppState
 import com.indagium.ui.AppText
 import com.indagium.ui.DARK_GITHUB
 import com.indagium.ui.FileView
+import com.indagium.ui.LocalRecordFieldNameStyle
 import com.indagium.ui.LocalTheme
+import com.indagium.ui.RecordFieldNameStyle
 import com.indagium.ui.StructuredRecordBody
 import com.indagium.ui.StructuredRecordDisclosure
 import com.indagium.ui.compactRecordSummary
 import com.indagium.ui.expandableRecordSource
+import com.indagium.ui.recordFieldNameColor
+import com.indagium.ui.recordFieldNameStyle
 import com.indagium.ui.structuredDisclosureVisible
 import com.indagium.ui.tc
 import com.indagium.utils.RegexEvaluationContext
@@ -221,7 +227,7 @@ class StructuredLogRecordUiTest {
     }
 
     @Test
-    fun fieldTreeKeysAreSecondaryTextAndValuesNeverUseTheAccentOrWarningColour() {
+    fun fieldTreeKeysAreAccentByDefaultAndValuesNeverUseTheAccentOrWarningColour() {
         val json = """{"name":"sensor","count":42,"enabled":false,"gone":null,"device":{"a":1}}"""
         lateinit var colors: com.indagium.ui.ThemeColors
         rule.setContent {
@@ -237,16 +243,93 @@ class StructuredLogRecordUiTest {
         fun colorOf(rowTag: String, text: String) = textColor(rowTag, text)
 
         val row = "structured-record-node-202-root"
-        listOf("name", "count", "enabled", "gone", "device").forEach { key ->
-            assertEquals(colors.ts, colorOf("$row-$key", key), "key $key is text-secondary")
-        }
+        val keys = listOf("name", "count", "enabled", "gone", "device")
+        keys.forEach { key -> assertEquals(colors.ac, colorOf("$row-$key", key), "key $key is the accent by default") }
         assertEquals(colors.tx, colorOf("$row-name", "\"sensor\""))
         assertEquals(colors.tx, colorOf("$row-count", "42"))
         assertEquals(colors.tx, colorOf("$row-enabled", "false"))
         assertEquals(colors.td, colorOf("$row-gone", "null"))
         assertEquals(colors.td, colorOf("$row-device", "{1 fields}"))
-        val used = listOf("name", "count", "enabled", "gone", "device").flatMap { listOf(colorOf("$row-$it", it)) }
-        assertTrue(colors.ac !in used && colors.warn !in used, "no accent or warning colour in the tree")
+        val values = listOf(
+            colorOf("$row-name", "\"sensor\""), colorOf("$row-count", "42"), colorOf("$row-enabled", "false"),
+            colorOf("$row-gone", "null"), colorOf("$row-device", "{1 fields}"),
+        )
+        assertTrue(colors.ac !in values && colors.warn !in values, "no accent or warning colour in the values")
+    }
+
+    @Test
+    fun theFieldNameSettingPicksAccentPlainOrTheCustomColourForTheTreeAndFallsBackToAccent() {
+        val json = """{"name":"sensor","device":{"a":1}}"""
+        val custom = androidx.compose.ui.graphics.Color(0xFF06B6D4)
+        var style by mutableStateOf(RecordFieldNameStyle())
+        lateinit var colors: com.indagium.ui.ThemeColors
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB, LocalRecordFieldNameStyle provides style) {
+                colors = tc()
+                Column(Modifier.width(700.dp).background(colors.p).padding(10.dp)) {
+                    PreviewRecordRow(id = 203, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-203").performClick()
+        rule.onNodeWithTag("structured-record-node-toggle-203-root-device").performClick()
+        val row = "structured-record-node-203-root"
+        val keyTags = listOf("$row-name" to "name", "$row-device" to "device", "$row-device-a" to "a")
+
+        fun assertKeys(expected: androidx.compose.ui.graphics.Color, why: String) =
+            keyTags.forEach { (tag, key) -> assertEquals(expected, textColor(tag, key), "$why: $key") }
+
+        assertKeys(colors.ac, "accent")
+        style = RecordFieldNameStyle(RecordFieldNameColor.PLAIN)
+        rule.waitForIdle()
+        assertKeys(colors.ts, "plain")
+        style = RecordFieldNameStyle(RecordFieldNameColor.CUSTOM, custom)
+        rule.waitForIdle()
+        assertKeys(custom, "custom")
+        assertEquals(androidx.compose.ui.text.font.FontWeight.Medium, textWeight("$row-name", "name"), "keys stay medium weight")
+        style = RecordFieldNameStyle(RecordFieldNameColor.CUSTOM, null)
+        rule.waitForIdle()
+        assertKeys(colors.ac, "custom without a stored colour")
+        assertEquals(colors.tx, textColor("$row-name", "\"sensor\""), "values keep their colour")
+    }
+
+    @Test
+    fun appSettingsMapToTheFieldNameStyleTheViewReads() {
+        assertEquals(RecordFieldNameStyle(), AppSettings().recordFieldNameStyle())
+        val custom = AppSettings(recordFieldNameColor = RecordFieldNameColor.CUSTOM, recordFieldNameCustomArgb = 0xFF06B6D4L)
+        assertEquals(
+            RecordFieldNameStyle(RecordFieldNameColor.CUSTOM, androidx.compose.ui.graphics.Color(0xFF06B6D4)),
+            custom.recordFieldNameStyle(),
+        )
+        val tc = DARK_GITHUB
+        assertEquals(tc.ts, recordFieldNameColor(RecordFieldNameStyle(RecordFieldNameColor.PLAIN), tc))
+    }
+
+    @Test
+    fun treeTogglesAreTheAppsRoundedHoverChevronInASlotThatKeepsKeysAndValuesAligned() {
+        val json = """{"device":{"name":"sensor-7"},"enabled":false,"list":[1]}"""
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(700.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 204, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-204").performClick()
+        val device = rule.onNodeWithTag("structured-record-node-toggle-204-root-device")
+        device.assertContentDescriptionEquals("Expand device")
+        val bounds = device.getBoundsInRoot()
+        assertEquals(20f, bounds.right.value - bounds.left.value, 0.01f, "toggle slot width")
+        assertEquals(16f, bounds.bottom.value - bounds.top.value, 0.01f, "toggle slot height keeps rows from growing")
+        val rowHeights = listOf("device", "enabled", "list").map { key ->
+            rule.onNodeWithTag("structured-record-node-204-root-$key").getBoundsInRoot().let { it.bottom.value - it.top.value }
+        }
+        rowHeights.forEach { assertEquals(rowHeights.first(), it, 0.01f, "rows with and without a toggle are as tall as each other") }
+
+        device.performClick()
+        rule.onNodeWithTag("structured-record-node-toggle-204-root-device").assertContentDescriptionEquals("Collapse device")
+        val valueX = valueLeft("structured-record-node-204-root-enabled", "false")
+        assertEquals(valueX, valueLeft("structured-record-node-204-root-device-name", "\"sensor-7\""), 0.5f, "values stay aligned at depth 1")
     }
 
     @Test
@@ -517,6 +600,13 @@ class StructuredLogRecordUiTest {
         val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
         node.config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
         return layouts.single().layoutInput.style.color
+    }
+
+    private fun textWeight(rowTag: String, text: String): androidx.compose.ui.text.font.FontWeight? {
+        val node = rule.onNode(hasText(text) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).fetchSemanticsNode()
+        val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+        node.config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+        return layouts.single().layoutInput.style.fontWeight
     }
 
     private fun saveIntegrationScreenshot(name: String) {

@@ -1,14 +1,21 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import com.indagium.model.RecordFieldNameColor
 
 // Settings › Log view and Settings › Search & filters: rows of switches, steppers and dropdowns in titled groups. Issue categories and
 // Source code are in SettingsSourcePages.kt.
@@ -19,6 +26,7 @@ internal const val LOG_ROW_WRAPPING_HINT = "Auto fits long lines to the panel. F
 internal const val LOG_ROW_WRAPPING_DETAIL = LOG_ROW_WRAPPING_HINT + " Hold Shift while scrolling if a trackpad swipe doesn't scroll sideways."
 internal const val LOG_WRAP_AT_HINT = "The column Fixed wrapping breaks lines at, from 80 to 20,000."
 internal const val LOG_PROCESS_NAMES_HINT = "New tabs show names from “Start proc” lines instead of PIDs. A tab's own pick resets every session."
+internal const val LOG_RECORD_FIELD_NAMES_HINT = "Colour of field names when a JSON record is expanded and in Message details."
 internal const val LOG_CRASH_ROWS_HINT = "Colour every row of an expanded crash group, not just its header."
 internal const val LOG_ERROR_ROWS_HINT = "Tint every Error-level row in every tab. A tab with its own style keeps it until you reset it."
 internal const val LOG_OPEN_WITH_ORIGINAL_HINT = "New files start with the unfiltered Original panel visible."
@@ -46,6 +54,8 @@ private val SCROLL_MARGINS = listOf(0, 2, 3, 5, 8, 12)
 internal object LogPageTags {
     const val ROW_NUMBERS = "setting-row-numbers"
     const val PROCESS_NAMES = "setting-process-names-new-tabs"
+    const val RECORD_FIELD_NAMES = "setting-record-field-names"
+    const val RECORD_FIELD_NAMES_COLOR = "setting-record-field-names-color"
     const val CRASH_ROWS = "setting-crash-rows"
     const val OPEN_WITH_ORIGINAL = "setting-open-with-original"
     const val MINIMAP = "setting-minimap"
@@ -147,6 +157,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 testTag = LogPageTags.PROCESS_NAMES,
             )
         }
+        RecordFieldNamesRow(state, stylePalette, reclaimFocus)
     }
     SettingsGroup("Highlights") {
         SettingsRow("Crash rows", LOG_CRASH_ROWS_HINT) {
@@ -201,6 +212,63 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
         }
     }
 }
+
+/** "Record field names": Accent, Plain or Custom, and the colour picker while Custom is chosen. */
+@Composable
+private fun RecordFieldNamesRow(state: AppState, palette: HighlighterStylePaletteActions, reclaimFocus: () -> Unit) {
+    val settings = state.settings
+    val accent = tc().ac
+    var pickerOpen by remember { mutableStateOf(false) }
+    val choices = RecordFieldNameColor.entries
+    SettingsRow("Record field names", LOG_RECORD_FIELD_NAMES_HINT) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (settings.recordFieldNameColor == RecordFieldNameColor.CUSTOM) {
+                HighlighterColorPicker(
+                    color = settings.recordFieldNameCustomArgb?.let { Color(it.toInt()) } ?: accent,
+                    onColorChange = { color ->
+                        state.updateSettings { it.copy(recordFieldNameCustomArgb = color.toArgb().toLong() and ARGB_MASK) }
+                    },
+                    customColors = palette.customColors,
+                    onSaveCustomColor = palette.onSaveCustomColor,
+                    onDeleteCustomColor = palette.onDeleteCustomColor,
+                    paletteColumns = settings.highlighterPaletteColumns,
+                    onPaletteColumnsChange = {},
+                    pickerOpen = pickerOpen,
+                    onPickerOpenChange = {
+                        pickerOpen = it
+                        if (!it) reclaimFocus()
+                    },
+                    testTagPrefix = LogPageTags.RECORD_FIELD_NAMES_COLOR,
+                    customColorEditorExpanded = palette.customColorEditorExpanded,
+                    onCustomColorEditorExpandedChange = palette.onCustomColorEditorExpandedChange,
+                )
+            }
+            SettingsSegmented(
+                options = choices.map { it.label },
+                selectedIndices = setOf(choices.indexOf(settings.recordFieldNameColor)),
+                onToggle = { index ->
+                    val choice = choices[index]
+                    if (choice != settings.recordFieldNameColor) {
+                        state.updateSettings { current ->
+                            current.copy(
+                                recordFieldNameColor = choice,
+                                // A first Custom starts from the accent, so the swatch shows what the names look like now.
+                                recordFieldNameCustomArgb = current.recordFieldNameCustomArgb
+                                    ?: if (choice == RecordFieldNameColor.CUSTOM) accent.toArgb().toLong() and ARGB_MASK else null,
+                            )
+                        }
+                    }
+                    if (choice != RecordFieldNameColor.CUSTOM) pickerOpen = false
+                    reclaimFocus()
+                },
+                modifier = Modifier.testTag(LogPageTags.RECORD_FIELD_NAMES),
+                segmentModifier = { index -> Modifier.testTag("${LogPageTags.RECORD_FIELD_NAMES}-${choices[index].name.lowercase()}") },
+            )
+        }
+    }
+}
+
+private const val ARGB_MASK = 0xFFFFFFFFL
 
 /** Settings › Search & filters: what Ctrl/Cmd+F does and how Find behaves in split views, the filter panel's lists and keyboard navigation. */
 @Composable

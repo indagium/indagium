@@ -1,5 +1,6 @@
 package com.indagium
 
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -22,6 +23,7 @@ import com.indagium.model.AnnotationCopyFormat
 import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.AppSettings
 import com.indagium.model.CustomIssueRule
+import com.indagium.model.RecordFieldNameColor
 import com.indagium.ui.AppState
 import com.indagium.ui.LogPageTags
 import com.indagium.ui.NotesPageTags
@@ -29,6 +31,7 @@ import com.indagium.ui.SETTINGS_EMPTY_STATE_TAG
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.SettingsPage
 import com.indagium.ui.SourcePageTags
+import com.indagium.ui.recordFieldNameStyle
 import com.indagium.ui.settingsNavTag
 import org.junit.Rule
 import org.junit.Test
@@ -94,6 +97,42 @@ class SettingsLogAndNotesPagesUiTest {
         assertSwitchFlips(state, LogPageTags.MINIMAP) { it.showMinimap }
         assertSwitchFlips(state, LogPageTags.FOLLOW_LIVE) { it.autoScrollWhileTailing }
         assertSwitchFlips(state, "error-highlight-global-switch") { it.errorHighlightStyle.enabled }
+    }
+
+    @Test
+    fun recordFieldNamesRowChoosesAccentPlainOrCustomAndShowsTheColourControlOnlyForCustom() {
+        val state = AppState()
+        openPage(state, SettingsPage.LogView)
+        rule.onNodeWithText("Record field names").performScrollTo().assertExists()
+        rule.onNodeWithText("Colour of field names when a JSON record is expanded and in Message details.").assertExists()
+        assertEquals(RecordFieldNameColor.ACCENT, state.settings.recordFieldNameColor)
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES}-accent").performScrollTo().assertIsSelected()
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-trigger").assertDoesNotExist()
+
+        click("${LogPageTags.RECORD_FIELD_NAMES}-plain")
+        assertEquals(RecordFieldNameColor.PLAIN, state.settings.recordFieldNameColor)
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES}-plain").assertIsSelected()
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-trigger").assertDoesNotExist()
+
+        click("${LogPageTags.RECORD_FIELD_NAMES}-custom")
+        assertEquals(RecordFieldNameColor.CUSTOM, state.settings.recordFieldNameColor)
+        assertTrue(state.settings.recordFieldNameCustomArgb != null, "the first Custom starts from the accent colour")
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-trigger").performScrollTo().assertExists()
+
+        val cyan = androidx.compose.ui.graphics.Color(0xFF06B6D4)
+        state.updateSettings { it.copy(recordFieldNameCustomArgb = cyan.toArgb().toLong() and 0xFFFFFFFFL) }
+        rule.waitForIdle()
+        assertEquals(cyan, state.settings.recordFieldNameStyle().custom)
+
+        click("${LogPageTags.RECORD_FIELD_NAMES}-accent")
+        assertEquals(RecordFieldNameColor.ACCENT, state.settings.recordFieldNameColor)
+        assertEquals(cyan.toArgb().toLong() and 0xFFFFFFFFL, state.settings.recordFieldNameCustomArgb, "the picked colour is kept")
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-trigger").assertDoesNotExist()
+
+        // Back on Custom, the swatch opens the shared colour picker.
+        click("${LogPageTags.RECORD_FIELD_NAMES}-custom")
+        click("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-trigger")
+        rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-picker").assertExists()
     }
 
     @Test
