@@ -132,6 +132,51 @@ class LogFormatProfilePersistenceTest {
     }
 
     @Test
+    fun profileLibraryLimitRejectsNewAndDuplicateButAllowsEditsAndAutosave() {
+        val directory = createTempDirectory("log-format-library-limit").toFile()
+        val autosave = File(directory, "state.cache")
+        val app = newState(directory)
+        val profiles = (1..200).map { index ->
+            customJsonProfile("limit-profile-$index").copy(name = "Limit profile $index")
+        }
+        try {
+            app.settings = app.settings.copy(customLogFormatProfiles = profiles)
+            app.autosaveNow()
+            assertNull(app.autosaveError)
+
+            val edited = app.saveLogFormatProfile(profiles.first().copy(name = "Edited at limit")).getOrThrow()
+            assertEquals("Edited at limit", edited.name)
+            assertEquals(200, app.settings.customLogFormatProfiles.size)
+            app.autosaveNow()
+            val savedAutosave = autosave.readText()
+
+            val rejectedSave = app.saveLogFormatProfile(customJsonProfile("limit-profile-new"))
+            assertTrue(rejectedSave.isFailure)
+            assertTrue(rejectedSave.exceptionOrNull()?.message.orEmpty().contains("limited to 200"))
+            assertEquals(200, app.settings.customLogFormatProfiles.size)
+            assertEquals(savedAutosave, autosave.readText(), "a rejected save must leave the last valid autosave intact")
+
+            assertNull(app.duplicateLogFormatProfile(profiles.last().id))
+            assertTrue(app.logFormatProfileError.orEmpty().contains("limited to 200"))
+            assertEquals(200, app.settings.customLogFormatProfiles.size)
+            assertEquals(savedAutosave, autosave.readText(), "a rejected duplicate must leave the last valid autosave intact")
+            assertNull(app.autosaveError)
+        } finally {
+            app.close()
+        }
+
+        val restored = newState(directory, restore = true)
+        try {
+            assertEquals(200, restored.settings.customLogFormatProfiles.size)
+            assertEquals("Edited at limit", restored.logFormatProfile(profiles.first().id)?.name)
+            assertNull(restored.autosaveError)
+        } finally {
+            restored.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun malformedOrMismatchedPinnedSnapshotFailsWithoutRegistryFallback() = runBlocking {
         val directory = createTempDirectory("log-format-invalid-snapshot").toFile()
         val app = newState(directory)

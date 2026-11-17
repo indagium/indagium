@@ -18,6 +18,7 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -215,6 +216,36 @@ class IncrementalProfileParserTest {
     }
 
     @Test
+    fun csvTailSeedsAnUnterminatedQuotedRowAndRevisesItsExistingId() {
+        val dir = createTempDirectory("incremental-csv-seed").toFile()
+        try {
+            val initialLines = listOf(
+                csvText.first(),
+                "2024-01-01T00:00:00Z,INFO,first,trace-a",
+                "2024-01-01T00:00:01Z,WARN,\"before",
+            )
+            val file = File(dir, "data.csv").apply { writeText(initialLines.joinToString("\n", postfix = "\n")) }
+            val initial = whole(csvProfile, initialLines)
+            assertEquals(2, initial.size)
+            assertFalse(initial.last().severityKnown, "the initial whole-file parse flushes an unterminated row as raw")
+
+            val parser = assertNotNull(IncrementalProfileParser.forFile(csvProfile, CLOCK, file, initial))
+            val appended = listOf("after\"", "2024-01-01T00:00:02Z,ERROR,third,trace-c")
+            val updated = parser.append(appended, 3, initialLines.size.toLong())
+            assertEquals(setOf(initial.last().id), parser.replacedEntryIds)
+            assertEquals(listOf(2, 3), updated.entries.map { it.id })
+            assertEquals(listOf(3L, 5L), updated.entries.map { it.sourceStartLine })
+            assertEquals(listOf(4L, 5L), updated.entries.map { it.sourceEndLine })
+            assertEquals("before\nafter", updated.entries.first().msg)
+
+            val combined = initial.dropLast(1) + updated.entries
+            assertSameRows(whole(csvProfile, initialLines + appended), combined, "seeded CSV continuation")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun csvWithAHeaderAndNoReadableHeaderRefusesToGuess() {
         val dir = createTempDirectory("incremental-csv-noheader").toFile()
         try {
@@ -250,6 +281,35 @@ class IncrementalProfileParserTest {
     }
 
     @Test
+    fun multilineRegexTailSeedsAndRevisesTheInitiallyFlushedLastRecord() {
+        val dir = createTempDirectory("incremental-regex-seed").toFile()
+        try {
+            val initialLines = listOf("[2024-03-01T10:00:00Z] ERROR first", "\tat first")
+            val file = File(dir, "app.log").apply { writeText(initialLines.joinToString("\n", postfix = "\n")) }
+            val initial = whole(regexProfile, initialLines)
+            assertEquals(1, initial.size)
+
+            val parser = assertNotNull(IncrementalProfileParser.forFile(regexProfile, CLOCK, file, initial))
+            val appended = listOf("\tat continuation", "[2024-03-01T10:00:01Z] INFO second")
+            val updated = parser.append(appended, 2, initialLines.size.toLong())
+            assertEquals(setOf(initial.single().id), parser.replacedEntryIds)
+            assertEquals(1, updated.entries.size, "the seeded first record is revised; the new EOF record remains open")
+            assertEquals(initial.single().id, updated.entries.single().id)
+            assertEquals(1L, updated.entries.single().sourceStartLine)
+            assertEquals(3L, updated.entries.single().sourceEndLine)
+            assertEquals("first\n\tat first\n\tat continuation", updated.entries.single().msg)
+
+            val final = parser.flush(2, (initialLines + appended).size.toLong())
+            assertEquals(emptySet(), parser.replacedEntryIds)
+            assertEquals(2, final.entries.single().id)
+            assertEquals(4L, final.entries.single().sourceStartLine)
+            assertSameRows(whole(regexProfile, initialLines + appended), updated.entries + final.entries, "seeded regex continuation")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun criInAnySplitMatchesTheWholeFile() = assertEverySplitMatchesTheWholeFile(criProfile, criText)
 
     @Test
@@ -268,6 +328,61 @@ class IncrementalProfileParserTest {
     }
 
     @Test
+    fun criTailSeedsOnlyOpenStreamsAndKeepsInterleavedCompletedRowsAndIds() {
+        val dir = createTempDirectory("incremental-cri-seed").toFile()
+        try {
+            val initialLines = listOf(
+                "2024-01-01T00:00:00.000000001Z stdout P hello ",
+                "2024-01-01T00:00:00.000000002Z stderr F side-channel",
+                "2024-01-01T00:00:00.000000003Z stdout P wor",
+            )
+            val file = File(dir, "container.log").apply { writeText(initialLines.joinToString("\n", postfix = "\n")) }
+            val initial = whole(criProfile, initialLines)
+            assertEquals(listOf("hello wor", "side-channel"), initial.map { it.msg })
+            assertEquals("P", initial.first().profileFields["cri_tag"])
+
+            val parser = assertNotNull(IncrementalProfileParser.forFile(criProfile, CLOCK, file, initial))
+            val appended = listOf(
+                "2024-01-01T00:00:00.000000004Z stdout F ld",
+                "2024-01-01T00:00:00.000000005Z stderr F next",
+            )
+            val updated = parser.append(appended, 3, initialLines.size.toLong())
+            assertEquals(setOf(initial.first().id), parser.replacedEntryIds)
+            assertEquals(listOf(1, 3), updated.entries.map { it.id })
+            assertEquals(listOf(1L, 5L), updated.entries.map { it.sourceStartLine })
+            assertEquals(listOf(4L, 5L), updated.entries.map { it.sourceEndLine })
+            assertEquals("hello world", updated.entries.first().msg)
+
+            val mergedById = (initial + updated.entries).associateBy { it.id }
+            val stable = listOf(mergedById.getValue(1), mergedById.getValue(2), mergedById.getValue(3))
+            assertSameRows(whole(criProfile, initialLines + appended), stable, "seeded CRI stream")
+            assertEquals(2L, stable[1].sourceStartLine, "the interleaved completed row keeps its source line and id")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun criTailDoesNotReseedAPartialThatWasFollowedByACompletedRecordOnItsStream() {
+        val dir = createTempDirectory("incremental-cri-complete").toFile()
+        try {
+            val initialLines = listOf(
+                "2024-01-01T00:00:00.000000001Z stdout P hello ",
+                "2024-01-01T00:00:00.000000002Z stdout F world",
+            )
+            val file = File(dir, "container.log").apply { writeText(initialLines.joinToString("\n", postfix = "\n")) }
+            val initial = whole(criProfile, initialLines)
+            val parser = assertNotNull(IncrementalProfileParser.forFile(criProfile, CLOCK, file, initial))
+            val next = parser.append(listOf("2024-01-01T00:00:00.000000003Z stdout F later"), 2, 2)
+            assertEquals(emptySet(), parser.replacedEntryIds)
+            assertEquals(listOf(2), next.entries.map { it.id })
+            assertEquals(listOf("later"), next.entries.map { it.msg })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun lineIndependentEnginesJustDelegate() {
         val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
         val lines = listOf(
@@ -277,6 +392,55 @@ class IncrementalProfileParserTest {
         )
         val actual = feed(IncrementalProfileParser(profile, CLOCK), lines.chunked(2)).flatten()
         assertSameRows(whole(profile, lines), actual, "json lines")
+    }
+
+    @Test
+    fun jsonTailReplacesOpenPrettyObjectAndRootArrayElementInPlace() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
+        val directory = createTempDirectory("incremental-json-seed").toFile()
+        try {
+            val prettyInitial = listOf(
+                "{",
+                "  \"timestamp\": \"2024-01-01T00:00:00Z\",",
+                "  \"message\": \"continued\"",
+            )
+            val objectFile = File(directory, "open.json").apply {
+                writeText(prettyInitial.joinToString("\n", postfix = "\n"))
+            }
+            val initialObjectRows = parseLogContent(
+                objectFile.inputStream(), profile = profile, sourceClockId = CLOCK,
+            ).entries
+            assertEquals(1, initialObjectRows.size)
+            val objectParser = assertNotNull(IncrementalProfileParser.forFile(profile, CLOCK, objectFile, initialObjectRows))
+            val completed = objectParser.append(listOf("}"), 2, prettyInitial.size.toLong())
+            assertEquals(setOf(initialObjectRows.single().id), objectParser.replacedEntryIds)
+            assertEquals(1, completed.entries.size)
+            assertEquals("continued", completed.entries.single().msg)
+            assertEquals(1L, completed.entries.single().sourceStartLine)
+            assertEquals(4L, completed.entries.single().sourceEndLine)
+
+            val arrayInitial = listOf(
+                "[",
+                "  {\"timestamp\":\"2024-01-01T00:00:00Z\",\"message\":\"first\"},",
+                "  {\"timestamp\":\"2024-01-01T00:00:01Z\",\"message\":\"second\"",
+            )
+            val arrayFile = File(directory, "open-array.json").apply {
+                writeText(arrayInitial.joinToString("\n", postfix = "\n"))
+            }
+            val initialArrayRows = parseLogContent(
+                arrayFile.inputStream(), profile = profile, sourceClockId = CLOCK,
+            ).entries
+            assertEquals(2, initialArrayRows.size)
+            assertTrue(initialArrayRows.last().rawRecord.orEmpty().contains("second"))
+            val arrayParser = assertNotNull(IncrementalProfileParser.forFile(profile, CLOCK, arrayFile, initialArrayRows))
+            val appended = arrayParser.append(listOf("  }", "]"), 3, arrayInitial.size.toLong())
+            assertEquals(setOf(initialArrayRows.last().id), arrayParser.replacedEntryIds)
+            assertEquals(listOf("second"), appended.entries.map { it.msg })
+            assertEquals(3L, appended.entries.single().sourceStartLine)
+            assertEquals(4L, appended.entries.single().sourceEndLine)
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test
@@ -304,5 +468,36 @@ class IncrementalProfileParserTest {
             CapabilityAvailability.UNAVAILABLE,
             tail(BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.DLT }).availability,
         )
+    }
+
+    @Test
+    fun aRecordShownEarlyIsReplacedInPlaceWhenMoreLinesJoinItInALaterBatch() {
+        val syslog = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.SYSLOG_RFC5424 }
+        val head = "<34>1 2024-11-16T10:00:00Z host app 123 ID47 - failed"
+        val next = "<34>1 2024-11-16T10:00:01Z host app 123 ID48 - recovered"
+        val parser = IncrementalProfileParser(syslog, "clock")
+
+        val first = parser.append(listOf(head), startId = 1, sourceLineOffset = 0)
+        assertEquals(listOf("failed"), first.entries.map { it.msg }, "the newest line is visible at once")
+        assertTrue(parser.replacedEntryIds.isEmpty())
+
+        val second = parser.append(listOf("  caused by lower layer", "    at frame"), startId = 2, sourceLineOffset = 1)
+        assertEquals(listOf(1), second.entries.map { it.id }, "the same row is extended, not a new one added")
+        assertEquals(setOf(1), parser.replacedEntryIds)
+        assertEquals("failed\n  caused by lower layer\n    at frame", second.entries.single().msg)
+        assertEquals(3L, second.entries.single().sourceEndLine)
+
+        val third = parser.append(listOf(next), startId = 2, sourceLineOffset = 3)
+        assertEquals(listOf(2), third.entries.map { it.id })
+        assertEquals(listOf("recovered"), third.entries.map { it.msg })
+        assertTrue(parser.replacedEntryIds.isEmpty())
+        assertTrue(parser.flush(startId = 3, sourceLineOffset = 4).entries.isEmpty(), "nothing is emitted twice at stop")
+
+        // Any split gives the rows of the whole file.
+        val whole = parseLogContent(
+            ByteArrayInputStream(listOf(head, "  caused by lower layer", "    at frame", next).joinToString("\n").toByteArray()),
+            profile = syslog,
+        ).entries
+        assertEquals(listOf("failed\n  caused by lower layer\n    at frame", "recovered"), whole.map { it.msg })
     }
 }

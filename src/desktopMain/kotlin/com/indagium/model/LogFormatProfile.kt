@@ -12,6 +12,9 @@ enum class LogFormatEngine {
     SYSLOG_RFC3164,
     LOGFMT,
     CRI,
+
+    /** JSON records with metadata and optional nested sections. */
+    METADATA_JSON,
 }
 
 /** Canonical meaning assigned to a parsed source field. */
@@ -31,6 +34,7 @@ enum class LogFieldRole {
     HTTP_METHOD,
     HTTP_PATH,
     SOURCE,
+    SECTION,
 }
 
 enum class ProfileTimestampKind { AUTO, ISO_8601, CUSTOM, EPOCH, TIME_OF_DAY, RELATIVE }
@@ -112,6 +116,11 @@ data class LogFormatProfile(
     val compatibleAnalyzers: Set<String> = emptySet(),
     val issueRules: List<CustomIssueRule> = emptyList(),
     val readOnly: Boolean = false,
+    /**
+     * A line that does not match the format continues the record above it (a stack trace under a
+     * syslog line). Applies to the syslog engines and to a regex profile without a multiline start.
+     */
+    val joinUnmatchedLines: Boolean = true,
 )
 
 /** Profile-level column headers for tab surfaces that need them before the first row exists. */
@@ -168,7 +177,7 @@ fun deriveLogCapabilities(
     entries: List<LogEntry>,
     sourceClockId: String? = null,
     // Every text engine tails: the ones that span lines keep their state in IncrementalProfileParser.
-    incremental: Boolean = profile.engine != LogFormatEngine.DLT,
+    incremental: Boolean = profile.engine !in setOf(LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON),
     sourceLookupSupported: Boolean = false,
 ): Map<LogCapability, LogCapabilityStatus> {
     val withTime = countTimedEntries(profile, entries, sourceClockId)
@@ -184,12 +193,16 @@ fun deriveLogCapabilities(
     val comparableTime = if (clockCompatibility.comparable) timeCoverage else unavailable(clockCompatibility.reason)
     val deltaTime = if (withTime < 2) unavailable("At least two comparable timestamps are needed for deltas.") else comparableTime
     val mergeTime = mergeTimeAvailability(entries, withTime, clockCompatibility)
-    val safeSplit = profile.engine != LogFormatEngine.CRI
+    val safeSplit = profile.engine !in setOf(LogFormatEngine.CRI, LogFormatEngine.METADATA_JSON)
     val result = linkedMapOf(
         LogCapability.TEXT_SEARCH to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Parsed records are searchable."),
         LogCapability.NOTES to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Notes can reference parsed records."),
         LogCapability.MANUAL_FOLDING to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Records can be folded manually."),
-        LogCapability.SEVERITY_FILTER to coverage(withSeverity, total, "severity"),
+        LogCapability.SEVERITY_FILTER to if (profile.engine == LogFormatEngine.METADATA_JSON) {
+            unavailable("Record status fields are not log severity levels.")
+        } else {
+            coverage(withSeverity, total, "severity")
+        },
         LogCapability.COMPONENT_FILTER to coverage(withComponent, total, "component"),
         LogCapability.PID_THREAD_FILTER to coverage(withPid, total, "process or thread identity"),
         LogCapability.PROCESS_MAP to coverage(withProcessAndThread, total, "paired numeric process and thread identities"),
@@ -225,6 +238,7 @@ private fun androidIssuesStatus(profile: LogFormatProfile): LogCapabilityStatus 
 private fun incrementalTailStatus(profile: LogFormatProfile, incremental: Boolean): LogCapabilityStatus = when {
     incremental -> available("The engine supports complete-record incremental parsing.")
     profile.engine == LogFormatEngine.DLT -> unavailable("DLT is a framed binary format and cannot be tailed as text.")
+    profile.engine == LogFormatEngine.METADATA_JSON -> unavailable("Sectioned JSON documents are read completely before ordering records by time.")
     else -> unavailable("This engine needs the complete input before parsing.")
 }
 
@@ -346,9 +360,18 @@ val BUILTIN_LOG_FORMAT_PROFILES: List<LogFormatProfile> = listOf(
         ),
         readOnly = true,
     ),
+    LogFormatProfile(
+        "metadata-json", "JSON with metadata", "JSON records with metadata fields, nested sections and expandable details.",
+        revision = 2,
+        engine = LogFormatEngine.METADATA_JSON,
+        detection = LogFormatDetection(extensions = listOf("json")),
+        visibleColumns = listOf(LogFieldRole.TIMESTAMP, LogFieldRole.SOURCE, LogFieldRole.MESSAGE),
+        joinUnmatchedLines = false,
+        readOnly = true,
+    ),
     LogFormatProfile("plain-text", "Plain text", "One non-empty line per record.", engine = LogFormatEngine.PLAIN_TEXT, readOnly = true),
     LogFormatProfile(
-        "json-lines", "JSON Lines", "One JSON object per line with common timestamp, severity, component and message keys.",
+        "json-lines", "JSON Lines", "JSON objects per record, including pretty-printed objects and objects in root arrays.",
         engine = LogFormatEngine.JSON_LINES, readOnly = true,
     ),
     LogFormatProfile(

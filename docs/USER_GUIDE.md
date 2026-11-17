@@ -196,10 +196,34 @@ json-file and systemd journal exports), syslog (RFC 5424 and RFC 3164), logfmt /
 container logs, Apache/Nginx access logs, `dmesg`, CSV/TSV and plain text. The format is detected from the content.
 Text that matches none of them opens as before, one row per line.
 
-- **Format details** on the tab shows which format was used, how many records parsed, and which features work for
+- **JSON with metadata** opens arrays of records and documents containing nested groups of record arrays.
+  Rows use metadata timestamps, source and identity fields together with decoded summary fields.
+  A combined document offers a **Sections** tile for switching logs; separate JSON files open as individual logs.
+  The tile appears only when there is useful section navigation. Empty sections are hidden initially;
+  **Show empty** reveals them with a count of zero. Each section keeps its own filters, selection and folds,
+  and the selected section is remembered when reopening the session. Nested arrays and linked objects inside
+  a message stay in that message's expandable details. Metadata objects in an envelope remain inspectable
+  without invented timestamps; standalone metadata objects open through the ordinary JSON reader.
+  The TAG column starts hidden for this format. Right-click the log toolbar and choose **Show TAG** or
+  **Hide TAG**; the choice is remembered for that tab across section changes and session restore.
+  Tags remain available for filtering and in record details. Other formats keep their column defaults.
+  This format imports JSON only. Status codes do not create a Log level filter, and sectioned documents
+  cannot be tailed or split.
+- **Message details** is a tile on the right of structured logs. Click a message to inspect its fields, initially expanded,
+  and collapse individual objects or arrays as needed. Selecting another message replaces the inspector contents.
+  Double-click a message row to expand or collapse its inline details. Both inline messages and folded log groups use
+  the same disclosure button. The inspector can be moved, resized, collapsed or hidden like the other log-view tiles.
+- **Format details**, available by right-clicking a log tab, shows which format was used, how many records parsed, and which features work for
   this file (for example, a log with no process ids has no thread map). Pick another format there and
   **Reparse as new tab**; your original tab, its notes and folds stay as they are.
 - If a file matches several formats, a strip above the log asks which one to use.
+- The **JSON Lines** profile also reads pretty-printed JSON objects, arrays of events, and streams of
+  complete JSON objects. A multiline object is one log record; a top-level array gives one record per
+  element. Nested objects and arrays within an event stay inside that event.
+- Structured JSON and multiline records have a disclosure arrow in the log view. Each starts with a
+  compact summary; expand it to inspect nested fields, array elements, or the message's original
+  lines. A multiline JSON string can be expanded into its decoded lines too. These child rows keep
+  the parent log record's identity; they do not become separate search results or note references.
 - **Settings › Log formats** is where you make your own. For a plain text log, press **New profile**, paste one
   typical line under **Set up from a sample line**, and say what each column is (level, message, timestamp, tag,
   process id, thread id, an extra field, or skip). Choose Message for every word of the text; lines with more or fewer
@@ -208,6 +232,12 @@ Text that matches none of them opens as before, one row per line.
   mapping**; an unusual date format goes under **Timestamp pattern**. For JSON Lines or CSV, choose that engine and
   type the key or column name next to each field. The record regex stays editable for unusual layouts. Turn on **Always open these extensions with this format** to tie it to a file
   extension. Formats can be exported and imported as JSON to share with a team.
+
+In syslog, dmesg and your own text formats, a line that does not fit the format belongs to the record
+above it, so a stack trace printed under a log line is one record with a disclosure arrow, not twenty
+rows. Turn this off per format with **Lines that do not match** in Settings › Log formats. Logcat
+lines carry their own headers and stay separate records; quoted CSV cells, CRI partial fragments and
+binary DLT frames keep the boundaries their formats define.
 
 Some features depend on what the format contains: level filtering needs a level, time deltas and merging need
 comparable timestamps, crash and ANR detection is for Android logs. A feature that cannot work for a file is hidden

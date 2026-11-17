@@ -100,7 +100,7 @@ internal fun splitStreamToFiles(
     return outputFiles
 }
 
-/** Split CSV logical rows and multiline-regex records without cutting through a record. */
+/** Split CSV/JSON logical rows and multiline-regex records without cutting through a record. */
 @Suppress("CyclomaticComplexMethod", "TooGenericExceptionCaught") // One record state machine; the catch cleans up and rethrows.
 internal fun splitProfileRecordsToFiles(
     input: InputStream,
@@ -108,7 +108,7 @@ internal fun splitProfileRecordsToFiles(
     sourceSizeBytes: Long,
     profile: LogFormatProfile,
 ): List<File> {
-    require(profile.engine == LogFormatEngine.CSV ||
+    require(profile.engine == LogFormatEngine.CSV || profile.engine == LogFormatEngine.JSON_LINES ||
         profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank()
     ) { "This profile does not require record-aware splitting." }
     require(outputFiles.isNotEmpty()) { "At least one output file is required" }
@@ -123,16 +123,47 @@ internal fun splitProfileRecordsToFiles(
     var csvQuoted = false
     var csvHeader: ByteArray? = null
     var physicalLine = 0L
+    val jsonMachine = if (profile.engine == LogFormatEngine.JSON_LINES) JsonRecordMachine(profile, mutableListOf(), 0) else null
+    val jsonReady = ArrayList<ProfileRecord>(2)
+    var jsonArrayActive = false
     try {
         PushbackInputStream(BufferedInputStream(input, SPLIT_BUFFER_BYTES), SPLIT_ENCODING_SAMPLE_BYTES).use { stream ->
             val prefix = stream.readNBytes(SPLIT_ENCODING_SAMPLE_BYTES)
             stream.unread(prefix)
             val (charset, newlineBytes) = splitEncoding(prefix)
+            writer.setTextCharset(charset)
             val lineReader = SplitPhysicalLineReader(stream, newlineBytes)
             while (true) {
                 val lineBytes = lineReader.next() ?: break
                 physicalLine++
                 val lineText = decodeSplitLine(lineBytes, physicalLine == 1L, charset)
+                if (jsonMachine != null) {
+                    jsonMachine.accept(lineText, jsonReady)
+                    if (jsonMachine.arrayTouchedOnLastLine() || jsonArrayActive) {
+                        if (!jsonArrayActive) {
+                            writer.beginJsonArray()
+                            jsonArrayActive = true
+                        }
+                        jsonReady.forEach { record ->
+                            writer.writeJsonArrayElement(record.raw.toByteArray(charset))
+                        }
+                        if (jsonMachine.arrayClosedOnLastLine()) {
+                            writer.endJsonArray()
+                            jsonArrayActive = false
+                        }
+                    } else {
+                        current.write(lineBytes)
+                        require(current.size() <= MAX_PROFILE_SPLIT_RECORD_BYTES) {
+                            "A JSON record exceeds the 1 MiB safe splitting limit."
+                        }
+                        if (!jsonMachine.hasPendingRecord()) {
+                            writer.writeRecord(current.toByteArray())
+                            current.reset()
+                        }
+                    }
+                    jsonReady.clear()
+                    continue
+                }
                 if (profile.engine == LogFormatEngine.REGEX &&
                     current.size() > 0 && boundary?.groups(lineText) != null
                 ) {
@@ -164,6 +195,13 @@ internal fun splitProfileRecordsToFiles(
                     current.reset()
                     csvQuoted = false
                 }
+            }
+            if (jsonMachine != null && jsonArrayActive) {
+                jsonMachine.finish(jsonReady)
+                jsonReady.forEach { record -> writer.writeJsonArrayElement(record.raw.toByteArray(charset)) }
+                jsonReady.clear()
+                writer.endJsonArray()
+                jsonArrayActive = false
             }
             if (current.size() > 0) {
                 val record = current.toByteArray()
@@ -263,17 +301,67 @@ private class ProfileRecordSplitWriter(
     private var outputIndex = 0
     private var output = outputFiles[0].outputStream().buffered(SPLIT_BUFFER_BYTES)
     private var written = 0L
+    private var textCharset: Charset = StandardCharsets.UTF_8
+    private var jsonArrayOpen = false
+    private var jsonArrayHasElement = false
+
+    fun setTextCharset(charset: Charset) {
+        textCharset = charset
+    }
+
+    fun beginJsonArray() {
+        if (jsonArrayOpen) return
+        if (written > 0L && outputIndex < outputFiles.lastIndex && written + 2L > targetBytes) rotate()
+        if (written > 0L) writeText("\n")
+        writeText("[")
+        jsonArrayOpen = true
+        jsonArrayHasElement = false
+    }
+
+    fun writeJsonArrayElement(record: ByteArray) {
+        if (!jsonArrayOpen) beginJsonArray()
+        if (jsonArrayHasElement && outputIndex < outputFiles.lastIndex &&
+            written + 2L + record.size + 2L > targetBytes
+        ) {
+            endJsonArray()
+            rotate()
+            beginJsonArray()
+        }
+        if (jsonArrayHasElement) writeText(",\n")
+        output.write(record)
+        written += record.size
+        jsonArrayHasElement = true
+    }
+
+    fun endJsonArray() {
+        if (!jsonArrayOpen) return
+        writeText("]\n")
+        jsonArrayOpen = false
+        jsonArrayHasElement = false
+    }
 
     fun writeRecord(record: ByteArray, repeatedHeader: ByteArray? = null) {
+        endJsonArray()
         if (written > 0 && outputIndex < outputFiles.lastIndex && written + record.size > targetBytes) {
-            output.close()
-            outputIndex++
-            output = outputFiles[outputIndex].outputStream().buffered(SPLIT_BUFFER_BYTES)
-            written = 0L
+            rotate()
             repeatedHeader?.let(output::write)
         }
         output.write(record)
         written += record.size
+    }
+
+    private fun rotate() {
+        if (outputIndex >= outputFiles.lastIndex) return
+        output.close()
+        outputIndex++
+        output = outputFiles[outputIndex].outputStream().buffered(SPLIT_BUFFER_BYTES)
+        written = 0L
+    }
+
+    private fun writeText(text: String) {
+        val bytes = text.toByteArray(textCharset)
+        output.write(bytes)
+        written += bytes.size
     }
 
     override fun close() = output.close()

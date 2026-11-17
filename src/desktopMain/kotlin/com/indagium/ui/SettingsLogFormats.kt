@@ -108,6 +108,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
     val canConfigureSeverity = canEdit && draft.engine !in setOf(
         LogFormatEngine.LOGCAT,
         LogFormatEngine.DLT,
+        LogFormatEngine.METADATA_JSON,
         LogFormatEngine.PLAIN_TEXT,
     )
     val customProfiles = profiles.filterNot { it.readOnly }
@@ -212,14 +213,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 SettingsButton(
                     "Duplicate",
                     {
-                        val duplicate = state.duplicateLogFormatProfile(selectedId)
-                            ?: selectedProfile.copy(
-                                id = "profile-${UUID.randomUUID()}",
-                                name = "${selectedProfile.name} copy",
-                                revision = 1,
-                                readOnly = false,
-                            )
-                        chooseProfile(duplicate)
+                        state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile)
                         reclaimFocus()
                     },
                     modifier = Modifier.testTag("settings-log-format-duplicate"),
@@ -483,6 +477,27 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 monospace = true,
                 modifier = Modifier.fillMaxWidth(),
                 testTag = "settings-log-format-multiline",
+            )
+        }
+        val canJoinLines = canEdit && (
+            draft.engine == LogFormatEngine.SYSLOG_RFC5424 || draft.engine == LogFormatEngine.SYSLOG_RFC3164 ||
+                (draft.engine == LogFormatEngine.REGEX && draft.multilineStartPattern.isBlank())
+        )
+        SettingsStackedRow(
+            "Lines that do not match",
+            "On: a line that does not fit the format continues the record above it, so a stack trace under a log line stays " +
+                "one record you can expand. Off: every such line is its own raw row.",
+            enabled = canJoinLines,
+        ) {
+            SettingsCheckbox(
+                draft.joinUnmatchedLines,
+                "Add them to the record above",
+                { checked ->
+                    editDraft { profile -> profile.copy(joinUnmatchedLines = checked) }
+                    reclaimFocus()
+                },
+                enabled = canJoinLines,
+                testTag = "settings-log-format-join-lines",
             )
         }
         SettingsStackedRow(
@@ -902,15 +917,23 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
     SettingsGroup("Preview and save") {
         SettingsStackedRow(
             "Sample records",
-            if (draft.engine == LogFormatEngine.DLT) {
+            if (isBinaryEngine(draft.engine)) {
                 "DLT records are binary. Open a DLT tab and preview its source instead."
             } else {
                 "Try up to 2,000 lines from the sample. Parsing runs in the background; previews do not modify settings."
             },
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (draft.engine == LogFormatEngine.DLT) {
-                    AppText("Text samples cannot represent DLT records.", color = tc().ts, fontSize = 10.sp)
+                if (isBinaryEngine(draft.engine)) {
+                    AppText(
+                        if (draft.engine == LogFormatEngine.DLT) {
+                            "Text samples cannot represent DLT records."
+                        } else {
+                            "Text samples cannot represent captured packets."
+                        },
+                        color = tc().ts,
+                        fontSize = 10.sp,
+                    )
                 } else {
                     MultilineSettingsField(
                         sample,
@@ -923,7 +946,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (draft.engine != LogFormatEngine.DLT) {
+                    if (!isBinaryEngine(draft.engine)) {
                         SettingsButton(
                             if (previewLoading) "Previewing…" else "Preview sample",
                             {
@@ -1197,6 +1220,8 @@ private fun defaultProfileSample(engine: LogFormatEngine): String = when (engine
     LogFormatEngine.SYSLOG_RFC3164 -> "<34>Oct 31 12:00:00 host app[123]: started"
     LogFormatEngine.LOGCAT -> "10-31 12:00:00.123  123  124 I App: started"
     LogFormatEngine.DLT -> ""
+    LogFormatEngine.METADATA_JSON ->
+        """[{"metadata":{"identity":"Service.Event","source":"demo-host","system_time":1790000000000000000},"Summary":{"Note":"Started"}}]"""
 }
 
 private fun engineDefaultMappings(engine: LogFormatEngine): Map<LogFieldRole, String> = when (engine) {
@@ -1248,7 +1273,7 @@ private fun engineDefaultMappings(engine: LogFormatEngine): Map<LogFieldRole, St
 }
 
 private fun engineFieldRoles(engine: LogFormatEngine): List<LogFieldRole> = when (engine) {
-    LogFormatEngine.PLAIN_TEXT, LogFormatEngine.LOGCAT, LogFormatEngine.DLT -> emptyList()
+    LogFormatEngine.PLAIN_TEXT, LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON -> emptyList()
     LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 -> listOf(
         LogFieldRole.TIMESTAMP, LogFieldRole.SEVERITY, LogFieldRole.COMPONENT, LogFieldRole.MESSAGE,
         LogFieldRole.PROCESS_ID, LogFieldRole.HOST, LogFieldRole.SERVICE,
@@ -1256,11 +1281,14 @@ private fun engineFieldRoles(engine: LogFormatEngine): List<LogFieldRole> = when
     else -> LOG_FORMAT_ROLE_FIELDS
 }
 
+/** Engines that read a binary file: there is no text sample to paste and nothing to map. */
+private fun isBinaryEngine(engine: LogFormatEngine): Boolean = engine == LogFormatEngine.DLT
+
 private fun supportsProfileFields(engine: LogFormatEngine): Boolean =
-    engine !in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.PLAIN_TEXT)
+    engine !in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON, LogFormatEngine.PLAIN_TEXT)
 
 private fun supportsProfileTimestamps(engine: LogFormatEngine): Boolean =
-    engine !in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.PLAIN_TEXT)
+    engine !in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON, LogFormatEngine.PLAIN_TEXT)
 
 private fun nativeFieldDescription(engine: LogFormatEngine): String = when (engine) {
     LogFormatEngine.LOGCAT -> "Logcat rows provide their standard timestamp, severity, component, process, " +
@@ -1305,6 +1333,7 @@ private fun engineLabel(engine: LogFormatEngine): String = when (engine) {
     LogFormatEngine.SYSLOG_RFC3164 -> "Syslog RFC 3164"
     LogFormatEngine.LOGFMT -> "logfmt / Go slog"
     LogFormatEngine.CRI -> "Kubernetes CRI"
+    LogFormatEngine.METADATA_JSON -> "JSON with metadata"
 }
 
 private fun timestampKindLabel(kind: ProfileTimestampKind): String = when (kind) {

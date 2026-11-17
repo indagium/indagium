@@ -75,6 +75,10 @@ internal typealias LogViewNode = TileNode<LogViewSectionId>
 
 internal val LOG_VIEW_FILTER_TILES: List<LogViewSectionId> = LogViewSectionId.entries.filter { it.group == LogViewTileGroup.FILTERS }
 
+/** Contextual tiles are installed only for logs that can use them, or kept when explicitly stored. */
+internal val LogViewSectionId.isAuxiliaryLogTile: Boolean
+    get() = this == LogViewSectionId.SECTIONS || this == LogViewSectionId.MESSAGE_DETAILS
+
 /** The tiles that hold the log itself: always visible, never hideable. */
 internal val LogViewSectionId.isLogTile: Boolean
     get() = this == LogViewSectionId.LOG || this == LogViewSectionId.LOG_A || this == LogViewSectionId.LOG_B
@@ -88,6 +92,7 @@ internal val LogViewSectionId.isLogTile: Boolean
 internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
     LogViewSectionId.LOG, LogViewSectionId.ORIGINAL, LogViewSectionId.LOG_A, LogViewSectionId.LOG_B,
     LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B,
+    LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS,
     -> false
     else -> true
 }
@@ -386,6 +391,25 @@ enum class LogViewLayoutPreset(
 internal fun effectiveLogViewLayout(settings: AppSettings, sizes: LogViewLegacySizes): LogViewNode =
     withToolbarTile(settings.logViewLayout ?: LogViewLayoutPreset.CLASSIC.layout(sizes), settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT)
 
+/** Upgrade existing layouts while keeping tiles the user has already positioned. */
+internal fun withAuxiliaryLogTiles(tree: LogViewNode, ctx: LogViewTileContext): LogViewNode {
+    var result = tree
+    for (id in listOf(LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS)) {
+        val present = tileLeafSections(result).toSet()
+        if (id !in present && logViewTileApplicable(id, ctx)) {
+            val preferred = LOG_VIEW_DEFAULT_ANCHORS.getValue(id)
+            val anchor = if (preferred.first in present) preferred else LogViewSectionId.LOG to TileEdge.RIGHT
+            if (anchor.first in present) result = insertAt(result, id, anchor)
+        }
+    }
+    return if (ctx.hasSections && LogViewSectionId.SECTIONS !in tileLeafSections(tree)) pinNewSectionsTile(result) else result
+}
+
+private fun pinNewSectionsTile(node: LogViewNode): LogViewNode = when (node) {
+    is TileLeaf -> if (node.section == LogViewSectionId.SECTIONS) node.copy(sizeDp = 184f) else node
+    is TileSplit -> node.copy(children = node.children.map { pinNewSectionsTile(it) })
+}
+
 /** The compare view's layout: the stored one, else Compare grid derived from the legacy [sizes]. */
 internal fun effectiveCompareLayout(settings: AppSettings, sizes: LogViewLegacySizes): LogViewNode =
     settings.compareLayout ?: LogViewLayoutPreset.COMPARE_GRID.layout(sizes)
@@ -430,6 +454,9 @@ data class LogViewTileContext(
     val filterModeTags: Boolean,
     val hasVideoPanel: Boolean,
     val toolbarInLayout: Boolean = false,
+    val hasSections: Boolean = false,
+    val hasMessageDetails: Boolean = false,
+    val hasSeverityFilter: Boolean = true,
     val groupOn: (LogViewTileGroup) -> Boolean,
 )
 
@@ -449,6 +476,9 @@ fun logViewTileApplicable(id: LogViewSectionId, ctx: LogViewTileContext): Boolea
         LogViewSectionId.TAGS -> !ctx.filterBarVisible
         LogViewSectionId.MESSAGE_RULES -> !ctx.filterBarVisible && ctx.filterModeTags
         LogViewSectionId.TOOLBAR -> ctx.toolbarInLayout
+        LogViewSectionId.SECTIONS -> ctx.hasSections
+        LogViewSectionId.MESSAGE_DETAILS -> ctx.hasMessageDetails
+        LogViewSectionId.LOG_LEVEL -> ctx.hasSeverityFilter
         else -> true
     }
 }
@@ -468,6 +498,8 @@ fun logViewTileVisible(id: LogViewSectionId, ctx: LogViewTileContext, hidden: Co
  * order instead (see [anchorFor]).
  */
 internal val LOG_VIEW_DEFAULT_ANCHORS: Map<LogViewSectionId, Pair<LogViewSectionId, TileEdge>> = mapOf(
+    LogViewSectionId.SECTIONS to (LogViewSectionId.LOG to TileEdge.LEFT),
+    LogViewSectionId.MESSAGE_DETAILS to (LogViewSectionId.NOTES to TileEdge.TOP),
     LogViewSectionId.ORIGINAL to (LogViewSectionId.LOG to TileEdge.TOP),
     LogViewSectionId.ORIGINAL_A to (LogViewSectionId.LOG_A to TileEdge.TOP),
     LogViewSectionId.ORIGINAL_B to (LogViewSectionId.LOG_B to TileEdge.TOP),
@@ -542,7 +574,9 @@ internal fun sanitizeLogViewLayoutState(
     scope: LogViewScope,
     toolbarInLayout: Boolean = false,
 ): Pair<LogViewNode, List<LogViewSectionId>> {
-    val wanted = LogViewSectionId.entries.filter { it.inScope(scope) && (it != LogViewSectionId.TOOLBAR || toolbarInLayout) }
+    val wanted = LogViewSectionId.entries.filter {
+        it.inScope(scope) && !it.isAuxiliaryLogTile && (it != LogViewSectionId.TOOLBAR || toolbarInLayout)
+    }
     val seen = mutableSetOf<LogViewSectionId>()
     val cleaned = tree?.let { keepScope(it, scope) }?.let { sanitizeTileTree(it, seen) }?.let { normalizeTileLayout(it, LOG_VIEW_LONE_COLUMNS) }
         ?.let { clampPins(it) }
@@ -706,6 +740,8 @@ private val TILE_TITLES: Map<LogViewSectionId, String> = mapOf(
     LogViewSectionId.AI to "AI assistant",
     LogViewSectionId.VIDEO to "Video",
     LogViewSectionId.TOOLBAR to "Toolbar",
+    LogViewSectionId.SECTIONS to "Sections",
+    LogViewSectionId.MESSAGE_DETAILS to "Message details",
 )
 
 /** The title a tile's header, drop caption and menu entry use; the table has an entry for every [LogViewSectionId] (a test walks them all). */
@@ -744,4 +780,6 @@ internal fun LogViewSectionId.focusPanel(): LogViewFocusPanel = when (this) {
 
 /** The panels of the visible tiles in reading order (depth first), the filter tiles collapsed into one FILTERS stop. */
 internal fun logViewFocusOrder(projectionRoot: TileNode<LogViewSectionId>): List<LogViewFocusPanel> =
-    tileLeafSections(projectionRoot).filter { it != LogViewSectionId.TOOLBAR }.map { it.focusPanel() }.distinct()
+    tileLeafSections(projectionRoot).filter {
+        it !in setOf(LogViewSectionId.TOOLBAR, LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS)
+    }.map { it.focusPanel() }.distinct()

@@ -34,11 +34,11 @@ private val EMPTY_SEARCH_RESULT = SearchComputeResult(IntArray(0), invalidPatter
 
 // Walks `items` (expected fully expanded — see AppState.scheduleSearchRecompute — so a match
 // hidden inside a currently-collapsed group is still found; the jump itself is what expands that
-// group) and matches `query` as a regex against each item's visibleLogLineText, exactly the text
-// buildFullLineAnnotation renders so match offsets line up with the highlight. Always regex — this
-// is a "Find" bar, not the plain-text/regex-toggle keyword filter — through regexRanges/
-// RegexEvaluationContext only, same catastrophic-backtracking budget and compile cache as every
-// other regex path in the app (see TextMatch.kt); never a raw Regex().
+// group) and matches `query` as a regex against each item's visibleLogLineText. If a profile row's
+// projection omits nested raw-record fields, Find also checks rawRecord and still reports the
+// logical parent's ID. Always regex — this is a "Find" bar, not the plain-text/regex-toggle
+// keyword filter — through regexRanges/RegexEvaluationContext only, same catastrophic-backtracking
+// budget and compile cache as every other regex path in the app; never a raw Regex().
 //
 // An empty query intentionally reports zero matches without being "invalid" — nothing is
 // highlighted until the user actually types something. A syntactically-broken pattern instead
@@ -64,8 +64,13 @@ internal fun computeSearchMatches(
             cancellationCheck()
         }
         val entry = item.entry
-        val ranges = regexRanges(visibleLogLineText(entry), query, ignoreCase = ignoreCase, regexContext = ctx)
-        if (ranges.isNotEmpty()) ids.add(entry.id)
+        val visibleRanges = regexRanges(visibleLogLineText(entry), query, ignoreCase = ignoreCase, regexContext = ctx)
+        val rawRecordRanges = if (visibleRanges.isEmpty()) {
+            entry.rawRecord?.let { regexRanges(it, query, ignoreCase = ignoreCase, regexContext = ctx) }.orEmpty()
+        } else {
+            emptyList()
+        }
+        if (visibleRanges.isNotEmpty() || rawRecordRanges.isNotEmpty()) ids.add(entry.id)
     }
     return SearchComputeResult(ids.toIntArray(), invalidPattern = false, timedOut = ctx.hasTimedOut)
 }

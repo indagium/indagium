@@ -16,8 +16,8 @@ import java.util.concurrent.CancellationException
 private const val MAX_ADDITIONAL_RECORD_CHARS = 256 * 1024
 private const val MAX_LOGFMT_FIELDS = 128
 private const val MAX_LOGFMT_VALUE_CHARS = 4096
-private const val MAX_CRI_REORDERED_CHARS = 2 * 1024 * 1024
-private const val MAX_CRI_REORDERED_RECORDS = 512
+internal const val MAX_CRI_REORDERED_CHARS = 2 * 1024 * 1024
+internal const val MAX_CRI_REORDERED_RECORDS = 512
 private const val SIGNATURE_SAMPLE_LINES = 24
 private const val MINIMUM_SIGNATURE_MATCHES = 2
 private const val SIGNATURE_PERCENT = 70
@@ -80,7 +80,8 @@ internal fun detectAdditionalLogProfileResult(sample: ByteArray): AdditionalLogP
     }.getOrDefault("")
     val lines = text.lineSequence().filter(String::isNotBlank).take(SIGNATURE_SAMPLE_LINES).toList()
     if (lines.isEmpty()) return AdditionalLogProfileDetection()
-    val candidates = detectJsonCandidates(lines) + listOfNotNull(
+    val jsonRecords = scanJsonObjectRecordRaws(text)
+    val candidates = detectJsonCandidates(jsonRecords) + listOfNotNull(
         detectHttpCandidate(lines),
         detectDmesgCandidate(lines),
         detectCriCandidate(lines),
@@ -89,12 +90,13 @@ internal fun detectAdditionalLogProfileResult(sample: ByteArray): AdditionalLogP
     return chooseDetectionCandidate(candidates)
 }
 
-private fun detectJsonCandidates(lines: List<String>): List<Pair<Int, LogFormatProfile>> {
-    val rows = lines.mapNotNull(::additionalJsonFields)
+private fun detectJsonCandidates(records: List<String>): List<Pair<Int, LogFormatProfile>> {
+    val rows = records.mapNotNull(::additionalJsonFields)
+    if (rows.isEmpty()) return emptyList()
     return listOfNotNull(
-        scoredCandidate("docker-json-file", rows, ::isDockerJsonRow, JSON_SIGNATURE_WEIGHT, lines.size),
-        scoredCandidate("pino-json", rows, ::isPinoJsonRow, JSON_SIGNATURE_WEIGHT, lines.size),
-        scoredCandidate("systemd-journal-json", rows, ::isJournalJsonRow, JOURNAL_SIGNATURE_WEIGHT, lines.size),
+        scoredCandidate("docker-json-file", rows, ::isDockerJsonRow, JSON_SIGNATURE_WEIGHT, rows.size),
+        scoredCandidate("pino-json", rows, ::isPinoJsonRow, JSON_SIGNATURE_WEIGHT, rows.size),
+        scoredCandidate("systemd-journal-json", rows, ::isJournalJsonRow, JOURNAL_SIGNATURE_WEIGHT, rows.size),
     )
 }
 
@@ -271,6 +273,37 @@ internal class CriRecordAssembler(private val diagnostics: MutableList<String>) 
         }
         return enforceReorderBound() + flushSafe()
     }
+
+    /** Seeds one partial stream from the row already shown by the initial whole-file parse. */
+    fun seedPending(
+        rawRecord: String,
+        sourceStartLine: Long,
+        sourceEndLine: Long,
+        readyRecordCountAfter: Int,
+        readyCharsAfter: Int,
+    ): Boolean {
+        if (sourceStartLine <= 0 || sourceEndLine < sourceStartLine ||
+            readyRecordCountAfter > MAX_CRI_REORDERED_RECORDS || readyCharsAfter > MAX_CRI_REORDERED_CHARS
+        ) return false
+        val fragments = rawRecord.split('\n')
+        val parsed = fragments.map(::parseCriLine)
+        val rows = parsed.filterNotNull()
+        val first = rows.firstOrNull() ?: return false
+        if (rows.size != fragments.size || !isPartialCriStream(rows, first.stream) || first.stream in pending) return false
+        val value = CriPending(first.stream, first.timestamp, first.tag, sourceStartLine)
+        fragments.zip(rows).forEachIndexed { index, (fragment, row) ->
+            // The exact physical positions of interleaved streams are intentionally not needed
+            // to rebuild this stream's pending payload. Keep the original span endpoints and the
+            // record's start order; appended lines carry their exact positions from here onward.
+            value.append(fragment, row.payload, sourceStartLine + index)
+        }
+        value.endLine = sourceEndLine
+        pending[first.stream] = value
+        return true
+    }
+
+    private fun isPartialCriStream(rows: List<CriRow>, stream: String): Boolean =
+        rows.first().tag == CRI_PARTIAL_TAG && rows.last().tag == CRI_PARTIAL_TAG && rows.all { it.stream == stream }
 
     fun finish(): List<AdditionalProfileRecord> {
         pending.keys.toList().forEach { emitPending(it, incomplete = true) }

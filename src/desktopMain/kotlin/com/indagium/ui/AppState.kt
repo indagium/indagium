@@ -207,6 +207,7 @@ import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
 import com.indagium.utils.scanFolderForLogs
+import com.indagium.utils.selectSection
 import com.indagium.utils.sharedLogLineContext
 import com.indagium.utils.splitDltStreamToFiles
 import com.indagium.utils.splitProfileRecordsToFiles
@@ -498,24 +499,28 @@ internal fun normalizeFilterForCapabilities(
     }
     val unavailableTags = capabilities[LogCapability.COMPONENT_FILTER]?.availability == CapabilityAvailability.UNAVAILABLE
     val unavailablePid = capabilities[LogCapability.PID_THREAD_FILTER]?.availability == CapabilityAvailability.UNAVAILABLE
+    val unavailableLevels = capabilities[LogCapability.SEVERITY_FILTER]?.availability == CapabilityAvailability.UNAVAILABLE
     val normalized = filter.copy(
         activeTags = if (unavailableTags) emptySet() else filter.activeTags,
         excludeTags = if (unavailableTags) emptySet() else filter.excludeTags,
         pkgPrefixes = if (unavailableTags) emptySet() else filter.pkgPrefixes,
         excludePkgPrefixes = if (unavailableTags) emptySet() else filter.excludePkgPrefixes,
         pidTidFilter = if (unavailablePid) "" else filter.pidTidFilter,
+        levels = if (unavailableLevels) LogLevel.entries.toSet() else filter.levels,
     )
-    val hasTagCriteria = filter.activeTags.isNotEmpty() || filter.excludeTags.isNotEmpty() ||
-        filter.pkgPrefixes.isNotEmpty() || filter.excludePkgPrefixes.isNotEmpty()
     val removed = buildList {
-        if (unavailableTags && hasTagCriteria) add("tag")
+        if (unavailableTags && filter.hasComponentFilterCriteria()) add("tag")
         if (unavailablePid && filter.pidTidFilter.isNotBlank()) add("PID/TID")
+        if (unavailableLevels && filter.levels != LogLevel.entries.toSet()) add("log level")
     }
     val notice = removed.takeIf { it.isNotEmpty() }?.joinToString(", ")?.let { fields ->
-        "$fields filter criteria were cleared because this profile has no parsed values for those fields."
+        "$fields filter criteria were cleared because this profile does not support filtering by those fields."
     }
     return FilterCapabilityNormalization(normalized, notice)
 }
+
+private fun Filter.hasComponentFilterCriteria(): Boolean =
+    activeTags.isNotEmpty() || excludeTags.isNotEmpty() || pkgPrefixes.isNotEmpty() || excludePkgPrefixes.isNotEmpty()
 
 // What a freshly loaded tab carries while the stack/crash analysis still runs in the background:
 // tag counts immediately (cheap, the filter panel needs them), folding/crash data deferred.
@@ -6497,6 +6502,7 @@ class AppState(
     var keyboardFocusVisible by mutableStateOf(false)
     var ctx by mutableStateOf<CtxMenuState?>(null)
     var tabCtx by mutableStateOf<TabCtxMenuState?>(null)
+    internal var logFormatDetailsTabId by mutableStateOf<String?>(null)
     var sfDialog by mutableStateOf(false)
     var sfName by mutableStateOf("")
     var sfTabId by mutableStateOf<String?>(null)
@@ -7134,6 +7140,8 @@ class AppState(
                 val next = tab.copy(
                     logData = emptyList(),
                     rmap = emptyMap(),
+                    logSections = emptyList(),
+                    logSectionViews = emptyMap(),
                     analysis = LogAnalysis(),
                     captureTimeline = null,
                     messageComposition = MessageCompositionState.NotComputed,
@@ -7734,7 +7742,8 @@ class AppState(
         return logCapabilitiesForTab(tabId)[capability]
     }
 
-    /** Cached capability summary with cheap source and file-type checks layered on at read time. */
+    /** Pure read: use a cached summary when present, derive legacy/incomplete summaries locally,
+     *  and layer cheap source and file-type checks on at read time. */
     internal fun logCapabilitiesForTab(tabId: String): Map<LogCapability, LogCapabilityStatus> {
         val sourceTab = tab(tabId) ?: return emptyMap()
         val pinnedResult = pinnedLogFormatProfileResult(tabId)
@@ -7765,22 +7774,6 @@ class AppState(
                 },
             )
             base = base + (LogCapability.SOURCE_LOOKUP to sourceStatus)
-            upTab(tabId) { current ->
-                if (current.logData === sourceTab.logData && current.logCapabilities === sourceTab.logCapabilities) {
-                    current.copy(logCapabilities = base)
-                } else {
-                    current
-                }
-            }
-        }
-        if (!completeSummary) {
-            upTab(tabId) { current ->
-                if (current.logData === sourceTab.logData && !LogCapability.entries.all { it in current.logCapabilities }) {
-                    current.copy(logCapabilities = base)
-                } else {
-                    current
-                }
-            }
         }
         return base.mapValues { (capability, status) ->
             runtimeLogCapabilityStatus(sourceTab, capability, status)
@@ -7823,18 +7816,18 @@ class AppState(
         require(status.availability != CapabilityAvailability.UNAVAILABLE) { status.reason }
     }
 
-    private fun parseFileWithFormatProfile(file: File, profile: LogFormatProfile? = null): ParsedLog {
+    private fun rethrowFileLoadCancellation(failure: Throwable) {
+        if (failure is CancellationException) throw failure
+    }
+
+    private fun parseFileWithFormatProfile(file: File, profile: LogFormatProfile? = null, sectionId: String? = null): ParsedLog {
         // The injected parser stands in for the native Logcat/DLT parse, so it also serves a tab
         // pinned to an unmodified built-in Logcat or DLT profile (every ordinary open pins one).
         val nativeProfile = profile == null ||
             (profile.engine in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT) && !usesCustomLogFormatProjection(profile))
         val injected = parser?.takeIf { nativeProfile }?.invoke(file)
         if (injected != null) return if (injected.profile == null && profile != null) injected.copy(profile = profile) else injected
-        return parseLogFileResultWithProfiles(
-            file,
-            profiles = availableLogFormatProfiles(),
-            profile = profile,
-        )
+        return parseLogFileResultWithProfiles(file, profiles = availableLogFormatProfiles(), profile = profile).selectSection(sectionId)
     }
 
     private fun effectiveLogCapabilities(parsed: ParsedLog): Map<LogCapability, LogCapabilityStatus> {
@@ -7908,21 +7901,34 @@ class AppState(
     internal fun saveLogFormatProfile(draft: LogFormatProfile): Result<LogFormatProfile> = runCatching {
         validateLogFormatProfile(draft)
         require(BUILTIN_LOG_FORMAT_PROFILES.none { it.id == draft.id }) { "Built-in formats are read-only. Duplicate one to edit it." }
-        val existing = settings.customLogFormatProfiles.firstOrNull { it.id == draft.id }
-        val nameConflict = settings.customLogFormatProfiles.firstOrNull { it.id != draft.id && it.name.equals(draft.name, true) }
-        require(nameConflict == null) { "Another custom format already uses that name." }
-        val revision = if (existing == null) draft.revision.coerceAtLeast(1) else maxOf(draft.revision, existing.revision + 1)
-        val saved = draft.copy(revision = revision, readOnly = false)
+        var saved: LogFormatProfile? = null
         updateSettings { current ->
-            val next = if (existing == null) current.customLogFormatProfiles + saved
-            else current.customLogFormatProfiles.map { if (it.id == saved.id) saved else it }
+            val profiles = current.customLogFormatProfiles
+            val existing = profiles.firstOrNull { it.id == draft.id }
+            require(existing != null || profiles.size < MAX_CUSTOM_LOG_FORMAT_PROFILES) {
+                "The profile library is limited to $MAX_CUSTOM_LOG_FORMAT_PROFILES custom formats."
+            }
+            val nameConflict = profiles.firstOrNull { it.id != draft.id && it.name.equals(draft.name, true) }
+            require(nameConflict == null) { "Another custom format already uses that name." }
+            val revision = if (existing == null) draft.revision.coerceAtLeast(1) else maxOf(draft.revision, existing.revision + 1)
+            val profile = draft.copy(revision = revision, readOnly = false)
+            saved = profile
+            val next = if (existing == null) profiles + profile
+            else profiles.map { if (it.id == profile.id) profile else it }
             current.copy(customLogFormatProfiles = next)
         }
-        saved
+        checkNotNull(saved)
     }
 
     internal fun duplicateLogFormatProfile(id: String): LogFormatProfile? {
-        val original = logFormatProfile(id) ?: return null
+        val original = logFormatProfile(id) ?: run {
+            logFormatProfileError = "That profile no longer exists."
+            return null
+        }
+        if (settings.customLogFormatProfiles.size >= MAX_CUSTOM_LOG_FORMAT_PROFILES) {
+            logFormatProfileError = "The profile library is limited to $MAX_CUSTOM_LOG_FORMAT_PROFILES custom formats."
+            return null
+        }
         val newProfile = original.copy(
             id = newId("lf"),
             name = uniqueLogFormatProfileName("${original.name} copy", settings.customLogFormatProfiles.map { it.name }),
@@ -7933,6 +7939,7 @@ class AppState(
             detection = original.detection.copy(alwaysUseForExtensions = false),
         )
         updateSettings { it.copy(customLogFormatProfiles = it.customLogFormatProfiles + newProfile) }
+        clearLogFormatProfileError()
         return newProfile
     }
 
@@ -8006,7 +8013,9 @@ class AppState(
                 copy
             }
         }
-        require(custom.size <= MAX_CUSTOM_LOG_FORMAT_PROFILES) { "The profile library is limited to 200 custom formats." }
+        require(custom.size <= MAX_CUSTOM_LOG_FORMAT_PROFILES) {
+            "The profile library is limited to $MAX_CUSTOM_LOG_FORMAT_PROFILES custom formats."
+        }
         updateSettings { it.copy(customLogFormatProfiles = custom) }
         pendingLogFormatImport = null
         applied
@@ -8055,6 +8064,33 @@ class AppState(
                 logFormatProfileError = failure.message ?: "Could not export these log formats."
             }
         }
+    }
+
+    /** Switch protocol logs without mixing their filters, selections, folds or row identities. */
+    internal fun selectLogSection(tabId: String, sectionId: String) {
+        synchronized(stateLock) {
+            val source = tab(tabId) ?: return
+            if (source.contentState != TabContentState.LOADED || source.selectedLogSectionId == sectionId) return
+            if (source.logSections.none { it.id == sectionId }) return
+            val views = source.logSectionViews.toMutableMap()
+            source.selectedLogSectionId?.let { current ->
+                views[current] = LogSectionViewState(source.filter, source.selected, source.expanded, source.manualBlocks)
+            }
+            val view = views[sectionId] ?: LogSectionViewState()
+            upTab(tabId) {
+                it.copy(
+                    selectedLogSectionId = sectionId,
+                    inspectedRecordId = null,
+                    logSectionViews = views,
+                    logData = emptyList(), rmap = emptyMap(), analysis = LogAnalysis(),
+                    filter = view.filter, selected = view.selected, expanded = view.expanded, manualBlocks = view.manualBlocks,
+                    search = LogSearchState.EMPTY, searches = LogSearchSessions(),
+                    contentState = TabContentState.UNLOADED, contentLoadError = null,
+                )
+            }
+        }
+        ensureTabLoaded(tabId)
+        autosaveNow()
     }
 
     internal fun previewLogFormatProfile(profile: LogFormatProfile, sample: String): ParsedLog =
@@ -8134,7 +8170,7 @@ class AppState(
             logFormatProfileError = reparseMemoryFailure(shortfall).message
             return null
         }
-        val result = runCatching { withContext(Dispatchers.IO) { parseSourceWithFormatProfile(sourceTab, profile) } }
+        val result = runCatching { runInterruptible(Dispatchers.IO) { parseSourceWithFormatProfile(sourceTab, profile) } }
             .onFailure { logFormatProfileError = it.message ?: "Could not reparse the source." }
             .getOrNull() ?: return null
         if (tab(tabId)?.sourcePath != sourceTab.sourcePath) return null
@@ -9980,7 +10016,7 @@ class AppState(
         // A manual click is no longer treated as opting out of Follow: it's a one-off look-around,
         // and Follow resumes driving selection on the next playhead move. Only the explicit
         // "Following" toggle (setVideoFollowLog) turns Follow off.
-        t.copy(selected = n)
+        t.copy(selected = n, inspectedRecordId = id)
     }
 
     fun selRowRange(tabId: String, fromId: Int, toId: Int) = upTab(tabId) { t ->
@@ -10204,6 +10240,35 @@ class AppState(
     // Per-tab Δt-column toggle (LogViewer.kt's toolbar button, beside Export) — see LogTab.showTimeDelta's
     // doc comment for why this lives on the tab rather than in AppSettings.
     fun toggleTimeDelta(tabId: String) = upTab(tabId) { it.copy(showTimeDelta = !it.showTimeDelta) }
+
+    /** Null keeps the format-specific column control out of other log types. */
+    internal fun metadataJsonTagVisible(tabId: String): Boolean? = pinnedLogFormatProfile(tabId)
+        ?.takeIf { it.engine == LogFormatEngine.METADATA_JSON }
+        ?.let { LogFieldRole.COMPONENT in com.indagium.utils.metadataJsonPresentationProfile(it).visibleColumns }
+
+    internal fun toggleMetadataJsonTag(tabId: String) {
+        upTab(tabId) { current ->
+            if (current.contentState != TabContentState.LOADED) return@upTab current
+            val pinned = pinnedLogFormatProfile(current)?.takeIf { it.engine == LogFormatEngine.METADATA_JSON } ?: return@upTab current
+            val profile = com.indagium.utils.metadataJsonPresentationProfile(pinned)
+            val columns = if (LogFieldRole.COMPONENT in profile.visibleColumns) {
+                profile.visibleColumns - LogFieldRole.COMPONENT
+            } else {
+                profile.visibleColumns.toMutableList().apply {
+                    val message = indexOf(LogFieldRole.MESSAGE).takeIf { it >= 0 } ?: size
+                    add(message, LogFieldRole.COMPONENT)
+                }
+            }
+            val next = profile.copy(visibleColumns = columns)
+            val rows = current.logData.map { com.indagium.utils.withMetadataJsonColumns(it, next) }
+            current.copy(
+                logData = rows, rmap = rows.associateBy { it.id },
+                logFormatProfileSnapshot = logFormatProfileJson(next),
+                profileDisplayColumns = logFormatDisplayColumnDefinitions(next),
+            )
+        }
+        autosaveNow()
+    }
 
     // ── Tid map (ui/TidMap.kt, utils/TidMap.kt) ────────────────────────
     // Only one map active at a time, per tab: opening a new one REPLACES tidMap wholesale rather
@@ -13472,7 +13537,7 @@ class AppState(
         is ArchiveFormat.Sequential -> true
         is ArchiveFormat.CompressedFile -> true
         is ArchiveFormat.Unsupported -> false
-        ArchiveFormat.None -> isLikelyLogPath(file) || isLikelyTextFile(file)
+        ArchiveFormat.None -> file.isFile && (isLikelyLogPath(file) || isLikelyTextFile(file))
     }
 
     // Order matters here — see each branch's own comment for why it has to run before the ones
@@ -13597,7 +13662,8 @@ class AppState(
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
             try {
-                val parsed = runCatching { parseFileWithFormatProfile(file, profile) }.getOrElse { error ->
+                val parsed = runCatching { runInterruptible { parseFileWithFormatProfile(file, profile) } }.getOrElse { error ->
+                    rethrowFileLoadCancellation(error)
                     removeRecentFile(file)
                     showOpenError(
                         title = "Could not open file",
@@ -13629,6 +13695,8 @@ class AppState(
                         logFormatProfileId = parsed.profile?.id,
                         logFormatProfileSnapshot = parsed.profile?.let(::logFormatProfileJson),
                         logFormatDiagnostics = parsed.diagnostics,
+                        logSections = parsed.sections.map { it.description() },
+                        selectedLogSectionId = parsed.selectedSectionId,
                         logFormatCandidateIds = parsed.candidateProfileIds,
                         logCapabilities = effectiveLogCapabilities(parsed),
                         profileFieldNames = parsed.profileFieldNames,
@@ -14562,6 +14630,8 @@ class AppState(
                         logFormatProfileId = parsed.profile?.id,
                         logFormatProfileSnapshot = parsed.profile?.let(::logFormatProfileJson),
                         logFormatDiagnostics = parsed.diagnostics,
+                        logSections = parsed.sections.map { it.description() },
+                        selectedLogSectionId = parsed.selectedSectionId,
                         logFormatCandidateIds = parsed.candidateProfileIds,
                         logCapabilities = effectiveLogCapabilities(parsed),
                         profileFieldNames = parsed.profileFieldNames,
@@ -14846,7 +14916,7 @@ class AppState(
         val written = when {
             kind == LogContentKind.DLT_STORAGE || kind == LogContentKind.DLT_RAW ->
                 splitDltStreamToFiles(stream, outputs, source.sizeBytes, kind)
-            profile != null && (profile.engine == LogFormatEngine.CSV ||
+            profile != null && (profile.engine == LogFormatEngine.CSV || profile.engine == LogFormatEngine.JSON_LINES ||
                 profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank()) ->
                 splitProfileRecordsToFiles(stream, outputs, source.sizeBytes, profile)
             kind == LogContentKind.DLT_VIEWER_CSV ->
@@ -14962,6 +15032,8 @@ class AppState(
                 logFormatProfileId = parsed.profile?.id,
                 logFormatProfileSnapshot = parsed.profile?.let(::logFormatProfileJson),
                 logFormatDiagnostics = parsed.diagnostics,
+                logSections = parsed.sections.map { it.description() },
+                selectedLogSectionId = parsed.selectedSectionId,
                 logFormatCandidateIds = parsed.candidateProfileIds,
                 logCapabilities = effectiveLogCapabilities(parsed),
                 profileFieldNames = parsed.profileFieldNames,
@@ -14981,7 +15053,7 @@ class AppState(
     }
 
     private fun supportsProfileAwareSplit(profile: LogFormatProfile): Boolean = when (profile.engine) {
-        LogFormatEngine.CRI -> false
+        LogFormatEngine.CRI, LogFormatEngine.METADATA_JSON -> false
         LogFormatEngine.CSV, LogFormatEngine.REGEX -> true
         else -> true
     }
@@ -18110,7 +18182,7 @@ class AppState(
             val selectedProfile = pinnedLogFormatProfile(shell)
             val legacySnapshotlessTab = shell.logFormatProfileId == null && shell.logFormatProfileSnapshot == null
             val restoreProfile = selectedProfile ?: if (legacySnapshotlessTab) builtinProfileFor(shell.logFormat) else null
-            val parsedResult = loadRestoredTab(source, restoreProfile)
+            val parsedResult = runInterruptible { loadRestoredTab(source, restoreProfile, shell.selectedLogSectionId) }
             val result = if (legacySnapshotlessTab && parsedResult is RestoredTabLoadResult.Loaded) {
                 // Old tabs have stable row identity tied to their saved Logcat/DLT parser. Pinning
                 // the compatibility parser only for this load prevents current auto-detection
@@ -18198,6 +18270,8 @@ class AppState(
                             logFormatProfileId = loaded.profile?.id ?: current.logFormatProfileId,
                             logFormatProfileSnapshot = loaded.profile?.let(::logFormatProfileJson) ?: current.logFormatProfileSnapshot,
                             logFormatDiagnostics = loaded.diagnostics,
+                            logSections = loaded.logSections,
+                            selectedLogSectionId = loaded.selectedLogSectionId,
                             logCapabilities = capabilities,
                             filter = filterNormalization.filter,
                             filterNormalizationNotice = filterNormalization.notice,
@@ -18337,14 +18411,16 @@ class AppState(
 
     private val captureAdoptionLock = Any()
 
-    private fun loadRestoredTab(source: RestoredTabSource, profile: LogFormatProfile?): RestoredTabLoadResult = when (source) {
+    private fun loadRestoredTab(
+        source: RestoredTabSource, profile: LogFormatProfile?, sectionId: String? = null,
+    ): RestoredTabLoadResult = when (source) {
         is RestoredTabSource.CaptureSource -> loadRestoredCaptureSource(source, profile)
         is RestoredTabSource.FileSource -> {
             if (!source.file.isFile || !source.file.canRead()) {
                 return RestoredTabLoadResult.Failed("The source file is missing or unreadable: ${source.file.absolutePath}")
             }
             val parsed = try {
-                parseFileWithFormatProfile(source.file, profile)
+                parseFileWithFormatProfile(source.file, profile, sectionId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -18357,11 +18433,13 @@ class AppState(
                 logFormat = parsed.format,
                 profile = parsed.profile ?: profile,
                 diagnostics = parsed.diagnostics,
+                logSections = parsed.sections.map { it.description() },
+                selectedLogSectionId = parsed.selectedSectionId,
                 profileClockSignature = parsed.profileClockSignature,
                 sourceLineCount = parsed.sourceLineCount,
             )
         }
-        is RestoredTabSource.ArchiveSource -> loadRestoredArchiveSource(source, profile)
+        is RestoredTabSource.ArchiveSource -> loadRestoredArchiveSource(source, profile, sectionId)
     }
 
     private fun loadRestoredCaptureSource(source: RestoredTabSource.CaptureSource, profile: LogFormatProfile?): RestoredTabLoadResult {
@@ -18382,7 +18460,9 @@ class AppState(
         return loadedImportedCapture(imported, profile)
     }
 
-    private fun loadRestoredArchiveSource(source: RestoredTabSource.ArchiveSource, profile: LogFormatProfile?): RestoredTabLoadResult {
+    private fun loadRestoredArchiveSource(
+        source: RestoredTabSource.ArchiveSource, profile: LogFormatProfile?, sectionId: String? = null,
+    ): RestoredTabLoadResult {
         if (!source.archiveFile.isFile || !source.archiveFile.canRead()) {
             return RestoredTabLoadResult.Failed("The source archive is missing or unreadable: ${source.archiveFile.absolutePath}")
         }
@@ -18407,6 +18487,7 @@ class AppState(
             ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
         val parsed = try {
             extractCandidateResultWithProfiles(source.archiveFile, currentCandidate, archiveEntryByteBudget, availableLogFormatProfiles(), profile)
+                .selectSection(sectionId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
@@ -18419,6 +18500,8 @@ class AppState(
             logFormat = parsed.format,
             profile = parsed.profile ?: profile,
             diagnostics = parsed.diagnostics,
+            logSections = parsed.sections.map { it.description() },
+            selectedLogSectionId = parsed.selectedSectionId,
             profileClockSignature = parsed.profileClockSignature,
             sourceLineCount = parsed.sourceLineCount,
         )

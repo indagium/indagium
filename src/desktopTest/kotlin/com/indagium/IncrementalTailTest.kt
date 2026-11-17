@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.model.CapabilityAvailability
+import com.indagium.model.LogCapability
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
@@ -169,5 +171,173 @@ class IncrementalTailTest {
         app.stopTailing(tabId)
         waitUntil { app.tab(tabId)!!.logData.size == 3 }
         assertEquals("two", app.tab(tabId)!!.logData.last().msg)
+    }
+
+    @Test
+    fun startingAndRestartingWatchingContinuesTheAlreadyVisibleLastRegexRecord() {
+        val app = newState()
+        val profile = LogFormatProfile(
+            id = "tail-regex-initial-pending",
+            name = "Tail regex initial pending",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "(?s)^\\[(\\S+)] ([A-Z]+) (.*)$",
+            multilineStartPattern = "^\\[",
+            fieldMappings = mapOf(
+                LogFieldRole.TIMESTAMP to "1",
+                LogFieldRole.SEVERITY to "2",
+                LogFieldRole.MESSAGE to "3",
+            ),
+            timestampKind = ProfileTimestampKind.ISO_8601,
+        )
+        val file = File(requireNotNull(dir), "restart.log").apply {
+            writeText("[2024-03-01T10:00:00Z] ERROR first\n\tat first\n")
+        }
+        val tabId = openWith(app, profile, file)
+        assertEquals(1, app.tab(tabId)!!.logData.size)
+
+        app.startTailing(tabId)
+        file.appendText("\tat continuation\n[2024-03-01T10:00:01Z] INFO second\n")
+        waitUntil { app.tab(tabId)!!.logData.single().msg.endsWith("\tat continuation") }
+        app.stopTailing(tabId)
+        waitUntil { app.tab(tabId)!!.logData.size == 2 }
+        assertEquals(1, app.tab(tabId)!!.logData.first().id)
+        assertEquals("first\n\tat first\n\tat continuation", app.tab(tabId)!!.logData.first().msg)
+
+        waitUntil {
+            app.startTailing(tabId)
+            app.tab(tabId)!!.tailing
+        }
+        file.appendText("\tat still-second\n[2024-03-01T10:00:02Z] WARN third\n")
+        waitUntil { app.tab(tabId)!!.logData.last().msg.endsWith("\tat still-second") }
+        app.stopTailing(tabId)
+        waitUntil { app.tab(tabId)!!.logData.size == 3 }
+
+        val rows = app.tab(tabId)!!.logData
+        assertEquals(listOf(1, 2, 3), rows.map { it.id })
+        assertEquals(
+            listOf(
+                "first\n\tat first\n\tat continuation",
+                "second\n\tat still-second",
+                "third",
+            ),
+            rows.map { it.msg },
+        )
+        assertEquals(listOf(1L, 4L, 6L), rows.map { it.sourceStartLine })
+        assertEquals(listOf(3L, 5L, 6L), rows.map { it.sourceEndLine })
+    }
+
+    @Test
+    fun stoppingWithoutNewLinesKeepsTheInitiallyVisibleRegexRowAndId() {
+        val app = newState()
+        val profile = LogFormatProfile(
+            id = "tail-regex-stop-unchanged",
+            name = "Tail regex stop unchanged",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "(?s)^\\[(\\S+)] ([A-Z]+) (.*)$",
+            multilineStartPattern = "^\\[",
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "3", LogFieldRole.SEVERITY to "2"),
+        )
+        val file = File(requireNotNull(dir), "stop.log").apply { writeText("[t0] INFO visible\n") }
+        val tabId = openWith(app, profile, file)
+        val before = app.tab(tabId)!!.logData.single()
+
+        app.startTailing(tabId)
+        app.stopTailing(tabId)
+        waitUntil { !app.tab(tabId)!!.tailing }
+        assertEquals(listOf(before), app.tab(tabId)!!.logData)
+        assertEquals(before.id, app.tab(tabId)!!.logData.single().id)
+    }
+
+    @Test
+    fun deltaTimeUsesTimedRowsAcrossSingleRecordBatchesAndRejectsMixedClocks() {
+        val app = newState()
+        val profile = LogFormatProfile(
+            id = "tail-regex-delta",
+            name = "Tail regex delta",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "^\\[(.*?)\\] (.*)$",
+            fieldMappings = mapOf(LogFieldRole.TIMESTAMP to "1", LogFieldRole.MESSAGE to "2"),
+            timestampKind = ProfileTimestampKind.AUTO,
+        )
+        val file = File(requireNotNull(dir), "timed.log").apply {
+            writeText("[2024-03-01T10:00:00Z] first\n")
+        }
+        val tabId = openWith(app, profile, file)
+        assertEquals(CapabilityAvailability.UNAVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+
+        app.startTailing(tabId)
+        file.appendText("[2024-03-01T10:00:01Z] second\n")
+        waitUntil { app.tab(tabId)!!.logData.size == 2 }
+        assertEquals(CapabilityAvailability.AVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+
+        file.appendText("[2024-03-01T10:00:02] local-clock\n")
+        waitUntil { app.tab(tabId)!!.logData.size == 3 }
+        assertEquals(CapabilityAvailability.UNAVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+        app.stopTailing(tabId)
+    }
+
+    @Test
+    fun deltaTimeCountsAnUnchangedSeededRowWhenAnotherRowIsAppendedInTheSameBatch() {
+        val app = newState()
+        val profile = LogFormatProfile(
+            id = "tail-regex-seeded-delta",
+            name = "Tail regex seeded delta",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "(?s)^\\[(\\S+)] (.*)$",
+            multilineStartPattern = "^\\[",
+            fieldMappings = mapOf(LogFieldRole.TIMESTAMP to "1", LogFieldRole.MESSAGE to "2"),
+            timestampKind = ProfileTimestampKind.ISO_8601,
+        )
+        val file = File(requireNotNull(dir), "seeded-timed.log").apply {
+            writeText("[2024-03-01T10:00:00Z] first\n")
+        }
+        val tabId = openWith(app, profile, file)
+        val initialRow = app.tab(tabId)!!.logData.single()
+        assertEquals(CapabilityAvailability.UNAVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+
+        app.startTailing(tabId)
+        file.appendText("[2024-03-01T10:00:01Z] second\n[2024-03-01T10:00:02Z] third\n")
+        waitUntil { app.tab(tabId)!!.logData.size == 2 }
+
+        val rows = app.tab(tabId)!!.logData
+        assertEquals(initialRow.id, rows.first().id)
+        assertEquals(initialRow.msg, rows.first().msg, "the unchanged seeded row remains present exactly once")
+        assertEquals(2, rows.last().id)
+        assertEquals(CapabilityAvailability.AVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+        app.stopTailing(tabId)
+    }
+
+    @Test
+    fun deltaTimeRetainsInitialCoverageAcrossStopAndRestartWithGenericPartialReason() {
+        val app = newState()
+        val profile = LogFormatProfile(
+            id = "tail-regex-delta-restart",
+            name = "Tail regex delta restart",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "^\\[(.*?)\\] (.*)$",
+            fieldMappings = mapOf(LogFieldRole.TIMESTAMP to "1", LogFieldRole.MESSAGE to "2"),
+            timestampKind = ProfileTimestampKind.AUTO,
+        )
+        val file = File(requireNotNull(dir), "timed-restart.log").apply {
+            writeText("[2024-03-01T10:00:00Z] first\n[not-a-time] untimed\n")
+        }
+        val tabId = openWith(app, profile, file)
+        assertEquals(CapabilityAvailability.UNAVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+
+        app.startTailing(tabId)
+        file.appendText("[still-not-a-time] also-untimed\n")
+        waitUntil { app.tab(tabId)!!.logData.size == 3 }
+        assertEquals(CapabilityAvailability.UNAVAILABLE, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+        assertTrue(app.tab(tabId)!!.logCapabilities.getValue(LogCapability.TIMELINE).reason.contains("parsed prefix"))
+        app.stopTailing(tabId)
+
+        waitUntil {
+            app.startTailing(tabId)
+            app.tab(tabId)!!.tailing
+        }
+        file.appendText("[2024-03-01T10:00:03Z] second-timed\n")
+        waitUntil { app.tab(tabId)!!.logData.size == 4 }
+        assertEquals(CapabilityAvailability.PARTIAL, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
+        app.stopTailing(tabId)
     }
 }

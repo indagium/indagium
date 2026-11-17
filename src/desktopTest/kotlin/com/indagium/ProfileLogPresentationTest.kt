@@ -35,17 +35,22 @@ import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.buildFilteredCsv
 import com.indagium.utils.buildFilteredTxt
 import com.indagium.utils.captureAnnotationLogRef
+import com.indagium.utils.computeProfileColumnLayout
 import com.indagium.utils.filteredCsvHeader
 import com.indagium.utils.filteredCsvValues
 import com.indagium.utils.passesFilter
 import com.indagium.utils.presentAnnotationLogLine
 import com.indagium.utils.presentLogLine
 import com.indagium.utils.presentLogLineMarkdown
+import com.indagium.utils.profileDisplayColumns
+import com.indagium.utils.profileDisplayTextProjection
+import com.indagium.utils.remapOffset
 import com.indagium.utils.visibleLogLineText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private const val PROFILE_ROW_ID = 1
@@ -86,14 +91,14 @@ class ProfileLogPresentationTest {
         ).text
 
         val knownText = render(knownError)
-        val knownSeverityStart = knownText.text.indexOf("level=E")
-        assertEquals("level=E", knownText.text)
+        val knownSeverityStart = knownText.text.indexOf("E")
+        assertEquals("E", knownText.text)
         assertEquals(LogLevel.E.defaultColor, knownText.foregroundAt(knownSeverityStart))
 
         val unknownText = render(unknownSeverity)
-        val unknownSeverityStart = unknownText.text.indexOf("level=NOTICE")
+        val unknownSeverityStart = unknownText.text.indexOf("NOTICE")
         val neutralSeverityColor = Color(UNKNOWN_SEVERITY_TEXT_COLOR_ARGB)
-        assertEquals("level=NOTICE", unknownText.text)
+        assertEquals("NOTICE", unknownText.text)
         assertEquals(neutralSeverityColor, unknownText.foregroundAt(unknownSeverityStart))
         assertTrue(unknownText.foregroundAt(unknownSeverityStart) != unknownSeverity.level.defaultColor)
 
@@ -109,7 +114,7 @@ class ProfileLogPresentationTest {
             backgroundEnabled = false,
         )
         val overriddenText = render(unknownSeverity, listOf(wholeLineOverride))
-        assertEquals(Color.Magenta, overriddenText.foregroundAt(overriddenText.text.indexOf("level=NOTICE")))
+        assertEquals(Color.Magenta, overriddenText.foregroundAt(overriddenText.text.indexOf("NOTICE")))
     }
 
     @Test
@@ -146,7 +151,7 @@ class ProfileLogPresentationTest {
         )
         val tab = profileTab(profile, entry)
         val settings = AppSettings()
-        val displayed = "timestamp=09:15:00.001  message=request completed  Trace ID=trace-17"
+        val displayed = "09:15:00.001  request completed  Trace ID=trace-17"
 
         assertEquals(displayed, visibleLogLineText(entry))
         assertEquals(displayed, presentLogLine(tab, entry, settings))
@@ -319,8 +324,8 @@ class ProfileLogPresentationTest {
         )
         val baseTab = profileTab(profile, entry)
         val tab = baseTab.copy(analysis = baseTab.analysis.copy(processNames = mapOf(42 to "worker-service")))
-        val canonicalText = "pid=42  tid=43  timestamp=10:00:00  message=finished"
-        val renderedText = "pid=worker-service  tid=43  timestamp=10:00:00  message=finished"
+        val canonicalText = "42  43  10:00:00  finished"
+        val renderedText = "worker-service  43  10:00:00  finished"
         val render = buildLogLineRender(
             entry = entry,
             highlighters = listOf(Highlighter("message", "finished", false, Color.Yellow, true)),
@@ -354,11 +359,11 @@ class ProfileLogPresentationTest {
             showPidTid = false,
         ).text
         val identityHiddenMatchStart = identityHidden.text.indexOf("finished")
-        assertEquals("timestamp=10:00:00  message=finished", identityHidden.text)
+        assertEquals("10:00:00  finished", identityHidden.text)
         assertTrue(identityHidden.backgroundAt(identityHiddenMatchStart) != Color.Unspecified)
 
         val omitIdentity = AppSettings(copyPidTid = false, copyPidAsName = true)
-        assertEquals("timestamp=10:00:00  message=finished", presentLogLine(tab, entry, omitIdentity))
+        assertEquals("10:00:00  finished", presentLogLine(tab, entry, omitIdentity))
         assertEquals(listOf("timestamp", "message"), filteredCsvHeader(tab, omitIdentity))
         assertEquals(
             listOf("10:00:00", "finished"),
@@ -367,7 +372,7 @@ class ProfileLogPresentationTest {
 
         val copyName = AppSettings(copyPidTid = true, copyPidAsName = true)
         assertEquals(renderedText, presentLogLine(tab, entry, copyName))
-        assertTrue(presentLogLineMarkdown(tab, entry, copyName).contains("pid=worker-service"))
+        assertTrue(presentLogLineMarkdown(tab, entry, copyName).contains("worker-service"))
         assertEquals(listOf("pid", "pid_name", "tid", "timestamp", "message"), filteredCsvHeader(tab, copyName))
         assertEquals(
             listOf("42", "worker-service", "43", "10:00:00", "finished"),
@@ -388,7 +393,7 @@ class ProfileLogPresentationTest {
         val processNameVisible = capture.presentation.copy(
             options = AnnBlock.LogRefPresentationOptions(pidTid = true, processName = true),
         )
-        assertEquals("timestamp=10:00:00  message=finished", presentAnnotationLogLine(entry, pidHidden))
+        assertEquals("10:00:00  finished", presentAnnotationLogLine(entry, pidHidden))
         assertEquals(renderedText, presentAnnotationLogLine(entry, processNameVisible))
     }
 
@@ -429,7 +434,7 @@ class ProfileLogPresentationTest {
             legacyClock = true,
         ))
         val logcatTab = profileTab(logcatProfile, logcat)
-        val logcatText = "pid=42  tid=43  tag=Worker  message=ready  Trace ID=trace-lc"
+        val logcatText = "42  43  Worker  ready  Trace ID=trace-lc"
         val withIdentity = AppSettings(copyPidTid = true)
         assertEquals(logcatText, presentLogLine(logcatTab, logcat, withIdentity))
         assertEquals(listOf("pid", "tid", "tag", "message", "Trace ID"), filteredCsvHeader(logcatTab, withIdentity))
@@ -473,7 +478,7 @@ class ProfileLogPresentationTest {
             ),
         )
         val dltTab = profileTab(dltProfile, dlt, LogFormat.DLT)
-        val dltText = "message=frame received  timestamp=12:00:01  tag=CanStack  ECU=ECU42"
+        val dltText = "frame received  12:00:01  CanStack  ECU=ECU42"
         assertEquals(dltText, presentLogLine(dltTab, dlt, AppSettings()))
         assertEquals(listOf("message", "timestamp", "tag", "ECU"), filteredCsvHeader(dltTab, AppSettings()))
         assertEquals(
@@ -686,6 +691,56 @@ class ProfileLogPresentationTest {
             "raw text  RAW  raw text",
             presentLogLine(legacyTab(unknownSeverity), unknownSeverity, AppSettings()),
         )
+    }
+
+    @Test
+    fun standardColumnsArePaddedToTheTabsWidthsAndTheHeaderUsesTheSameWidths() {
+        val header = listOf(
+            LogDisplayField("timestamp", "timestamp", ""),
+            LogDisplayField("severity", "level", ""),
+            LogDisplayField("component", "tag", ""),
+            LogDisplayField("message", "message", ""),
+        )
+
+        fun row(id: Int, level: String, tag: String, message: String) = profileEntry(
+            ts = "10:00:0$id",
+            level = LogLevel.I,
+            tag = tag,
+            msg = message,
+            fields = emptyMap(),
+            columns = listOf(
+                LogDisplayField("timestamp", "timestamp", "10:00:0$id"),
+                LogDisplayField("severity", "level", level),
+                LogDisplayField("component", "tag", tag),
+                LogDisplayField("message", "message", message),
+            ),
+        )
+        val rows = listOf(row(1, "INFO", "api", "started"), row(2, "WARNING", "", "slow"), row(3, "E", "storage", "failed"))
+        val layout = requireNotNull(computeProfileColumnLayout(header, rows))
+
+        assertEquals(mapOf("timestamp" to 9, "severity" to 7, "component" to 7), layout.widths)
+        assertEquals("TIMESTAMP  LVL      TAG      MESSAGE", layout.header)
+        val rendered = rows.map { profileDisplayTextProjection(profileDisplayColumns(it)!!, columnWidths = layout.widths).text }
+        assertEquals(
+            listOf(
+                "10:00:01   INFO     api      started",
+                "10:00:02   WARNING" + " ".repeat(11) + "slow",
+                "10:00:03   E        storage  failed",
+            ),
+            rendered,
+        )
+        // Every message starts in the header's MESSAGE column.
+        assertEquals(setOf(layout.header.indexOf("MESSAGE")), rendered.map { it.indexOfAny(listOf("started", "slow", "failed")) }.toSet())
+
+        // What filters and Find match is unpadded, and a match there maps onto the padded text.
+        assertEquals("10:00:01  INFO  api  started", visibleLogLineText(rows[0]))
+        val projection = profileDisplayTextProjection(profileDisplayColumns(rows[0])!!, columnWidths = layout.widths)
+        val canonicalStart = visibleLogLineText(rows[0]).indexOf("api")
+        assertEquals(rendered[0].indexOf("api"), projection.remapOffset(canonicalStart))
+        assertEquals(rendered[0].indexOf("api") + 3, projection.remapOffset(canonicalStart + 3))
+
+        // A Logcat tab has no profile layout.
+        assertNull(computeProfileColumnLayout(header, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
     }
 
     private fun profileEntry(

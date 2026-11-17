@@ -1781,6 +1781,7 @@ internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
     logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
+    selectedLogSectionId,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1945,6 +1946,7 @@ internal fun LogTab.tabToken(): String {
         // Trailing field (20): ordered schema for mixed-profile merged tabs, which intentionally
         // have no single profile snapshot from which their export schema could be rebuilt.
         profileDisplayColumns.joinToString(",") { tokenFields(it.id, it.label).b64() },
+        selectedLogSectionId.orEmpty(),
     )
 }
 
@@ -1964,6 +1966,8 @@ internal sealed interface RestoredTabLoadResult {
         val diagnostics: List<String> = emptyList(),
         val profileClockSignature: String? = null,
         val sourceLineCount: Long? = null,
+        val logSections: List<com.indagium.model.LogFileSection> = emptyList(),
+        val selectedLogSectionId: String? = null,
     ) : RestoredTabLoadResult
 
     data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult
@@ -2048,6 +2052,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
                     LogDisplayField(fields[0], fields[1], "")
                 }.getOrNull()
             }.orEmpty(),
+            selectedLogSectionId = p.getOrNull(21)?.takeIf { it.isNotBlank() },
         ),
         source,
     )

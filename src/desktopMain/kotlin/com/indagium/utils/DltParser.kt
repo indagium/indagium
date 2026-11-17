@@ -35,6 +35,8 @@ data class ParsedLog(
     val sourceLineCount: Long? = null,
     /** Profile ids that tied when detection was ambiguous; empty otherwise. */
     val candidateProfileIds: List<String> = emptyList(),
+    val sections: List<ParsedLogSection> = emptyList(),
+    val selectedSectionId: String? = null,
 ) {
     val capabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> by lazy {
         profile?.let { com.indagium.model.deriveLogCapabilities(it, entries, sourceClockId = sourceClockId) }.orEmpty()
@@ -118,7 +120,7 @@ fun parseLogContent(
     }
 
     val selection = selectTextProfile(sample, fileName, profile, profiles)
-    return parseTextWithProfile(input, selection.profile, profile, startId, sourceClockId)
+    return parseTextWithProfile(input, selection.profile, profile, startId, sourceClockId, fileName)
         .withDetectionDiagnostics(selection.diagnostics)
         .let { if (selection.candidateProfileIds.isEmpty()) it else it.copy(candidateProfileIds = selection.candidateProfileIds) }
 }
@@ -197,10 +199,11 @@ private fun parseTextWithProfile(
     requestedProfile: LogFormatProfile?,
     startId: Int,
     sourceClockId: String?,
+    fileName: String?,
 ): ParsedLog {
     if (selectedProfile.engine != LogFormatEngine.LOGCAT && selectedProfile.engine != LogFormatEngine.DLT) {
         validateLogFormatProfile(selectedProfile)
-        return input.use { parseProfileLog(it, selectedProfile, startId, sourceClockId) }
+        return input.use { parseProfileLog(it, selectedProfile, startId, sourceClockId, fileName) }
     }
     if (requestedProfile != null && requestedProfile.engine == LogFormatEngine.LOGCAT) {
         return input.use { parseTextLog(it, startId) }

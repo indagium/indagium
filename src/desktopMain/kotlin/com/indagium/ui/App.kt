@@ -72,7 +72,7 @@ internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recen
 // complexity threshold; the grouping is cosmetic only — every flag below still contributes to
 // the same OR chain, evaluated in the same order group-by-group.
 private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
-    state.ctx != null || state.tabCtx != null || state.addAnnRequest != null ||
+    state.ctx != null || state.tabCtx != null || state.logFormatDetailsTabId != null || state.addAnnRequest != null ||
         state.pendingZipPicker != null || state.pendingFolderPicker != null ||
         state.sourceCodeView != null || state.recordDetailsEntry != null || state.caseLibraryTabId != null ||
         state.customCommandEditorTarget != null || state.sourceFolderInfoEditorTarget != null ||
@@ -1302,7 +1302,7 @@ fun App(
                             42 + (if (state.tabGroups.isNotEmpty()) 42 else 0) + (if (state.tabGroupOf(groupRef) != null) 42 else 0)
                         }
                         val menuWidth = 200.dp
-                        val estimatedMenuHeight = (268 + groupActionHeight +
+                        val estimatedMenuHeight = (268 + (if (!ttab.isCaptureLauncher) 42 else 0) + groupActionHeight +
                             (if (showTailAction) 44 + (if (canUseTail) 0 else 24) else 0) +
                             (if (showSplitAction) 44 + (if (canUseSplit) 0 else 24) else 0)).dp
                         val x = tctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
@@ -1337,6 +1337,9 @@ fun App(
                                     state.tabCtx = null
                                 },
                             )
+                            if (!ttab.isCaptureLauncher) {
+                                LogFormatTabContextAction(state, ttab)
+                            }
                             CtxDivider()
                             if (showTailAction) {
                                 CtxItem(
@@ -2718,6 +2721,8 @@ fun App(
                     }
                 }
             }
+
+            ActiveLogFormatDetailsDialog(state)
 
             // ── Settings dialog ───────────────────────────────────────
             if (state.settingsOpen) {

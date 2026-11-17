@@ -22,6 +22,7 @@ import com.indagium.ui.columnTiles
 import com.indagium.ui.commitLogViewLayout
 import com.indagium.ui.currentLogViewLayout
 import com.indagium.ui.hideLogViewTile
+import com.indagium.ui.isAuxiliaryLogTile
 import com.indagium.ui.isLogViewTileCollapsed
 import com.indagium.ui.lastLogViewResetLabel
 import com.indagium.ui.legacyLogViewSizes
@@ -111,7 +112,9 @@ class LogViewLayoutStateTest {
         state.commitLogViewLayout(partial)
         val stored = assertNotNull(state.settings.logViewLayout)
         assertEquals(
-            LogViewSectionId.entries.filter { it.scope != com.indagium.model.LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR }.toSet(),
+            LogViewSectionId.entries.filter {
+                it.scope != com.indagium.model.LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR && !it.isAuxiliaryLogTile
+            }.toSet(),
             tileLeafSections(stored).toSet(),
         )
     }

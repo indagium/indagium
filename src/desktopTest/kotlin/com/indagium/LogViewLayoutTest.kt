@@ -49,6 +49,7 @@ import com.indagium.ui.compareGridLayout
 import com.indagium.ui.dropTile
 import com.indagium.ui.effectiveCompareLayout
 import com.indagium.ui.effectiveLogViewLayout
+import com.indagium.ui.isAuxiliaryLogTile
 import com.indagium.ui.isLogTile
 import com.indagium.ui.layoutMenuPanels
 import com.indagium.ui.logViewDropLabel
@@ -69,6 +70,7 @@ import com.indagium.ui.sanitizeLogViewLayoutState
 import com.indagium.ui.tileGeometry
 import com.indagium.ui.tileLayoutShapeEquals
 import com.indagium.ui.tileLeafSections
+import com.indagium.ui.withAuxiliaryLogTiles
 import com.indagium.ui.withCompareLayout
 import com.indagium.ui.withComparePreset
 import com.indagium.ui.withCompareTileHidden
@@ -101,7 +103,9 @@ class LogViewLayoutTest {
     private val sizes = LogViewLegacySizes(filterPanelWidth = 300f, annotationPanelWidth = 420f, rightSidebarSplit = 0.3f, compareSplit = 0.4f)
 
     // The tiles of a stored single-view tree: every single-view tile but the toolbar, which is in it only while the toolbar is IN_LAYOUT.
-    private val singleIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR }.toSet()
+    private val singleIds = LogViewSectionId.entries.filter {
+        it.scope != LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR && !it.isAuxiliaryLogTile
+    }.toSet()
     private val compareIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.SINGLE }.toSet()
 
     private fun ctx(
@@ -233,6 +237,21 @@ class LogViewLayoutTest {
     }
 
     // ---- applicability and visibility --------------------------------------------------------------------------
+
+    @Test
+    fun protocolTilesAreContextualAndUserPlacementSurvivesSanitizing() {
+        val base = classicLogViewLayout(sizes)
+        assertSame(base, withAuxiliaryLogTiles(base, ctx()), "ordinary logs retain their original layout")
+        val context = ctx().copy(hasSections = true, hasMessageDetails = true)
+        val full = withAuxiliaryLogTiles(base, context)
+        assertTrue(LogViewSectionId.SECTIONS in leafIds(full))
+        assertTrue(LogViewSectionId.MESSAGE_DETAILS in leafIds(full))
+        val moved = dropTile(full, LogViewSectionId.SECTIONS, TileDropTarget.OnSection(NOTES, TileEdge.BOTTOM), LOG_VIEW_LONE_COLUMNS)
+        val sanitized = sanitizeLogViewLayoutState(moved, emptyList(), LogViewScope.SINGLE).first
+        assertTrue(LogViewSectionId.SECTIONS in leafIds(sanitized))
+        assertTrue(LogViewSectionId.MESSAGE_DETAILS in leafIds(sanitized))
+        assertSame(sanitized, withAuxiliaryLogTiles(sanitized, context), "opening another capture preserves the user's tile arrangement")
+    }
 
     @Test
     fun applicabilityMatrix() {
@@ -545,6 +564,7 @@ class LogViewLayoutTest {
         val expected = listOf(
             "Tags", "Message rules", "Log composition", "Highlighters", "Log level", "Sequences", "Issues", "Saved filters",
             "Log", "Original", "Log A", "Log B", "Original A", "Original B", "Notes", "Diagram library", "AI assistant", "Video", "Toolbar",
+            "Sections", "Message details",
         )
         assertEquals(expected, LogViewSectionId.entries.map { logViewTileTitle(it) })
         assertEquals("Below Notes", logViewDropLabel(TileDropTarget.OnSection(NOTES, TileEdge.BOTTOM)))
@@ -737,7 +757,7 @@ class LogViewLayoutTest {
     @Test
     fun onlyTheLogAndOriginalTilesKeepTheirColumnFromScrolling() {
         // The toolbar tile is a content-sized tile of a scrolling column like any side section (it may scroll out of view there).
-        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B)
+        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B, LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS)
         LogViewSectionId.entries.forEach { assertEquals(it !in fixed, logViewScrollsInColumn(it), "scrolls($it)") }
     }
 

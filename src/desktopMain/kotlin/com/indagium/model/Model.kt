@@ -1033,6 +1033,11 @@ data class LogTab(
     val profileClockSignature: String? = null,
     /** Profile column headers are kept even for empty files so exporters can produce a header row. */
     val profileDisplayColumns: List<LogDisplayField> = emptyList(),
+    val logSections: List<LogFileSection> = emptyList(),
+    val selectedLogSectionId: String? = null,
+    val logSectionViews: Map<String, LogSectionViewState> = emptyMap(),
+    /** Last inspected message; transient, independent of toggling a row out of the selection. */
+    val inspectedRecordId: Int? = null,
     // Links this tab to a live capture recording session (ui/CaptureCoordinator.kt), if it's the
     // tab streaming one. Session-only, like tailing/search/tidMap above — deliberately ABSENT from
     // AutosaveCodec's tabToken()/tabShellFromToken()/persistedSnapshot(). A capture cannot survive
@@ -1854,6 +1859,8 @@ enum class LogViewSectionId(val key: String, val group: LogViewTileGroup, val sc
 
     /** The main toolbar as a slim tile; present in a stored layout only while ToolbarPlacement.IN_LAYOUT, and never hideable. */
     TOOLBAR("toolbar", LogViewTileGroup.NONE, LogViewScope.SINGLE),
+    SECTIONS("sections", LogViewTileGroup.NONE, LogViewScope.SINGLE),
+    MESSAGE_DETAILS("message_details", LogViewTileGroup.NONE, LogViewScope.SINGLE),
     ;
 
     companion object {

@@ -2,6 +2,7 @@ package com.indagium.utils
 
 import com.indagium.model.*
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -19,7 +20,10 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 private const val MAX_PROFILE_RECORD_CHARS = 256 * 1024
+private const val MAX_JSON_RECORD_DEPTH = 128
 private const val MAX_PROFILE_FIELDS = 128
+private const val JSON_SCAN_CANCELLATION_CHARS = 4096
+private const val MAX_CONTINUATION_LINES = 2_000
 private const val MAX_CSV_HEADER_SCAN_LINES = 1000
 private const val MAX_PROFILE_FIELD_VALUE_CHARS = 4096
 private const val MAX_PROFILE_FIELD_KEY_CHARS = 128
@@ -45,13 +49,19 @@ private val MILLIS_PER_SECOND_DECIMAL = BigDecimal("1000")
 private val MICROSECONDS_TO_MILLIS = BigDecimal("0.001")
 private val NANOSECONDS_TO_MILLIS = BigDecimal("0.000001")
 
-/** Chooses only high-confidence content signatures; arbitrary JSON and CSV remain ordinary text. */
+/** Chooses strong JSON/log signatures; a `.json` document may be structured without log aliases. */
+@Suppress("ReturnCount") // One early return per signature, strongest first.
 internal fun detectBuiltInLogProfile(sample: ByteArray, fileName: String?): LogFormatProfile? {
     val text = runCatching { openLogTextReader(ByteArrayInputStream(sample)).use { it.readText() } }.getOrDefault("")
     val lines = text.lineSequence().filter(String::isNotBlank).take(24).toList()
     if (lines.isEmpty()) return null
-    val jsonObjects = lines.mapNotNull(::jsonObjectFields)
-    if (jsonObjects.size >= maxOf(2, (lines.size * SIGNATURE_MATCH_SHARE).toInt()) &&
+    if (isMetadataJsonSample(text)) return metadataJsonProfile()
+    val jsonRaws = scanJsonObjectRecordRaws(text)
+    val jsonObjects = jsonRaws.mapNotNull(::jsonObjectFields)
+    if (jsonObjects.singleOrNull()?.let(::hasRecognizedJsonLogFields) == true) {
+        return BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
+    }
+    if (jsonObjects.size >= maxOf(2, (jsonRaws.size * SIGNATURE_MATCH_SHARE).toInt()) &&
         jsonObjects.count(::hasRecognizedJsonLogFields) >= maxOf(2, (jsonObjects.size * SIGNATURE_MATCH_SHARE).toInt())
     ) return BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
     val signatureThreshold = maxOf(2, (lines.size * SIGNATURE_MATCH_SHARE).toInt())
@@ -61,9 +71,16 @@ internal fun detectBuiltInLogProfile(sample: ByteArray, fileName: String?): LogF
     if (lines.count { RFC3164_REGEX.matchEntire(it) != null } >= maxOf(2, (lines.size * SIGNATURE_MATCH_SHARE).toInt())) {
         return BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.SYSLOG_RFC3164 }
     }
-    if (fileName?.substringAfterLast('.', "")?.lowercase() in setOf("jsonl", "ndjson") &&
+    val extension = fileName?.substringAfterLast('.', "")?.lowercase()
+    if (extension in setOf("jsonl", "ndjson") &&
         jsonObjects.singleOrNull()?.let(::hasRecognizedJsonLogFields) == true
     ) return BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
+    if (extension == "json" && text.trimStart().startsWith('{') && jsonRaws.size == 1 && jsonObjects.size == 1) {
+        return BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
+    }
+    if (extension == "json" && runCatching { Json.parseToJsonElement(text) is JsonArray }.getOrDefault(false)) {
+        return BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
+    }
     return null
 }
 
@@ -85,8 +102,13 @@ internal fun detectAndroidDiagnosticProfile(sample: ByteArray): LogFormatProfile
         ?.takeIf { hasAnrHeader || hasBugreportLogSection }
 }
 
-internal fun parseProfileLog(input: InputStream, profile: LogFormatProfile, startId: Int = 1, sourceClockId: String? = null): ParsedLog {
+internal fun parseProfileLog(
+    input: InputStream, profile: LogFormatProfile, startId: Int = 1, sourceClockId: String? = null, fileName: String? = null,
+): ParsedLog {
     validateLogFormatProfile(profile)
+    if (profile.engine == LogFormatEngine.METADATA_JSON) {
+        return openLogTextReader(input).use { parseMetadataJson(it, profile, startId, sourceClockId, sectionNameHint = fileName) }
+    }
     return openLogTextReader(input).use { reader -> parseProfileSequence(reader.lineSequence(), profile, startId, sourceClockId) }
 }
 
@@ -121,7 +143,10 @@ fun parseLogFormatPreview(
     } else {
         decoded
     }
-    val parsed = parseProfileSequence(completeText.lineSequence(), profile, 1, sourceClockId)
+    val parsed = parseProfileSequence(
+        completeText.lineSequence(), profile, 1, sourceClockId,
+        includeIncompleteJsonTail = !truncated,
+    )
     return if (truncated) parsed.copy(diagnostics = parsed.diagnostics + "Preview is limited to the first ${maxBytes / 1024} KB.") else parsed
 }
 
@@ -180,12 +205,16 @@ private fun parseProfileSequence(
     startId: Int,
     sourceClockId: String?,
     sourceLineOffset: Long = 0,
+    includeIncompleteJsonTail: Boolean = true,
 ): ParsedLog {
     validateLogFormatProfile(profile)
     require(sourceLineOffset >= 0) { "Source line offset cannot be negative." }
     val diagnostics = mutableListOf<String>()
     val lineCounter = ProfileLineCounter(sourceLineOffset)
     val countedLines = lineCounter.wrap(lines)
+    if (profile.engine == LogFormatEngine.METADATA_JSON) {
+        return parseMetadataJson(sequenceReader(countedLines), profile, startId, sourceClockId, sourceLineOffset)
+    }
     if (profile.engine == LogFormatEngine.LOGCAT) {
         val entries = parseLogcatLines(countedLines, startId)
         return ParsedLog(LogFormat.LOGCAT, entries, profile, sourceClockId = sourceClockId, sourceLineCount = lineCounter.count)
@@ -201,12 +230,17 @@ private fun parseProfileSequence(
     }
     val records = when (profile.engine) {
         LogFormatEngine.PLAIN_TEXT -> physicalLines(countedLines, sourceLineOffset)
-        LogFormatEngine.REGEX -> machineRecords(countedLines) { RegexRecordMachine(profile, diagnostics, sourceLineOffset) }
-        LogFormatEngine.JSON_LINES -> jsonRecords(countedLines, profile, diagnostics, sourceLineOffset)
+        LogFormatEngine.REGEX -> machineRecords(countedLines) {
+            continuationMachine(profile, diagnostics, sourceLineOffset) ?: RegexRecordMachine(profile, diagnostics, sourceLineOffset)
+        }
+        LogFormatEngine.JSON_LINES -> jsonRecords(countedLines, profile, diagnostics, sourceLineOffset, includeIncompleteJsonTail)
         LogFormatEngine.CSV -> machineRecords(countedLines) { CsvRecordMachine(profile, diagnostics, null, sourceLineOffset) }
-        LogFormatEngine.SYSLOG_RFC5424 -> syslogRecords(countedLines, diagnostics, true, sourceLineOffset)
-        LogFormatEngine.SYSLOG_RFC3164 -> syslogRecords(countedLines, diagnostics, false, sourceLineOffset)
-        LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.LOGFMT, LogFormatEngine.CRI -> error("Handled above.")
+        LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 ->
+            continuationMachine(profile, diagnostics, sourceLineOffset)?.let { machine -> machineRecords(countedLines) { machine } }
+                ?: syslogRecords(countedLines, diagnostics, profile.engine == LogFormatEngine.SYSLOG_RFC5424, sourceLineOffset)
+        LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.LOGFMT, LogFormatEngine.CRI,
+        LogFormatEngine.METADATA_JSON ->
+            error("Handled above.")
     }
     val timeParser = ProfileTimeParser(profile, sourceClockId)
     val compactor = ProfileRowCompactor()
@@ -256,6 +290,21 @@ internal interface ProfileRecordMachine {
 
     /** Adds the record still held at the end of the input, if any. */
     fun finish(out: MutableList<ProfileRecord>)
+
+    /** Allows previews to omit an open trailing record at a bounded sample edge. */
+    fun finish(out: MutableList<ProfileRecord>, includeIncomplete: Boolean) = finish(out)
+
+    /** Whether the machine currently holds a record that has not reached its boundary yet. */
+    fun hasPendingRecord(): Boolean = false
+
+    /** Physical source line that the first result from a seeded pending record should replace. */
+    fun pendingReplacementStartLine(): Long? = null
+
+    /**
+     * Adds the held record as it stands, without closing it, when a tail should show it now and
+     * replace it once more lines join. Machines whose open record is not yet presentable add nothing.
+     */
+    fun pendingSnapshot(out: MutableList<ProfileRecord>) = Unit
 }
 
 private fun machineRecords(
@@ -306,23 +355,142 @@ internal class RegexRecordMachine(
         }
     }
 
+    override fun hasPendingRecord(): Boolean = current.isNotEmpty()
+
     private fun emitCurrent(parseAllowed: Boolean, out: MutableList<ProfileRecord>) {
         if (current.isEmpty()) return
-        val raw = current.toString()
-        val groups = if (parseAllowed) matcher.groups(raw) else null
-        val fields = groups?.let { groupValues ->
-            val mapped = linkedMapOf<String, String>()
-            profile.fieldMappings.forEach { (role, source) ->
-                source.toIntOrNull()?.let { index -> groupValues.getOrNull(index)?.let { mapped[role.name] = it } }
-            }
-            profile.attributes.forEach { attribute ->
-                attribute.source.toIntOrNull()?.let { index -> groupValues.getOrNull(index)?.let { mapped[attribute.id] = it } }
-            }
-            mapped
-        }.orEmpty()
-        if (groups == null) diagnostics.addLimited("Regex did not match a record; original text was kept.")
-        out += ProfileRecord(raw, fields, parseFields = groups != null, sourceStartLine = start, sourceEndLine = end)
+        val record = regexRecord(profile, if (parseAllowed) matcher else null, current.toString(), start, end)
+        if (!record.parseFields) diagnostics.addLimited("Regex did not match a record; original text was kept.")
+        out += record
         current = StringBuilder()
+    }
+}
+
+/** One record from [raw]: the mapped capture groups, or the raw text alone when [matcher] is null or does not match. */
+private fun regexRecord(
+    profile: LogFormatProfile,
+    matcher: BoundedProfileRegexMatcher?,
+    raw: String,
+    start: Long,
+    end: Long,
+): ProfileRecord {
+    val groups = matcher?.groups(raw)
+    val fields = groups?.let { groupValues ->
+        val mapped = linkedMapOf<String, String>()
+        profile.fieldMappings.forEach { (role, source) ->
+            source.toIntOrNull()?.let { index -> groupValues.getOrNull(index)?.let { mapped[role.name] = it } }
+        }
+        profile.attributes.forEach { attribute ->
+            attribute.source.toIntOrNull()?.let { index -> groupValues.getOrNull(index)?.let { mapped[attribute.id] = it } }
+        }
+        mapped
+    }.orEmpty()
+    return ProfileRecord(raw, fields, parseFields = groups != null, sourceStartLine = start, sourceEndLine = end)
+}
+
+/**
+ * The machine for formats whose record is one header line that other lines may follow: syslog and
+ * a single-line regex. Null when the profile switched the joining off or uses another engine.
+ */
+internal fun continuationMachine(
+    profile: LogFormatProfile,
+    diagnostics: MutableList<String>,
+    sourceLineOffset: Long,
+): ProfileRecordMachine? {
+    if (!profile.joinUnmatchedLines) return null
+    return when (profile.engine) {
+        LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 -> {
+            val rfc5424 = profile.engine == LogFormatEngine.SYSLOG_RFC5424
+            ContinuationJoinMachine(diagnostics, sourceLineOffset, "A syslog record with an invalid header was kept as raw text.") { raw, line ->
+                syslogLineRecord(raw, line, rfc5424)
+            }
+        }
+        LogFormatEngine.REGEX -> {
+            if (profile.multilineStartPattern.isNotBlank()) return null
+            val matcher = BoundedProfileRegexMatcher(
+                profile.regexPattern.takeIf(String::isNotBlank) ?: error("Choose a record regex before using the Regex engine."),
+            )
+            ContinuationJoinMachine(diagnostics, sourceLineOffset, "Regex did not match a record; original text was kept.") { raw, line ->
+                regexRecord(profile, matcher, raw, line, line)
+            }
+        }
+        else -> null
+    }
+}
+
+/**
+ * Keeps the last record that matched the format and adds the lines after it that do not match, so
+ * a stack trace printed under a log line stays one record. A line that does not match and has no
+ * record above it is kept as raw text. Blank lines are skipped, as the line-by-line parse did.
+ */
+internal class ContinuationJoinMachine(
+    private val diagnostics: MutableList<String>,
+    sourceLineOffset: Long,
+    private val unmatchedDiagnostic: String,
+    private val parseLine: (raw: String, lineNumber: Long) -> ProfileRecord,
+) : ProfileRecordMachine {
+    private var head: ProfileRecord? = null
+    private val extraRaw = StringBuilder()
+    private var extraLines = 0
+    private var endLine = 0L
+
+    /** False once [pendingSnapshot] has handed out the held record in its current state. */
+    private var heldChanged = false
+    override var lineNumber: Long = sourceLineOffset
+
+    override fun accept(line: String, out: MutableList<ProfileRecord>) {
+        lineNumber++
+        if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
+        if (line.isBlank()) return
+        val record = parseLine(line, lineNumber)
+        val held = head
+        val fits = held != null && extraLines < MAX_CONTINUATION_LINES &&
+            held.raw.length + extraRaw.length + line.length < MAX_PROFILE_RECORD_CHARS
+        if (!record.parseFields && fits) {
+            extraRaw.append('\n').append(line)
+            extraLines++
+            endLine = lineNumber
+            heldChanged = true
+            return
+        }
+        emitHeld(out)
+        if (record.parseFields) {
+            head = record
+            endLine = lineNumber
+            heldChanged = true
+        } else {
+            diagnostics.addLimited(unmatchedDiagnostic)
+            out += record
+        }
+    }
+
+    override fun finish(out: MutableList<ProfileRecord>) = emitHeld(out)
+
+    override fun hasPendingRecord(): Boolean = head != null
+
+    override fun pendingReplacementStartLine(): Long? = head?.sourceStartLine
+
+    override fun pendingSnapshot(out: MutableList<ProfileRecord>) {
+        if (heldChanged) heldRecord()?.let { out += it }
+        heldChanged = false
+    }
+
+    private fun emitHeld(out: MutableList<ProfileRecord>) {
+        // A snapshot already handed out this exact state; emitting it again would duplicate the row.
+        if (heldChanged) heldRecord()?.let { out += it }
+        head = null
+        heldChanged = false
+        extraRaw.setLength(0)
+        extraLines = 0
+    }
+
+    private fun heldRecord(): ProfileRecord? {
+        val held = head ?: return null
+        if (extraLines == 0) return held
+        val messageKey = LogFieldRole.MESSAGE.name
+        // The extra lines continue the message; without a message field the raw text carries them.
+        val fields = held.fields[messageKey]?.let { message -> held.fields + (messageKey to message + extraRaw) } ?: held.fields
+        return held.copy(raw = held.raw + extraRaw, fields = fields, sourceEndLine = endLine)
     }
 }
 
@@ -332,47 +500,278 @@ private fun jsonRecords(
     profile: LogFormatProfile,
     diagnostics: MutableList<String>,
     sourceLineOffset: Long,
+    includeIncompleteTail: Boolean = true,
 ): Sequence<ProfileRecord> = sequence {
-    var lineNumber = sourceLineOffset
-    for (raw in lines) {
+    val machine = JsonRecordMachine(profile, diagnostics, sourceLineOffset)
+    val ready = ArrayList<ProfileRecord>(2)
+    for (line in lines) {
+        machine.accept(line, ready)
+        for (record in ready) yield(record)
+        ready.clear()
+    }
+    machine.finish(ready, includeIncompleteTail)
+    for (record in ready) yield(record)
+}
+
+/** Scans object boundaries across lines and emits each top-level array element independently. */
+internal class JsonRecordMachine(
+    private val profile: LogFormatProfile?,
+    private val diagnostics: MutableList<String>,
+    sourceLineOffset: Long,
+) : ProfileRecordMachine {
+    private val current = StringBuilder()
+    private val stack = ArrayList<Char>(16)
+    private var arrayMode = false
+    private var recordRoot: Char? = null
+    private var scalarArrayItem = false
+    private var scalarStringItem = false
+    private var elementComplete = false
+    private var inString = false
+    private var escaped = false
+    private var invalidStructure = false
+    private var startLine = 0L
+    private var rootIndent = 0
+    private var scannedChars = 0
+    private var arrayTouchedThisLine = false
+    private var arrayClosedThisLine = false
+    override var lineNumber: Long = sourceLineOffset
+
+    override fun hasPendingRecord(): Boolean = current.isNotEmpty()
+
+    fun hasOpenArrayEnvelope(): Boolean = arrayMode
+
+    fun arrayTouchedOnLastLine(): Boolean = arrayTouchedThisLine
+
+    fun arrayClosedOnLastLine(): Boolean = arrayClosedThisLine
+
+    override fun pendingReplacementStartLine(): Long? = startLine
+
+    // A character scanner over string, escape, nesting and array state; splitting it would scatter that state.
+    @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements", "ComplexCondition")
+    override fun accept(line: String, out: MutableList<ProfileRecord>) {
         lineNumber++
+        arrayTouchedThisLine = arrayMode
+        arrayClosedThisLine = false
         if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
-        if (raw.isBlank()) continue
-        if (raw.length > MAX_PROFILE_RECORD_CHARS) {
-            diagnostics.addLimited("An oversized JSON record was kept as raw text.")
-            yield(ProfileRecord(raw, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber))
-            continue
+        if (current.isNotEmpty() && shouldRecoverAt(line)) emitMalformed(out, lineNumber - 1)
+        if (current.isNotEmpty()) current.append('\n')
+        var index = 0
+        while (index < line.length) {
+            if (current.isEmpty()) {
+                while (index < line.length && line[index].isWhitespace()) index++
+                if (index >= line.length) return
+                val first = line[index]
+                if (arrayMode && (first == ',' || first == ']')) {
+                    if (first == ']') {
+                        arrayMode = false
+                        arrayClosedThisLine = true
+                    }
+                    index++
+                    continue
+                }
+                if (first == '[' && !arrayMode) {
+                    arrayMode = true
+                    arrayTouchedThisLine = true
+                    index++
+                    continue
+                }
+                // A tailed array can be seeded from its last row, without retaining its envelope.
+                // Treat a bare closing bracket or comma as syntax in either state.
+                if (first == ']' || first == ',') {
+                    index++
+                    continue
+                }
+                if (!arrayMode && first != '{') {
+                    // Preserve legacy malformed/ordinary JSON Lines rows as one raw physical row.
+                    out += ProfileRecord(line, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber)
+                    diagnostics.addLimited("An invalid JSON record was kept as raw text.")
+                    return
+                }
+                startRecord(first, lineNumber, index)
+            }
+            val c = line[index]
+            if (arrayMode && !inString && stack.isEmpty() && (c == ',' || c == ']')) {
+                emitCompleteElement(out, lineNumber)
+                if (c == ']') {
+                    arrayMode = false
+                    arrayClosedThisLine = true
+                }
+                index++
+                continue
+            }
+            index++
+            scannedChars++
+            if (!appendAndScan(c)) {
+                emitMalformed(out, lineNumber)
+                // A malformed closer invalidates this candidate. Do not interpret its suffix as a
+                // second event; the next physical root boundary is the bounded recovery point.
+                return
+            }
+            if (current.length > MAX_PROFILE_RECORD_CHARS) {
+                diagnostics.addLimited("An oversized JSON record was kept as raw text.")
+                emitMalformed(out, lineNumber)
+                return
+            }
+            if (elementComplete && !arrayMode) {
+                emitCompleteElement(out, lineNumber)
+            }
+            if (scannedChars >= JSON_SCAN_CANCELLATION_CHARS) {
+                checkParserCancellation()
+                scannedChars = 0
+            }
         }
-        val flattened = jsonObjectFields(raw)
-        if (flattened == null) {
-            diagnostics.addLimited("An invalid JSON record was kept as raw text.")
-            yield(ProfileRecord(raw, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber))
-            continue
+    }
+
+    override fun finish(out: MutableList<ProfileRecord>) = finish(out, includeIncomplete = true)
+
+    override fun finish(out: MutableList<ProfileRecord>, includeIncomplete: Boolean) {
+        if (current.isNotEmpty() && includeIncomplete) {
+            diagnostics.addLimited("An incomplete JSON record was kept as raw text.")
+            emitMalformed(out, lineNumber)
+        } else if (!includeIncomplete) {
+            resetRecord()
         }
-        val mapped = linkedMapOf<String, String>()
-        val aliases = mapOf(
-            LogFieldRole.TIMESTAMP to listOf("timestamp", "time", "ts", "@timestamp", "datetime"),
-            LogFieldRole.SEVERITY to listOf("level", "severity", "lvl", "log.level"),
-            LogFieldRole.COMPONENT to listOf("logger", "tag", "component", "service", "name"),
-            LogFieldRole.MESSAGE to listOf("message", "msg", "event", "log", "body"),
-            LogFieldRole.PROCESS_ID to listOf("pid", "process_id", "processId"),
-            LogFieldRole.THREAD_ID to listOf("tid", "thread", "thread_id", "threadId"),
-        )
-        LogFieldRole.entries.forEach { role ->
-            val configured = profile.fieldMappings[role]
-            val value = if (configured != null) {
-                flattened[configured]
-            } else {
-                aliases[role]?.firstNotNullOfOrNull { key ->
-                    flattened[key] ?: flattened.entries.firstOrNull { it.key.substringAfterLast('.') == key }?.value
+    }
+
+    private fun startRecord(first: Char, atLine: Long, indentation: Int) {
+        current.setLength(0)
+        stack.clear()
+        recordRoot = first
+        scalarArrayItem = arrayMode && first != '{' && first != '['
+        scalarStringItem = scalarArrayItem && first == '"'
+        elementComplete = false
+        startLine = atLine
+        rootIndent = indentation
+        scannedChars = 0
+        inString = false
+        escaped = false
+        invalidStructure = false
+    }
+
+    private fun appendAndScan(c: Char): Boolean {
+        current.append(c)
+        if (inString) {
+            when {
+                escaped -> escaped = false
+                c == '\\' -> escaped = true
+                c == '"' -> {
+                    inString = false
+                    if (scalarStringItem) elementComplete = true
                 }
             }
-            if (value != null) mapped[role.name] = value
+            return true
         }
-        profile.attributes.forEach { attribute -> flattened[attribute.source]?.let { mapped[attribute.id] = it } }
-        flattened.forEach { (key, value) -> mapped.putIfAbsent(key, value) }
-        yield(ProfileRecord(raw, mapped, sourceStartLine = lineNumber, sourceEndLine = lineNumber))
+        when (c) {
+            '"' -> {
+                inString = true
+                if (scalarArrayItem && !scalarStringItem) invalidStructure = true
+            }
+            '{', '[' -> {
+                stack += c
+                if (stack.size > MAX_JSON_RECORD_DEPTH) invalidStructure = true
+            }
+            '}', ']' -> {
+                val expected = if (c == '}') '{' else '['
+                if (stack.lastOrNull() != expected) return false
+                stack.removeAt(stack.lastIndex)
+                if (stack.isEmpty()) elementComplete = true
+            }
+        }
+        if (invalidStructure) return false
+        return true
     }
+
+    private fun emitCompleteElement(out: MutableList<ProfileRecord>, endLine: Long) {
+        val raw = current.toString().trim()
+        val fields = if (recordRoot == '{') {
+            profile?.let { jsonProfileFields(raw, it) }
+                ?: jsonObjectFields(raw)?.let { if (profile == null) emptyMap() else null }
+        } else {
+            null
+        }
+        if (fields == null) {
+            diagnostics.addLimited(
+                if (scalarArrayItem || (arrayMode && recordRoot != '{')) "A non-object JSON array element was kept as raw text."
+                else "An invalid JSON record was kept as raw text.",
+            )
+            out += ProfileRecord(raw, parseFields = false, sourceStartLine = startLine, sourceEndLine = endLine)
+        } else {
+            out += ProfileRecord(raw, fields, sourceStartLine = startLine, sourceEndLine = endLine)
+        }
+        resetRecord()
+    }
+
+    private fun emitMalformed(out: MutableList<ProfileRecord>, endLine: Long) {
+        if (current.isNotEmpty()) {
+            out += ProfileRecord(current.toString(), parseFields = false, sourceStartLine = startLine, sourceEndLine = endLine)
+        }
+        resetRecord()
+    }
+
+    private fun shouldRecoverAt(line: String): Boolean {
+        if (arrayMode || recordRoot != '{') return false
+        val indent = line.indexOfFirst { !it.isWhitespace() }
+        if (indent < 0 || indent > rootIndent) return false
+        val first = line[indent]
+        if (first != '{' && first != '[') return false
+        // Nested children normally indent beyond the root. If the held prefix is already invalid,
+        // this same-level root is the next recoverable event after a truncated/malformed object.
+        return runCatching { Json.parseToJsonElement(current.toString()) }.isFailure
+    }
+
+    private fun resetRecord() {
+        current.setLength(0)
+        stack.clear()
+        recordRoot = null
+        scalarArrayItem = false
+        scalarStringItem = false
+        elementComplete = false
+        inString = false
+        escaped = false
+        invalidStructure = false
+        scannedChars = 0
+    }
+}
+
+private fun jsonProfileFields(raw: String, profile: LogFormatProfile): Map<String, String>? {
+    val flattened = jsonObjectFields(raw) ?: return null
+    val mapped = linkedMapOf<String, String>()
+    val aliases = mapOf(
+        LogFieldRole.TIMESTAMP to listOf("timestamp", "time", "ts", "@timestamp", "datetime"),
+        LogFieldRole.SEVERITY to listOf("level", "severity", "lvl", "log.level"),
+        LogFieldRole.COMPONENT to listOf("logger", "tag", "component", "service", "name"),
+        LogFieldRole.MESSAGE to listOf("message", "msg", "event", "log", "body"),
+        LogFieldRole.PROCESS_ID to listOf("pid", "process_id", "processId"),
+        LogFieldRole.THREAD_ID to listOf("tid", "thread", "thread_id", "threadId"),
+    )
+    LogFieldRole.entries.forEach { role ->
+        val configured = profile.fieldMappings[role]
+        val value = if (configured != null) {
+            flattened[configured]
+        } else {
+            aliases[role]?.firstNotNullOfOrNull { key ->
+                flattened[key] ?: flattened.entries.firstOrNull { it.key.substringAfterLast('.') == key }?.value
+            }
+        }
+        if (value != null) mapped[role.name] = value
+    }
+    profile.attributes.forEach { attribute -> flattened[attribute.source]?.let { mapped[attribute.id] = it } }
+    flattened.forEach { (key, value) -> mapped.putIfAbsent(key, value) }
+    return mapped
+}
+
+/** Bounded content sniffing shared by generic JSON, Pino, Docker, and journal detection. */
+internal fun scanJsonObjectRecordRaws(text: String, maxRecords: Int = 24): List<String> {
+    if (maxRecords <= 0 || text.isEmpty()) return emptyList()
+    val machine = JsonRecordMachine(null, mutableListOf(), 0)
+    val records = ArrayList<ProfileRecord>(minOf(maxRecords, 8))
+    for (line in text.lineSequence()) {
+        machine.accept(line, records)
+        if (records.size >= maxRecords) break
+    }
+    // A sniff sample may end mid-record; it must not be mistaken for a candidate.
+    machine.finish(records, includeIncomplete = false)
+    return records.asSequence().filter { it.parseFields }.map { it.raw }.take(maxRecords).toList()
 }
 
 /**
@@ -433,6 +832,8 @@ internal class CsvRecordMachine(
         quoteState = CsvQuoteState.FIELD_START
     }
 
+    override fun hasPendingRecord(): Boolean = current.isNotEmpty()
+
     private fun mapCells(cells: List<String>): Map<String, String> {
         val fields = if (profile.hasHeader) {
             headers.orEmpty().zip(cells).toMap()
@@ -469,10 +870,11 @@ internal fun newTailRecordMachine(
     diagnostics: MutableList<String>,
     csvHeaders: List<String>?,
 ): ProfileRecordMachine? = when {
+    profile.engine == LogFormatEngine.JSON_LINES -> JsonRecordMachine(profile, diagnostics, 0)
     profile.engine == LogFormatEngine.CSV -> CsvRecordMachine(profile, diagnostics, csvHeaders, 0)
     profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank() ->
         RegexRecordMachine(profile, diagnostics, 0)
-    else -> null
+    else -> continuationMachine(profile, diagnostics, 0)
 }
 
 private fun syslogRecords(
@@ -486,23 +888,24 @@ private fun syslogRecords(
         lineNumber++
         if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
         if (raw.isBlank()) continue
-        val parsed = if (rfc5424) parseRfc5424StructuredData(raw) else parseRfc3164(raw)
-        if (parsed == null) {
-            diagnostics.addLimited("A syslog record with an invalid header was kept as raw text.")
-            yield(ProfileRecord(raw, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber))
-        } else {
-            val (fields, severity, timestamp) = parsed
-            yield(ProfileRecord(
-                raw,
-                fields,
-                severity,
-                timestamp,
-                sourceStartLine = lineNumber,
-                sourceEndLine = lineNumber,
-                dayOfYear = fields["day_of_year"]?.toShortOrNull() ?: NO_DATE,
-            ))
-        }
+        val record = syslogLineRecord(raw, lineNumber, rfc5424)
+        if (!record.parseFields) diagnostics.addLimited("A syslog record with an invalid header was kept as raw text.")
+        yield(record)
     }
+}
+
+private fun syslogLineRecord(raw: String, lineNumber: Long, rfc5424: Boolean): ProfileRecord {
+    val (fields, severity, timestamp) = (if (rfc5424) parseRfc5424StructuredData(raw) else parseRfc3164(raw))
+        ?: return ProfileRecord(raw, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber)
+    return ProfileRecord(
+        raw,
+        fields,
+        severity,
+        timestamp,
+        sourceStartLine = lineNumber,
+        sourceEndLine = lineNumber,
+        dayOfYear = fields["day_of_year"]?.toShortOrNull() ?: NO_DATE,
+    )
 }
 
 private fun parseRfc5424StructuredData(raw: String): Triple<Map<String, String>, String?, String?>? {
@@ -633,12 +1036,14 @@ internal fun recordToEntry(
     val tid = role(LogFieldRole.THREAD_ID)?.toIntOrNull() ?: 0
     val parsedTime = timeText?.let { timeParser.parse(it, fields["clock_time"]) }
     val profileFields = compactor.compact(fields)
+    // Docker's `log` and similar fields end with the line break of the original output; a row does not.
+    val messageText = (if (record.parseFields) role(LogFieldRole.MESSAGE) else null)?.withoutTrailingLineBreak()
     val displayColumns = profile.visibleColumns.map { visibleRole ->
         val value = when (visibleRole) {
             LogFieldRole.TIMESTAMP -> timeText.orEmpty()
             LogFieldRole.SEVERITY -> severityText.orEmpty()
             LogFieldRole.COMPONENT -> role(visibleRole).orEmpty()
-            LogFieldRole.MESSAGE -> role(visibleRole) ?: record.raw
+            LogFieldRole.MESSAGE -> messageText ?: role(visibleRole)?.withoutTrailingLineBreak() ?: record.raw
             LogFieldRole.PROCESS_ID, LogFieldRole.THREAD_ID -> role(visibleRole).orEmpty()
             else -> role(visibleRole).orEmpty()
         }
@@ -668,13 +1073,16 @@ internal fun recordToEntry(
         ts = parsedTime?.localTime ?: timeText.orEmpty(),
         level = level,
         tag = compactor.shared(role(LogFieldRole.COMPONENT).orEmpty()),
-        msg = if (record.parseFields) role(LogFieldRole.MESSAGE) ?: record.raw else record.raw,
+        msg = messageText ?: record.raw,
         pid = pid,
         tid = tid,
         recordMetadata = metadata,
         dayOfYear = record.dayOfYear,
     )
 }
+
+private fun String.withoutTrailingLineBreak(): String =
+    if (endsWith('\n') || endsWith('\r')) trimEnd('\n', '\r') else this
 
 /**
  * Stores one row's fields as two arrays. The key array is shared by every row with the same keys

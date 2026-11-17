@@ -14,7 +14,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +38,24 @@ private data class SourceFormatPreview(
     val profileId: String,
     val parsed: ParsedLog,
 )
+
+/** Shared by the real tab menu and its UI regression test. */
+@Composable
+internal fun LogFormatTabContextAction(state: AppState, tab: LogTab) {
+    CtxItem(icon = Icons.Outlined.Info, label = "Format details") {
+        state.tabCtx = null
+        state.logFormatDetailsTabId = tab.id
+    }
+}
+
+@Composable
+internal fun ActiveLogFormatDetailsDialog(state: AppState) {
+    state.logFormatDetailsTabId?.let { tabId ->
+        val exists = state.tab(tabId) != null
+        LaunchedEffect(tabId, exists) { if (!exists) state.logFormatDetailsTabId = null }
+        if (exists) LogFormatDetailsDialog(state, tabId, onDismiss = { state.logFormatDetailsTabId = null })
+    }
+}
 
 /** Per-tab view of the pinned parser, derived capabilities, and safe format-change flow. */
 @Composable
@@ -317,6 +338,7 @@ private fun engineName(engine: LogFormatEngine?): String = when (engine) {
     LogFormatEngine.SYSLOG_RFC3164 -> "Syslog RFC 3164"
     LogFormatEngine.LOGFMT -> "logfmt"
     LogFormatEngine.CRI -> "Kubernetes CRI"
+    LogFormatEngine.METADATA_JSON -> "JSON with metadata"
     null -> "legacy parser"
 }
 

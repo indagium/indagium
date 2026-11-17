@@ -13,7 +13,6 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.RecorderSnapshot
@@ -302,7 +301,6 @@ internal fun FileView(
         } == true
     val captureDeviceEvents = rememberCaptureDeviceEvents(state, tab)
     var importedRangeEditorOpen by remember(tab.id) { mutableStateOf(false) }
-    var formatDetailsOpen by remember(tab.id) { mutableStateOf(false) }
 
     // The F6 / panel-focus stops for the tiles that are showing, in the layout's reading order. Original and Log are one stop (the log
     // viewer has a single requester), as are all the filter tiles; Video and the Diagram library have no focus target of their own.
@@ -356,41 +354,6 @@ internal fun FileView(
             )
         }
         if (tab.contentState == TabContentState.LOADED) {
-            val pinnedFormat = remember(
-                tab.id,
-                tab.logFormatProfileId,
-                tab.logFormatProfileSnapshot,
-                state.settings.customLogFormatProfiles,
-            ) {
-                runCatching { state.pinnedLogFormatProfile(tab.id) }.getOrNull()
-            }
-            Row(
-                Modifier.fillMaxWidth().background(tc.p2).padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                AppText(
-                    pinnedFormat?.let { "${it.name} · revision ${it.revision}" }
-                        ?: if (tab.logFormatProfileId != null || tab.logFormatProfileSnapshot != null) {
-                            "Profile details unavailable"
-                        } else if (tab.logFormat == LogFormat.DLT) {
-                            "Automotive DLT · detected automatically"
-                        } else {
-                            "Android Logcat · detected automatically"
-                        },
-                    color = tc.ts,
-                    fontSize = 10.sp,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                )
-                AppButton(
-                    "Format details",
-                    onClick = { formatDetailsOpen = true },
-                    variant = ButtonVariant.Ghost,
-                    modifier = Modifier.testTag("tab-format-details-${tab.id}"),
-                    verticalPadding = 3.dp,
-                )
-            }
             LogFormatChooserStrip(state, tab, onReturnFocus = { runCatching { logViewerFr.requestFocus() } })
         }
         // The panels (filters, log, Notes, AI, Video) are tiles of one tiling surface; see LogViewTiling.kt. The horizontal filter bar
@@ -472,13 +435,6 @@ internal fun FileView(
                 state = state,
                 sessionId = archiveSession?.id ?: tab.captureSourceSessionId,
                 onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
-            )
-        }
-        if (formatDetailsOpen) {
-            LogFormatDetailsDialog(
-                state = state,
-                tabId = tab.id,
-                onDismiss = { formatDetailsOpen = false },
             )
         }
     }

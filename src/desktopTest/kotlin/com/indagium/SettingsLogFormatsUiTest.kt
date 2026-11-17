@@ -27,8 +27,10 @@ import com.indagium.model.LogLevel
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.ProfileTimestampKind
+import com.indagium.ui.ActiveLogFormatDetailsDialog
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
+import com.indagium.ui.LogFormatTabContextAction
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.SettingsPage
 import org.junit.After
@@ -264,10 +266,16 @@ class SettingsLogFormatsUiTest {
 
         rule.setContent {
             Box(Modifier.size(1120.dp, 700.dp)) {
-                state.tab(originalTabId)?.let { FileView(state, it) }
+                state.tab(originalTabId)?.let { tab ->
+                    FileView(state, tab)
+                    if (state.tabCtx != null) LogFormatTabContextAction(state, tab)
+                }
+                ActiveLogFormatDetailsDialog(state)
             }
         }
-        rule.onNodeWithTag("tab-format-details-$originalTabId").performClick()
+        rule.onNodeWithTag("tab-format-details-$originalTabId").assertDoesNotExist()
+        rule.runOnIdle { state.tabCtx = com.indagium.model.TabCtxMenuState(originalTabId, 10f, 10f) }
+        rule.onNodeWithText("Format details").performClick()
         rule.onNodeWithText("JSON Lines").assertExists()
         rule.onNodeWithTag("tab-log-format-profile").performClick()
         rule.waitForIdle()

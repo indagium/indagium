@@ -92,6 +92,8 @@ val ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES: List<LogFormatProfile> = listOf(
     ),
     LogFormatProfile(
         id = "http-common-combined",
+        // An access log has one request per line; a line that does not parse is damage, not a continuation.
+        joinUnmatchedLines = false,
         name = "HTTP Common / Combined",
         description = "Apache Common and Combined access logs with client, request, response status, byte count and optional referrer and user agent.",
         engine = LogFormatEngine.REGEX,

@@ -7,6 +7,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.DataObject
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -300,7 +302,7 @@ private fun LogViewTileSurface(
     val settings = state.settings
     val ctx = state.logViewTileContext(tab)
     val isVisible: (LogViewSectionId) -> Boolean = { logViewTileVisible(it, ctx, settings.logViewHidden) }
-    val baseLayout = state.currentLogViewLayout()
+    val baseLayout = state.logViewLayoutForTab(tab)
 
     // The chrome's toolbar bar can be dropped into these tiles: it asks the host to put the toolbar tile at the drop target.
     val bridge = LocalToolbarDock.current
@@ -325,7 +327,8 @@ private fun LogViewTileSurface(
     val layout = if (videoPin != null && baseVideo != null) baseLayout.withVideoSlot(baseVideo.first, videoPin) else baseLayout
 
     val projection = projectTileLayout(layout, isVisible)
-    val collapsibleTiles = projection?.let { columnTiles(it.root) }.orEmpty() + LOG_VIEW_FILTER_TILES.filterTo(HashSet(), isVisible)
+    val collapsibleTiles = projection?.let { columnTiles(it.root) }.orEmpty() + LOG_VIEW_FILTER_TILES.filterTo(HashSet(), isVisible) +
+        setOf(LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS)
     val collapsedTiles = collapsibleTiles.filterTo(HashSet()) { state.isLogViewTileCollapsed(it) }
     val toggles = remember { HashMap<LogViewSectionId, () -> Unit>() }
 
@@ -382,6 +385,24 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
 ) {
     val visibleFilters = LOG_VIEW_FILTER_TILES.filterTo(HashSet()) { isVisible(it) }
     ToolbarTile(state, focus.returnToLog)
+    if (isVisible(LogViewSectionId.SECTIONS)) {
+        Tile(
+            LogViewSectionId.SECTIONS,
+            TileSlot(
+                icon = Icons.Outlined.FolderOpen, title = "Sections", collapsible = true, maximizable = true,
+                body = { LogSections(state, tab) },
+            ),
+        )
+    }
+    if (isVisible(LogViewSectionId.MESSAGE_DETAILS)) {
+        Tile(
+            LogViewSectionId.MESSAGE_DETAILS,
+            TileSlot(
+                icon = Icons.Outlined.DataObject, title = "Message details", collapsible = true, maximizable = true,
+                body = { MessageDetailsTileBody(tab) },
+            ),
+        )
+    }
     BoundFilterPanel(
         state = state,
         tab = tab,

@@ -12,6 +12,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material3.Icon
@@ -74,6 +76,7 @@ import com.indagium.utils.isProfileProcessIdColumn
 import com.indagium.utils.isProfileThreadIdColumn
 import com.indagium.utils.kloggVariedColors
 import com.indagium.utils.passesFilter
+import com.indagium.utils.profileColumnLayout
 import com.indagium.utils.profileDisplayColumns
 import com.indagium.utils.profileDisplayTextProjection
 import com.indagium.utils.regexRanges
@@ -350,7 +353,8 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): State<C
     val computedState = remember(tab.id, applyFilter) {
         mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true, expandedAt = null))
     }
-    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
+    // Column visibility changes replace row presentation without changing the row count or IDs.
+    LaunchedEffect(tab.id, dataSize, lastId, tab.profileDisplayColumns, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
         val previous = computedState.value
         coroutineScope {
@@ -983,7 +987,7 @@ private fun remapProfileProcessIdRange(
 // can tint the row. [suppressLineTextColor] drops a klogg whole-line rule's foreground colour (LogRow
 // passes it for selected and crash rows, whose own backgrounds must stay readable); the tint itself
 // is LogRow's business.
-@Suppress("LongParameterList")
+@Suppress("LongParameterList", "CyclomaticComplexMethod") // One pass per row: every branch is a separate highlight source.
 internal fun buildLogLineRender(
     entry: LogEntry,
     highlighters: List<Highlighter>,
@@ -1003,6 +1007,8 @@ internal fun buildLogLineRender(
     // shorter text (remapHiddenPidTidRange), and processDisplay is ignored (there is no pid field).
     showPidTid: Boolean = true,
     errorHighlightStyle: ErrorHighlightStyle? = null,
+    // Column widths of a profile tab (profileColumnLayout); null leaves the columns unpadded.
+    profileColumnWidths: Map<String, Int>? = null,
 ): LogLineRender {
     // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
     // source of truth (utils/TextMatch.kt) — never against what's actually rendered below, which
@@ -1022,7 +1028,7 @@ internal fun buildLogLineRender(
     val lineText = visibleLogLineText(entry)
     val profileColumns = profileDisplayColumns(entry)
     val profileProjection = profileColumns?.let {
-        profileDisplayTextProjection(it, processDisplay, includeProcessThread = showPidTid)
+        profileDisplayTextProjection(it, processDisplay, includeProcessThread = showPidTid, columnWidths = profileColumnWidths)
     }
     val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext, errorHighlightStyle)
     // A klogg whole-line rule recolours every character of the row through the base colours below,
@@ -1091,11 +1097,14 @@ internal fun buildLogLineRender(
             remappedRanges(keywordRegexHighlightRanges(lineText, filter, regexContext), renderedLength, remap)
         }.orEmpty()
         val searchRanges = searchHighlight?.takeIf { it.query.isNotEmpty() }?.let { search ->
-            remappedRanges(
-                regexRanges(lineText, search.query, ignoreCase = !search.caseSensitive, regexContext = regexContext),
-                renderedLength,
-                remap,
-            )
+            val visibleRanges = regexRanges(lineText, search.query, ignoreCase = !search.caseSensitive, regexContext = regexContext)
+            when {
+                visibleRanges.isNotEmpty() -> remappedRanges(visibleRanges, renderedLength, remap)
+                entry.rawRecord?.let { raw ->
+                    regexRanges(raw, search.query, ignoreCase = !search.caseSensitive, regexContext = regexContext).isNotEmpty()
+                } == true && renderedLength > 0 -> listOf(0 to renderedLength)
+                else -> emptyList()
+            }
         }.orEmpty()
         val boundaries = styleBoundaries(
             renderedLength,
@@ -1377,6 +1386,8 @@ internal fun LogViewer(
     // no-op keeps preview/test call sites that don't wire it unaffected, same as the other optional
     // callbacks below.
     onToggleTimeDelta: () -> Unit = {},
+    metadataJsonTagVisible: Boolean? = null,
+    onToggleMetadataJsonTag: () -> Unit = {},
     /** Live source/config-aware availability supplied by FileView; null keeps preview callers working. */
     deltaTimeStatus: LogCapabilityStatus? = null,
     /** Live process-name availability supplied by BoundLogViewer; null keeps legacy tabs unchanged. */
@@ -1592,6 +1603,7 @@ internal fun LogViewer(
                     },
                 )
                 .onSizeChanged { toolbarWidthPx = it.width }
+                .testTag("log-view-options-toolbar-${tab.id}")
                 .pointerInput("toolbar-context", tab.id) {
                     awaitPointerEventScope {
                         while (true) {
@@ -1659,6 +1671,8 @@ internal fun LogViewer(
                 ToolbarOptionsPopup(
                     showRowNumbers = settings.showRowNumbers,
                     showMinimap = settings.showMinimap,
+                    metadataJsonTagVisible = metadataJsonTagVisible,
+                    onToggleMetadataJsonTag = { toolbarContextMenuOpen = false; onToggleMetadataJsonTag() },
                     processNameMode = tab.processNameMode,
                     manualProcessNamePicks = tab.manualProcessNamePicks,
                     processNamesEnabled = processNamesEnabled,
@@ -1734,7 +1748,7 @@ internal fun LogViewer(
                         IndeterminateLoadingLine(Modifier.width(180.dp))
                     }
                 } else {
-                    EmptyState(tc, totalCnt, onClearFilter)
+                    EmptyState(tc, totalCnt, onClearFilter, tab.logSections.firstOrNull { it.id == tab.selectedLogSectionId })
                 }
                 return
             }
@@ -2771,6 +2785,8 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.header,
+                    profileHeaderFont = mono,
                 )
                 ItemList(
                     listItems = allItems,
@@ -2861,6 +2877,8 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.header,
+                    profileHeaderFont = mono,
                 )
                 ItemList(
                     listItems = items,
@@ -3121,6 +3139,8 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.header,
+                    profileHeaderFont = mono,
                 )
                 ItemList(
                     items, computedItems.summary, rowBoundsAbs, boxPosY,
@@ -3654,8 +3674,13 @@ private fun LogRow(
     val density  = LocalDensity.current.density
     val entry    = item.entry
     val isSel    = entry.id in tab.selected
+    val structuredRecordSource = remember(entry, tab.logFormat) { expandableRecordSource(entry, tab.logFormat) }
+    var structuredRecordExpanded by remember(tab.id, entry.id) { mutableStateOf(false) }
+    var structuredDisclosureBounds by remember(tab.id, entry.id) { mutableStateOf<Pair<Float, Float>?>(null) }
+    val latestStructuredDisclosureBounds by rememberUpdatedState(structuredDisclosureBounds)
     var hov      by remember { mutableStateOf(false) }
     var rowRoot  by remember { mutableStateOf(Offset.Zero) }
+    val latestRowRoot by rememberUpdatedState(rowRoot)
     var sel      by remember(tab.id, entry.id) { mutableStateOf(TextRange.Zero) }
     val latestIsSelected by rememberUpdatedState(isSel)
     val latestSelection by rememberUpdatedState(sel)
@@ -3726,9 +3751,10 @@ private fun LogRow(
     // isSel is a key because a klogg whole-line rule's text colour is dropped on selected rows
     // (see buildLogLineRender's suppressLineTextColor) — the row's selection background must stay
     // readable — so the text has to be rebuilt when selection toggles.
+    val profileLayout = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)
     val lineRender = remember(
         tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
-        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid, errorHighlightStyle,
+        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid, errorHighlightStyle, profileLayout,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
@@ -3749,12 +3775,13 @@ private fun LogRow(
             pidFieldWidth = pidFieldChars,
             cellBg = cellBg,
             suppressLineTextColor = isSel || isCrashGroupRow,
+            profileColumnWidths = profileLayout?.widths,
             showPidTid = showPidTid,
             errorHighlightStyle = errorHighlightStyle,
         )
         if (autoWrap) built else built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars))
     }
-    val annoLine = lineRender.text
+    val annoLine = if (structuredRecordSource != null) compactRecordSummary(lineRender.text) else lineRender.text
     val wholeLineHl = lineRender.wholeLine
     val wholeLineBgHl = wholeLineHl?.takeIf { it.backgroundEnabled }
 
@@ -3781,360 +3808,400 @@ private fun LogRow(
     val stripeHl = wholeLineHl?.takeIf { !isSel && !it.isKloggStyle() && it.backgroundEnabled }
     val groupColor = item.groupColor
 
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .heightIn(min = 22.dp)
-            .testTag("log-row-$panelKey-${entry.id}")
-            .semantics { selected = isSel }
-            .pointerHoverIcon(PointerIcon(AwtCursor.getDefaultCursor()), overrideDescendants = true)
-            .background(bg)
-            .drawWithContent {
-                drawContent()
-                selectionOverlay?.let { drawRect(it) }
-            }
-            .onGloballyPositioned { coords ->
-                val pos = coords.positionInRoot()
-                rowBoundsAbs[entry.id] = pos.y to (pos.y + coords.size.height)
-                rowRoot = pos
-            }
-            // Keys include tab.id so coroutines restart when the same entry ID appears in a different tab
-            .pointerInput("rc", tab.id, entry.id) {
-                val clickScope = CoroutineScope(coroutineContext)
-                awaitPointerEventScope {
-                    var pressPos: Offset? = null
-                    var pressShift = false
-                    var pressMulti = false
-                    var pressUnmodified = false
-                    var pressDragged = false
-                    var pendingSelectedRowToggle: Job? = null
-                    var pendingDoubleClickGestureExpiry: Job? = null
-                    var lastPrimaryPressMs = 0L
-                    var lastPrimaryPressPos = Offset.Unspecified
-                    var doubleClickInProgress = false
-                    try {
-                        while (true) {
-                            val ev = awaitPointerEvent(PointerEventPass.Initial)
-                            when (ev.type) {
-                                PointerEventType.Press -> {
-                                    val mods = ev.keyboardModifiers
-                                    if (ev.buttons.isSecondaryPressed) {
-                                        pendingSelectedRowToggle?.cancel()
-                                        ev.changes.forEach { it.consume() }
-                                        val selText = if (!sel.collapsed)
-                                            runCatching {
-                                                stripVisualWrapBreaks(annoLine.text.substring(sel.min, sel.max))
-                                            }.getOrElse { "" }
-                                        else ""
-                                        val ch = ev.changes.firstOrNull() ?: continue
-                                        latestOnCtxMenu(
-                                            entry.id,
-                                            (rowRoot.x + ch.position.x) / density,
-                                            (rowRoot.y + ch.position.y) / density,
-                                            selText,
-                                        )
-                                    } else if (ev.buttons.isPrimaryPressed) {
-                                        // A selected row's first click in a double-click sequence would
-                                        // otherwise deselect it before BasicTextField can select the
-                                        // word. Delay only that plain selected-row toggle; a second
-                                        // press cancels it, while an ordinary single click still
-                                        // deselects after the normal desktop double-click interval.
-                                        pendingSelectedRowToggle?.cancel()
-                                        val position = ev.changes.firstOrNull()?.position
-                                        val now = System.currentTimeMillis()
-                                        doubleClickInProgress = position != null &&
-                                            lastPrimaryPressPos != Offset.Unspecified &&
-                                            now - lastPrimaryPressMs <= DOUBLE_CLICK_WINDOW_MS &&
-                                            (position - lastPrimaryPressPos).getDistance() <= 10f
-                                        lastPrimaryPressMs = now
-                                        if (position != null) lastPrimaryPressPos = position
-                                        pressPos = position
-                                        pressShift = mods.isShiftPressed
-                                        pressMulti = mods.isCtrlPressed || mods.isMetaPressed
-                                        pressUnmodified = !mods.isShiftPressed && !mods.isCtrlPressed &&
-                                            !mods.isMetaPressed && !mods.isAltPressed
-                                        pressDragged = false
-                                        if (pressUnmodified) {
-                                            if (doubleClickInProgress) {
-                                                pendingDoubleClickGestureExpiry?.cancel()
-                                            } else {
-                                                onLogRowDoubleClickGestureStarted?.invoke()
-                                                pendingDoubleClickGestureExpiry?.cancel()
-                                                pendingDoubleClickGestureExpiry = clickScope.launch {
-                                                    kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
-                                                    onLogRowDoubleClickGestureExpired?.invoke()
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 22.dp)
+                .testTag("log-row-$panelKey-${entry.id}")
+                .semantics { selected = isSel }
+                .pointerHoverIcon(PointerIcon(AwtCursor.getDefaultCursor()), overrideDescendants = true)
+                .background(bg)
+                .drawWithContent {
+                    drawContent()
+                    selectionOverlay?.let { drawRect(it) }
+                }
+                .onGloballyPositioned { coords ->
+                    val pos = coords.positionInRoot()
+                    rowBoundsAbs[entry.id] = pos.y to (pos.y + coords.size.height)
+                    rowRoot = pos
+                }
+                // Keys include tab.id so coroutines restart when the same entry ID appears in a different tab
+                .pointerInput("rc", tab.id, entry.id) {
+                    val clickScope = CoroutineScope(coroutineContext)
+                    awaitPointerEventScope {
+                        var pressPos: Offset? = null
+                        var pressShift = false
+                        var pressMulti = false
+                        var pressUnmodified = false
+                        var pressDragged = false
+                        var pressOnRecordDisclosure = false
+                        var pendingSelectedRowToggle: Job? = null
+                        var pendingDoubleClickGestureExpiry: Job? = null
+                        var lastPrimaryPressMs = 0L
+                        var lastPrimaryPressPos = Offset.Unspecified
+                        var doubleClickInProgress = false
+                        try {
+                            while (true) {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                when (ev.type) {
+                                    PointerEventType.Press -> {
+                                        val mods = ev.keyboardModifiers
+                                        if (ev.buttons.isSecondaryPressed) {
+                                            pendingSelectedRowToggle?.cancel()
+                                            ev.changes.forEach { it.consume() }
+                                            val selText = if (!sel.collapsed)
+                                                runCatching {
+                                                    stripVisualWrapBreaks(annoLine.text.substring(sel.min, sel.max))
+                                                }.getOrElse { "" }
+                                            else ""
+                                            val ch = ev.changes.firstOrNull() ?: continue
+                                            latestOnCtxMenu(
+                                                entry.id,
+                                                (rowRoot.x + ch.position.x) / density,
+                                                (rowRoot.y + ch.position.y) / density,
+                                                selText,
+                                            )
+                                        } else if (ev.buttons.isPrimaryPressed) {
+                                            // A selected row's first click in a double-click sequence would
+                                            // otherwise deselect it before BasicTextField can select the
+                                            // word. Delay only that plain selected-row toggle; a second
+                                            // press cancels it, while an ordinary single click still
+                                            // deselects after the normal desktop double-click interval.
+                                            pendingSelectedRowToggle?.cancel()
+                                            val position = ev.changes.firstOrNull()?.position
+                                            val now = System.currentTimeMillis()
+                                            doubleClickInProgress = position != null &&
+                                                lastPrimaryPressPos != Offset.Unspecified &&
+                                                now - lastPrimaryPressMs <= DOUBLE_CLICK_WINDOW_MS &&
+                                                (position - lastPrimaryPressPos).getDistance() <= 10f
+                                            lastPrimaryPressMs = now
+                                            if (position != null) lastPrimaryPressPos = position
+                                            pressPos = position
+                                            pressShift = mods.isShiftPressed
+                                            pressMulti = mods.isCtrlPressed || mods.isMetaPressed
+                                            pressUnmodified = !mods.isShiftPressed && !mods.isCtrlPressed &&
+                                                !mods.isMetaPressed && !mods.isAltPressed
+                                            pressDragged = false
+                                            val disclosureBounds = latestStructuredDisclosureBounds
+                                            pressOnRecordDisclosure = structuredRecordSource != null && position != null &&
+                                                disclosureBounds?.let { (left, right) ->
+                                                    val xInRoot = latestRowRoot.x + position.x
+                                                    xInRoot in left..right
+                                                } == true
+                                            if (pressUnmodified && !pressOnRecordDisclosure) {
+                                                if (doubleClickInProgress) {
+                                                    pendingDoubleClickGestureExpiry?.cancel()
+                                                } else {
+                                                    onLogRowDoubleClickGestureStarted?.invoke()
+                                                    pendingDoubleClickGestureExpiry?.cancel()
+                                                    pendingDoubleClickGestureExpiry = clickScope.launch {
+                                                        kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
+                                                        onLogRowDoubleClickGestureExpired?.invoke()
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                                PointerEventType.Move -> {
-                                    val start = pressPos
-                                    val current = ev.changes.firstOrNull()?.position
-                                    if (start != null && current != null && (current - start).getDistance() > 4f) {
-                                        pressDragged = true
-                                    }
-                                }
-                                PointerEventType.Release -> {
-                                    // sel reflects whatever BasicTextField's own gesture handling did
-                                    // with THIS click by the time its Release arrives here — text
-                                    // selection (double-click-to-select-word, in particular) happens on
-                                    // the PRESS half of a click, not the release, so by Release time
-                                    // `sel` already carries the new selection Press produced. A plain
-                                    // click (cursor placement, no drag) always ends up COLLAPSED, so
-                                    // this doesn't change ordinary click-to-select-row behavior at all.
-                                    //
-                                    // Without the sel.collapsed check: a double-click to select a word
-                                    // is, from this handler's point of view, two ordinary clicks in
-                                    // quick succession. AppState.selRow TOGGLES an already-selected row
-                                    // off on a repeat plain click — so click 1 selected the row, click 2
-                                    // (the second half of the double-click) immediately deselected it
-                                    // again, and the Δt column's anchor mode flipped on then off inside
-                                    // one user gesture — visible as the flicker this guards against.
-                                    // Modified clicks select rows even when BasicTextField also
-                                    // extends its text selection. Unmodified word selection still
-                                    // suppresses the row toggle during a double-click.
-                                    val selectsRows = latestSelection.collapsed || pressMulti || pressShift
-                                    if (!doubleClickInProgress && !pressDragged && pressPos != null && selectsRows) {
-                                        // The delayed plain deselection belongs to this click's sync
-                                        // policy. Capture its callback now so re-linking during the
-                                        // double-click window cannot turn an earlier Independent
-                                        // click into a new Linked selection event.
-                                        val selectionHandler = latestOnSelRow
-                                        if (latestIsSelected && !pressMulti && !pressShift) {
-                                            pendingSelectedRowToggle = clickScope.launch {
-                                                kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
-                                                selectionHandler(entry.id, false, false)
-                                            }
-                                        } else {
-                                            selectionHandler(entry.id, pressMulti, pressShift)
+                                    PointerEventType.Move -> {
+                                        val start = pressPos
+                                        val current = ev.changes.firstOrNull()?.position
+                                        if (start != null && current != null && (current - start).getDistance() > 4f) {
+                                            pressDragged = true
                                         }
                                     }
-                                    // Run alongside (rather than instead of) BasicTextField's own
-                                    // second-click handling. It therefore preserves desktop word
-                                    // selection while adding only the independent video seek action.
-                                    if (doubleClickInProgress && !pressDragged && pressUnmodified) {
-                                        onLogRowDoubleClick?.invoke(entry.id)
-                                    } else if (doubleClickInProgress && pressDragged) {
-                                        // The second press was a drag rather than a real double-click;
-                                        // do not leave Follow held while the user continues selecting.
-                                        onLogRowDoubleClickGestureExpired?.invoke()
+                                    PointerEventType.Release -> {
+                                        // sel reflects whatever BasicTextField's own gesture handling did
+                                        // with THIS click by the time its Release arrives here — text
+                                        // selection (double-click-to-select-word, in particular) happens on
+                                        // the PRESS half of a click, not the release, so by Release time
+                                        // `sel` already carries the new selection Press produced. A plain
+                                        // click (cursor placement, no drag) always ends up COLLAPSED, so
+                                        // this doesn't change ordinary click-to-select-row behavior at all.
+                                        //
+                                        // Without the sel.collapsed check: a double-click to select a word
+                                        // is, from this handler's point of view, two ordinary clicks in
+                                        // quick succession. AppState.selRow TOGGLES an already-selected row
+                                        // off on a repeat plain click — so click 1 selected the row, click 2
+                                        // (the second half of the double-click) immediately deselected it
+                                        // again, and the Δt column's anchor mode flipped on then off inside
+                                        // one user gesture — visible as the flicker this guards against.
+                                        // Modified clicks select rows even when BasicTextField also
+                                        // extends its text selection. Unmodified word selection still
+                                        // suppresses the row toggle during a double-click.
+                                        val selectsRows = latestSelection.collapsed || pressMulti || pressShift
+                                        val plainClick = !pressOnRecordDisclosure && !doubleClickInProgress && !pressDragged
+                                        if (plainClick && pressPos != null && selectsRows) {
+                                            // The delayed plain deselection belongs to this click's sync
+                                            // policy. Capture its callback now so re-linking during the
+                                            // double-click window cannot turn an earlier Independent
+                                            // click into a new Linked selection event.
+                                            val selectionHandler = latestOnSelRow
+                                            if (latestIsSelected && !pressMulti && !pressShift) {
+                                                pendingSelectedRowToggle = clickScope.launch {
+                                                    kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
+                                                    selectionHandler(entry.id, false, false)
+                                                }
+                                            } else {
+                                                selectionHandler(entry.id, pressMulti, pressShift)
+                                            }
+                                        }
+                                        // Run alongside (rather than instead of) BasicTextField's own
+                                        // second-click handling. It therefore preserves desktop word
+                                        // selection while adding only the independent video seek action.
+                                        if (!pressOnRecordDisclosure && doubleClickInProgress && !pressDragged && pressUnmodified) {
+                                            if (structuredRecordSource != null) structuredRecordExpanded = !structuredRecordExpanded
+                                            onLogRowDoubleClick?.invoke(entry.id)
+                                            // Consume this pair; a third rapid click starts the next gesture.
+                                            lastPrimaryPressMs = 0L
+                                            lastPrimaryPressPos = Offset.Unspecified
+                                        } else if (doubleClickInProgress && pressDragged) {
+                                            // The second press was a drag rather than a real double-click;
+                                            // do not leave Follow held while the user continues selecting.
+                                            onLogRowDoubleClickGestureExpired?.invoke()
+                                        }
+                                        pressPos = null
+                                        pressShift = false
+                                        pressMulti = false
+                                        pressUnmodified = false
+                                        pressDragged = false
+                                        doubleClickInProgress = false
+                                        pressOnRecordDisclosure = false
                                     }
-                                    pressPos = null
-                                    pressShift = false
-                                    pressMulti = false
-                                    pressUnmodified = false
-                                    pressDragged = false
-                                    doubleClickInProgress = false
+                                    else -> {}
+                                }
+                            }
+                        } finally {
+                            pendingDoubleClickGestureExpiry?.cancel()
+                            onLogRowDoubleClickGestureExpired?.invoke()
+                        }
+                    }
+                }
+                .pointerInput("hd", tab.id, entry.id) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Final)
+                            when (ev.type) {
+                                PointerEventType.Enter -> hov = true
+                                PointerEventType.Exit  -> hov = false
+                                // Only recorded when this row can actually show the popup — every other
+                                // row's Move events fall through to the else branch below, no state
+                                // write, no recomposition triggered by hovering it.
+                                PointerEventType.Move -> if (latestShowsElidedName) {
+                                    ev.changes.firstOrNull()?.let { hoverPointerX = it.position.x }
                                 }
                                 else -> {}
                             }
                         }
-                    } finally {
-                        pendingDoubleClickGestureExpiry?.cancel()
-                        onLogRowDoubleClickGestureExpired?.invoke()
                     }
                 }
-            }
-            .pointerInput("hd", tab.id, entry.id) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val ev = awaitPointerEvent(PointerEventPass.Final)
-                        when (ev.type) {
-                            PointerEventType.Enter -> hov = true
-                            PointerEventType.Exit  -> hov = false
-                            // Only recorded when this row can actually show the popup — every other
-                            // row's Move events fall through to the else branch below, no state
-                            // write, no recomposition triggered by hovering it.
-                            PointerEventType.Move -> if (latestShowsElidedName) {
-                                ev.changes.firstOrNull()?.let { hoverPointerX = it.position.x }
-                            }
-                            else -> {}
-                        }
+                // Level-coloured left edge stripe
+                .drawBehind {
+                    if (stripeHl != null) {
+                        drawRect(stripeHl.color, topLeft = Offset.Zero, size = Size(3.dp.toPx(), size.height))
+                    } else {
+                        drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
+                    }
+                    if (groupColor != null && item.indent > 0) {
+                        val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * INDENT_STEP.toPx())
+                        drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))
                     }
                 }
+                // Keep the optional gutters in a stable, file-wide column. Nesting indentation belongs
+                // to the log line itself, not to the row-number/Δt gutter; otherwise the same settings
+                // appear to create different gaps in different files depending on the visible group.
+                .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Empty reserved space for the tid-map gutter (see hasTidMap's own doc above) — leading,
+            // before row-number/Δt/text, matching where TidMapOverlay's own Canvas is offset to.
+            if (hasTidMap) {
+                Spacer(Modifier.width(TID_MAP_HIT_WIDTH))
             }
-            // Level-coloured left edge stripe
-            .drawBehind {
-                if (stripeHl != null) {
-                    drawRect(stripeHl.color, topLeft = Offset.Zero, size = Size(3.dp.toPx(), size.height))
-                } else {
-                    drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
-                }
-                if (groupColor != null && item.indent > 0) {
-                    val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * INDENT_STEP.toPx())
-                    drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))
+            // Optional left gutter showing the row's original (parse-order) row number — entry.id,
+            // which is stable under filtering/folding so it always points at the same spot in the full
+            // file. Left-aligned at the stable gutter origin; group/fold headers deliberately omit it
+            // and span the gutter (like an IDE's fold-region header).
+            if (showRowNumbers) {
+                // Size the number column to the widest row number in this tab (see ColHeader's "#" cell
+                // for the matching header-side width), so a small-/mid-size log gets a tight gutter that
+                // hugs the left edge instead of a fixed-width cell the number floats inside.
+                val numColWidth = rowNumberColumnWidth(fontSize.value, tab.logData.size.toString().length)
+                Box(Modifier.width(numColWidth + ROW_NUM_GAP).padding(end = ROW_NUM_GAP)) {
+                    AppText(
+                        entry.id.toString(),
+                        color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                        modifier = Modifier.align(Alignment.CenterStart),
+                    )
                 }
             }
-            // Keep the optional gutters in a stable, file-wide column. Nesting indentation belongs
-            // to the log line itself, not to the row-number/Δt gutter; otherwise the same settings
-            // appear to create different gaps in different files depending on the visible group.
-            .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // Empty reserved space for the tid-map gutter (see hasTidMap's own doc above) — leading,
-        // before row-number/Δt/text, matching where TidMapOverlay's own Canvas is offset to.
-        if (hasTidMap) {
-            Spacer(Modifier.width(TID_MAP_HIT_WIDTH))
-        }
-        // Optional left gutter showing the row's original (parse-order) row number — entry.id,
-        // which is stable under filtering/folding so it always points at the same spot in the full
-        // file. Left-aligned at the stable gutter origin; group/fold headers deliberately omit it
-        // and span the gutter (like an IDE's fold-region header).
-        if (showRowNumbers) {
-            // Size the number column to the widest row number in this tab (see ColHeader's "#" cell
-            // for the matching header-side width), so a small-/mid-size log gets a tight gutter that
-            // hugs the left edge instead of a fixed-width cell the number floats inside.
-            val numColWidth = rowNumberColumnWidth(fontSize.value, tab.logData.size.toString().length)
-            Box(Modifier.width(numColWidth + ROW_NUM_GAP).padding(end = ROW_NUM_GAP)) {
-                AppText(
-                    entry.id.toString(),
-                    color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
-                    overflow = TextOverflow.Clip,
-                    modifier = Modifier.align(Alignment.CenterStart),
+            // Optional left gutter (immediately after the row-number gutter, when both are on) showing
+            // either the signed offset from the selected line (deltaSelectionAnchored) or the gap to
+            // the previous VISIBLE row — see LogRow's deltaMs/deltaSelectionAnchored param docs. "—"
+            // marks no baseline (first visible row with no selection, or either side's ts unparseable
+            // — never invented as a zero). A gap over DELTA_WARN_THRESHOLD_MS is tinted the same
+            // warning color as a W-level row, but only in gap mode — see deltaSelectionAnchored's doc
+            // for why that tint is suppressed once the column means "distance from selection" instead.
+            //
+            // LEFT-aligned, flush with this Box's own start (no leading padding) — deliberately, so the
+            // Δt VALUE's own left edge lands exactly where row content starts when the column is
+            // hidden (enabling Δt must not invent a new left margin). The box's own width still
+            // reserves deltaColWidth + ROW_NUM_GAP, same total footprint as the row-number gutter uses;
+            // since timeDeltaChars is fixed, that width remains stable while selecting a row, and the
+            // small difference (ROW_NUM_GAP) becomes the trailing gap before whatever comes next — the same
+            // gap the row-number gutter gets, just achieved by leaving the end open instead of an
+            // explicit end-padding, because THIS text is left- not right-aligned.
+            if (showTimeDelta) {
+                val deltaColWidth = timeDeltaColumnWidth(fontSize.value, timeDeltaChars)
+                Box(Modifier.width(deltaColWidth + ROW_NUM_GAP)) {
+                    AppText(
+                        deltaMs?.let { if (deltaSelectionAnchored) formatSignedDelta(it) else formatDelta(it) } ?: "—",
+                        color = if (!deltaSelectionAnchored && deltaMs != null && deltaMs >= DELTA_WARN_THRESHOLD_MS) {
+                            LogLevel.W.defaultColor
+                        } else {
+                            tc.td
+                        },
+                        fontSize = fontSize, fontFamily = mono, maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                        modifier = Modifier.align(Alignment.CenterStart),
+                    )
+                }
+            }
+            if (item.indent > 0) {
+                Spacer(Modifier.width(INDENT_STEP * item.indent))
+            }
+            if (structuredRecordSource != null) {
+                StructuredRecordDisclosure(
+                    entryId = entry.id,
+                    expanded = structuredRecordExpanded,
+                    color = tc.ts,
+                    modifier = Modifier.padding(end = 2.dp),
+                    onBoundsChanged = { left, right -> structuredDisclosureBounds = left to right },
+                    onClick = { structuredRecordExpanded = !structuredRecordExpanded },
+                )
+            } else if (profileLayout != null) {
+                // Rows without a disclosure arrow keep its place, so every row's text starts in one column.
+                Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT))
+            }
+            // Video anchor badge (plan doc's Task B) — this row is the one and only VideoAnchor.logId
+            // for tab.attachedVideo, if any. A plain icon (no tooltip): rows are the hottest path in
+            // this composable (every visible row, every recomposition), and the match is rare enough
+            // (at most one row per tab) that the extra affordance isn't worth the per-row cost of
+            // wiring up TooltipArea's own pointer-event tracking on every row just to support it.
+            if (tab.attachedVideo?.anchor?.logId == entry.id) {
+                Icon(
+                    Icons.Outlined.Movie, contentDescription = "Linked to the attached video",
+                    tint = tc.ac, modifier = Modifier.size(12.dp).padding(end = 4.dp),
                 )
             }
-        }
-        // Optional left gutter (immediately after the row-number gutter, when both are on) showing
-        // either the signed offset from the selected line (deltaSelectionAnchored) or the gap to
-        // the previous VISIBLE row — see LogRow's deltaMs/deltaSelectionAnchored param docs. "—"
-        // marks no baseline (first visible row with no selection, or either side's ts unparseable
-        // — never invented as a zero). A gap over DELTA_WARN_THRESHOLD_MS is tinted the same
-        // warning color as a W-level row, but only in gap mode — see deltaSelectionAnchored's doc
-        // for why that tint is suppressed once the column means "distance from selection" instead.
-        //
-        // LEFT-aligned, flush with this Box's own start (no leading padding) — deliberately, so the
-        // Δt VALUE's own left edge lands exactly where row content starts when the column is
-        // hidden (enabling Δt must not invent a new left margin). The box's own width still
-        // reserves deltaColWidth + ROW_NUM_GAP, same total footprint as the row-number gutter uses;
-        // since timeDeltaChars is fixed, that width remains stable while selecting a row, and the
-        // small difference (ROW_NUM_GAP) becomes the trailing gap before whatever comes next — the same
-        // gap the row-number gutter gets, just achieved by leaving the end open instead of an
-        // explicit end-padding, because THIS text is left- not right-aligned.
-        if (showTimeDelta) {
-            val deltaColWidth = timeDeltaColumnWidth(fontSize.value, timeDeltaChars)
-            Box(Modifier.width(deltaColWidth + ROW_NUM_GAP)) {
+            // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
+            // badge naming which original file a row came from, since a merged tab otherwise gives no
+            // visual way to tell which buffer (main/system/crash/...) a given line was in.
+            entry.sourceTag?.let { tag ->
                 AppText(
-                    deltaMs?.let { if (deltaSelectionAnchored) formatSignedDelta(it) else formatDelta(it) } ?: "—",
-                    color = if (!deltaSelectionAnchored && deltaMs != null && deltaMs >= DELTA_WARN_THRESHOLD_MS) {
-                        LogLevel.W.defaultColor
-                    } else {
-                        tc.td
+                    tag, color = tc.td, fontSize = 9.sp, fontFamily = mono, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
+                )
+            }
+            // Change 3 (process-names rework): the process name (when shown) now renders INSIDE
+            // annoLine's single BasicTextField below, padded inline to a uniform per-tab pid-field
+            // width (appendTsPidTid/pidFieldCharWidth) — no separate composable, so drag-selection
+            // spans the whole row again even on a row showing a name. This used to be two extra
+            // composables here (a plain ts AppText plus a TooltipArea-wrapped name AppText) specifically
+            // to hang a hover tooltip off the name; splitting the field out that way is exactly what
+            // broke whole-row drag-selection on named rows.
+            //
+            // The hover popup below (Change: process-name hover popup) restores a way to see the full
+            // name WITHOUT re-splitting the field: it reads this SAME BasicTextField's own
+            // TextLayoutResult (onTextLayout) to find the pid field's exact rendered pixel span via
+            // getBoundingBox, rather than computing an x-offset arithmetically (see
+            // pointerInsidePidFieldX's own doc, and ui/Theme.kt:269-275's NOTE, for why two earlier
+            // attempts at the latter were reverted). The wrapping Box below only exists so the Popup can
+            // sit alongside the field as a sibling — Popup has no content slot of its own on
+            // BasicTextField — and does not affect drag-selection, which is entirely a property of the
+            // single BasicTextField inside it.
+            Box(Modifier.weight(1f)) {
+                SelectableLogLineField(
+                    value = TextFieldValue(annotatedString = annoLine, selection = sel),
+                    onValueChange = { new ->
+                        sel = new.selection
+                        val selectedText = if (!new.selection.collapsed) {
+                            runCatching {
+                                stripVisualWrapBreaks(annoLine.text.substring(new.selection.min, new.selection.max))
+                            }.getOrElse { "" }
+                        } else {
+                            ""
+                        }
+                        onSelectedTextChange(selectedText)
                     },
-                    fontSize = fontSize, fontFamily = mono, maxLines = 1,
-                    overflow = TextOverflow.Clip,
-                    modifier = Modifier.align(Alignment.CenterStart),
-                )
-            }
-        }
-        if (item.indent > 0) {
-            Spacer(Modifier.width(INDENT_STEP * item.indent))
-        }
-        // Video anchor badge (plan doc's Task B) — this row is the one and only VideoAnchor.logId
-        // for tab.attachedVideo, if any. A plain icon (no tooltip): rows are the hottest path in
-        // this composable (every visible row, every recomposition), and the match is rare enough
-        // (at most one row per tab) that the extra affordance isn't worth the per-row cost of
-        // wiring up TooltipArea's own pointer-event tracking on every row just to support it.
-        if (tab.attachedVideo?.anchor?.logId == entry.id) {
-            Icon(
-                Icons.Outlined.Movie, contentDescription = "Linked to the attached video",
-                tint = tc.ac, modifier = Modifier.size(12.dp).padding(end = 4.dp),
-            )
-        }
-        // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
-        // badge naming which original file a row came from, since a merged tab otherwise gives no
-        // visual way to tell which buffer (main/system/crash/...) a given line was in.
-        entry.sourceTag?.let { tag ->
-            AppText(
-                tag, color = tc.td, fontSize = 9.sp, fontFamily = mono, maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
-            )
-        }
-        // Change 3 (process-names rework): the process name (when shown) now renders INSIDE
-        // annoLine's single BasicTextField below, padded inline to a uniform per-tab pid-field
-        // width (appendTsPidTid/pidFieldCharWidth) — no separate composable, so drag-selection
-        // spans the whole row again even on a row showing a name. This used to be two extra
-        // composables here (a plain ts AppText plus a TooltipArea-wrapped name AppText) specifically
-        // to hang a hover tooltip off the name; splitting the field out that way is exactly what
-        // broke whole-row drag-selection on named rows.
-        //
-        // The hover popup below (Change: process-name hover popup) restores a way to see the full
-        // name WITHOUT re-splitting the field: it reads this SAME BasicTextField's own
-        // TextLayoutResult (onTextLayout) to find the pid field's exact rendered pixel span via
-        // getBoundingBox, rather than computing an x-offset arithmetically (see
-        // pointerInsidePidFieldX's own doc, and ui/Theme.kt:269-275's NOTE, for why two earlier
-        // attempts at the latter were reverted). The wrapping Box below only exists so the Popup can
-        // sit alongside the field as a sibling — Popup has no content slot of its own on
-        // BasicTextField — and does not affect drag-selection, which is entirely a property of the
-        // single BasicTextField inside it.
-        Box(Modifier.weight(1f)) {
-            SelectableLogLineField(
-                value = TextFieldValue(annotatedString = annoLine, selection = sel),
-                onValueChange = { new ->
-                    sel = new.selection
-                    val selectedText = if (!new.selection.collapsed) {
-                        runCatching {
-                            stripVisualWrapBreaks(annoLine.text.substring(new.selection.min, new.selection.max))
-                        }.getOrElse { "" }
-                    } else {
-                        ""
-                    }
-                    onSelectedTextChange(selectedText)
-                },
-                textStyle = TextStyle(
-                    color = tc.tx,
-                    fontFamily = mono,
-                    fontSize = fontSize,
-                    lineHeight = rowLineHeightFor(annoLine, fontSize),
-                ),
-                selectionColor = tc.ac.copy(alpha = SELECTION_OVERLAY_ALPHA),
-                handleColor = tc.ac,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
-                    .onSizeChanged { if (showsElidedName) popupAnchorHeightPx = it.height },
-                // Measuring bounding boxes only runs for a row that can actually show the popup —
-                // every other row (OFF, no name, or a name that already fits) skips this entirely,
-                // same as the pointer-tracking guard above. pidFieldStart mirrors
-                // buildFullLineAnnotation's own "entry.ts.length + 2" — the same formula against the
-                // same rendered text, since the field starts at the same offset in both.
-                onTextLayout = { layout ->
-                    if (showsElidedName) {
-                        val pidFieldStart = entry.ts.length + 2
-                        val pidFieldEnd = (pidFieldStart + pidFieldChars).coerceAtMost(layout.layoutInput.text.length)
-                        if (pidFieldEnd > pidFieldStart) {
-                            val left = layout.getBoundingBox(pidFieldStart).left
-                            val right = layout.getBoundingBox(pidFieldEnd - 1).right
-                            pidFieldXRange = left to right
+                    textStyle = TextStyle(
+                        color = tc.tx,
+                        fontFamily = mono,
+                        fontSize = fontSize,
+                        lineHeight = rowLineHeightFor(annoLine, fontSize),
+                    ),
+                    selectionColor = tc.ac.copy(alpha = SELECTION_OVERLAY_ALPHA),
+                    handleColor = tc.ac,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
+                        .onSizeChanged { if (showsElidedName) popupAnchorHeightPx = it.height },
+                    // Measuring bounding boxes only runs for a row that can actually show the popup —
+                    // every other row (OFF, no name, or a name that already fits) skips this entirely,
+                    // same as the pointer-tracking guard above. pidFieldStart mirrors
+                    // buildFullLineAnnotation's own "entry.ts.length + 2" — the same formula against the
+                    // same rendered text, since the field starts at the same offset in both.
+                    onTextLayout = { layout ->
+                        if (showsElidedName) {
+                            val pidFieldStart = entry.ts.length + 2
+                            val pidFieldEnd = (pidFieldStart + pidFieldChars).coerceAtMost(layout.layoutInput.text.length)
+                            if (pidFieldEnd > pidFieldStart) {
+                                val left = layout.getBoundingBox(pidFieldStart).left
+                                val right = layout.getBoundingBox(pidFieldEnd - 1).right
+                                pidFieldXRange = left to right
+                            }
                         }
-                    }
-                },
-            )
-            val fieldRange = pidFieldXRange
-            if (showProcessNamePopup && fieldRange != null && processDisplay != null) {
-                // Same visual treatment and TopStart+measured-offset positioning as FilterPanel.kt's
-                // FullTextHint (the house precedent for a hover popup driven by layout information)
-                // — see its own doc for why a guessed constant offset flickers. x is the field's own
-                // measured left edge (fieldRange.first); y drops the popup below the row using this
-                // field's own measured height, exactly mirroring FullTextHint's anchorHeightPx.
-                val gapPx = (4f * density).roundToInt()
-                Popup(
-                    alignment = Alignment.TopStart,
-                    offset = IntOffset(fieldRange.first.roundToInt(), popupAnchorHeightPx + gapPx),
-                    properties = PopupProperties(focusable = false),
-                ) {
-                    Box(
-                        Modifier
-                            .background(tc.p, CORNER_SM)
-                            .border(1.dp, tc.br, CORNER_SM)
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                    },
+                )
+                val fieldRange = pidFieldXRange
+                if (showProcessNamePopup && fieldRange != null && processDisplay != null) {
+                    // Same visual treatment and TopStart+measured-offset positioning as FilterPanel.kt's
+                    // FullTextHint (the house precedent for a hover popup driven by layout information)
+                    // — see its own doc for why a guessed constant offset flickers. x is the field's own
+                    // measured left edge (fieldRange.first); y drops the popup below the row using this
+                    // field's own measured height, exactly mirroring FullTextHint's anchorHeightPx.
+                    val gapPx = (4f * density).roundToInt()
+                    Popup(
+                        alignment = Alignment.TopStart,
+                        offset = IntOffset(fieldRange.first.roundToInt(), popupAnchorHeightPx + gapPx),
+                        properties = PopupProperties(focusable = false),
                     ) {
-                        AppText(
-                            processDisplay, color = tc.tx, fontSize = 11.sp, fontFamily = mono,
-                            maxLines = 1, overflow = TextOverflow.Clip,
-                        )
+                        Box(
+                            Modifier
+                                .background(tc.p, CORNER_SM)
+                                .border(1.dp, tc.br, CORNER_SM)
+                                .padding(horizontal = 8.dp, vertical = 5.dp),
+                        ) {
+                            AppText(
+                                processDisplay, color = tc.tx, fontSize = 11.sp, fontFamily = mono,
+                                maxLines = 1, overflow = TextOverflow.Clip,
+                            )
+                        }
                     }
                 }
             }
+        }
+        if (structuredRecordExpanded && structuredRecordSource != null) {
+            StructuredRecordBody(
+                entryId = entry.id,
+                source = structuredRecordSource,
+                mono = mono,
+                startIndent = ROW_START_PAD +
+                    (if (hasTidMap) TID_MAP_HIT_WIDTH else 0.dp) +
+                    (if (showRowNumbers) rowNumberColumnWidth(fontSize.value, tab.logData.size.toString().length) + ROW_NUM_GAP else 0.dp) +
+                    (if (showTimeDelta) timeDeltaColumnWidth(fontSize.value, timeDeltaChars) + ROW_NUM_GAP else 0.dp) +
+                    (INDENT_STEP * item.indent) + 26.dp,
+            )
         }
     }
 }
@@ -4216,18 +4283,18 @@ internal fun SelectableLogLineField(
 // hover background gives it the same "clickable chip" affordance as other icon buttons in the app
 // (e.g. HoverBox usages elsewhere), instead of a bare glyph with no feedback until the click lands.
 @Composable
-private fun CollapseChevron(expanded: Boolean, color: Color, mono: FontFamily, onClick: () -> Unit) {
+internal fun CollapseChevron(
+    expanded: Boolean, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier.size(24.dp),
+) {
     HoverBox(
-        modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)),
+        modifier = modifier.clip(RoundedCornerShape(6.dp)),
         hoverBg = color.copy(alpha = 0.18f),
         onClick = onClick,
     ) {
-        AppText(
-            if (expanded) "▼" else "▶",
-            color = color,
-            fontSize = 14.sp,
-            fontFamily = mono,
-            modifier = Modifier.align(Alignment.Center),
+        Icon(
+            if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
+            contentDescription = null, tint = color,
+            modifier = Modifier.align(Alignment.Center).size(16.dp),
         )
     }
 }
@@ -4554,7 +4621,7 @@ private fun SeqHeaderRow(
         HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
-        CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
+        CollapseChevron(expanded = item.expanded, color = sc, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.displaySeverityText}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         ScopeTidBadge(item.scopeTid, sc, mono)
@@ -4661,7 +4728,7 @@ private fun ManualHeaderRow(
         HeaderTidMapGutterCell(hasTidMap)
         HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
-        CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
+        CollapseChevron(expanded = item.expanded, color = sc, onClick = { onToggleGroup(item.gid) })
         val label = when (item.direction) {
             ManualCollapseDirection.TO_START -> "Collapsed to file start"
             ManualCollapseDirection.TO_END -> "Collapsed to file end"
@@ -4781,7 +4848,7 @@ private fun StackTraceHeaderRow(
         HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
-        CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
+        CollapseChevron(expanded = item.expanded, color = sc, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.displaySeverityText}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
@@ -4802,7 +4869,9 @@ private fun shouldShowOriginalSearchBar(enabled: Boolean, active: Boolean, mode:
     enabled && active && (mode == SearchMode.UNFILTERED || mode == SearchMode.TWO_SEARCHES)
 
 @Composable
-private fun EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {
+private fun EmptyState(
+    tc: ThemeColors, totalCount: Int, onClear: () -> Unit, section: com.indagium.model.LogFileSection?,
+) {
     // Always the last child of its pane's Column, so fillMaxSize takes exactly what a weight(1f) would (and needs no ColumnScope,
     // which a tiled LogViewer does not have).
     Column(
@@ -4810,7 +4879,11 @@ private fun EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
         if (totalCount == 0) {
-            AppText("Open a log file to begin", color = tc.ts, fontSize = 13.sp)
+            AppText(
+                section?.unavailableReason ?: section?.decodeNotice?.let { "No ${section.title} records decoded.\n\n$it" }
+                    ?: section?.let { "No records in section ${it.title}" } ?: "This file contains no records",
+                color = tc.ts, fontSize = 13.sp, modifier = Modifier.padding(24.dp).testTag("log-empty-section"),
+            )
         } else {
             AppText("No entries match current filters", color = tc.ts, fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
@@ -4868,6 +4941,8 @@ internal fun ExportMenuPopup(
 private fun ToolbarOptionsPopup(
     showRowNumbers: Boolean,
     showMinimap: Boolean,
+    metadataJsonTagVisible: Boolean?,
+    onToggleMetadataJsonTag: () -> Unit,
     processNameMode: ProcessNameMode,
     manualProcessNamePicks: Set<Int>,
     processNamesEnabled: Boolean,
@@ -4906,6 +4981,16 @@ private fun ToolbarOptionsPopup(
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 )
+            }
+            if (metadataJsonTagVisible != null) {
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth().testTag("metadata-json-tag-toggle"), onClick = onToggleMetadataJsonTag,
+                ) {
+                    AppText(
+                        if (metadataJsonTagVisible) "Hide TAG" else "Show TAG", color = tc.tx, fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    )
+                }
             }
             // Second entry point for the mode (Settings › Log view carries the full three-way
             // choice — see SettingsDialog.kt's EditorBehaviorSettingsSection). This one is a plain

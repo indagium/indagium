@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
+import com.indagium.model.LogCapability
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
@@ -37,6 +38,7 @@ internal fun AppState.compareTileContext(left: LogTab, right: LogTab): LogViewTi
         filterModeTags = edited.filter.mode == FilterMode.TAGS,
         hasVideoPanel = hasVideoTileContent(left),
         groupOn = ::logViewGroupOn,
+        hasSeverityFilter = edited.canUseProfileCapability(LogCapability.SEVERITY_FILTER, logCapabilitiesForTab(edited)),
     )
 }
 

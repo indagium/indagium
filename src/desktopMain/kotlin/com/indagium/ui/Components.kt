@@ -655,8 +655,16 @@ fun ColHeader(
     // field is actually widened. Defaults to AppSettings' own default (12) purely so existing call
     // sites/tests that don't pass it keep compiling; every real call site threads settings.fontSize.
     contentFontSizeSp: Int = 12,
+    // Set for a tab whose rows come from a log format profile: the column names, already padded to
+    // the widths the rows use. The header is then drawn in the rows' own font so the two line up.
+    profileHeader: String? = null,
+    profileHeaderFont: FontFamily? = null,
 ) {
     val tc = tc()
+    if (profileHeader != null) {
+        ProfileColHeader(profileHeader, profileHeaderFont, showRowNumbers, rowNumDigits, showTimeDelta, timeDeltaChars, hasTidMap, contentFontSizeSp)
+        return
+    }
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
             .padding(horizontal = 12.dp, vertical = 5.dp),
@@ -711,6 +719,52 @@ fun ColHeader(
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
         AppText("TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(100.dp))
         AppText("MESSAGE", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+    }
+}
+
+/**
+ * The header of a profile tab. Its gutters repeat the row's own (start padding, tid map, row
+ * number, time delta, disclosure arrow) at the row's font size, so the names sit over the values.
+ */
+@Composable
+private fun ProfileColHeader(
+    header: String,
+    font: FontFamily?,
+    showRowNumbers: Boolean,
+    rowNumDigits: Int,
+    showTimeDelta: Boolean,
+    timeDeltaChars: Int,
+    hasTidMap: Boolean,
+    contentFontSizeSp: Int,
+) {
+    val tc = tc()
+    val fontSize = contentFontSizeSp.toFloat()
+    Row(
+        Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
+            .padding(start = ROW_START_PAD, end = 12.dp, top = 4.dp, bottom = 4.dp)
+            .testTag("colheader-profile"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (hasTidMap) Spacer(Modifier.width(TID_MAP_HIT_WIDTH))
+        if (showRowNumbers) {
+            Box(Modifier.width(rowNumberColumnWidth(fontSize, rowNumDigits) + ROW_NUM_GAP)) {
+                AppText("#", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        if (showTimeDelta) {
+            Box(Modifier.width(timeDeltaColumnWidth(fontSize, timeDeltaChars) + ROW_NUM_GAP)) {
+                AppText("Δt", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT))
+        AppText(
+            header,
+            color = tc.td,
+            fontSize = contentFontSizeSp.sp,
+            fontFamily = font ?: FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
     }
 }
 

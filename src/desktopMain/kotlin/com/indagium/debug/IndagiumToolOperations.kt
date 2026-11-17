@@ -757,6 +757,7 @@ internal class IndagiumToolOperations(
             com.indagium.model.LogFormatEngine.PLAIN_TEXT,
             com.indagium.model.LogFormatEngine.LOGFMT,
             com.indagium.model.LogFormatEngine.CRI -> profile.fieldMappings.keys
+            com.indagium.model.LogFormatEngine.METADATA_JSON -> profile.visibleColumns.toSet()
         }
         (builtInRoles + profile.fieldMappings.keys).forEach { role ->
             add(
@@ -1196,6 +1197,8 @@ internal class IndagiumToolOperations(
     }
 
     private fun profileSplitUnsupportedReason(profile: LogFormatProfile): String? = when (profile.engine) {
+        com.indagium.model.LogFormatEngine.METADATA_JSON ->
+            "Record splitting is unavailable for ${profile.name}: captures and nested export sections must be read as a whole."
         com.indagium.model.LogFormatEngine.CSV, com.indagium.model.LogFormatEngine.CRI ->
             "Record splitting is unavailable for ${profile.name}: multiline/partial records can cross file boundaries."
         com.indagium.model.LogFormatEngine.REGEX -> if (profile.multilineStartPattern.isNotBlank()) {

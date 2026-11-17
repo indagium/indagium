@@ -130,6 +130,13 @@ internal fun isProfileProcessIdColumn(id: String): Boolean = id == "process_id" 
 
 internal fun isProfileThreadIdColumn(id: String): Boolean = id == "thread_id" || id == "tid"
 
+private val STANDARD_PROFILE_COLUMN_IDS = setOf(
+    "timestamp", "severity", "component", "message", "process_id", "thread_id", "pid", "tid", "source", "section",
+)
+
+/** Timestamp, level, tag, message, process and thread id: the columns every log line has a place for. */
+internal fun isStandardProfileColumn(id: String): Boolean = id in STANDARD_PROFILE_COLUMN_IDS
+
 internal fun isProfileProcessThreadColumn(id: String): Boolean =
     isProfileProcessIdColumn(id) || isProfileThreadIdColumn(id)
 
@@ -154,6 +161,8 @@ internal data class ProfileTextOffsetSegment(
     val renderedEnd: Int,
 ) {
     fun remap(offset: Int): Int = when {
+        // Padding has no canonical text: a position at it belongs to what follows the padding.
+        sourceStart == sourceEnd -> renderedEnd
         offset <= sourceStart -> renderedStart
         offset >= sourceEnd -> renderedEnd
         sourceEnd - sourceStart == renderedEnd - renderedStart -> renderedStart + offset - sourceStart
@@ -170,8 +179,14 @@ internal fun profileDisplayTextProjection(
     columns: List<LogDisplayField>,
     processDisplayName: String? = null,
     includeProcessThread: Boolean = true,
+    // Character width per column id. When given, the rendered text pads each of those columns so
+    // rows line up under the header; the canonical text that filters and Find match stays unpadded.
+    columnWidths: Map<String, Int>? = null,
 ): ProfileDisplayTextProjection {
     val text = StringBuilder()
+    // Spaces owed before the next rendered column: the short end of the previous value, and the
+    // whole width of any empty column in between. Nothing is added after the last column.
+    var owedPadding = 0
     val source = StringBuilder()
     var hasSourceColumn = false
     var hasRenderedColumn = false
@@ -194,14 +209,23 @@ internal fun profileDisplayTextProjection(
     }
 
     columns.forEach { column ->
-        if (column.value.isBlank()) return@forEach
         val includeColumn = includeProcessThread || !isProfileProcessThreadColumn(column.id)
+        val width = columnWidths?.get(column.id)?.takeIf { includeColumn }
+        if (column.value.isBlank()) {
+            if (width != null) owedPadding += width + PROFILE_FIELD_SEPARATOR.length
+            return@forEach
+        }
+        if (includeColumn && owedPadding > 0) appendSource("", " ".repeat(owedPadding))
+        if (includeColumn) owedPadding = 0
         if (hasSourceColumn) {
             appendSource(PROFILE_FIELD_SEPARATOR, PROFILE_FIELD_SEPARATOR.takeIf { includeColumn && hasRenderedColumn })
         }
+        // The standard columns read as a plain log line; the header already names them. Only an
+        // extra field keeps its label, because nothing else says what its value is.
+        val prefix = if (isStandardProfileColumn(column.id)) "" else "${column.label}="
         val sourceFieldStart = source.length
-        val sourceValueStart = sourceFieldStart + column.label.length + 1
-        val sourceField = "${column.label}=${column.value}"
+        val sourceValueStart = sourceFieldStart + prefix.length
+        val sourceField = prefix + column.value
         hasSourceColumn = true
 
         if (!includeColumn) {
@@ -209,7 +233,7 @@ internal fun profileDisplayTextProjection(
             return@forEach
         }
         val renderedFieldStart = text.length
-        appendSource("${column.label}=", "${column.label}=")
+        if (prefix.isNotEmpty()) appendSource(prefix, prefix)
         val renderedValueStart = text.length
         val replacement = processDisplayName?.takeIf {
             isProfileProcessIdColumn(column.id) && it.isNotBlank() && it != column.value
@@ -221,6 +245,7 @@ internal fun profileDisplayTextProjection(
         }
         renderedFields += ProfileRenderedFieldRange(column.id, renderedFieldStart, text.length)
         hasRenderedColumn = true
+        if (width != null) owedPadding = (width - (text.length - renderedFieldStart)).coerceAtLeast(0)
     }
     return ProfileDisplayTextProjection(
         text = text.toString(),
@@ -238,6 +263,70 @@ internal fun profileDisplayText(
 ): String = profileDisplayTextProjection(columns, processDisplayName, includeProcessThread).text
 
 private const val PROFILE_FIELD_SEPARATOR = "  "
+private const val PROFILE_WIDTH_SAMPLE_ROWS = 2_000
+private const val MAX_PROFILE_COLUMN_CHARS = 40
+private const val MAX_CACHED_PROFILE_LAYOUTS = 16
+
+/** The header line of a profile tab and the character width of each padded column. */
+internal class ProfileColumnLayout(val header: String, val widths: Map<String, Int>)
+
+private val profileLayoutCache = object : LinkedHashMap<String, Pair<List<LogEntry>, ProfileColumnLayout?>>(16, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<List<LogEntry>, ProfileColumnLayout?>>?): Boolean =
+        size > MAX_CACHED_PROFILE_LAYOUTS
+}
+
+/**
+ * Column widths for a tab whose rows are drawn from a format profile, or null for any other tab.
+ * Every row asks for this, so the result is kept per tab until its rows change.
+ */
+internal fun profileColumnLayout(tabId: String, columns: List<LogDisplayField>, rows: List<LogEntry>): ProfileColumnLayout? =
+    synchronized(profileLayoutCache) {
+        profileLayoutCache[tabId]?.takeIf { it.first === rows }?.let { return it.second }
+        val layout = computeProfileColumnLayout(columns, rows)
+        profileLayoutCache[tabId] = rows to layout
+        layout
+    }
+
+/**
+ * Standard columns before the message get a fixed width, taken from the rows at both ends of the
+ * log (a tail keeps adding rows; reading all of them on every batch would cost more than it gives).
+ * The message and anything after it is free text. A value longer than the cap simply runs over.
+ */
+internal fun computeProfileColumnLayout(columns: List<LogDisplayField>, rows: List<LogEntry>): ProfileColumnLayout? {
+    if (columns.isEmpty() || rows.firstOrNull()?.recordMetadata?.usesProfilePresentation != true) return null
+    val padded = columns.takeWhile { it.id != "message" }.filter { isStandardProfileColumn(it.id) }.map { it.id }.toSet()
+    val widths = HashMap<String, Int>()
+    columns.forEach { if (it.id in padded) widths[it.id] = profileHeaderLabel(it).length }
+    val sample = if (rows.size <= 2 * PROFILE_WIDTH_SAMPLE_ROWS) {
+        rows
+    } else {
+        rows.subList(0, PROFILE_WIDTH_SAMPLE_ROWS) + rows.subList(rows.size - PROFILE_WIDTH_SAMPLE_ROWS, rows.size)
+    }
+    sample.forEach { entry ->
+        entry.recordMetadata?.displayColumns?.forEach { column ->
+            val current = widths[column.id] ?: return@forEach
+            val length = column.value.length.coerceAtMost(MAX_PROFILE_COLUMN_CHARS)
+            if (length > current) widths[column.id] = length
+        }
+    }
+    val header = buildString {
+        columns.forEachIndexed { index, column ->
+            if (index > 0) append(PROFILE_FIELD_SEPARATOR)
+            val label = profileHeaderLabel(column)
+            append(label)
+            widths[column.id]?.let { width -> repeat((width - label.length).coerceAtLeast(0)) { append(' ') } }
+        }
+    }.trimEnd()
+    return ProfileColumnLayout(header, widths)
+}
+
+private fun profileHeaderLabel(column: LogDisplayField): String = when (column.id) {
+    "severity" -> "LVL"
+    "component" -> "TAG"
+    "process_id" -> "PID"
+    "thread_id" -> "TID"
+    else -> column.label.uppercase()
+}
 
 internal fun profileDisplayText(entry: LogEntry): String? =
     profileDisplayColumns(entry)?.let { profileDisplayText(it) }

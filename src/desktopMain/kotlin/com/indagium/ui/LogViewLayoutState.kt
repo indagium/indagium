@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
+import com.indagium.model.LogCapability
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
@@ -45,6 +46,12 @@ internal fun AppState.logViewTileContext(tab: LogTab): LogViewTileContext =
         hasVideoPanel = hasVideoTileContent(tab),
         toolbarInLayout = settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT && logViewMaximized == null,
         groupOn = ::logViewGroupOn,
+        hasSeverityFilter = tab.canUseProfileCapability(LogCapability.SEVERITY_FILTER, logCapabilitiesForTab(tab)),
+        hasSections = tab.hasSectionNavigation(),
+        hasMessageDetails = tab.logData.firstOrNull()?.recordMetadata?.usesProfilePresentation == true ||
+            (tab.inspectedRecordId ?: tab.selected.firstOrNull())?.let { id ->
+                tab.rmap[id]?.let { expandableRecordSource(it, tab.logFormat) != null }
+            } == true,
     )
 
 /** The tab-strip toggle behind [group]. */
@@ -67,7 +74,11 @@ private fun AppState.setLogViewGroup(group: LogViewTileGroup, on: Boolean) {
 }
 
 /** The single log view's layout as drawn: the stored one, else Classic derived from the legacy sizes. */
-internal fun AppState.currentLogViewLayout(): TileNode<LogViewSectionId> = effectiveLogViewLayout(settings, legacyLogViewSizes())
+internal fun AppState.currentLogViewLayout(): TileNode<LogViewSectionId> =
+    activeTab()?.let(::logViewLayoutForTab) ?: effectiveLogViewLayout(settings, legacyLogViewSizes())
+
+internal fun AppState.logViewLayoutForTab(tab: LogTab): TileNode<LogViewSectionId> =
+    withAuxiliaryLogTiles(effectiveLogViewLayout(settings, legacyLogViewSizes()), logViewTileContext(tab))
 
 /** Stores [tree] as the single log view's layout (a release-only edit: the host calls this once per gesture). */
 internal fun AppState.commitLogViewLayout(tree: TileNode<LogViewSectionId>) {

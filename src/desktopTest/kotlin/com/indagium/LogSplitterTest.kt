@@ -110,6 +110,32 @@ class LogSplitterTest {
     }
 
     @Test
+    fun jsonArraySplitProducesValidArrayPartsWithWholeEvents() {
+        val profile = LogFormatProfile(
+            id = "split-json-array",
+            name = "Split JSON array",
+            engine = LogFormatEngine.JSON_LINES,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+        )
+        val source = (0 until 30).joinToString(prefix = "[\n", postfix = "\n]\n") { index ->
+            "  {\"message\":\"event-$index ${"x".repeat(100)}\",\"nested\":[1,{\"ok\":true}]}"
+        }
+        val directory = createTempDirectory("openlog-profile-json-split").toFile()
+        val outputs = planSplitOutputs("events.json", directory, "part", 3)
+
+        splitProfileRecordsToFiles(
+            ByteArrayInputStream(source.toByteArray()), outputs, source.toByteArray().size.toLong(), profile,
+        )
+
+        assertTrue(outputs.all { file ->
+            val text = file.readText()
+            text.trimStart().startsWith("[") && text.trimEnd().endsWith("]")
+        })
+        val entries = outputs.flatMap { file -> parseProfileLines(file.readLines(), profile).entries }
+        assertEquals((0 until 30).map { "event-$it ${"x".repeat(100)}" }, entries.map { it.msg })
+    }
+
+    @Test
     fun multilineRegexProfileSplitCutsOnlyAtConfiguredRecordStarts() {
         val profile = LogFormatProfile(
             id = "split-regex",

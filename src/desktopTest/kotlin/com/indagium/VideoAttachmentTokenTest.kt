@@ -204,7 +204,7 @@ class VideoAttachmentTokenTest {
         // Error highlight style and the four log format profile fields are appended after the
         // existing attachment, mapping, format, and imported capture source fields; attachedVideo
         // itself remains at index 11.
-        assertEquals(21, fields.size, "tab token must carry exactly 21 fields (0..20) once attachedVideo is set")
+        assertEquals(22, fields.size, "tab token must carry exactly 22 fields (0..21), including the selected capture section")
         assertEquals("/videos/repro.mp4", original.tabToken().tabShellFromToken()?.tab?.attachedVideo?.path)
     }
 

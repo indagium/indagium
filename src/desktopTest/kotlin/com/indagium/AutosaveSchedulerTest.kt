@@ -308,9 +308,10 @@ class AutosaveSchedulerTest {
             base.copy(errorHighlightStyle = ErrorHighlightStyle(enabled = false)),
             base.copy(logFormatProfileId = "plain-text"),
             base.copy(logFormatProfileSnapshot = "{}"),
+            base.copy(selectedLogSectionId = "Tethered Bluetooth / L2CAP"),
         )
 
-        assertEquals(21, base.persistedSnapshot().size)
+        assertEquals(22, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

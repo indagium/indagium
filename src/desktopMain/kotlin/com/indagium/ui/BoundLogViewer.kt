@@ -77,6 +77,9 @@ internal fun BoundLogViewer(
             onOpenFilterPanel = { state.openFilterPanelRevealing(tab.id) },
         )
     }
+    val metadataJsonTagVisible = remember(tab.logFormatProfileSnapshot, tab.logFormatProfileId) {
+        state.metadataJsonTagVisible(tab.id)
+    }
     LogViewer(
         tab = tab, modifier = modifier,
         settings = state.settings,
@@ -94,6 +97,8 @@ internal fun BoundLogViewer(
         onCollapseAll = { state.collapseAll(tab.id) },
         onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
         onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
+        metadataJsonTagVisible = metadataJsonTagVisible,
+        onToggleMetadataJsonTag = { state.toggleMetadataJsonTag(tab.id) },
         onOpenSearch = { if (state.isSearchOpen(tab.id)) state.closeSearch(tab.id) else state.openSearch(tab.id) },
         onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
         onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },

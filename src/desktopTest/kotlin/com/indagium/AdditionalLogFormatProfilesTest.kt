@@ -53,6 +53,32 @@ class AdditionalLogFormatProfilesTest {
     }
 
     @Test
+    fun prettyPinoObjectUsesTheSameMultilineJsonBoundaryAndDetection() {
+        val raw = buildString {
+            appendLine("{")
+            appendLine("  \"level\": 50,")
+            appendLine("  \"time\": 1700000000123,")
+            appendLine("  \"pid\": 42,")
+            appendLine("  \"name\": \"api\",")
+            appendLine("  \"msg\": \"pretty request failed\",")
+            appendLine("  \"context\": {")
+            repeat(22) { index -> appendLine("    \"field$index\": $index,") }
+            appendLine("    \"traceId\": \"trace-7\"")
+            appendLine("  }")
+            append("}")
+        }
+        val selected = detectAdditionalLogProfile(raw.toByteArray())
+        val parsed = parseJson(raw, profile("pino-json"))
+
+        assertEquals("pino-json", selected?.id)
+        assertEquals(1, parsed.entries.size)
+        assertEquals("pretty request failed", parsed.entries.single().msg)
+        assertEquals(raw, parsed.entries.single().rawRecord)
+        assertEquals(1L, parsed.entries.single().sourceStartLine)
+        assertEquals(raw.count { it == '\n' }.toLong() + 1, parsed.entries.single().sourceEndLine)
+    }
+
+    @Test
     fun pinoNumericLevelScaleMapsAllDocumentedValuesAndKeepsUnknownValuesNeutral() {
         val expected = mapOf(10 to LogLevel.V, 20 to LogLevel.D, 30 to LogLevel.I, 40 to LogLevel.W, 50 to LogLevel.E, 60 to LogLevel.A)
 
@@ -73,7 +99,9 @@ class AdditionalLogFormatProfilesTest {
         val row = """{"log":"failed\n","stream":"stderr","time":"2019-01-01T11:11:11.111111111Z"}"""
         val entry = parseJson(row, profile("docker-json-file")).entries.single()
 
-        assertEquals("failed\n", entry.msg)
+        // The line break Docker stores at the end of `log` is not part of the row's text.
+        assertEquals("failed", entry.msg)
+        assertEquals("failed\n", entry.profileFields["log"])
         assertEquals("stderr", entry.profileFields["STREAM"])
         assertFalse(entry.severityKnown)
         assertNull(entry.originalSeverity)

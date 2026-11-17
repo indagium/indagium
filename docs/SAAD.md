@@ -6013,7 +6013,7 @@ with workspace profiles, which hold appearance and layout.
 
 | Piece | Where | Role |
 |---|---|---|
-| `LogFormatEngine` | `model/LogFormatProfile.kt` | The parsing mechanics: `LOGCAT`, `DLT`, `PLAIN_TEXT`, `REGEX`, `JSON_LINES`, `CSV`, `SYSLOG_RFC5424`, `SYSLOG_RFC3164`, `LOGFMT`, `CRI`. Names are serialized; never rename one. |
+| `LogFormatEngine` | `model/LogFormatProfile.kt` | The parsing mechanics: `LOGCAT`, `DLT`, `PLAIN_TEXT`, `REGEX`, `JSON_LINES`, `CSV`, `SYSLOG_RFC5424`, `SYSLOG_RFC3164`, `LOGFMT`, `CRI`, `METADATA_JSON`. Names are serialized; never rename one. |
 | `LogFormatProfile` | same | Identity (`id`, `name`, `revision`, `schemaVersion`), engine, `LogFormatDetection`, field mappings by `LogFieldRole`, extra `LogFormatAttribute`s, time and severity rules, visible columns, compatible analyzers, profile-only issue rules. |
 | Built-ins | `BUILTIN_LOG_FORMAT_PROFILES` + `model/AdditionalBuiltinLogFormats.kt` | Read-only: Android Logcat, Automotive DLT, Plain text, JSON Lines, Syslog 5424/3164, Pino, Docker json-file, systemd journal JSON, dmesg, HTTP Common/Combined, logfmt, Kubernetes CRI. A user duplicates one to change it. |
 | Custom | `AppSettings.customLogFormatProfiles` (JSON settings only) | At most 200. Edited in Settings › Log formats (`ui/SettingsLogFormats.kt`). |
@@ -6024,7 +6024,47 @@ The editor's "Set up from a sample line" panel (`ui/LogFormatColumnBuilderPanel.
 cuts one pasted line into pieces, guesses what each is, and writes the `REGEX` engine's pattern, capture numbers and
 timestamp kind from the user's choice per column, so a text format needs no hand-written regex.
 
+The `METADATA_JSON` engine (`utils/MetadataJson.kt`, profile `metadata-json`, displayed as **JSON with metadata**)
+reads record arrays and nested groups of section arrays. It imports exported JSON fields directly, with no
+byte-level protocol decoding or binary capture-to-JSON conversion action. ZIP inputs use the standard archive picker.
+
+A bounded Jackson token walker recognizes a completed record metadata object within the content sample,
+even if a large first payload extends beyond that sample. Complete records survive damaged tails. JSON values
+are bounded to 256 KiB, retained objects to 4 MiB and nesting to 64. Metadata timestamps are parsed with decimal
+precision, stably sorted and rounded to epoch milliseconds without floating-point conversion. Untimed objects
+receive no fabricated timestamps. Nested records and arrays inside a record remain in its original tree rather
+than generating extra rows or empty section descriptors. General object-valued sections in a document envelope
+become inspectable metadata rows; standalone objects use the ordinary JSON reader. Large payloads represented
+as bounded hex-string arrays retain their full raw tree while indexed fields keep normal application limits.
+
+`ParsedLogSection` owns parser-local rows; a published `LogTab` retains only the selected section's rows plus
+lightweight `LogFileSection` descriptions. The metadata format's revision-2 built-in profile omits the
+component column by default. A format-scoped toolbar context-menu action changes the current tab's
+column projection and pinned profile snapshot without discarding tag values. Section reload and session
+restore reuse that snapshot. Revision-1 built-in snapshots adopt the new default; custom profiles and
+explicit revision-2 choices retain their own columns. Other engines have no corresponding menu action.
+`LogSections` is the contextual `SECTIONS` tile. It appears when
+multiple meaningful sections exist, or when a selected empty section needs navigation back to a populated log.
+Genuinely empty sections are hidden by default and revealed with **Show empty**; selected sections and sections
+with unknown coverage remain visible. Flat record files have one section, empty array files have none, and
+neither reserves space for a redundant navigation tile. The sections list has its own thin scrollbar.
+
+Section changes use the existing asynchronous reload pipeline. Filters, selection and manual folds have independent
+session state per section. The selected section ID is append-only autosave field 21, restored before publishing rows.
+Unloading discards derived section metadata and view state while retaining the selected ID. Status errors retain
+row styling, while metadata JSON does not expose a severity filter based on status codes. Tailing and record
+splitting are unavailable for this engine; capability reporting and UI/MCP guards agree. The tile projection
+uses the same capability as FilterPanel, so omitted controls reserve no space.
+
 A profile holds no code. An imported profile can name engines and analyzers; this build decides whether it can honour them.
+
+`SECTIONS` and `MESSAGE_DETAILS` are contextual, movable single-log tiles. Existing generic layouts remain unchanged;
+`withAuxiliaryLogTiles` inserts applicable missing tiles at display time, and a user layout edit persists their placement.
+The inspector follows selection (with a transient `inspectedRecordId` for a repeated click), reuses the bounded record tree
+with expanded children and separate semantic paths, and has its own scroll state per message. Inline disclosure and log
+fold headers share `CollapseChevron`. Double-click consumes a click pair once, toggles structured inline details, and keeps
+the existing video-seek callback. Format details is opened from the tab context menu via `logFormatDetailsTabId`; no
+format/status banner is mounted above the log tiles. Drag/drop uses the standard text and archive openability checks.
 
 ### 28.2 Choosing a profile
 
@@ -6082,10 +6122,32 @@ or disable what a tab cannot do (`ui/LogFormatAvailability.kt`); MCP tools refus
 Live tailing of a profile tab goes through one `IncrementalProfileParser` (`utils/IncrementalProfileParser.kt`) per tailed tab, kept in
 `TailCoordinator` for as long as the tail lasts, pause and resume included. It drives the same record machines as the whole-file
 parse (`CsvRecordMachine`, `RegexRecordMachine`, `CriRecordAssembler`), so any split of a file into batches yields the rows the whole
-file would, with absolute source lines. It holds an open CSV quote, the CSV header row (read again from line 1 of the file when the
-tail starts), a multiline regex record until the next start line arrives, and CRI partial fragments; stopping the tail appends what
-it still holds. Engines whose record is one line delegate to `parseProfileLines`. DLT is refused, and Logcat tails through
-`parseLogcatLines` without a parser.
+file would, with absolute source lines. When watching starts, it seeds only the pending tail state from the already-parsed final row:
+an open CSV quote, a multiline regex record until the next start line arrives, and the latest bounded CRI `P` fragments per stream.
+The CSV header row is still read again from line 1 of the file. A seeded row keeps its existing id and source start line; when it
+completes, the tail replaces that row and appends any later records. This replacement rebuilds an immutable row-list snapshot and
+invalidates row-derived analysis and message-composition results before their debounced refresh. It does not reread the whole source
+file. Stopping the tail appends what it still holds. Engines whose record is one line delegate to `parseProfileLines`. DLT is refused,
+and Logcat tails through `parseLogcatLines` without a parser. `DELTA_TIME` uses cumulative timed-row and clock-compatibility evidence
+across batches, so two individually single-row batches can satisfy its two-timestamp requirement.
+
+JSON profiles use a quote/escape-aware record machine rather than physical newline boundaries. Pretty-printed objects and
+object streams retain one entry per object; a root array is an event envelope and emits one entry per element. Nested values
+stay within their parent entry, and record-size limits apply per event. Detection uses logical candidates from the bounded sniff
+sample. Whole-file parsing, preview, incremental parsing and profile-aware splitting share the same record-boundary rules.
+
+`ui/StructuredLogRecord.kt` supplies a transient, inline disclosure in the viewer. Structured JSON and multiline payloads start
+with a compact parent summary; expansion renders nested object/array nodes or original message lines without adding `LogEntry`
+IDs. JSON trees are read lazily with bounded depth and children; multiline JSON strings have their own decoded-line disclosure.
+Find can match nested raw-record fields and returns the parent ID. Visible-line projection, copy and export retain their existing
+record representations.
+
+A format whose record starts with a header line treats a line that does not match as a continuation of the record above it
+(`ContinuationJoinMachine`): the syslog engines and a `REGEX` profile without a multiline start, so a stack trace under a
+syslog, dmesg or custom-format line is one record. `LogFormatProfile.joinUnmatchedLines` (default on; off for HTTP access logs)
+controls it. A line with no record above it stays raw. A tail shows the newest record at once and replaces that same row as
+lines join it (`pendingSnapshot`). Logcat, plain text, JSON, CSV, CRI, logfmt and DLT do not use it: Logcat lines carry their own
+headers, and the others have their own framing.
 
 Logcat tabs are deliberately not gated by this: their tools keep their own checks and messages, saved filters are never trimmed
 for them, and the capture tailer starts regardless of the summary. Android crash and ANR analysis runs for the Logcat engine or
@@ -6110,8 +6172,7 @@ restricted to safe characters, and sizes are bounded (see the constants at the t
 
 ### 28.8 Known limits
 
-- Live tailing is refused for DLT only. A tail that starts while a multiline regex record is still growing at the end of the file
-  treats the lines that complete it as a record of their own.
+- Live tailing is refused for DLT only.
 - Splitting is refused for CRI.
 - There is no generic filter on arbitrary profile fields yet; they are searchable as text and visible in columns and over MCP.
 - JSON rows still cost about five times a Logcat row.

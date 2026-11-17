@@ -13,6 +13,7 @@ import com.indagium.utils.decodeLogFormatProfiles
 import com.indagium.utils.deltaMillis
 import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.parseLogContent
+import com.indagium.utils.parseLogFormatPreview
 import com.indagium.utils.validateLogFormatProfile
 import java.io.ByteArrayInputStream
 import kotlin.test.Test
@@ -91,6 +92,82 @@ class LogFormatParserCoreTest {
         assertTrue(entry.recordMetadata?.usesProfilePresentation == true)
         // No role columns were chosen; only the attribute marked visible is projected.
         assertEquals(listOf("trace"), entry.recordMetadata?.displayColumns?.map { it.id })
+    }
+
+    @Test
+    fun prettyNestedJsonObjectIsOneAutoDetectedRecordPastTheOldLineSampleLimit() {
+        val raw = buildString {
+            appendLine("{")
+            appendLine("  \"timestamp\": \"2026-11-16T12:00:00Z\",")
+            appendLine("  \"level\": \"ERROR\",")
+            appendLine("  \"message\": \"one logical event\",")
+            appendLine("  \"context\": {")
+            repeat(28) { index -> appendLine("    \"field$index\": \"nested $index { brace } \\\"quoted\\\"\",") }
+            appendLine("    \"values\": [1, 2, {\"name\": \"kept in raw JSON\"}]")
+            appendLine("  }")
+            append("}")
+        }
+        val parsed = parseLogContent(ByteArrayInputStream(raw.toByteArray()), fileName = "pretty-event.log")
+
+        assertEquals("json-lines", parsed.profile?.id)
+        assertEquals(1, parsed.entries.size)
+        assertEquals("one logical event", parsed.entries.single().msg)
+        assertEquals(raw, parsed.entries.single().rawRecord)
+        assertEquals(1L, parsed.entries.single().sourceStartLine)
+        assertEquals(raw.count { it == '\n' }.toLong() + 1L, parsed.entries.single().sourceEndLine)
+    }
+
+    @Test
+    fun rootJsonArrayEmitsOneRecordPerObjectAndKeepsSameLineSpans() {
+        val first = """{"timestamp":"2026-11-16T12:00:00Z","message":"first","nested":{"items":[1,{"x":true}]}}"""
+        val second = """{"timestamp":"2026-11-16T12:00:01Z","message":"second"}"""
+        val raw = "[$first,$second]"
+        val parsed = parseLogContent(ByteArrayInputStream(raw.toByteArray()), fileName = "events.json")
+
+        assertEquals("json-lines", parsed.profile?.id)
+        assertEquals(listOf("first", "second"), parsed.entries.map { it.msg })
+        assertEquals(listOf(first, second), parsed.entries.map { it.rawRecord })
+        assertEquals(listOf(1L, 1L), parsed.entries.map { it.sourceStartLine })
+        assertEquals(listOf(1L, 1L), parsed.entries.map { it.sourceEndLine })
+        assertEquals(0, parseLogContent(ByteArrayInputStream("[]".toByteArray()), fileName = "empty.json").entries.size)
+    }
+
+    @Test
+    fun largeJsonArrayBoundsMemoryPerEventAndMixedValuesStayRaw() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "json-lines" }
+        val padding = "x".repeat(1100)
+        val raw = (0 until 300).joinToString(prefix = "[", postfix = "]") { index ->
+            "{\"message\":\"event-$index\",\"padding\":\"$padding\"}"
+        }
+        assertTrue(raw.length > 256 * 1024)
+        val parsed = parseLogContent(ByteArrayInputStream(raw.toByteArray()), profile = profile)
+        assertEquals(300, parsed.entries.size)
+        assertEquals("event-299", parsed.entries.last().msg)
+        assertTrue(parsed.entries.all { it.rawRecord.orEmpty().length < 2_000 })
+
+        val mixed = parseLogContent(ByteArrayInputStream("[{\"message\":\"event\"},7,[1,2]]".toByteArray()), profile = profile)
+        assertEquals(listOf("event", "7", "[1,2]"), mixed.entries.map { it.msg })
+        assertEquals(listOf("{\"message\":\"event\"}", "7", "[1,2]"), mixed.entries.map { it.rawRecord })
+    }
+
+    @Test
+    fun oneObjectJsonFileWithoutConventionalLogFieldsStillUsesStructuredJson() {
+        val raw = """{"event":{"kind":"sample","details":{"values":[true,false,null]}}}"""
+        val parsed = parseLogContent(ByteArrayInputStream(raw.toByteArray()), fileName = "single.json")
+        assertEquals("json-lines", parsed.profile?.id)
+        assertEquals(1, parsed.entries.size)
+        assertEquals(raw, parsed.entries.single().rawRecord)
+    }
+
+    @Test
+    fun truncatedJsonPreviewKeepsCompleteRecordsAndOmitsTheOpenTrailingObject() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "json-lines" }
+        val input = "{\"message\":\"complete\"}\n{\n  \"message\": \"${"x".repeat(2000)}\"\n}\n"
+        val preview = parseLogFormatPreview(
+            ByteArrayInputStream(input.toByteArray()), profile, fileName = "preview.json", maxBytes = 1024,
+        )
+        assertEquals(listOf("complete"), preview.entries.map { it.msg })
+        assertTrue(preview.diagnostics.any { it.contains("Preview is limited") })
     }
 
     @Test

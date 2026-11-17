@@ -132,6 +132,8 @@ private fun LogFormatProfile.toJson() = buildJsonObject {
     put("severityMapping", buildJsonObject { severityMapping.forEach { (key, value) -> put(key, value.toString()) } })
     put("delimiter", delimiter.toString())
     put("hasHeader", hasHeader)
+    // Written only when switched off, so profiles saved before the option existed stay byte-identical.
+    if (!joinUnmatchedLines) put("joinUnmatchedLines", false)
     put("visibleColumns", buildJsonArray { visibleColumns.forEach { add(JsonPrimitive(it.name)) } })
     put("compatibleAnalyzers", buildJsonArray { compatibleAnalyzers.forEach { add(JsonPrimitive(it)) } })
     put("issueRules", buildJsonArray {
@@ -193,6 +195,7 @@ private fun JsonObject.toLogFormatProfile(): LogFormatProfile {
         delimiter = stringOrNull("delimiter")?.singleOrNull()
             ?: if ("delimiter" in this) error("Delimiter must contain exactly one character.") else ',',
         hasHeader = bool("hasHeader", true),
+        joinUnmatchedLines = bool("joinUnmatchedLines", true),
         visibleColumns = visibleColumns(),
         compatibleAnalyzers = stringArray("compatibleAnalyzers").toSet(),
         issueRules = rules,

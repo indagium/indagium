@@ -729,6 +729,8 @@ kotlin {
                 // In-app AI providers use the same Ktor line as the MCP server. Keeping the
                 // transport explicit avoids depending on the server engine transitively.
                 implementation("io.ktor:ktor-client-cio:$ktorVersion")
+                // Already in the locked runtime via LanguageTool; stream nested JSON sections one packet at a time.
+                implementation("com.fasterxml.jackson.core:jackson-core:2.18.0")
                 // Whisper and GGML are statically linked into an app-owned native bridge at build
                 // time; the multilingual model is downloaded only after an explicit user action.
                 // Embedded offline note proofreading: English resources only, no server or remote rules.

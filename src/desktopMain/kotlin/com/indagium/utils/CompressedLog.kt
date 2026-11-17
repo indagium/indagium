@@ -18,6 +18,8 @@ data class CompressedLogParse(
     val profile: com.indagium.model.LogFormatProfile? = null,
     val diagnostics: List<String> = emptyList(),
     val sourceClockId: String? = null,
+    val sections: List<ParsedLogSection> = emptyList(),
+    val selectedSectionId: String? = null,
 )
 
 // Counts bytes as they pass through, purely for CompressedLogParse.uncompressedBytes — unlike
@@ -74,7 +76,10 @@ fun parseCompressedLogWithProfile(
         profiles = profiles,
         sourceClockId = file.absolutePath,
     )
-    return CompressedLogParse(parsed.entries, counting.count, parsed.format, parsed.profile, parsed.diagnostics, parsed.sourceClockId)
+    return CompressedLogParse(
+        parsed.entries, counting.count, parsed.format, parsed.profile, parsed.diagnostics, parsed.sourceClockId,
+        parsed.sections, parsed.selectedSectionId,
+    )
 }
 
 /** Parsed compressed-file result used by AppState so content detection is never inferred from a name. */
@@ -83,7 +88,7 @@ fun parseCompressedLogResult(
     compressorName: String,
     maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
 ): ParsedLog = parseCompressedLog(file, compressorName, maxBytes).let {
-    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId)
+    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId, sections = it.sections, selectedSectionId = it.selectedSectionId)
 }
 
 fun parseCompressedLogResultWithProfiles(
@@ -93,23 +98,27 @@ fun parseCompressedLogResultWithProfiles(
     profile: com.indagium.model.LogFormatProfile? = null,
     maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
 ): ParsedLog = parseCompressedLogWithProfile(file, compressorName, maxBytes, profile, profiles).let {
-    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId)
+    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId, sections = it.sections, selectedSectionId = it.selectedSectionId)
 }
 
 /** Content-aware file parser. The List-returning [parseLogFile] remains the compatibility seam. */
-fun parseLogFileResult(file: File): ParsedLog = when (val format = detectArchiveFormat(file)) {
-    is ArchiveFormat.CompressedFile -> parseCompressedLogResult(file, format.compressorName)
-    else -> file.inputStream().use { parseLogContent(it, fileName = file.name, sourceClockId = file.absolutePath) }
+fun parseLogFileResult(file: File): ParsedLog {
+    return when (val format = detectArchiveFormat(file)) {
+        is ArchiveFormat.CompressedFile -> parseCompressedLogResult(file, format.compressorName)
+        else -> file.inputStream().use { parseLogContent(it, fileName = file.name, sourceClockId = file.absolutePath) }
+    }
 }
 
 fun parseLogFileResultWithProfiles(
     file: File,
     profiles: List<com.indagium.model.LogFormatProfile>,
     profile: com.indagium.model.LogFormatProfile? = null,
-): ParsedLog = when (val format = detectArchiveFormat(file)) {
-    is ArchiveFormat.CompressedFile -> parseCompressedLogResultWithProfiles(file, format.compressorName, profiles, profile)
-    else -> file.inputStream().use {
-        parseLogContent(it, fileName = file.name, profile = profile, profiles = profiles, sourceClockId = file.absolutePath)
+): ParsedLog {
+    return when (val format = detectArchiveFormat(file)) {
+        is ArchiveFormat.CompressedFile -> parseCompressedLogResultWithProfiles(file, format.compressorName, profiles, profile)
+        else -> file.inputStream().use {
+            parseLogContent(it, fileName = file.name, profile = profile, profiles = profiles, sourceClockId = file.absolutePath)
+        }
     }
 }
 
@@ -117,7 +126,9 @@ fun parseLogFileResultWithProfiles(
 // AppState's `parser` constructor seam defaults to this instead of ::parseLogcat, which covers
 // openFileInternal, the split path, and — critically — loadRestoredTab, which would otherwise
 // re-parse gzip bytes as raw (garbage) logcat lines on every relaunch of a restored .log.gz tab.
-fun parseLogFile(file: File): List<LogEntry> = when (val format = detectArchiveFormat(file)) {
-    is ArchiveFormat.CompressedFile -> parseCompressedLog(file, format.compressorName).entries
-    else -> file.inputStream().use { parseLogContent(it, fileName = file.name).entries }
+fun parseLogFile(file: File): List<LogEntry> {
+    return when (val format = detectArchiveFormat(file)) {
+        is ArchiveFormat.CompressedFile -> parseCompressedLog(file, format.compressorName).entries
+        else -> file.inputStream().use { parseLogContent(it, fileName = file.name).entries }
+    }
 }

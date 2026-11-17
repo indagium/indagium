@@ -23,6 +23,7 @@ import com.indagium.utils.unrollLogTimeline
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class LogFormatProfileCoreTest {
     private val jsonProfile = LogFormatProfile(
@@ -131,6 +132,16 @@ class LogFormatProfileCoreTest {
         assertEquals(emptySet(), normalized.filter.pkgPrefixes)
         assertEquals("", normalized.filter.pidTidFilter)
         assertEquals(true, normalized.notice?.contains("tag, PID/TID") == true)
+    }
+
+    @Test
+    fun unavailableSeverityClearsHiddenPresetLevelsSoPacketErrorsRemainVisible() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.METADATA_JSON }
+        val entries = listOf(LogEntry(1, "", LogLevel.E, "HCI.Event", "Command Disallowed"))
+        val capabilities = deriveLogCapabilities(profile, entries)
+        val normalized = normalizeFilterForCapabilities(Filter(levels = setOf(LogLevel.I)), capabilities, profile)
+        assertEquals(LogLevel.entries.toSet(), normalized.filter.levels)
+        assertTrue(normalized.notice?.contains("log level") == true)
     }
 
     @Test
