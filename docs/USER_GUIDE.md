@@ -228,11 +228,13 @@ Text that matches none of them opens as before, one row per line.
   summary; press **Duplicate to edit** to get an editable copy. For a plain text log, press **New profile**, paste one
   typical line under **Set up from a sample line**, and say what each column is (level, message, timestamp, tag,
   process id, thread id, an extra field, or skip). Choose Message for every word of the text; lines with more or fewer
-  words still match. **Use these columns** writes the parsing rule for you, **Preview** shows the result, **Save**
-  keeps it. Level names other than the usual ones (TRACE, DEBUG, INFO, WARN, ERROR, FATAL) go under **Severity
+  words still match. **Use these columns** writes the parsing rule for you, **Preview sample** shows the result, and
+  **Save profile** at the top of the profile keeps it (a badge says **Unsaved changes** until you do, and **Revert**
+  goes back to the saved version; **Duplicate** and **Delete…** are in the profile's **⋯** menu). Level names other than the usual ones (TRACE, DEBUG, INFO, WARN, ERROR, FATAL) go under **Severity
   mapping**; an unusual date format goes under **Timestamp pattern**. For JSON Lines or CSV, choose that engine and
   type the key or column name next to each field. The record regex stays editable for unusual layouts. Turn on **Always open these extensions with this format** to tie it to a file
-  extension. Formats can be exported and imported as JSON to share with a team.
+  extension. Formats can be exported and imported as JSON to share with a team: **Import…**, **Export current…** and
+  **Export bundle…** are in the **⋯** menu next to **New profile**.
 
 In syslog, dmesg and your own text formats, a line that does not fit the format belongs to the record
 above it, so a stack trace printed under a log line is one record with a disclosure arrow, not twenty

@@ -103,7 +103,10 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
     var contentRegex by remember(selectedId, profiles) {
         mutableStateOf(selectedProfile.detection.contentRegex.orEmpty())
     }
+    // Errors from Save, Import and Revert show under the profile header, where the button was pressed; errors from the
+    // preview buttons show in the Preview group next to them.
     var localError by remember { mutableStateOf<String?>(null) }
+    var previewError by remember { mutableStateOf<String?>(null) }
     var preview by remember { mutableStateOf<LogFormatPreview?>(null) }
     var previewLoading by remember { mutableStateOf(false) }
     var previewRequestId by remember { mutableStateOf(0) }
@@ -123,6 +126,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         previewLoading = false
         preview = null
         localError = null
+        previewError = null
     }
 
     fun editDraft(transform: (LogFormatProfile) -> LogFormatProfile) {
@@ -187,8 +191,25 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         contentRegex = profile.detection.contentRegex.orEmpty()
     }
 
+    // The stored profile behind the editor; null for a new profile that has not been saved yet.
+    val savedProfile = profiles.firstOrNull { it.id == selectedId && !it.readOnly }
+    // Compared field by field with what selecting the profile loads, so a freshly selected profile is never dirty.
+    val dirty = savedProfile != null && (
+        draft != savedProfile || detectionTextEdited(savedProfile, extensionText, headerText, contentRegex)
+    )
+
+    fun saveDraft() {
+        runCatching { state.saveLogFormatProfile(buildDraft()).getOrThrow() }
+            .onSuccess { saved ->
+                chooseProfile(saved)
+                state.clearLogFormatProfileError()
+            }
+            .onFailure { localError = it.message ?: "Could not save this profile." }
+        reclaimFocus()
+    }
+
     SettingsGroup("Log format profiles", modifier = Modifier.settingsAnchor("Log format profiles")) {
-        SettingsStackedRow("Profile", "Built-ins are read-only. Duplicate one to make an editable copy.") {
+        SettingsStackedRow("Profile", "Built-ins are read-only. Duplicate one to edit it. Import and export are under ⋯.") {
             Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
                 SettingsDropdown(
                     options = profiles,
@@ -213,13 +234,27 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                     },
                     modifier = Modifier.testTag("settings-log-format-new"),
                 )
-                SettingsButton(
-                    "Duplicate",
-                    {
-                        state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile)
-                        reclaimFocus()
-                    },
-                    modifier = Modifier.testTag("settings-log-format-duplicate"),
+                SettingsOverflowMenu(
+                    items = listOf(
+                        SettingsMenuItem("Import…", "settings-log-format-import") {
+                            state.chooseLogFormatProfilesToImport { file, result ->
+                                result.fold(
+                                    onSuccess = {
+                                        localError = null
+                                        state.clearLogFormatProfileError()
+                                    },
+                                    onFailure = { localError = it.message ?: "Could not read ${file.name}." },
+                                )
+                            }
+                        },
+                        SettingsMenuItem("Export current…", "settings-log-format-export-current") {
+                            state.exportLogFormatProfiles(listOf(selectedProfile))
+                        },
+                        SettingsMenuItem("Export bundle…", "settings-log-format-export-bundle") { exportDialogOpen = true },
+                    ),
+                    contentDescription = "Import and export",
+                    testTag = "settings-log-format-library-menu",
+                    onInteraction = reclaimFocus,
                 )
             }
         }
@@ -228,48 +263,37 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile)
                 reclaimFocus()
             }
-        }
-        SettingsStackedRow(
-            "Library actions",
-            "Import a single profile or bundle. Export the current profile or choose a bundle.",
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                SettingsButton(
-                    "Import…",
-                    {
-                        state.chooseLogFormatProfilesToImport { file, result ->
-                            result.fold(
-                                onSuccess = {
-                                    localError = null
-                                    state.clearLogFormatProfileError()
-                                },
-                                onFailure = { localError = it.message ?: "Could not read ${file.name}." },
-                            )
-                        }
-                        reclaimFocus()
-                    },
-                    modifier = Modifier.testTag("settings-log-format-import"),
-                )
-                SettingsButton(
-                    "Export current…",
-                    { state.exportLogFormatProfiles(listOf(selectedProfile)); reclaimFocus() },
-                    modifier = Modifier.testTag("settings-log-format-export-current"),
-                )
-                SettingsButton(
-                    "Export bundle…",
-                    { exportDialogOpen = true; reclaimFocus() },
-                    modifier = Modifier.testTag("settings-log-format-export-bundle"),
-                )
-                // A built-in cannot be deleted, so it gets no button; an unsaved new profile has nothing to delete yet.
-                if (canEdit) {
-                    SettingsButton(
-                        "Delete…",
-                        { deleteConfirmationOpen = true; reclaimFocus() },
-                        isDanger = true,
-                        enabled = profiles.any { it.id == selectedId },
-                        modifier = Modifier.testTag("settings-log-format-delete"),
+        } else {
+            CustomProfileHeader(
+                name = draft.name,
+                revision = savedProfile?.revision,
+                dirty = dirty,
+                saveEnabled = (savedProfile == null || dirty) && !previewLoading,
+                onSave = ::saveDraft,
+                onRevert = {
+                    chooseProfile(savedProfile ?: profiles.first())
+                    reclaimFocus()
+                },
+                menu = savedProfile?.let {
+                    listOf(
+                        SettingsMenuItem("Duplicate", "settings-log-format-duplicate") {
+                            state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile)
+                        },
+                        SettingsMenuItem("Delete…", "settings-log-format-delete", danger = true) { deleteConfirmationOpen = true },
                     )
-                }
+                }.orEmpty(),
+                reclaimFocus = reclaimFocus,
+            )
+        }
+        localError?.let { message ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                AppText(
+                    message,
+                    color = DANGER_RED,
+                    fontSize = 11.sp,
+                    maxLines = 3,
+                    modifier = Modifier.testTag("settings-log-format-error"),
+                )
             }
         }
         val pendingImport = state.pendingLogFormatImport
@@ -923,7 +947,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         }
     }
 
-    SettingsGroup("Preview and save") {
+    SettingsGroup("Preview") {
         SettingsStackedRow(
             "Sample records",
             if (isBinaryEngine(draft.engine)) {
@@ -962,7 +986,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                 if (!previewLoading) {
                                     clearPreview()
                                     val candidate = runCatching(::buildDraft).getOrElse {
-                                        localError = it.message ?: "Complete the profile fields before previewing."
+                                        previewError = it.message ?: "Complete the profile fields before previewing."
                                         return@SettingsButton
                                     }
                                     val sampleText = sample
@@ -975,7 +999,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                         if (requestId == previewRequestId) {
                                             result.fold(
                                                 onSuccess = { preview = LogFormatPreview(candidate, sampleText, it) },
-                                                onFailure = { localError = it.message ?: "Could not preview this profile." },
+                                                onFailure = { previewError = it.message ?: "Could not preview this profile." },
                                             )
                                             previewLoading = false
                                             samplePreviewJob = null
@@ -994,10 +1018,10 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                             clearPreview()
                             val activeTabId = state.activeTabId.takeIf(String::isNotBlank)
                             if (activeTabId == null) {
-                                localError = "Open a log tab before previewing its source."
+                                previewError = "Open a log tab before previewing its source."
                             } else {
                                 val candidate = runCatching(::buildDraft).getOrElse {
-                                    localError = it.message ?: "Complete the profile fields before previewing."
+                                    previewError = it.message ?: "Complete the profile fields before previewing."
                                     return@SettingsButton
                                 }
                                 val requestId = previewRequestId
@@ -1006,7 +1030,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                     if (requestId == previewRequestId) {
                                         result.fold(
                                             onSuccess = { preview = LogFormatPreview(candidate, sample, it) },
-                                            onFailure = { localError = it.message ?: "Could not preview the active tab." },
+                                            onFailure = { previewError = it.message ?: "Could not preview the active tab." },
                                         )
                                         previewLoading = false
                                     }
@@ -1017,25 +1041,8 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                         enabled = state.activeTabId.isNotBlank() && !previewLoading,
                         modifier = Modifier.testTag("settings-log-format-preview-current"),
                     )
-                    if (canEdit) {
-                        SettingsButton(
-                            "Save profile",
-                            {
-                                runCatching { state.saveLogFormatProfile(buildDraft()).getOrThrow() }
-                                    .onSuccess { saved ->
-                                        chooseProfile(saved)
-                                        state.clearLogFormatProfileError()
-                                    }
-                                    .onFailure { localError = it.message ?: "Could not save this profile." }
-                                reclaimFocus()
-                            },
-                            variant = ButtonVariant.Primary,
-                            enabled = !previewLoading,
-                            modifier = Modifier.testTag("settings-log-format-save"),
-                        )
-                    }
                 }
-                localError?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
+                previewError?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
                 val currentDraft = runCatching(::buildDraft).getOrNull()
                 preview?.takeIf { it.profile == currentDraft && it.sample == sample }?.let { current ->
                     ProfilePreviewResults(current.parsed)
@@ -1103,6 +1110,72 @@ private fun BuiltInProfileHeader(profile: LogFormatProfile, onDuplicate: () -> U
             variant = ButtonVariant.Primary,
             modifier = Modifier.testTag("settings-log-format-duplicate-to-edit"),
         )
+    }
+}
+
+/** Whether the detection text fields differ from what selecting [saved] loads into them. */
+private fun detectionTextEdited(saved: LogFormatProfile, extensions: String, header: String, contentRegex: String): Boolean =
+    extensions != saved.detection.extensions.joinToString(", ") ||
+        header != saved.detection.headerContains.joinToString(", ") ||
+        contentRegex != saved.detection.contentRegex.orEmpty()
+
+/**
+ * The custom profile's name and state badges with its Revert (Discard for a new profile), Save profile and, for a saved
+ * profile, a "⋯" menu of the rare actions in [menu]. It sits where the built-in header does, at the top.
+ */
+@Composable
+private fun CustomProfileHeader(
+    name: String,
+    revision: Int?,
+    dirty: Boolean,
+    saveEnabled: Boolean,
+    onSave: () -> Unit,
+    onRevert: () -> Unit,
+    menu: List<SettingsMenuItem>,
+    reclaimFocus: () -> Unit,
+) {
+    val tc = tc()
+    val isNew = revision == null
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp).testTag("settings-log-format-custom-header"),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText(
+                name.ifBlank { "Untitled profile" },
+                color = tc.tx,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SettingsBadge(if (revision == null) "New · not saved" else "Custom · revision $revision")
+                if (dirty) SettingsBadge("Unsaved changes", dot = true)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+            SettingsButton(
+                if (isNew) "Discard" else "Revert",
+                onRevert,
+                enabled = isNew || dirty,
+                modifier = Modifier.testTag("settings-log-format-revert"),
+            )
+            SettingsButton(
+                "Save profile",
+                onSave,
+                variant = ButtonVariant.Primary,
+                enabled = saveEnabled,
+                modifier = Modifier.testTag("settings-log-format-save"),
+            )
+            if (menu.isNotEmpty()) {
+                SettingsOverflowMenu(
+                    items = menu,
+                    contentDescription = "More profile actions",
+                    testTag = "settings-log-format-profile-menu",
+                    onInteraction = reclaimFocus,
+                )
+            }
+        }
     }
 }
 

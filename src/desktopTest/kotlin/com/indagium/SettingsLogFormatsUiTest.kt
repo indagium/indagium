@@ -14,6 +14,7 @@ import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -162,9 +163,162 @@ class SettingsLogFormatsUiTest {
         // The copy is selected and opens in the editor.
         rule.onNodeWithTag("settings-log-format-summary").assertDoesNotExist()
         rule.onNodeWithTag("settings-log-format-builtin-header").assertDoesNotExist()
-        rule.onNodeWithTag("settings-log-format-save").performScrollTo().assertIsEnabled()
-        rule.onNodeWithTag("settings-log-format-delete").performScrollTo().assertIsEnabled()
+        rule.onNodeWithTag("settings-log-format-save").performScrollTo().assertIsNotEnabled()
+        rule.onNodeWithTag("settings-log-format-profile-menu").performScrollTo().assertExists()
         rule.onNodeWithTag("settings-log-format-name").performScrollTo().assertExists()
+    }
+
+    private fun openMenu(tag: String) {
+        rule.onNodeWithTag(tag).performScrollTo().performClick()
+        rule.waitForIdle()
+    }
+
+    private fun assertNoSaveInPreviewGroup() {
+        // The preview buttons are there, Save is not: it lives in the profile header.
+        rule.onNodeWithTag("settings-log-format-preview").performScrollTo().assertExists()
+        rule.onNodeWithTag("settings-log-format-preview-current").assertExists()
+        rule.onNodeWithText("Preview and save").assertDoesNotExist()
+        rule.onNodeWithText("Preview", useUnmergedTree = true).assertExists()
+    }
+
+    @Test
+    fun theProfileRowIsADropdownNewProfileAndAnImportExportMenu() {
+        val state = newState()
+        openPage(state)
+
+        assertTagsPresent("settings-log-format-profile", "settings-log-format-new", "settings-log-format-library-menu")
+        rule.onNodeWithText("Library actions").assertDoesNotExist()
+        rule.onNodeWithText("Duplicate", substring = false).assertDoesNotExist()
+        assertTagsAbsent(
+            "settings-log-format-import",
+            "settings-log-format-export-current",
+            "settings-log-format-export-bundle",
+            "settings-log-format-delete",
+        )
+        rule.onNodeWithContentDescription("Import and export").assertExists()
+
+        openMenu("settings-log-format-library-menu")
+        rule.onNodeWithTag("settings-log-format-import").assert(hasText("Import…"))
+        rule.onNodeWithTag("settings-log-format-export-current").assert(hasText("Export current…"))
+        rule.onNodeWithTag("settings-log-format-export-bundle").assert(hasText("Export bundle…"))
+        // Each item still does what its button did: the bundle item opens the export dialog.
+        rule.onNodeWithTag("settings-log-format-export-bundle").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-export-all").assertExists()
+        // Closing the menu left nothing behind in the profile row.
+        rule.onNodeWithText("Library actions").assertDoesNotExist()
+    }
+
+    @Test
+    fun aCustomProfileHeaderHoldsTheUnsavedStateRevertSaveAndTheMenu() {
+        val state = newState()
+        val profile = LogFormatProfile(
+            id = "ui-header",
+            name = "Header profile",
+            description = "",
+            engine = LogFormatEngine.PLAIN_TEXT,
+        )
+        assertTrue(state.saveLogFormatProfile(profile).isSuccess)
+        openPage(state)
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-ui-header").performScrollTo().performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("settings-log-format-custom-header").performScrollTo().assertExists()
+        rule.onNodeWithText("Custom · revision 1", substring = true, useUnmergedTree = true).assertExists()
+        // Right after selecting there is nothing to save or revert.
+        rule.onNodeWithText("Unsaved changes").assertDoesNotExist()
+        rule.onNodeWithTag("settings-log-format-revert").assertIsNotEnabled()
+        assertNoSaveInPreviewGroup()
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo()
+        recordScreenshot("settings-editor-custom")
+
+        rule.onNodeWithTag("settings-log-format-name").performScrollTo().performTextClearance()
+        rule.onNodeWithTag("settings-log-format-name").performTextInput("Edited name")
+        rule.waitForIdle()
+        rule.onNodeWithText("Unsaved changes", useUnmergedTree = true).assertExists()
+        rule.onNodeWithTag("settings-log-format-revert").performScrollTo().assertIsEnabled()
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo()
+        recordScreenshot("settings-editor-custom-dirty")
+
+        rule.onNodeWithTag("settings-log-format-revert").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Unsaved changes").assertDoesNotExist()
+        rule.onNodeWithTag("settings-log-format-revert").assertIsNotEnabled()
+        rule.onNodeWithTag("settings-log-format-name").performScrollTo().assert(hasText("Header profile"))
+        assertEquals("Header profile", state.availableLogFormatProfiles().single { it.id == "ui-header" }.name)
+
+        rule.onNodeWithTag("settings-log-format-name").performTextClearance()
+        rule.onNodeWithTag("settings-log-format-name").performTextInput("Saved name")
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-save").performScrollTo().performClick()
+        rule.waitForIdle()
+        val saved = state.availableLogFormatProfiles().single { it.id == "ui-header" }
+        assertEquals("Saved name", saved.name)
+        assertEquals(2, saved.revision)
+        rule.onNodeWithText("Unsaved changes").assertDoesNotExist()
+        rule.onNodeWithText("Custom · revision 2", substring = true, useUnmergedTree = true).assertExists()
+
+        // A failed save is reported under the header, where Save was pressed.
+        rule.onNodeWithTag("settings-log-format-name").performScrollTo().performTextClearance()
+        rule.onNodeWithTag("settings-log-format-save").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-error").performScrollTo().assertExists()
+        assertEquals("Saved name", state.availableLogFormatProfiles().single { it.id == "ui-header" }.name)
+        rule.onNodeWithText("Untitled profile", useUnmergedTree = true).assertExists()
+    }
+
+    @Test
+    fun theCustomProfileMenuDuplicatesAndOpensTheDeleteConfirmation() {
+        val state = newState()
+        val profile = LogFormatProfile(id = "ui-menu", name = "Menu profile", description = "", engine = LogFormatEngine.PLAIN_TEXT)
+        assertTrue(state.saveLogFormatProfile(profile).isSuccess)
+        openPage(state)
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-ui-menu").performScrollTo().performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("settings-log-format-duplicate").assertDoesNotExist()
+        openMenu("settings-log-format-profile-menu")
+        rule.onNodeWithTag("settings-log-format-duplicate").assert(hasText("Duplicate"))
+        rule.onNodeWithTag("settings-log-format-delete").assert(hasText("Delete…"))
+        rule.onNodeWithTag("settings-log-format-delete").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete Menu profile?").assertExists()
+        rule.onNodeWithText("Cancel").performClick()
+        rule.waitForIdle()
+        assertTrue(state.availableLogFormatProfiles().any { it.id == "ui-menu" })
+
+        val count = state.availableLogFormatProfiles().size
+        openMenu("settings-log-format-profile-menu")
+        rule.onNodeWithTag("settings-log-format-duplicate").performClick()
+        rule.waitForIdle()
+        assertEquals(count + 1, state.availableLogFormatProfiles().size)
+    }
+
+    @Test
+    fun aNewProfileIsNotSavedAndDiscardReturnsToTheFirstProfile() {
+        val state = newState()
+        openPage(state)
+        rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithText("New · not saved", useUnmergedTree = true).assertExists()
+        rule.onNodeWithText("Custom · revision", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        // Nothing to duplicate or delete yet, so there is no menu.
+        assertTagsAbsent("settings-log-format-profile-menu", "settings-log-format-duplicate", "settings-log-format-delete")
+        rule.onNodeWithTag("settings-log-format-save").assertIsEnabled()
+        assertNoSaveInPreviewGroup()
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo()
+        recordScreenshot("settings-editor-new")
+
+        rule.onNodeWithTag("settings-log-format-revert").performScrollTo().assert(hasText("Discard"))
+        rule.onNodeWithTag("settings-log-format-revert").assertIsEnabled().performClick()
+        rule.waitForIdle()
+        assertTagsPresent("settings-log-format-builtin-header", "settings-log-format-summary")
+        assertTagsAbsent("settings-log-format-custom-header", "settings-log-format-save")
+        rule.onNodeWithTag("settings-log-format-profile").assert(hasText(state.availableLogFormatProfiles().first().name))
+        assertTrue(state.availableLogFormatProfiles().none { !it.readOnly })
     }
 
     @Test
@@ -260,7 +414,7 @@ class SettingsLogFormatsUiTest {
         rule.onNodeWithTag("settings-log-format-summary-severity-mapping", useUnmergedTree = true).assertExists()
         rule.onNodeWithTag("settings-log-format-summary-extra-attributes", useUnmergedTree = true).assertExists()
         rule.onNodeWithText("This engine does not expose additional source fields.").assertExists()
-        // A custom profile keeps its editor and Save button.
+        // A new custom profile keeps its editor and an enabled Save button.
         rule.onNodeWithTag("settings-log-format-save").performScrollTo().assertIsEnabled()
     }
 
