@@ -13,6 +13,7 @@ import com.indagium.model.ParsedTime
 import com.indagium.model.usesCustomLogFormatProjection
 import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
@@ -37,6 +38,8 @@ data class ParsedLog(
     val candidateProfileIds: List<String> = emptyList(),
     val sections: List<ParsedLogSection> = emptyList(),
     val selectedSectionId: String? = null,
+    /** Set when a plain metadata JSON file was parsed from its bytes: where each section lives, for switching sections later. */
+    val metadataSectionIndex: MetadataJsonSectionIndex? = null,
 ) {
     val capabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> by lazy {
         profile?.let { com.indagium.model.deriveLogCapabilities(it, entries, sourceClockId = sourceClockId) }.orEmpty()
@@ -98,6 +101,8 @@ fun parseLogContent(
     profile: LogFormatProfile? = null,
     profiles: List<LogFormatProfile> = emptyList(),
     sourceClockId: String? = null,
+    /** The plain file [stream] reads from, when it is one: lets a metadata JSON parse build its section index from the file's bytes. */
+    indexSource: File? = null,
 ): ParsedLog {
     val input = if (stream.markSupported()) stream else BufferedInputStream(stream, PARSE_LOG_CONTENT_BUFFER_BYTES)
     input.mark(CONTENT_SNIFF_BYTES + 1)
@@ -120,7 +125,7 @@ fun parseLogContent(
     }
 
     val selection = selectTextProfile(sample, fileName, profile, profiles)
-    return parseTextWithProfile(input, selection.profile, profile, startId, sourceClockId, fileName)
+    return parseTextWithProfile(input, selection.profile, profile, startId, sourceClockId, fileName, indexSource)
         .withDetectionDiagnostics(selection.diagnostics)
         .let { if (selection.candidateProfileIds.isEmpty()) it else it.copy(candidateProfileIds = selection.candidateProfileIds) }
 }
@@ -200,10 +205,11 @@ private fun parseTextWithProfile(
     startId: Int,
     sourceClockId: String?,
     fileName: String?,
+    indexSource: File?,
 ): ParsedLog {
     if (selectedProfile.engine != LogFormatEngine.LOGCAT && selectedProfile.engine != LogFormatEngine.DLT) {
         validateLogFormatProfile(selectedProfile)
-        return input.use { parseProfileLog(it, selectedProfile, startId, sourceClockId, fileName) }
+        return input.use { parseProfileLog(it, selectedProfile, startId, sourceClockId, fileName, indexSource) }
     }
     if (requestedProfile != null && requestedProfile.engine == LogFormatEngine.LOGCAT) {
         return input.use { parseTextLog(it, startId) }

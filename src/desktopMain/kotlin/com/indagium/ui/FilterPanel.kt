@@ -810,10 +810,16 @@ internal fun FilterPanel(
     var kwDisplay by remember(tab.id) { mutableStateOf(filter.kwText) }
     var kwLastSent by remember(tab.id) { mutableStateOf(filter.kwText) }
     var kwFieldFocused by remember { mutableStateOf(false) }
+    // A commit of the text the filter already holds changes nothing, so it is skipped: one that fires between a JSON section switch
+    // publishing its rows and this panel being rebuilt for them must not write the old section's text into the new section's filter.
+    val appliedKw by rememberUpdatedState(filter.kwText)
     LaunchedEffect(kwDisplay) {
         val snap = kwDisplay
         kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 150)
-        if (snap == kwDisplay) { kwLastSent = kwDisplay; onSetKw(kwDisplay) }
+        if (snap == kwDisplay) {
+            kwLastSent = kwDisplay
+            if (snap != appliedKw) onSetKw(kwDisplay)
+        }
     }
     LaunchedEffect(filter.kwText) { if (filter.kwText != kwLastSent) kwDisplay = filter.kwText }
 
@@ -833,6 +839,7 @@ internal fun FilterPanel(
     var msgRuleScopeSelectedIdx by remember(tab.id) { mutableStateOf(0) }
     var pendingMessageRule by remember(tab.id) { mutableStateOf<PendingMessageRuleDraft?>(null) }
     var pendingSearchFocusTarget by remember { mutableStateOf<CtrlFTarget?>(null) }
+    val appliedKwInTag by rememberUpdatedState(filter.kwInTag)
     LaunchedEffect(msgRuleInput) {
         fpState.messageQueryDrafts[tab.id] = msgRuleInput
         val snap = msgRuleInput
@@ -842,7 +849,7 @@ internal fun FilterPanel(
             msgRuleLastSent = msgRuleInput
             // kwInTag is a Tags-mode-only secondary filter (see Filter.kt). The message-rule field
             // is not rendered in Regex mode, so typing here should only ever update Tags-mode state.
-            if (filter.mode == FilterMode.TAGS) onSetKwInTag(msgRuleInput)
+            if (filter.mode == FilterMode.TAGS && msgRuleInput != appliedKwInTag) onSetKwInTag(msgRuleInput)
         }
     }
     LaunchedEffect(filter.kwInTag) {

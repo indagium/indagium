@@ -57,7 +57,9 @@ internal fun RowScope.LogSectionsHeaderAction(tab: LogTab, showEmpty: Boolean, o
 internal fun LogSections(state: AppState, tab: LogTab, showEmpty: Boolean, modifier: Modifier = Modifier) {
     val colors = tc()
     val scroll = rememberLazyListState()
-    val visibleSections = tab.logSections.filter { showEmpty || !it.isEmptySection || it.id == tab.selectedLogSectionId }
+    // The section being loaded counts as the selected one at once; the rows shown stay the old section's until it arrives.
+    val selectedId = state.pendingLogSection[tab.id] ?: tab.selectedLogSectionId
+    val visibleSections = tab.logSections.filter { showEmpty || !it.isEmptySection || it.id == selectedId }
     Column(modifier.fillMaxWidth().fillMaxHeight().testTag("log-sections-${tab.id}")) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
@@ -73,7 +75,7 @@ internal fun LogSections(state: AppState, tab: LogTab, showEmpty: Boolean, modif
                             )
                         }
                     }
-                    items(sections, key = { it.id }) { section -> LogSectionRow(state, tab, section) }
+                    items(sections, key = { it.id }) { section -> LogSectionRow(state, tab, section, section.id == selectedId) }
                 }
             }
             ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
@@ -82,9 +84,8 @@ internal fun LogSections(state: AppState, tab: LogTab, showEmpty: Boolean, modif
 }
 
 @Composable
-private fun LogSectionRow(state: AppState, tab: LogTab, section: LogFileSection) {
+private fun LogSectionRow(state: AppState, tab: LogTab, section: LogFileSection, selected: Boolean) {
     val colors = tc()
-    val selected = section.id == tab.selectedLogSectionId
     HoverBox(
         modifier = Modifier.fillMaxWidth()
             .selectable(

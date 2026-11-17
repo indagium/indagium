@@ -1511,6 +1511,8 @@ internal fun LogViewer(
     // Tiled mode (log-view tiling, ui/LogViewerTiles.kt): instead of one Column with banners and a draggable split, LogViewer emits
     // the Original and Log tiles into the enclosing TilingSurface. null (every other caller) keeps the single Column below.
     tiles: LogViewerTiles? = null,
+    // The rows shown are the JSON section being switched away from (AppState.pendingLogSection): the tiles dim and ignore the pointer.
+    rowsStale: Boolean = false,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -2991,15 +2993,19 @@ internal fun LogViewer(
                         onClose = onToggleUnfiltered,
                         onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
                     ) { info ->
-                        Column(Modifier.fillMaxSize().background(tc.bg)) {
-                            OriginalPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                        StaleRowsLayer(rowsStale, tab.id, tc.bg) {
+                            Column(Modifier.fillMaxSize().background(tc.bg)) {
+                                OriginalPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                            }
                         }
                     },
                 )
                 tiles.scope.Tile(tiles.logId, tiles.logSlot { info ->
-                    Column(Modifier.fillMaxSize().background(tc.bg).onGloballyPositioned { containerH = it.size.height / density }) {
-                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
-                        FilteredSplitPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                    StaleRowsLayer(rowsStale, tab.id, tc.bg) {
+                        Column(Modifier.fillMaxSize().background(tc.bg).onGloballyPositioned { containerH = it.size.height / density }) {
+                            Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
+                            FilteredSplitPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                        }
                     }
                 })
             }
@@ -3201,9 +3207,11 @@ internal fun LogViewer(
                 SinglePane(hasPidTid)
             } else {
                 tiles.scope.Tile(tiles.logId, tiles.logSlot { info ->
-                    Column(Modifier.fillMaxSize().background(tc.bg)) {
-                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
-                        SinglePane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                    StaleRowsLayer(rowsStale, tab.id, tc.bg) {
+                        Column(Modifier.fillMaxSize().background(tc.bg)) {
+                            Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
+                            SinglePane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                        }
                     }
                 })
             }

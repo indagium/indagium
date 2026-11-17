@@ -104,9 +104,12 @@ internal fun detectAndroidDiagnosticProfile(sample: ByteArray): LogFormatProfile
 
 internal fun parseProfileLog(
     input: InputStream, profile: LogFormatProfile, startId: Int = 1, sourceClockId: String? = null, fileName: String? = null,
+    indexSource: java.io.File? = null,
 ): ParsedLog {
     validateLogFormatProfile(profile)
     if (profile.engine == LogFormatEngine.METADATA_JSON) {
+        // [input] is still unread here, so a file the byte parse declines is parsed from it exactly as before.
+        indexSource?.let { file -> parseMetadataJsonFile(file, profile, startId, sourceClockId, fileName)?.let { return it } }
         return openLogTextReader(input).use { parseMetadataJson(it, profile, startId, sourceClockId, sectionNameHint = fileName) }
     }
     return openLogTextReader(input).use { reader -> parseProfileSequence(reader.lineSequence(), profile, startId, sourceClockId) }

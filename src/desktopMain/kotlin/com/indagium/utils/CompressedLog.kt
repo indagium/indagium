@@ -117,7 +117,9 @@ fun parseLogFileResultWithProfiles(
     return when (val format = detectArchiveFormat(file)) {
         is ArchiveFormat.CompressedFile -> parseCompressedLogResultWithProfiles(file, format.compressorName, profiles, profile)
         else -> file.inputStream().use {
-            parseLogContent(it, fileName = file.name, profile = profile, profiles = profiles, sourceClockId = file.absolutePath)
+            parseLogContent(
+                it, fileName = file.name, profile = profile, profiles = profiles, sourceClockId = file.absolutePath, indexSource = file,
+            )
         }
     }
 }

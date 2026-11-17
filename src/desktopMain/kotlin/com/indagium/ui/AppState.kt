@@ -138,6 +138,7 @@ import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.MergeSourceFile
+import com.indagium.utils.MetadataJsonSectionIndex
 import com.indagium.utils.OrderedIntSet
 import com.indagium.utils.ParsedLog
 import com.indagium.utils.RegexEvaluationContext
@@ -182,6 +183,7 @@ import com.indagium.utils.isSupportedArchiveFile
 import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.isValidRegexPattern
 import com.indagium.utils.listArchiveLogCandidates
+import com.indagium.utils.loadMetadataJsonSection
 import com.indagium.utils.logFormatProfileFromJson
 import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.matchingHighlighter
@@ -6267,6 +6269,21 @@ class AppState(
     private val inactiveSinceNanos = ConcurrentHashMap<String, Long>()
     private val contentLoadGenerations = ConcurrentHashMap<String, AtomicLong>()
     private val contentLoadJobs = ConcurrentHashMap<String, Job>()
+
+    // A JSON section switch keeps the shown rows until the next section's rows are ready (selectLogSection). Its load has its own
+    // generation and job per tab: a newer pick supersedes an older one, and closing the tab cancels it. All three are guarded by stateLock.
+    private val sectionLoadGenerations = ConcurrentHashMap<String, AtomicLong>()
+    private val sectionLoadJobs = ConcurrentHashMap<String, Job>()
+
+    /** Session-only: where each section of a plain metadata JSON file lives, so a switch reads only that section. Never saved. */
+    private val logSectionIndexes = ConcurrentHashMap<String, MetadataJsonSectionIndex>()
+
+    /** tabId -> the section a switch is loading; the Sections list shows it selected while the old rows stay on screen. */
+    var pendingLogSection by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
+
+    /** Test seam: runs on the IO thread just before a section switch reads its rows. */
+    @Volatile internal var onLogSectionLoadStart: ((tabId: String, sectionId: String) -> Unit)? = null
     private val readerPinsByTab = HashMap<String, Int>()
     private var tabMemoryLifecycleStarted by mutableStateOf(!restoreOnCreate)
     private val tabMemoryLifecycleJobsStarted = AtomicBoolean(false)
@@ -7010,7 +7027,9 @@ class AppState(
         val target = rowReleaseTarget(tab)
         if (target != null && (rowsPinCounts[target.store] ?: 0) > 0) return true
         if (videoControllers[tab.id]?.isPlaying == true) return true
-        if (activeLoads[tab.id]?.job?.isActive == true || contentLoadJobs[tab.id]?.isActive == true) return true
+        if (activeLoads[tab.id]?.job?.isActive == true || contentLoadJobs[tab.id]?.isActive == true ||
+            sectionLoadJobs[tab.id]?.isActive == true
+        ) return true
         if (captureIndexBuildsByTab[tab.id]?.result?.isDone == false) return true
         return compositionJobs[tab.id]?.isActive == true
     }
@@ -7128,6 +7147,7 @@ class AppState(
                 logViewerScrollStateStore.snapshotAndDropLazyStates(tabId)
                 detachedVideo = videoControllers.remove(tabId)
                 detachedSnapshots = detachImportedSnapshots(setOf(tabId))
+                logSectionIndexes.remove(tabId) // the reload's full parse builds a fresh one
 
                 contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
                 val filtered = tab.searchFor(SearchScope.FILTERED).copy(
@@ -8066,32 +8086,133 @@ class AppState(
         }
     }
 
-    /** Switch protocol logs without mixing their filters, selections, folds or row identities. */
+    /**
+     * Switch protocol logs without mixing their filters, selections, folds or row identities. The shown section's rows, filter and
+     * selection stay on screen, untouched and still belonging together, while the target loads off the UI thread; the target's rows
+     * and its saved view then replace them in one update. A newer pick supersedes a load still running, and picking the shown section
+     * again cancels it.
+     */
     internal fun selectLogSection(tabId: String, sectionId: String) {
         synchronized(stateLock) {
             val source = tab(tabId) ?: return
-            if (source.contentState != TabContentState.LOADED || source.selectedLogSectionId == sectionId) return
+            if (source.contentState != TabContentState.LOADED) return
             if (source.logSections.none { it.id == sectionId }) return
-            clearRecordExpansion(listOf(tabId))
-            val views = source.logSectionViews.toMutableMap()
-            source.selectedLogSectionId?.let { current ->
-                views[current] = LogSectionViewState(source.filter, source.selected, source.expanded, source.manualBlocks)
+            val pending = pendingLogSection[tabId]
+            if (pending == sectionId) return
+            if (source.selectedLogSectionId == sectionId) {
+                if (pending != null) {
+                    sectionLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+                    sectionLoadJobs.remove(tabId)?.cancel()
+                    pendingLogSection = pendingLogSection - tabId
+                }
+                return
             }
-            val view = views[sectionId] ?: LogSectionViewState()
-            upTab(tabId) {
-                it.copy(
+            val generation = sectionLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+            sectionLoadJobs.remove(tabId)?.cancel()
+            pendingLogSection = pendingLogSection + (tabId to sectionId)
+            lateinit var job: Job
+            job = ioScope.launch(start = CoroutineStart.LAZY) { runLogSectionLoad(tabId, sectionId, generation, job) }
+            sectionLoadJobs[tabId] = job
+            job.start()
+        }
+    }
+
+    /** stateLock must be held: a closed tab's section load is cancelled and its pending target and index dropped. */
+    private fun forgetLogSectionState(tabId: String) {
+        sectionLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+        sectionLoadJobs.remove(tabId)?.cancel()
+        logSectionIndexes.remove(tabId)
+        if (tabId in pendingLogSection) pendingLogSection = pendingLogSection - tabId
+    }
+
+    /** Keeps (or, with null, drops) the section index of a tab whose file was just parsed in full. */
+    private fun rememberLogSectionIndex(tabId: String, index: MetadataJsonSectionIndex?) {
+        if (index != null) logSectionIndexes[tabId] = index else logSectionIndexes.remove(tabId)
+    }
+
+    private fun isWantedLogSection(tabId: String, sectionId: String, generation: Long): Boolean =
+        sectionLoadGenerations[tabId]?.get() == generation && pendingLogSection[tabId] == sectionId && tab(tabId) != null
+
+    private suspend fun runLogSectionLoad(tabId: String, sectionId: String, generation: Long, self: Job) {
+        var restoredCapture: com.indagium.capture.ImportedCapture? = null
+        try {
+            onLogSectionLoadStart?.invoke(tabId, sectionId)
+            val request = synchronized(stateLock) {
+                val shell = tabs.firstOrNull { it.id == tabId } ?: return
+                val source = reloadSourcesByTab[tabId] ?: restoredSourceForTab(shell) ?: error("This tab has no source file to read.")
+                Triple(shell, source, logSectionIndexes[tabId])
+            }
+            val (shell, source, index) = request
+            val selectedProfile = pinnedLogFormatProfile(shell)
+            val restoreProfile = selectedProfile
+                ?: if (shell.logFormatProfileId == null) builtinProfileFor(shell.logFormat) else null
+            val result = runInterruptible { loadLogSectionRows(shell, source, restoreProfile, sectionId, index) }
+            restoredCapture = (result as? RestoredTabLoadResult.Loaded)?.captureArchive
+            currentCoroutineContext().ensureActive()
+            if (!isWantedLogSection(tabId, sectionId, generation)) return
+            val failure = restoredLoadFailureMessage(result)
+            if (failure != null) {
+                failLogSectionLoad(tabId, sectionId, generation, shell, failure)
+                return
+            }
+            val loaded = result as RestoredTabLoadResult.Loaded
+            val switch = LogSectionSwitch(sectionId) { isWantedLogSection(tabId, sectionId, generation) }
+            val rows = publishRestoredTabRows(tabId, 0L, loaded, switch) ?: return
+            autosaveNow()
+            val analysisGeneration = contentLoadGenerations[tabId]?.get() ?: 0L
+            scheduleRestoredTabAnalysis(tabId, analysisGeneration, rows, loaded.logFormat, loaded.profile)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            val message = failure.message?.takeIf(String::isNotBlank) ?: failure::class.simpleName ?: "The section could not be read."
+            tab(tabId)?.let { failLogSectionLoad(tabId, sectionId, generation, it, message) }
+        } finally {
+            restoredCapture?.close()
+            synchronized(stateLock) {
+                sectionLoadJobs.remove(tabId, self)
+                // A cancelled load that is still the wanted one (the tab unloaded under it) must not leave the target looking selected.
+                if (sectionLoadGenerations[tabId]?.get() == generation && pendingLogSection[tabId] == sectionId) {
+                    pendingLogSection = pendingLogSection - tabId
+                }
+            }
+        }
+    }
+
+    /** The old section stays on screen; the error is reported the way a file that cannot be opened is. */
+    private fun failLogSectionLoad(tabId: String, sectionId: String, generation: Long, shell: LogTab, message: String) {
+        synchronized(stateLock) {
+            if (sectionLoadGenerations[tabId]?.get() != generation) return
+            if (pendingLogSection[tabId] == sectionId) pendingLogSection = pendingLogSection - tabId
+        }
+        showOpenError("Could not load section", shell.sourcePath, "${sectionId.substringAfterLast(" / ")}: $message")
+    }
+
+    /**
+     * One section's rows: from the section index when the file is still the one it describes (only that section's bytes are read),
+     * otherwise through the ordinary full parse, which also builds a fresh index.
+     */
+    private fun loadLogSectionRows(
+        shell: LogTab,
+        source: RestoredTabSource,
+        profile: LogFormatProfile?,
+        sectionId: String,
+        index: MetadataJsonSectionIndex?,
+    ): RestoredTabLoadResult {
+        if (source is RestoredTabSource.FileSource && profile != null && index != null) {
+            loadMetadataJsonSection(source.file, index, sectionId, profile)?.let { rows ->
+                return RestoredTabLoadResult.Loaded(
+                    logData = rows,
+                    archiveCandidate = null,
+                    largeFileMode = shell.largeFileMode,
+                    logFormat = shell.logFormat,
+                    profile = profile,
                     selectedLogSectionId = sectionId,
-                    inspectedRecordId = null,
-                    logSectionViews = views,
-                    logData = emptyList(), rmap = emptyMap(), analysis = LogAnalysis(),
-                    filter = view.filter, selected = view.selected, expanded = view.expanded, manualBlocks = view.manualBlocks,
-                    search = LogSearchState.EMPTY, searches = LogSearchSessions(),
-                    contentState = TabContentState.UNLOADED, contentLoadError = null,
+                    sectionIndex = index,
+                    fromSectionIndex = true,
                 )
             }
         }
-        ensureTabLoaded(tabId)
-        autosaveNow()
+        return loadRestoredTab(source, profile, sectionId)
     }
 
     internal fun previewLogFormatProfile(profile: LogFormatProfile, sample: String): ParsedLog =
@@ -8231,6 +8352,7 @@ class AppState(
             profileSourceLineCount = result.sourceLineCount,
         )
         publishOpenedTab(newTab, originLauncherId = null)
+        rememberLogSectionIndex(newId, result.metadataSectionIndex)
         ioScope.launch {
             val full = buildLogAnalysis(result.entries, settings.customIssueRules, result.format, profile = profile)
             upTab(newId) { it.copy(analysis = full) }
@@ -13060,6 +13182,7 @@ class AppState(
             tabIds.forEach { tabId ->
                 contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
                 contentLoadJobs.remove(tabId)?.cancel()
+                forgetLogSectionState(tabId)
                 reloadSourcesByTab.remove(tabId)
                 inactiveSinceNanos.remove(tabId)
                 seq3Sessions.sourceTabClosed(tabId)
@@ -13734,6 +13857,7 @@ class AppState(
                 synchronized(stateLock) {
                     ensureActive()
                     publishOpenedTab(t, originLauncherId, originGroupId)
+                    rememberLogSectionIndex(tabId, parsed.metadataSectionIndex)
                 }
                 AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -15069,6 +15193,7 @@ class AppState(
                 profileSourceLineCount = parsed.sourceLineCount,
             )
         publishOpenedTab(t, originLauncherId = null, originGroupId = originGroupId)
+        rememberLogSectionIndex(tabId, parsed.metadataSectionIndex)
         autoLoadOwnNotesIfAny(tabId)
         return tabId
     }
@@ -18266,68 +18391,107 @@ class AppState(
         is RestoredTabLoadResult.Loaded -> null
     }
 
+    /** Publishes a section switch's rows together with the target section's saved view, while it is still the wanted switch. */
+    private class LogSectionSwitch(val sectionId: String, val isCurrent: () -> Boolean)
+
+    /** The tab as the section [sectionId] starts: the shown section's view is saved, and the target's saved view (or a fresh one) is restored. */
+    private fun enterLogSection(from: LogTab, sectionId: String): LogTab {
+        val views = from.logSectionViews.toMutableMap()
+        from.selectedLogSectionId?.let { shown ->
+            views[shown] = LogSectionViewState(from.filter, from.selected, from.expanded, from.manualBlocks)
+        }
+        val view = views[sectionId] ?: LogSectionViewState()
+        return from.copy(
+            selectedLogSectionId = sectionId,
+            inspectedRecordId = null,
+            logSectionViews = views,
+            filter = view.filter, selected = view.selected, expanded = view.expanded, manualBlocks = view.manualBlocks,
+            search = LogSearchState.EMPTY, searches = LogSearchSessions(),
+        )
+    }
+
+    /** [current] as it is once [loaded]'s rows are published: the rows, their derived metadata and a filter fitted to what they can filter by. */
+    private fun withPublishedRows(
+        current: LogTab,
+        loaded: RestoredTabLoadResult.Loaded,
+        publishedRows: List<LogEntry>,
+        publishedRmap: Map<Int, LogEntry>,
+        pending: LogAnalysis,
+    ): LogTab {
+        val compositionInputsChanged = current.logData !== publishedRows ||
+            current.analysis.stackTraceGroups !== pending.stackTraceGroups
+        val capabilities = deriveLogCapabilities(
+            loaded.profile ?: builtinProfileFor(loaded.logFormat),
+            publishedRows,
+            sourceClockId = current.sourcePath,
+            sourceLookupSupported = sourceLookupConfigured(),
+        )
+        val filterNormalization = normalizeFilterForCapabilities(current.filter, capabilities, loaded.profile)
+        return current.copy(
+            logData = publishedRows,
+            rmap = publishedRmap,
+            analysis = pending,
+            logFormat = loaded.logFormat,
+            logFormatProfileId = loaded.profile?.id ?: current.logFormatProfileId,
+            logFormatProfileSnapshot = loaded.profile?.let(::logFormatProfileJson) ?: current.logFormatProfileSnapshot,
+            logFormatDiagnostics = if (loaded.fromSectionIndex) current.logFormatDiagnostics else loaded.diagnostics,
+            logSections = if (loaded.fromSectionIndex) current.logSections else loaded.logSections,
+            selectedLogSectionId = loaded.selectedLogSectionId,
+            logCapabilities = capabilities,
+            filter = filterNormalization.filter,
+            filterNormalizationNotice = filterNormalization.notice,
+            profileFieldNames = publishedRows.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet(),
+            profileClockSignature = loaded.profileClockSignature
+                ?: loaded.profile?.let { logFormatClockSignature(it, publishedRows, current.sourcePath) },
+            profileDisplayColumns = loaded.profile?.let(::logFormatDisplayColumnDefinitions)
+                ?: current.profileDisplayColumns,
+            profileProjectionSchemaPresent = current.profileProjectionSchemaPresent ||
+                loaded.profile?.let(::usesCustomLogFormatProjection) == true,
+            profileSourceLineCount = if (loaded.fromSectionIndex) current.profileSourceLineCount else loaded.sourceLineCount,
+            archiveCandidate = loaded.archiveCandidate,
+            largeFileMode = loaded.largeFileMode,
+            selected = current.selected.filterTo(linkedSetOf()) { it in publishedRmap },
+            contentState = TabContentState.LOADED,
+            contentLoadError = null,
+            messageCompositionRevision = current.messageCompositionRevision +
+                if (compositionInputsChanged) 1 else 0,
+            messageComposition = if (compositionInputsChanged) {
+                MessageCompositionState.NotComputed
+            } else {
+                current.messageComposition
+            },
+        )
+    }
+
     private fun publishRestoredTabRows(
         tabId: String,
         generation: Long,
         loaded: RestoredTabLoadResult.Loaded,
+        section: LogSectionSwitch? = null,
     ): List<LogEntry>? {
         val (publishedRows, publishedRmap) = releasableLogRows(loaded.logData, mkRmap(loaded.logData))
         val pending = pendingAnalysis(publishedRows, loaded.logFormat, loaded.profile)
         val accepted = synchronized(stateLock) {
-            if (contentLoadGenerations[tabId]?.get() != generation || tabs.none { it.id == tabId }) {
+            val wanted = if (section != null) section.isCurrent() else contentLoadGenerations[tabId]?.get() == generation
+            if (!wanted || tabs.none { it.id == tabId }) {
                 false
             } else {
-                tabs = tabs.map { current ->
-                    if (current.id != tabId) {
-                        current
-                    } else {
-                        val compositionInputsChanged = current.logData !== publishedRows ||
-                            current.analysis.stackTraceGroups !== pending.stackTraceGroups
-                        val capabilities = deriveLogCapabilities(
-                            loaded.profile ?: builtinProfileFor(loaded.logFormat),
-                            publishedRows,
-                            sourceClockId = current.sourcePath,
-                            sourceLookupSupported = sourceLookupConfigured(),
-                        )
-                        val filterNormalization = normalizeFilterForCapabilities(current.filter, capabilities, loaded.profile)
-                        current.copy(
-                            logData = publishedRows,
-                            rmap = publishedRmap,
-                            analysis = pending,
-                            logFormat = loaded.logFormat,
-                            logFormatProfileId = loaded.profile?.id ?: current.logFormatProfileId,
-                            logFormatProfileSnapshot = loaded.profile?.let(::logFormatProfileJson) ?: current.logFormatProfileSnapshot,
-                            logFormatDiagnostics = loaded.diagnostics,
-                            logSections = loaded.logSections,
-                            selectedLogSectionId = loaded.selectedLogSectionId,
-                            logCapabilities = capabilities,
-                            filter = filterNormalization.filter,
-                            filterNormalizationNotice = filterNormalization.notice,
-                            profileFieldNames = publishedRows.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet(),
-                            profileClockSignature = loaded.profileClockSignature
-                                ?: loaded.profile?.let { logFormatClockSignature(it, publishedRows, current.sourcePath) },
-                            profileDisplayColumns = loaded.profile?.let(::logFormatDisplayColumnDefinitions)
-                                ?: current.profileDisplayColumns,
-                            profileProjectionSchemaPresent = current.profileProjectionSchemaPresent ||
-                                loaded.profile?.let(::usesCustomLogFormatProjection) == true,
-                            profileSourceLineCount = loaded.sourceLineCount,
-                            archiveCandidate = loaded.archiveCandidate,
-                            largeFileMode = loaded.largeFileMode,
-                            selected = current.selected.filterTo(linkedSetOf()) { it in publishedRmap },
-                            contentState = TabContentState.LOADED,
-                            contentLoadError = null,
-                            messageCompositionRevision = current.messageCompositionRevision +
-                                if (compositionInputsChanged) 1 else 0,
-                            messageComposition = if (compositionInputsChanged) {
-                                MessageCompositionState.NotComputed
-                            } else {
-                                current.messageComposition
-                            },
-                        )
+                tabs = tabs.map { shown ->
+                    when {
+                        shown.id != tabId -> shown
+                        section != null -> withPublishedRows(enterLogSection(shown, section.sectionId), loaded, publishedRows, publishedRmap, pending)
+                        else -> withPublishedRows(shown, loaded, publishedRows, publishedRmap, pending)
                     }
                 }
                 tabs.firstOrNull { it.id == tabId }?.let { loadedTab ->
                     updateInactiveSinceLocked(loadedTab, displayedLogTabIdsLocked(), monotonicNowNanos())
+                }
+                rememberLogSectionIndex(tabId, loaded.sectionIndex)
+                if (section != null) {
+                    // The searches, expanded records and details belong to the rows that just left.
+                    releaseSearchState(tabId)
+                    clearRecordExpansion(listOf(tabId))
+                    pendingLogSection = pendingLogSection - tabId
                 }
                 true
             }
@@ -18465,6 +18629,7 @@ class AppState(
                 selectedLogSectionId = parsed.selectedSectionId,
                 profileClockSignature = parsed.profileClockSignature,
                 sourceLineCount = parsed.sourceLineCount,
+                sectionIndex = parsed.metadataSectionIndex,
             )
         }
         is RestoredTabSource.ArchiveSource -> loadRestoredArchiveSource(source, profile, sectionId)

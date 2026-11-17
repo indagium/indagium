@@ -6049,9 +6049,22 @@ Genuinely empty sections are hidden by default and revealed with **Show empty**;
 with unknown coverage remain visible. Flat record files have one section, empty array files have none, and
 neither reserves space for a redundant navigation tile. The sections list has its own thin scrollbar.
 
-Section changes use the existing asynchronous reload pipeline. Filters, selection and manual folds have independent
-session state per section. The selected section ID is append-only autosave field 21, restored before publishing rows.
-Unloading discards derived section metadata and view state while retaining the selected ID. Status errors retain
+A section change keeps the shown section's rows, filter and selection on screen (the Log tile is dimmed, inert to the pointer and
+carries a loading line, and Message details is dimmed) while `AppState.selectLogSection` loads the target on `ioScope`
+(`runLogSectionLoad`, one job and generation per tab in `sectionLoadJobs` / `sectionLoadGenerations`; a newer pick
+supersedes it, picking the shown section again or closing the tab cancels it, a failure keeps the old rows and raises the
+open-error notice). `pendingLogSection` (session-only) makes the Sections list show the target as selected meanwhile. The target's rows
+and its saved view replace the old ones in one `publishRestoredTabRows` update, and `FileView` keys the tile host by the section so no
+field's local state or pending debounce crosses over. Filters, selection and manual folds have independent
+session state per section. The selected section ID is append-only autosave field 21, restored before publishing rows
+(session restore and first open still use the full parse).
+A plain, valid UTF-8 metadata JSON file is parsed from its bytes (`utils/MetadataJsonSectionIndex.kt`), which records per section the
+byte span, source lines and global row id of every record and summary object (24 bytes per object, never persisted, kept per tab in
+`AppState.logSectionIndexes`). A section switch then reads and parses only that section's spans and gives the rows, ids and lines the full parse
+would. The ids are the ones assigned by the document-wide time sort, so notes, saved views and autosave keep resolving. The index is used
+only while the file's path, length and modification time are unchanged; compressed files, archive entries, captures,
+invalid or non-UTF-8 text and damaged or oversized documents are parsed the ordinary way, which also rebuilds the index.
+Unloading discards derived section metadata, the index and view state while retaining the selected ID. Status errors retain
 row styling, while metadata JSON does not expose a severity filter based on status codes. Tailing and record
 splitting are unavailable for this engine; capability reporting and UI/MCP guards agree. The tile projection
 uses the same capability as FilterPanel, so omitted controls reserve no space.

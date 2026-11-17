@@ -157,5 +157,6 @@ internal fun BoundLogViewer(
         onToggleFilterBar = if (compare) null else ({ state.updateFilterBarVisible(!state.filterBarVisible) }),
         onExportCaptureRange = onExportCaptureRange,
         tiles = tiles,
+        rowsStale = state.pendingLogSection[tab.id] != null,
     )
 }

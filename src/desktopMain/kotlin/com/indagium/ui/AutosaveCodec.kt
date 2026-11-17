@@ -1968,6 +1968,10 @@ internal sealed interface RestoredTabLoadResult {
         val sourceLineCount: Long? = null,
         val logSections: List<com.indagium.model.LogFileSection> = emptyList(),
         val selectedLogSectionId: String? = null,
+        /** The section index of the file this load read in full (replaces the tab's), or null when it built none. */
+        val sectionIndex: com.indagium.utils.MetadataJsonSectionIndex? = null,
+        /** True when only one section's rows were read from the index: the tab keeps its sections, diagnostics and line count. */
+        val fromSectionIndex: Boolean = false,
     ) : RestoredTabLoadResult
 
     data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult

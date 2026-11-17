@@ -37,7 +37,7 @@ private const val METADATA_JSON_MAX_FIELDS = 128
 private const val METADATA_JSON_NANOS_TO_MILLIS = 6
 private const val METADATA_JSON_CANCELLATION_TOKENS = 128
 private val METADATA_JSON_TIME = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ROOT)
-private val METADATA_JSON_FACTORY = JsonFactory.builder().streamReadConstraints(
+internal val METADATA_JSON_FACTORY = JsonFactory.builder().streamReadConstraints(
     StreamReadConstraints.builder().maxNestingDepth(METADATA_JSON_MAX_DEPTH).maxStringLength(METADATA_JSON_MAX_VALUE_CHARS).build(),
 ).build()
 
@@ -50,16 +50,24 @@ internal fun isMetadataJsonSample(text: String): Boolean {
     return sample.packetMetadataSeen || sample.records.isNotEmpty() || sample.sectionStatus.isNotEmpty()
 }
 
-private data class MetadataJsonSummary(val value: JsonObject, val section: String, val startLine: Long, val endLine: Long)
+/** [byteStart] / [byteEnd] are the object's byte span in the scanned stream, or -1 when the scan did not track bytes. */
+internal data class MetadataJsonSummary(
+    val value: JsonObject, val section: String, val startLine: Long, val endLine: Long,
+    val byteStart: Long = -1, val byteEnd: Long = -1,
+)
 
-private data class MetadataJsonPacket(val value: JsonObject, val section: String, val startLine: Long, val endLine: Long)
+/** [fileIndex] is the packet's position in document order, which the section index uses to pair it with its sorted id. */
+internal data class MetadataJsonPacket(
+    val value: JsonObject, val section: String, val startLine: Long, val endLine: Long,
+    val byteStart: Long = -1, val byteEnd: Long = -1, val fileIndex: Int = -1,
+)
 
-private data class MetadataJsonScan(
+internal data class MetadataJsonScan(
     val records: List<MetadataJsonPacket>, val diagnostics: List<String>, val lines: Long, val arrayPaths: Set<List<String>>,
     val sectionStatus: Map<String, JsonObject>, val summaries: List<MetadataJsonSummary>, val packetMetadataSeen: Boolean,
 )
 
-private data class MetadataJsonValue(val element: JsonElement, val chars: Int)
+internal data class MetadataJsonValue(val element: JsonElement, val chars: Int)
 
 private class MetadataJsonSampleComplete : RuntimeException(null, null, false, false)
 
@@ -67,7 +75,12 @@ private class MetadataJsonSampleComplete : RuntimeException(null, null, false, f
  * Walk envelopes within bounded trees, extracting metadata records and object-valued sections.
  * Nested arrays and linked objects remain inside their containing record's original JSON tree.
  */
-private class MetadataJsonScanner(private val parser: JsonParser, private val maxRecords: Int) {
+internal class MetadataJsonScanner(
+    private val parser: JsonParser,
+    private val maxRecords: Int,
+    /** Offset added to the parser's byte positions (a skipped BOM); negative leaves byte spans untracked. */
+    private val byteBase: Long = -1,
+) {
     val records = mutableListOf<MetadataJsonPacket>()
     val summaries = mutableListOf<MetadataJsonSummary>()
     val diagnostics = mutableListOf<String>()
@@ -86,6 +99,16 @@ private class MetadataJsonScanner(private val parser: JsonParser, private val ma
         while (next() != null) readValue(emptyList())
     }
 
+    /** Reads the one JSON value a fragment parser starts on, with the same bounds and value shapes as the document walk. */
+    fun readFragment(path: List<String>): MetadataJsonValue? {
+        require(next() != null) { "Incomplete metadata JSON value." }
+        return readValue(path)
+    }
+
+    private fun tokenByte(): Long = if (byteBase >= 0) parser.currentTokenLocation().byteOffset + byteBase else -1
+
+    private fun endByte(): Long = if (byteBase >= 0) parser.currentLocation().byteOffset + byteBase else -1
+
     private fun readValue(path: List<String>): MetadataJsonValue? = when (parser.currentToken()) {
         JsonToken.START_OBJECT -> readObject(path)
         JsonToken.START_ARRAY -> readArray(path)
@@ -100,6 +123,7 @@ private class MetadataJsonScanner(private val parser: JsonParser, private val ma
 
     private fun readObject(path: List<String>): MetadataJsonValue? {
         val startLine = parser.currentTokenLocation().lineNr.toLong()
+        val startByte = tokenByte()
         val values = linkedMapOf<String, JsonElement>()
         val firstRecord = records.size
         val firstSummary = summaries.size
@@ -130,12 +154,16 @@ private class MetadataJsonScanner(private val parser: JsonParser, private val ma
         }.toMap()
         if (!isMetadataRecord(value)) {
             if (path.size == 2 && path[0] != JSON_SECTION_STATUS) {
-                summaries += MetadataJsonSummary(value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong())
+                summaries += MetadataJsonSummary(
+                    value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong(), startByte, endByte(),
+                )
             }
             return MetadataJsonValue(value, chars)
         }
         discardNestedRecords(firstRecord, firstSummary)
-        records += MetadataJsonPacket(value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong())
+        records += MetadataJsonPacket(
+            value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong(), startByte, endByte(), records.size,
+        )
         if (records.size >= maxRecords) throw MetadataJsonSampleComplete()
         return MetadataJsonValue(value, chars)
     }
@@ -168,7 +196,7 @@ private class MetadataJsonScanner(private val parser: JsonParser, private val ma
     }
 }
 
-private fun isMetadataRecord(value: JsonObject): Boolean {
+internal fun isMetadataRecord(value: JsonObject): Boolean {
     val metadata = value["metadata"] as? JsonObject ?: return false
     return hasRecordMetadata(metadata)
 }
@@ -180,9 +208,13 @@ private fun hasRecordMetadata(metadata: JsonObject): Boolean {
     return metadata.text("identity") != null && (hasTime || hasEventMetadata)
 }
 
-private fun scanMetadataJson(reader: Reader, maxRecords: Int = Int.MAX_VALUE): MetadataJsonScan {
-    METADATA_JSON_FACTORY.createParser(reader).use { parser ->
-        val scanner = MetadataJsonScanner(parser, maxRecords)
+private fun scanMetadataJson(reader: Reader, maxRecords: Int = Int.MAX_VALUE): MetadataJsonScan =
+    scanMetadataJson(METADATA_JSON_FACTORY.createParser(reader), maxRecords, -1)
+
+/** Scans [parser], closing it; a non-negative [byteBase] makes the parser a byte-stream one whose record spans are kept. */
+internal fun scanMetadataJson(parser: JsonParser, maxRecords: Int, byteBase: Long): MetadataJsonScan {
+    parser.use {
+        val scanner = MetadataJsonScanner(parser, maxRecords, byteBase)
         try {
             scanner.readDocument()
         } catch (_: MetadataJsonSampleComplete) {
@@ -208,9 +240,22 @@ internal fun parseMetadataJson(
     sourceClockId: String? = null,
     sourceLineOffset: Long = 0,
     sectionNameHint: String? = null,
+): ParsedLog = buildMetadataJsonLog(scanMetadataJson(reader), profile, startId, sourceClockId, sourceLineOffset, sectionNameHint, null)
+
+/**
+ * Turns a document scan into rows, sections and, when [stamp] names the scanned file, the section index that lets a later switch
+ * read only one section's bytes. Row ids come from the global time sort, so the index records each record's id as assigned here.
+ */
+internal fun buildMetadataJsonLog(
+    scanned: MetadataJsonScan,
+    profile: LogFormatProfile,
+    startId: Int,
+    sourceClockId: String?,
+    sourceLineOffset: Long,
+    sectionNameHint: String?,
+    stamp: MetadataJsonFileStamp?,
 ): ParsedLog {
     val viewProfile = metadataJsonPresentationProfile(profile)
-    val scanned = scanMetadataJson(reader)
     // BigDecimal avoids losing nanosecond ordering in 19-digit epoch values in metadata records.
     val ordered = scanned.records.sortedWith(compareBy(nullsLast()) { packet: MetadataJsonPacket ->
         (packet.value["metadata"] as JsonObject).text("system_time")?.toBigDecimalOrNull()
@@ -222,9 +267,10 @@ internal fun parseMetadataJson(
         metadataJsonEntry(packet, startId + index, sourceClockId, sourceLineOffset, compactor, viewProfile, sectionNameHint)
     }
     val recordPaths = scanned.records.map { it.section }.toSet()
-    val summaries = scanned.summaries.filter { summary ->
+    val keptSummaries = scanned.summaries.filter { summary ->
         recordPaths.none { it.isEmpty() || summary.section == it || summary.section.startsWith("$it / ") }
-    }.mapIndexed { index, summary ->
+    }
+    val summaries = keptSummaries.mapIndexed { index, summary ->
         metadataJsonObjectEntry(summary, startId + packets.size + index, sourceLineOffset, viewProfile, compactor)
     }
     val entries = packets + summaries
@@ -250,12 +296,18 @@ internal fun parseMetadataJson(
         )
     }
     val diagnostics = scanned.diagnostics + "Read ${entries.size} JSON records in ${sections.size} sections."
+    val index = stamp?.let {
+        MetadataJsonIndexBuilder(it, startId, sourceClockId, sourceLineOffset, sectionNameHint).build(
+            scanned.records, ordered, packets, keptSummaries, summaries, sectionIds,
+        )
+    }
     return ParsedLog(
         LogFormat.LOGCAT, entries, viewProfile, diagnostics, sourceClockId, sourceLineOffset + scanned.lines, sections = sections,
+        metadataSectionIndex = index,
     ).selectSection(null)
 }
 
-private fun metadataJsonObjectEntry(
+internal fun metadataJsonObjectEntry(
     summary: MetadataJsonSummary, id: Int, sourceLineOffset: Long, profile: LogFormatProfile, compactor: ProfileRowCompactor,
 ): LogEntry {
     val title = summary.section.substringAfterLast(" / ") + " details"
@@ -272,7 +324,7 @@ private fun metadataJsonObjectEntry(
     )
 }
 
-private fun metadataJsonEntry(
+internal fun metadataJsonEntry(
     packet: MetadataJsonPacket,
     id: Int,
     sourceClockId: String?,
@@ -330,7 +382,7 @@ private fun metadataJsonRawBytes(packet: JsonObject): String? = when (val raw = 
     else -> null
 }
 
-private fun metadataJsonPacketSection(packet: MetadataJsonPacket, source: String?): String = packet.section.ifEmpty {
+internal fun metadataJsonPacketSection(packet: MetadataJsonPacket, source: String?): String = packet.section.ifEmpty {
     source?.let { java.io.File(it).nameWithoutExtension }?.takeIf { it.isNotBlank() } ?: "Records"
 }
 

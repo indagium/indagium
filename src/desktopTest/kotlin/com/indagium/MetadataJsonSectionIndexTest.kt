@@ -1,0 +1,177 @@
+package com.indagium
+
+import com.indagium.model.LogEntry
+import com.indagium.utils.ParsedLog
+import com.indagium.utils.loadMetadataJsonSection
+import com.indagium.utils.metadataJsonProfile
+import com.indagium.utils.parseLogContent
+import com.indagium.utils.parseLogFileResultWithProfiles
+import java.io.File
+import java.nio.file.Files
+import java.util.zip.GZIPOutputStream
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+private const val T0 = 1_790_000_000_000_000_000L
+
+@Suppress("MagicNumber") // Synthetic wire timestamps and record counts.
+class MetadataJsonSectionIndexTest {
+    private fun record(
+        identity: String,
+        title: String,
+        time: Long?,
+        newline: String,
+        timestamp: Long? = null,
+    ): String {
+        val metadata = buildList {
+            add("\"identity\": \"$identity\"")
+            add("\"source\": \"Démo 🚀\"")
+            if (time != null) add("\"system_time\": $time")
+            if (timestamp != null) add("\"timestamp\": $timestamp")
+            if (time == null && timestamp == null) add("\"title\": \"$title\"")
+        }
+        return "{$newline  \"metadata\": {${metadata.joinToString(", ")}},$newline" +
+            "  \"Summary\": {\"Note\": \"$title é\"},$newline  \"Raw Bytes\": \"0001ff\"$newline}"
+    }
+
+    /** Several sections with interleaved times, ties, untimed records, a summary object and decode-notice / unavailable sections. */
+    private fun document(newline: String = "\n"): String {
+        fun r(identity: String, title: String, time: Long?, timestamp: Long? = null) = record(identity, title, time, newline, timestamp)
+        val hci = listOf(
+            r("HCI.A", "hci-late", T0 + 900), r("HCI.B", "hci-tie", T0 + 500), r("HCI.C", "hci-early", T0 + 100),
+            r("HCI.D", "hci-untimed", null), r("HCI.E", "hci-relative", null, timestamp = 7_000_000),
+        )
+        val l2cap = listOf(r("L2.A", "l2-tie", T0 + 500), r("L2.B", "l2-mid", T0 + 300), r("L2.C", "l2-tie-again", T0 + 500))
+        val events = listOf(r("EV.A", "event-first", T0 + 50), r("EV.B", "event-last", T0 + 2000), r("EV.C", "event-untimed", null))
+        return "{$newline\"Tethered Bluetooth\": {$newline\"HCI\": [${hci.joinToString(",$newline")}],$newline" +
+            "\"L2CAP\": [${l2cap.joinToString(",$newline")}],$newline\"RFCOMM\": []},$newline" +
+            "\"Other\": {$newline\"Events\": [${events.joinToString(",$newline")}],$newline" +
+            "\"Counters\": {\"packets\": 3, \"note\": \"résumé\"}},$newline" +
+            "\"indagium_section_status\": {\"Tethered Bluetooth / Decoded\": {\"decode_notice\": \"Partial\", \"decode_source\": \"tool\"}," +
+            "\"Tethered Bluetooth / Missing\": {\"unavailable_reason\": \"Not captured\"}}}$newline"
+    }
+
+    private fun write(directory: File, name: String, text: String, bom: Boolean = false): File = File(directory, name).apply {
+        writeBytes((if (bom) byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) else byteArrayOf()) + text.toByteArray())
+    }
+
+    private fun withDirectory(block: (File) -> Unit) {
+        val directory = Files.createTempDirectory("metadata-json-index-").toFile()
+        try {
+            block(directory)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    private fun full(file: File): ParsedLog =
+        parseLogFileResultWithProfiles(file, emptyList(), metadataJsonProfile())
+
+    /** The parse every section switch used before: text reader, no index. */
+    private fun reference(file: File): ParsedLog =
+        file.inputStream().use {
+            parseLogContent(it, fileName = file.name, profile = metadataJsonProfile(), sourceClockId = file.absolutePath)
+        }
+
+    private fun assertSameRows(expected: List<LogEntry>, actual: List<LogEntry>, label: String) {
+        assertEquals(expected.size, actual.size, "$label row count")
+        expected.zip(actual).forEachIndexed { row, (a, b) ->
+            assertEquals(a.id, b.id, "$label id of row $row")
+            assertEquals(a.ts, b.ts, "$label ts of row $row")
+            assertEquals(a.msg, b.msg, "$label msg of row $row")
+            assertEquals(a.recordMetadata?.profileFields, b.recordMetadata?.profileFields, "$label profileFields of row $row")
+            assertEquals(a.recordMetadata?.rawRecord, b.recordMetadata?.rawRecord, "$label rawRecord of row $row")
+            assertEquals(a.recordMetadata?.sourceStartLine, b.recordMetadata?.sourceStartLine, "$label start line of row $row")
+            assertEquals(a.recordMetadata?.sourceEndLine, b.recordMetadata?.sourceEndLine, "$label end line of row $row")
+            assertEquals(a.recordMetadata?.displayColumns, b.recordMetadata?.displayColumns, "$label displayColumns of row $row")
+            assertEquals(a, b, "$label whole entry of row $row")
+        }
+    }
+
+    private fun assertEveryIndexedSectionMatches(file: File) {
+        val reference = reference(file)
+        val parsed = full(file)
+        assertEquals(reference.entries, parsed.entries, "the byte-stream parse must give the reader parse's rows")
+        assertEquals(reference.sections.map { it.description() }, parsed.sections.map { it.description() })
+        assertEquals(reference.diagnostics, parsed.diagnostics)
+        assertEquals(reference.sourceLineCount, parsed.sourceLineCount)
+        assertEquals(reference.selectedSectionId, parsed.selectedSectionId)
+        val index = assertNotNull(parsed.metadataSectionIndex, "a plain valid file is indexed")
+        assertTrue(reference.sections.size >= 5)
+        assertEquals(1, reference.sections.single { it.id == "Other / Counters" }.entries.size, "the summary object is a section row")
+        assertEquals("Not captured", reference.sections.single { it.id == "Tethered Bluetooth / Missing" }.unavailableReason)
+        assertTrue(reference.sections.single { it.id == "Tethered Bluetooth / RFCOMM" }.entries.isEmpty())
+        val hciIds = reference.sections.single { it.id == "Tethered Bluetooth / HCI" }.entries.map { it.id }
+        assertTrue(hciIds.zipWithNext().any { (a, b) -> b - a > 1 }, "HCI ids come from the global time order, so they are not consecutive")
+        reference.sections.forEach { section ->
+            val loaded = assertNotNull(loadMetadataJsonSection(file, index, section.id, metadataJsonProfile()), "section ${section.id} loads from the index")
+            assertSameRows(section.entries, loaded, section.id)
+        }
+    }
+
+    @Test
+    fun everySectionLoadedFromTheIndexEqualsTheFullParse() = withDirectory { directory ->
+        assertEveryIndexedSectionMatches(write(directory, "export.json", document()))
+    }
+
+    @Test
+    fun windowsLineEndingsAndAByteOrderMarkKeepIdsAndLines() = withDirectory { directory ->
+        assertEveryIndexedSectionMatches(write(directory, "crlf.json", document("\r\n"), bom = true))
+    }
+
+    @Test
+    fun aTopLevelArrayOfRecordsIsIndexedAsOneSection() = withDirectory { directory ->
+        val rows = (0 until 6).joinToString(",\n") { record("Top.$it", "top-$it", T0 + (6 - it) * 10L, "\n") }
+        val file = write(directory, "records.json", "[\n$rows\n]\n")
+        val reference = reference(file)
+        val index = assertNotNull(full(file).metadataSectionIndex)
+        val section = reference.sections.single()
+        assertSameRows(section.entries, assertNotNull(loadMetadataJsonSection(file, index, section.id, metadataJsonProfile())), "top")
+    }
+
+    @Test
+    fun aModifiedFileIsNotUsedThroughTheIndex() = withDirectory { directory ->
+        val file = write(directory, "export.json", document())
+        val index = assertNotNull(full(file).metadataSectionIndex)
+        assertNotNull(loadMetadataJsonSection(file, index, "Tethered Bluetooth / HCI", metadataJsonProfile()))
+        file.appendText(" ")
+        assertNull(loadMetadataJsonSection(file, index, "Tethered Bluetooth / HCI", metadataJsonProfile()))
+        val sameLength = write(directory, "same.json", document())
+        val sameLengthIndex = assertNotNull(full(sameLength).metadataSectionIndex)
+        assertTrue(sameLength.setLastModified(sameLength.lastModified() + 5_000))
+        assertNull(loadMetadataJsonSection(sameLength, sameLengthIndex, "Tethered Bluetooth / HCI", metadataJsonProfile()))
+        assertNull(loadMetadataJsonSection(file, index, "No such section", metadataJsonProfile()))
+    }
+
+    @Test
+    fun aCompressedFileIsParsedTheOrdinaryWayWithoutAnIndex() = withDirectory { directory ->
+        val file = File(directory, "export.json.gz")
+        GZIPOutputStream(file.outputStream()).use { it.write(document().toByteArray()) }
+        val parsed = full(file)
+        assertNull(parsed.metadataSectionIndex)
+        assertTrue(parsed.entries.isNotEmpty())
+    }
+
+    @Test
+    fun aDamagedOrNonUtf8FileFallsBackToTheOrdinaryParse() = withDirectory { directory ->
+        val truncated = write(directory, "truncated.json", document().dropLast(40))
+        assertNull(full(truncated).metadataSectionIndex)
+        assertEquals(reference(truncated).entries, full(truncated).entries)
+        val invalid = File(directory, "invalid.json").apply {
+            writeBytes(document().toByteArray() + byteArrayOf(0xC3.toByte()))
+        }
+        assertNull(full(invalid).metadataSectionIndex)
+        val utf16 = File(directory, "utf16.json").apply { writeBytes(document().toByteArray(Charsets.UTF_16LE)) }
+        assertNull(full(utf16).metadataSectionIndex)
+    }
+
+    @Test
+    fun anIndexCostsAboutTwentyFourBytesPerRecord() = withDirectory { directory ->
+        val index = assertNotNull(full(write(directory, "export.json", document())).metadataSectionIndex)
+        val spans = 5 + 3 + 3 + 1
+        assertEquals(spans * 24L, index.estimatedBytes)
+    }
+}

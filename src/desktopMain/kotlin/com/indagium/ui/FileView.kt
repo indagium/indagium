@@ -369,29 +369,34 @@ internal fun FileView(
             // against an empty shell. Keep the entire row surface unmounted until its source is
             // loaded; the loading/error layer below owns this space during that gap.
             if (tab.contentState == TabContentState.LOADED) {
-                LogViewTilingHost(
-                    state = state,
-                    tab = tab,
-                    focus = LogViewPanelFocus(
-                        filters = filterFr,
-                        log = logViewerFr,
-                        notes = annotationFr,
-                        ai = aiFr,
-                        onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
-                        returnToLog = { runCatching { logViewerFr.requestFocus() } },
-                    ),
-                    inputs = LogViewHostInputs(
-                        filterSearchRequest = filterSearchRequest,
-                        onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-                        captureDeviceEvents = captureDeviceEvents,
-                        onExportCaptureRange = if (archiveBackedCapture) {
-                            { importedRangeEditorOpen = true }
-                        } else {
-                            null
-                        },
-                    ),
-                    modifier = Modifier.fillMaxSize(),
-                )
+                // A JSON section switch swaps the rows and that section's view in one update. Keying the host by the section rebuilds it
+                // with them (as unloading and reloading the tab used to), so a filter field's pending text commit or local state from
+                // the old section can never land in the new one.
+                key(tab.selectedLogSectionId) {
+                    LogViewTilingHost(
+                        state = state,
+                        tab = tab,
+                        focus = LogViewPanelFocus(
+                            filters = filterFr,
+                            log = logViewerFr,
+                            notes = annotationFr,
+                            ai = aiFr,
+                            onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
+                            returnToLog = { runCatching { logViewerFr.requestFocus() } },
+                        ),
+                        inputs = LogViewHostInputs(
+                            filterSearchRequest = filterSearchRequest,
+                            onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
+                            captureDeviceEvents = captureDeviceEvents,
+                            onExportCaptureRange = if (archiveBackedCapture) {
+                                { importedRangeEditorOpen = true }
+                            } else {
+                                null
+                            },
+                        ),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
             }
             if (tab.contentState != TabContentState.LOADED) {
                 Box(Modifier.fillMaxSize().background(tc.p.copy(alpha = .96f)), contentAlignment = Alignment.Center) {

@@ -1,17 +1,21 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -100,6 +104,35 @@ internal class LogViewerTiles(
 }
 
 private const val TOOLBAR_TRAILING_GAP_DP = 4f
+
+/** How much of the tile's own background covers rows that are about to be replaced (about half dimmed). */
+private const val STALE_ROWS_COVER_ALPHA = 0.5f
+
+/** Test tag of the cover over a log tile whose rows belong to the section being switched away from. */
+internal fun staleRowsTag(tabId: String): String = "log-rows-stale-$tabId"
+
+/**
+ * A log tile's content, dimmed and inert while [stale]: its rows still belong to the shown JSON section and are replaced in one go when
+ * the picked section has loaded. The cover takes every pointer event (a click, a drag or the wheel must not act on rows that are about
+ * to go away); keys still reach the viewer, where they act on the shown section's own selection. A loading line runs along the top.
+ */
+@Composable
+internal fun StaleRowsLayer(stale: Boolean, tabId: String, background: Color, content: @Composable () -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        content()
+        if (stale) {
+            Box(
+                Modifier.matchParentSize().background(background.copy(alpha = STALE_ROWS_COVER_ALPHA)).testTag(staleRowsTag(tabId))
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    },
+            )
+            IndeterminateLoadingLine(Modifier.fillMaxWidth().align(Alignment.TopCenter))
+        }
+    }
+}
 
 /** Test tag of the Original tile's "Follow selection" pill. */
 internal const val ORIGINAL_FOLLOW_TAG = "original-follow-toggle"

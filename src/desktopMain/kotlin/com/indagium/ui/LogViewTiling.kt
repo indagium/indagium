@@ -20,6 +20,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -48,6 +49,7 @@ import kotlin.math.abs
 // the notes editor, a playing video all survive a drag). The pure rules live in LogViewLayout.kt / LogViewLayoutState.kt.
 
 private const val LOG_VIEW_TITLE_SP = 12f
+private const val STALE_DETAILS_ALPHA = 0.5f
 private const val LOG_VIEW_CORNER_DP = 8
 internal const val LOG_VIEW_HOST_PAD_DP = 6
 private const val LOG_VIEW_STACKED_SHARE = 0.85f
@@ -402,7 +404,11 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
             TileSlot(
                 icon = Icons.Outlined.DataObject, title = "Message details", collapsible = true, maximizable = true,
                 headerAction = { MessageDetailsHeaderAction(state, tab) },
-                body = { MessageDetailsTileBody(tab) },
+                // While a section switch loads, the record shown still belongs to the old rows; keep it, dimmed.
+                body = {
+                    val stale = state.pendingLogSection[tab.id] != null
+                    Box(Modifier.fillMaxSize().alpha(if (stale) STALE_DETAILS_ALPHA else 1f)) { MessageDetailsTileBody(tab) }
+                },
             ),
         )
     }
