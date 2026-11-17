@@ -5,6 +5,7 @@ import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.RecordFieldNameColor
+import com.indagium.model.RecordValueAlignment
 import com.indagium.model.TileNode
 import com.indagium.model.ToolbarPlacement
 import kotlinx.serialization.json.JsonArray
@@ -61,6 +62,7 @@ internal fun JsonObjectBuilder.putLogViewLayoutSettings(settings: AppSettings) {
     // The record field-name colour (Settings › Log view) rides along: it is a log view setting and AutosaveCodec.kt is at the limit.
     put("recordFieldNameColor", settings.recordFieldNameColor.name)
     settings.recordFieldNameCustomArgb?.let { put("recordFieldNameCustomArgb", it) }
+    put("recordValueAlignment", settings.recordValueAlignment.name)
 }
 
 // One view's layout and hidden list, decoded and sanitized together. A layout that is absent or malformed stays null; the
@@ -114,5 +116,8 @@ internal fun AppSettings.withLogViewLayoutSettingsFrom(o: JsonObject): AppSettin
         recordFieldNameColor = RecordFieldNameColor.entries
             .firstOrNull { it.name == (o["recordFieldNameColor"] as? JsonPrimitive)?.contentOrNull } ?: RecordFieldNameColor.ACCENT,
         recordFieldNameCustomArgb = (o["recordFieldNameCustomArgb"] as? JsonPrimitive)?.longOrNull,
+        // A file without the key, or with an unknown name, reads as "after the name".
+        recordValueAlignment = RecordValueAlignment.entries
+            .firstOrNull { it.name == (o["recordValueAlignment"] as? JsonPrimitive)?.contentOrNull } ?: RecordValueAlignment.AFTER_NAME,
     )
 }

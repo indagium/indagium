@@ -15,15 +15,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
@@ -33,6 +36,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +51,7 @@ import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.RecordFieldNameColor
+import com.indagium.model.RecordValueAlignment
 import com.indagium.model.TidMapState
 import com.indagium.model.TidMapTarget
 import com.indagium.ui.AppState
@@ -54,6 +59,7 @@ import com.indagium.ui.AppText
 import com.indagium.ui.DARK_GITHUB
 import com.indagium.ui.FileView
 import com.indagium.ui.LocalRecordFieldNameStyle
+import com.indagium.ui.LocalRecordValueAlignment
 import com.indagium.ui.LocalTheme
 import com.indagium.ui.RecordFieldNameStyle
 import com.indagium.ui.StructuredRecordBody
@@ -200,10 +206,40 @@ class StructuredLogRecordUiTest {
     }
 
     @Test
+    fun doubleClickingAFieldRowOpensAndClosesIt() {
+        val json = """{"metadata":{"identity":"Bluetooth.L2CAP","source":"Watch"},"status":null}"""
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(700.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 301, summary = "10:00:00 INFO watch: record", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-301").performClick()
+        val row = "structured-record-node-301-root-metadata"
+        val child = "structured-record-node-301-root-metadata-identity"
+        rule.onAllNodesWithTag(child).assertCountEquals(0)
+
+        // On the field's name, away from its chevron.
+        rule.onNodeWithTag(row).performMouseInput { doubleClick(Offset(width * 0.3f, centerY)) }
+        rule.waitForIdle()
+        rule.onAllNodesWithTag(child).assertCountEquals(1)
+
+        rule.onNodeWithTag(row).performMouseInput { doubleClick(Offset(width * 0.3f, centerY)) }
+        rule.waitForIdle()
+        rule.onAllNodesWithTag(child).assertCountEquals(0)
+
+        // A field with nothing to open ignores it.
+        rule.onNodeWithTag("structured-record-node-301-root-status").performMouseInput { doubleClick(Offset(width * 0.3f, centerY)) }
+        rule.waitForIdle()
+        rule.onAllNodesWithTag(child).assertCountEquals(0)
+    }
+
+    @Test
     fun everyValueOfOneTreeStartsAtTheSameXAtEveryDepthAndStaysPutWhenANodeToggles() {
         val json = """{"alpha":{"n":42,"nested":{"aVeryLongKeyName":true,"t":null}},"x":null,"enabled":false,"list":[1,2]}"""
         rule.setContent {
-            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB, LocalRecordValueAlignment provides RecordValueAlignment.COLUMN) {
                 Column(Modifier.width(700.dp).background(tc().p).padding(10.dp)) {
                     PreviewRecordRow(id = 201, summary = "10:00:00 INFO api: tree", source = json)
                 }
@@ -306,10 +342,95 @@ class StructuredLogRecordUiTest {
     }
 
     @Test
+    fun withoutASettingAValueStartsOneSpaceAfterItsKeyAndLongerKeysPushTheirValuesFurtherRight() {
+        assertEquals(RecordValueAlignment.AFTER_NAME, AppSettings().recordValueAlignment)
+        val json = """{"source":"a","status":"ok","system_time_formatted":"x","device":{"id":7}}"""
+        var spaceDp = 0f
+        var density = 1f
+        var defaultAlignment: RecordValueAlignment? = null
+        rule.setContent {
+            defaultAlignment = LocalRecordValueAlignment.current
+            val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+            density = androidx.compose.ui.platform.LocalDensity.current.density
+            val style = androidx.compose.ui.text.TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 11.sp)
+            spaceDp = measurer.measure("aa", style).size.width / 2f / density
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(700.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 205, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-205").performClick()
+        rule.onNodeWithTag("structured-record-node-toggle-205-root-device").performClick()
+        assertEquals(RecordValueAlignment.AFTER_NAME, defaultAlignment, "no provider means after the name")
+        val row = "structured-record-node-205-root"
+        val sourceGap = valueLeft("$row-source", "\"a\"") - keyRight("$row-source", "source")
+        val statusGap = valueLeft("$row-status", "\"ok\"") - keyRight("$row-status", "status")
+        val longGap = valueLeft("$row-system-time-formatted", "\"x\"") - keyRight("$row-system-time-formatted", "system_time_formatted")
+        val nestedGap = valueLeft("$row-device-id", "7") - keyRight("$row-device-id", "id")
+        listOf(sourceGap, statusGap, longGap, nestedGap).forEach { assertEquals(spaceDp, it, 2f / density, "one space after the key") }
+        assertTrue(spaceDp in 4f..9f, "a space of an 11sp mono font is a few dp wide, was $spaceDp")
+        assertTrue(
+            valueLeft("$row-system-time-formatted", "\"x\"") > valueLeft("$row-source", "\"a\"") + 20f,
+            "a longer key's value starts further right: values are not aligned in a column",
+        )
+    }
+
+    @Test
+    fun aWrappedValueStaysUnderItselfNotUnderItsKey() {
+        val longValue = (1..40).joinToString(" ") { "word$it" }
+        val json = """{"msg":"$longValue"}"""
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(300.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 206, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-206").performClick()
+        val row = "structured-record-node-206-root-msg"
+        val key = rule.onNode(hasText("msg") and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).getBoundsInRoot()
+        val value = rule.onNode(hasText("\"word1 ", substring = true) and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).getBoundsInRoot()
+        val rowBounds = rule.onNodeWithTag(row).getBoundsInRoot()
+        assertTrue(value.left > key.right, "the value starts right of the key")
+        assertTrue(value.right <= rowBounds.right + 0.5.dp, "the value stays inside the row")
+        assertTrue(value.bottom - value.top > (key.bottom - key.top) * 1.5f, "the value wraps onto more lines than the key has")
+        val spaceLeft = rowBounds.right - rowBounds.left - 20.dp - (key.right - key.left)
+        assertTrue(value.right - value.left < spaceLeft, "the value is as wide as the space left of it, not the whole row")
+    }
+
+    @Test
+    fun anOverlongKeyIsEllipsizedAndItsValueStillShows() {
+        val key = "k".repeat(70)
+        val json = """{"$key":"visible-value"}"""
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(500.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 207, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-207").performClick()
+        val row = "structured-record-node-207-root-$key"
+        val rowBounds = rule.onNodeWithTag(row).getBoundsInRoot()
+        val keyBounds = rule.onNode(hasText(key) and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).getBoundsInRoot()
+        assertTrue(keyBounds.right - keyBounds.left <= (rowBounds.right - rowBounds.left - 20.dp) * 0.45f + 1.dp, "the key takes at most about 45% of the row")
+        val node = rule.onNode(hasText(key) and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).fetchSemanticsNode()
+        val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+        node.config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+        assertTrue(layouts.single().hasVisualOverflow, "the long key is cut with an ellipsis")
+        rule.onNode(hasText("\"visible-value\"") and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(
+            valueLeft(row, "\"visible-value\"") >= keyBounds.right.value,
+            "the value starts after the key and has room",
+        )
+    }
+
+    @Test
     fun treeTogglesAreTheAppsRoundedHoverChevronInASlotThatKeepsKeysAndValuesAligned() {
         val json = """{"device":{"name":"sensor-7"},"enabled":false,"list":[1]}"""
         rule.setContent {
-            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB, LocalRecordValueAlignment provides RecordValueAlignment.COLUMN) {
                 Column(Modifier.width(700.dp).background(tc().p).padding(10.dp)) {
                     PreviewRecordRow(id = 204, summary = "10:00:00 INFO api: tree", source = json)
                 }
@@ -594,6 +715,10 @@ class StructuredLogRecordUiTest {
     private fun valueLeft(rowTag: String, valueText: String): Float =
         rule.onNode(hasText(valueText) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true)
             .getBoundsInRoot().left.value
+
+    private fun keyRight(rowTag: String, keyText: String): Float =
+        rule.onNode(hasText(keyText) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true)
+            .getBoundsInRoot().right.value
 
     private fun textColor(rowTag: String, text: String): androidx.compose.ui.graphics.Color {
         val node = rule.onNode(hasText(text) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).fetchSemanticsNode()

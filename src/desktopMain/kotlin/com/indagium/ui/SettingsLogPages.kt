@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.indagium.model.RecordFieldNameColor
+import com.indagium.model.RecordValueAlignment
 
 // Settings › Log view and Settings › Search & filters: rows of switches, steppers and dropdowns in titled groups. Issue categories and
 // Source code are in SettingsSourcePages.kt.
@@ -27,6 +28,7 @@ internal const val LOG_ROW_WRAPPING_DETAIL = LOG_ROW_WRAPPING_HINT + " Hold Shif
 internal const val LOG_WRAP_AT_HINT = "The column Fixed wrapping breaks lines at, from 80 to 20,000."
 internal const val LOG_PROCESS_NAMES_HINT = "New tabs show names from “Start proc” lines instead of PIDs. A tab's own pick resets every session."
 internal const val LOG_RECORD_FIELD_NAMES_HINT = "Colour of field names when a JSON record is expanded and in Message details."
+internal const val LOG_RECORD_VALUES_HINT = "Where a field's value starts in an expanded JSON record and in Message details."
 internal const val LOG_CRASH_ROWS_HINT = "Colour every row of an expanded crash group, not just its header."
 internal const val LOG_ERROR_ROWS_HINT = "Tint every Error-level row in every tab. A tab with its own style keeps it until you reset it."
 internal const val LOG_OPEN_WITH_ORIGINAL_HINT = "New files start with the unfiltered Original panel visible."
@@ -56,6 +58,7 @@ internal object LogPageTags {
     const val PROCESS_NAMES = "setting-process-names-new-tabs"
     const val RECORD_FIELD_NAMES = "setting-record-field-names"
     const val RECORD_FIELD_NAMES_COLOR = "setting-record-field-names-color"
+    const val RECORD_VALUE_ALIGNMENT = "setting-record-value-alignment"
     const val CRASH_ROWS = "setting-crash-rows"
     const val OPEN_WITH_ORIGINAL = "setting-open-with-original"
     const val MINIMAP = "setting-minimap"
@@ -158,6 +161,7 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
             )
         }
         RecordFieldNamesRow(state, stylePalette, reclaimFocus)
+        RecordValuesRow(state, reclaimFocus)
     }
     SettingsGroup("Highlights") {
         SettingsRow("Crash rows", LOG_CRASH_ROWS_HINT) {
@@ -265,6 +269,25 @@ private fun RecordFieldNamesRow(state: AppState, palette: HighlighterStylePalett
                 segmentModifier = { index -> Modifier.testTag("${LogPageTags.RECORD_FIELD_NAMES}-${choices[index].name.lowercase()}") },
             )
         }
+    }
+}
+
+/** "Record values": the value starts right after its field name, or in one column per tree. */
+@Composable
+private fun RecordValuesRow(state: AppState, reclaimFocus: () -> Unit) {
+    val choices = RecordValueAlignment.entries
+    SettingsRow("Record values", LOG_RECORD_VALUES_HINT) {
+        SettingsSegmented(
+            options = choices.map { it.label },
+            selectedIndices = setOf(choices.indexOf(state.settings.recordValueAlignment)),
+            onToggle = { index ->
+                val choice = choices[index]
+                if (choice != state.settings.recordValueAlignment) state.updateSettings { it.copy(recordValueAlignment = choice) }
+                reclaimFocus()
+            },
+            modifier = Modifier.testTag(LogPageTags.RECORD_VALUE_ALIGNMENT),
+            segmentModifier = { index -> Modifier.testTag("${LogPageTags.RECORD_VALUE_ALIGNMENT}-${choices[index].name.lowercase().replace('_', '-')}") },
+        )
     }
 }
 

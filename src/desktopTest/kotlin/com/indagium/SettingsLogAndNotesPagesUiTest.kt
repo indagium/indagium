@@ -24,6 +24,7 @@ import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.AppSettings
 import com.indagium.model.CustomIssueRule
 import com.indagium.model.RecordFieldNameColor
+import com.indagium.model.RecordValueAlignment
 import com.indagium.ui.AppState
 import com.indagium.ui.LogPageTags
 import com.indagium.ui.NotesPageTags
@@ -133,6 +134,25 @@ class SettingsLogAndNotesPagesUiTest {
         click("${LogPageTags.RECORD_FIELD_NAMES}-custom")
         click("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-trigger")
         rule.onNodeWithTag("${LogPageTags.RECORD_FIELD_NAMES_COLOR}-picker").assertExists()
+    }
+
+    @Test
+    fun recordValuesRowSitsUnderFieldNamesAndSwitchesBetweenAfterTheNameAndAColumn() {
+        val state = AppState()
+        openPage(state, SettingsPage.LogView)
+        rule.onNodeWithText("Record values").performScrollTo().assertExists()
+        rule.onNodeWithText("Where a field's value starts in an expanded JSON record and in Message details.").assertExists()
+        assertEquals(RecordValueAlignment.AFTER_NAME, state.settings.recordValueAlignment)
+        rule.onNodeWithTag("${LogPageTags.RECORD_VALUE_ALIGNMENT}-after-name").performScrollTo().assertIsSelected()
+        rule.onNodeWithText("After the name").assertExists()
+        rule.onNodeWithText("In a column").assertExists()
+
+        click("${LogPageTags.RECORD_VALUE_ALIGNMENT}-column")
+        assertEquals(RecordValueAlignment.COLUMN, state.settings.recordValueAlignment)
+        rule.onNodeWithTag("${LogPageTags.RECORD_VALUE_ALIGNMENT}-column").assertIsSelected()
+
+        click("${LogPageTags.RECORD_VALUE_ALIGNMENT}-after-name")
+        assertEquals(RecordValueAlignment.AFTER_NAME, state.settings.recordValueAlignment)
     }
 
     @Test

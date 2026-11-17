@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,23 +24,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.AppSettings
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
 import com.indagium.model.RecordFieldNameColor
+import com.indagium.model.RecordValueAlignment
 
 private const val MAX_JSON_CHARS = 256 * 1024
 private const val MAX_JSON_DEPTH = 32
@@ -54,6 +64,10 @@ private const val MAX_KEY_CHARS = 28
 private const val KEY_CHAR_WIDTH_DP = 6.7f
 private const val KEY_GAP_DP = 14f
 private const val INDENT_PER_DEPTH_DP = 16
+private const val RECORD_FONT_SP = 11
+
+/** The most of a row an "after the name" field name may take; a longer name is ellipsized so its value always has room. */
+private const val MAX_KEY_ROW_FRACTION = 0.45f
 private val NODE_ROW_HEIGHT = 16.dp
 
 /** Width of a tree row's toggle slot (and of the empty slot of a leaf); the key column maths counts it as 20dp of indent. */
@@ -81,6 +95,12 @@ internal fun recordFieldNameColor(style: RecordFieldNameStyle, tc: ThemeColors):
     RecordFieldNameColor.PLAIN -> tc.ts
     RecordFieldNameColor.CUSTOM -> style.custom ?: tc.ac
 }
+
+/** Where field values start in the record tree and Message details; [App] provides it from the app settings. */
+internal val LocalRecordValueAlignment = staticCompositionLocalOf { RecordValueAlignment.AFTER_NAME }
+
+/** How one tree places its values: [alignment], the shared [keyColumnDp] (COLUMN only) and the width of one space in [gapPx]. */
+private class RecordValueLayout(val alignment: RecordValueAlignment, val keyColumnDp: Float, val gapPx: Int)
 
 /** Returns the profile/DLT payload eligible for the inline record disclosure. */
 internal fun expandableRecordSource(entry: LogEntry, logFormat: LogFormat): String? {
@@ -168,7 +188,12 @@ internal fun StructuredRecordBody(
 ) {
     val tc = tc()
     val tree = remember(source) { runCatching { BoundedJsonReader(source).parseRoot() }.getOrNull() }
-    val keyColumn = remember(tree) { tree?.let { structuredKeyColumnDp(it) } ?: 0f }
+    val alignment = LocalRecordValueAlignment.current
+    val keyColumn = remember(tree, alignment) {
+        if (alignment == RecordValueAlignment.COLUMN) tree?.let { structuredKeyColumnDp(it) } ?: 0f else 0f
+    }
+    val gapPx = monoSpaceWidthPx(mono)
+    val valueLayout = remember(alignment, keyColumn, gapPx) { RecordValueLayout(alignment, keyColumn, gapPx) }
     SelectionContainer(
         modifier = modifier.fillMaxWidth()
             .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
@@ -183,7 +208,7 @@ internal fun StructuredRecordBody(
                     mono = mono,
                     tc = tc,
                     initiallyExpanded = initiallyExpanded,
-                    keyColumnDp = keyColumn,
+                    valueLayout = valueLayout,
                 )
             } else {
                 RawRecordLines(entryId = entryId, source = source, mono = mono, tc = tc)
@@ -200,7 +225,7 @@ private fun StructuredContainerRows(
     mono: FontFamily,
     tc: ThemeColors,
     initiallyExpanded: Boolean,
-    keyColumnDp: Float,
+    valueLayout: RecordValueLayout,
 ) {
     val children = when (value) {
         is StructuredJsonValue.ObjectValue -> value.fields.map { it.first to it.second }
@@ -212,9 +237,9 @@ private fun StructuredContainerRows(
         is StructuredJsonValue.ArrayValue -> value.truncated
         else -> false
     }
-    // One key column for the whole tree (keyColumnDp, measured from the row's own start), so every
+    // COLUMN: one key column for the whole tree (keyColumnDp, measured from the row's own start), so every
     // value starts at the same x whatever its depth; a row already spends depth * indent of it.
-    val keyWidth = (keyColumnDp - depth * INDENT_PER_DEPTH_DP).dp
+    val keyWidth = (valueLayout.keyColumnDp - depth * INDENT_PER_DEPTH_DP).dp
     val keyColor = recordFieldNameColor(LocalRecordFieldNameStyle.current, tc)
     children.forEach { (label, child) ->
         val childPath = "$path/$label"
@@ -229,6 +254,7 @@ private fun StructuredContainerRows(
                 .padding(start = (depth * INDENT_PER_DEPTH_DP).dp, end = 3.dp)
                 // One node per field: a screen reader hears "key value" together.
                 .semantics(mergeDescendants = true) {}
+                .then(if (expandable) Modifier.toggleOnDoubleClick(childPath) { expanded = !expanded } else Modifier)
                 .testTag("structured-record-node-${pathTag(childPath)}"),
             verticalAlignment = Alignment.Top,
         ) {
@@ -246,33 +272,46 @@ private fun StructuredContainerRows(
                 // Same height as a toggle, so rows with and without one are evenly spaced.
                 Spacer(Modifier.size(width = TREE_TOGGLE_WIDTH, height = NODE_ROW_HEIGHT))
             }
-            AppText(
-                label,
-                color = keyColor,
-                fontSize = 11.sp,
-                fontFamily = mono,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.width(keyWidth),
+            KeyAndValue(
+                valueLayout = valueLayout,
+                keyWidth = keyWidth,
+                key = { keyModifier ->
+                    AppText(
+                        label,
+                        color = keyColor,
+                        fontSize = RECORD_FONT_SP.sp,
+                        fontFamily = mono,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = keyModifier,
+                    )
+                },
+                value = { valueModifier ->
+                    if (hexBytes != null) {
+                        StructuredHexSummary(hexBytes, mono, tc, wrap = initiallyExpanded, modifier = valueModifier)
+                    } else {
+                        val valueText = if (initiallyExpanded && child is StructuredJsonValue.StringValue && !multilineText) {
+                            child.value
+                        } else {
+                            scalarOrContainerSummary(child)
+                        }
+                        AppText(
+                            valueText,
+                            color = jsonValueColor(child, tc),
+                            fontSize = RECORD_FONT_SP.sp,
+                            fontFamily = mono,
+                            maxLines = if (initiallyExpanded) Int.MAX_VALUE else 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = valueModifier,
+                        )
+                    }
+                },
             )
-            if (hexBytes != null) {
-                StructuredHexSummary(hexBytes, mono, tc, wrap = initiallyExpanded, modifier = Modifier.weight(1f))
-            } else {
-                AppText(
-                    if (initiallyExpanded && child is StructuredJsonValue.StringValue && !multilineText) child.value else scalarOrContainerSummary(child),
-                    color = jsonValueColor(child, tc),
-                    fontSize = 11.sp,
-                    fontFamily = mono,
-                    maxLines = if (initiallyExpanded) Int.MAX_VALUE else 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-            }
         }
         if (expandable && expanded) {
             when {
-                container -> StructuredContainerRows(child, childPath, depth + 1, mono, tc, initiallyExpanded, keyColumnDp)
+                container -> StructuredContainerRows(child, childPath, depth + 1, mono, tc, initiallyExpanded, valueLayout)
                 hexBytes != null -> StructuredHexDump(
                     entryId = path.substringBefore('.').toIntOrNull() ?: 0,
                     path = childPath,
@@ -301,6 +340,61 @@ private fun StructuredContainerRows(
             fontFamily = mono,
             modifier = Modifier.padding(start = (depth * 16 + 20).dp, top = 2.dp),
         )
+    }
+}
+
+/**
+ * A field's key and value. COLUMN: the key is a fixed [keyWidth] and the value fills the rest. AFTER_NAME: the key takes its
+ * natural width (at most [MAX_KEY_ROW_FRACTION] of the row, ellipsized beyond) and the value starts one space-gap after it,
+ * wrapping under itself.
+ */
+@Composable
+private fun RowScope.KeyAndValue(
+    valueLayout: RecordValueLayout,
+    keyWidth: androidx.compose.ui.unit.Dp,
+    key: @Composable (Modifier) -> Unit,
+    value: @Composable (Modifier) -> Unit,
+) {
+    if (valueLayout.alignment == RecordValueAlignment.COLUMN) {
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.Top) {
+            key(Modifier.width(keyWidth))
+            value(Modifier.weight(1f))
+        }
+    } else {
+        val gapPx = valueLayout.gapPx
+        Layout(
+            content = {
+                key(Modifier)
+                value(Modifier)
+            },
+            modifier = Modifier.weight(1f),
+        ) { measurables, constraints ->
+            val rowWidth = constraints.maxWidth
+            val bounded = rowWidth != Constraints.Infinity
+            val keyMax = if (bounded) (rowWidth * MAX_KEY_ROW_FRACTION).toInt() else Constraints.Infinity
+            val keyPlaceable = measurables[0].measure(Constraints(maxWidth = keyMax))
+            val valueMax = if (bounded) (rowWidth - keyPlaceable.width - gapPx).coerceAtLeast(0) else Constraints.Infinity
+            val valuePlaceable = measurables[1].measure(Constraints(maxWidth = valueMax))
+            val valueX = keyPlaceable.width + gapPx
+            val width = if (bounded) rowWidth else valueX + valuePlaceable.width
+            layout(width, maxOf(keyPlaceable.height, valuePlaceable.height)) {
+                keyPlaceable.placeRelative(0, 0)
+                valuePlaceable.placeRelative(valueX, 0)
+            }
+        }
+    }
+}
+
+/** The width in px of one space of [mono] at the tree's font size, measured as "a a" minus "aa" (a trailing space may not count). */
+@Composable
+private fun monoSpaceWidthPx(mono: FontFamily): Int {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    return remember(mono, density) {
+        val style = TextStyle(fontFamily = mono, fontSize = RECORD_FONT_SP.sp)
+        val spaced = measurer.measure("a a", style, softWrap = false, maxLines = 1).size.width
+        val tight = measurer.measure("aa", style, softWrap = false, maxLines = 1).size.width
+        (spaced - tight).coerceAtLeast(0)
     }
 }
 
@@ -488,6 +582,34 @@ private fun structuredKeyColumnDp(root: StructuredJsonValue): Float {
     visit(root, 0)
     return widest
 }
+
+/**
+ * Opens or closes a tree row on a double-click anywhere on it except its chevron (which has its own click). It only watches
+ * presses and never consumes them, so the surrounding text selection keeps working.
+ */
+private fun Modifier.toggleOnDoubleClick(key: Any, onToggle: () -> Unit): Modifier = pointerInput(key) {
+    var lastPressMs = NO_PRESS
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull()
+            if (event.type != PointerEventType.Press || !event.buttons.isPrimaryPressed || change == null) continue
+            if (change.position.x < TREE_TOGGLE_WIDTH.toPx()) {
+                lastPressMs = NO_PRESS
+                continue
+            }
+            if (change.uptimeMillis - lastPressMs <= viewConfiguration.doubleTapTimeoutMillis) {
+                lastPressMs = NO_PRESS
+                onToggle()
+            } else {
+                lastPressMs = change.uptimeMillis
+            }
+        }
+    }
+}
+
+/** "No earlier press": far enough in the past that the next press never counts as the second click. */
+private const val NO_PRESS = Long.MIN_VALUE / 2
 
 private fun pathTag(path: String): String = path.map { if (it.isLetterOrDigit()) it else '-' }
     .joinToString("").replace(Regex("-+"), "-").trim('-')

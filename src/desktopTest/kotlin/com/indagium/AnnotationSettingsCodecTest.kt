@@ -4,6 +4,7 @@ import com.indagium.model.AnnotationCopyFormat
 import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.AppSettings
 import com.indagium.model.RecordFieldNameColor
+import com.indagium.model.RecordValueAlignment
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import kotlin.test.Test
@@ -72,5 +73,16 @@ class AnnotationSettingsCodecTest {
 
         val unknown = settingsFromJson("""{"recordFieldNameColor":"NEON"}""")!!
         assertEquals(RecordFieldNameColor.ACCENT, unknown.recordFieldNameColor)
+    }
+
+    @Test
+    fun recordValueAlignmentDefaultsToAfterNameRoundTripsAndFallsBackOnMissingOrUnknown() {
+        assertEquals(RecordValueAlignment.AFTER_NAME, AppSettings().recordValueAlignment)
+        RecordValueAlignment.entries.forEach { mode ->
+            val restored = settingsFromJson(AppSettings(recordValueAlignment = mode).settingsJson())!!
+            assertEquals(mode, restored.recordValueAlignment)
+        }
+        assertEquals(RecordValueAlignment.AFTER_NAME, settingsFromJson("""{"annotationLogBlockStyle":"JIRA_JAVA"}""")!!.recordValueAlignment)
+        assertEquals(RecordValueAlignment.AFTER_NAME, settingsFromJson("""{"recordValueAlignment":"GRID"}""")!!.recordValueAlignment)
     }
 }

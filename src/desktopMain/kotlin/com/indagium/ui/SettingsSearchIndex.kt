@@ -390,6 +390,11 @@ private fun editorBehavior() = listOf(
         listOf("json", "record", "field", "key", "colour", "color", "accent", "message details", "structured"),
     ),
     entry(
+        SettingsPage.LogView, "Record values",
+        LOG_RECORD_VALUES_HINT,
+        listOf("json", "record", "value", "align", "alignment", "column", "message details", "structured"),
+    ),
+    entry(
         SettingsPage.CaptureVideoPlayback, "Video follow readout",
         CAPTURE_FOLLOW_READOUT_HINT,
         listOf("video", "sync", "playhead"),

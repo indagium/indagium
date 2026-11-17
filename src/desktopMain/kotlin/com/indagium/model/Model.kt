@@ -1787,6 +1787,8 @@ data class AppSettings(
     val recordFieldNameColor: RecordFieldNameColor = RecordFieldNameColor.ACCENT,
     /** The picked colour (ARGB) used while [recordFieldNameColor] is CUSTOM; null falls back to the accent. JSON-only. */
     val recordFieldNameCustomArgb: Long? = null,
+    /** Where a field's value starts in an expanded JSON record and in Message details; a file without the key reads as AFTER_NAME. JSON-only. */
+    val recordValueAlignment: RecordValueAlignment = RecordValueAlignment.AFTER_NAME,
 )
 
 /** How the field names of an expanded record are coloured (Settings › Log view › Record field names). */
@@ -1794,6 +1796,15 @@ enum class RecordFieldNameColor(val label: String) {
     ACCENT("Accent"),
     PLAIN("Plain"),
     CUSTOM("Custom"),
+}
+
+/** Where a field's value starts in an expanded record (Settings › Log view › Record values). */
+enum class RecordValueAlignment(val label: String) {
+    /** One space after the field name, so a short name keeps its value close. */
+    AFTER_NAME("After the name"),
+
+    /** One column per tree: every value starts at the same x, whatever its depth. */
+    COLUMN("In a column"),
 }
 
 /** The corner style the toolbar is actually drawn with: the tiles' style while it follows them, else its own. */
