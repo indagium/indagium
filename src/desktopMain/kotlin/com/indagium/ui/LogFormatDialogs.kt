@@ -26,7 +26,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -256,38 +255,12 @@ internal fun LogFormatDetailsDialog(state: AppState, tabId: String, onDismiss: (
                             fontSize = 10.sp,
                         )
                     } else {
-                        CapabilityRows(tabCapabilities)
+                        LogFormatCapabilityList(tabCapabilities)
                     }
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 SettingsDialogButton("Done", onClick = onDismiss)
-            }
-        }
-    }
-}
-
-@Composable
-private fun CapabilityRows(capabilities: Map<LogCapability, LogCapabilityStatus>) {
-    val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        capabilities.toSortedMap(compareBy { it.ordinal }).forEach { (capability, status) ->
-            Column(
-                Modifier.fillMaxWidth().background(tc.p2, RoundedCornerShape(5.dp))
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    AppText(capabilityLabel(capability), color = tc.tx, fontSize = 11.sp)
-                    AppText(
-                        "· ${availabilityLabel(status.availability)}",
-                        color = availabilityColor(status.availability),
-                        fontSize = 10.sp,
-                    )
-                }
-                AppText(status.reason, color = tc.ts, fontSize = 10.sp, maxLines = 3)
             }
         }
     }
@@ -302,27 +275,10 @@ private fun SourcePreviewSummary(parsed: ParsedLog) {
     ) {
         AppText("${parsed.entries.size} records in the source preview", color = tc.tx, fontSize = 11.sp)
         parsed.diagnostics.take(4).forEach { AppText(it, color = tc.ts, fontSize = 10.sp, maxLines = 2) }
-        parsed.entries.take(5).forEach { entry ->
-            Column(
-                Modifier.fillMaxWidth().background(tc.p2, RoundedCornerShape(4.dp)).padding(6.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AppText(
-                        entry.ts.ifBlank { "No timestamp" },
-                        color = tc.ts,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                    AppText(entry.displaySeverityText, color = tc.ac, fontSize = 10.sp)
-                    AppText(entry.tag.ifBlank { "No component" }, color = tc.tx, fontSize = 10.sp)
-                }
-                AppText(entry.msg.ifBlank { "No message" }, color = tc.tx, fontSize = 10.sp, maxLines = 2)
-            }
-        }
+        parsed.entries.take(5).forEach { entry -> LogFormatPreviewRecord(entry, fill = tc.p2) }
         if (parsed.capabilities.isNotEmpty()) {
             AppText("Preview capabilities", color = tc.tx, fontSize = 11.sp)
-            CapabilityRows(parsed.capabilities)
+            LogFormatCapabilityList(parsed.capabilities)
         }
     }
 }
@@ -340,17 +296,4 @@ private fun engineName(engine: LogFormatEngine?): String = when (engine) {
     LogFormatEngine.CRI -> "Kubernetes CRI"
     LogFormatEngine.METADATA_JSON -> "JSON with metadata"
     null -> "legacy parser"
-}
-
-private fun capabilityLabel(capability: LogCapability): String = capability.name.lowercase()
-    .replace('_', ' ').replaceFirstChar(Char::uppercase)
-
-private fun availabilityLabel(availability: CapabilityAvailability): String = availability.name.lowercase()
-    .replaceFirstChar(Char::uppercase)
-
-@Composable
-private fun availabilityColor(availability: CapabilityAvailability) = when (availability) {
-    CapabilityAvailability.AVAILABLE -> tc().success
-    CapabilityAvailability.PARTIAL -> tc().warn
-    CapabilityAvailability.UNAVAILABLE -> tc().td
 }

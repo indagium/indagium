@@ -25,7 +25,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +71,9 @@ private val JOIN_LINES_ENGINES = setOf(
     LogFormatEngine.SYSLOG_RFC5424,
     LogFormatEngine.SYSLOG_RFC3164,
 )
+
+/** The one corner of the cards nested inside this page's rows: an import candidate, an attribute, an issue rule, the preview results. */
+private val NESTED_CARD_SHAPE = RoundedCornerShape(5.dp)
 
 private data class LogFormatPreview(
     val profile: LogFormatProfile,
@@ -315,7 +321,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                             existing != null -> "ID matches ${existing.name} · will import as a copy"
                             else -> "New profile · will be added"
                         }
-                        Column(Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(5.dp)).padding(8.dp)) {
+                        Column(Modifier.fillMaxWidth().background(tc().p2, NESTED_CARD_SHAPE).padding(8.dp)) {
                             AppText(candidate.name, color = tc().tx, fontSize = 12.sp)
                             AppText("${candidate.engine} · ${candidate.id}", color = tc().ts, fontSize = 10.sp)
                             AppText(
@@ -519,51 +525,47 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
             if (draft.engine in JOIN_LINES_ENGINES) {
                 // A multiline record start already decides where a regex record ends, so the choice does not apply then.
                 val canJoinLines = draft.engine != LogFormatEngine.REGEX || draft.multilineStartPattern.isBlank()
-                SettingsStackedRow(
+                SettingsRow(
                     "Lines that do not match",
                     "On: a line that does not fit the format continues the record above it, so a stack trace under a log line stays " +
                         "one record you can expand. Off: every such line is its own raw row.",
                     enabled = canJoinLines,
                 ) {
-                    SettingsCheckbox(
-                        draft.joinUnmatchedLines,
-                        "Add them to the record above",
-                        { checked ->
-                            editDraft { profile -> profile.copy(joinUnmatchedLines = checked) }
-                            reclaimFocus()
-                        },
+                    SettingsToggle(
+                        checked = draft.joinUnmatchedLines,
+                        label = "Add lines that do not match to the record above",
+                        onChange = { checked -> editDraft { profile -> profile.copy(joinUnmatchedLines = checked) } },
+                        reclaimFocus = reclaimFocus,
                         enabled = canJoinLines,
                         testTag = "settings-log-format-join-lines",
                     )
                 }
             }
             if (draft.engine == LogFormatEngine.CSV) {
-                SettingsStackedRow(
-                    "CSV delimiter and header",
-                    "Use one character as the delimiter and choose whether row one contains field names.",
+                SettingsStackedRow("CSV delimiter", "Use one character as the delimiter.") {
+                    SettingsTextField(
+                        draft.delimiter.toString(),
+                        { value ->
+                            value.singleOrNull()?.let { delimiter ->
+                                editDraft { current -> current.copy(delimiter = delimiter) }
+                            }
+                        },
+                        placeholder = ",",
+                        modifier = Modifier.width(80.dp),
+                        testTag = "settings-log-format-delimiter",
+                    )
+                }
+                SettingsRow(
+                    "First row contains field names",
+                    "Turn this off when row one is a record, not a header. Fields are then found by their 0-based column number.",
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        SettingsTextField(
-                            draft.delimiter.toString(),
-                            { value ->
-                                value.singleOrNull()?.let { delimiter ->
-                                    editDraft { current -> current.copy(delimiter = delimiter) }
-                                }
-                            },
-                            placeholder = ",",
-                            modifier = Modifier.width(80.dp),
-                            testTag = "settings-log-format-delimiter",
-                        )
-                        SettingsCheckbox(
-                            draft.hasHeader,
-                            "First row contains field names",
-                            { checked ->
-                                editDraft { profile -> profile.copy(hasHeader = checked) }
-                                reclaimFocus()
-                            },
-                            testTag = "settings-log-format-has-header",
-                        )
-                    }
+                    SettingsToggle(
+                        checked = draft.hasHeader,
+                        label = "First row contains field names",
+                        onChange = { checked -> editDraft { profile -> profile.copy(hasHeader = checked) } },
+                        reclaimFocus = reclaimFocus,
+                        testTag = "settings-log-format-has-header",
+                    )
                 }
             }
         }
@@ -577,10 +579,11 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                     AppText(nativeFieldDescription(draft.engine), color = tc().ts, fontSize = 11.sp)
                 }
             }
-            engineFieldRoles(draft.engine).forEach { role ->
-                SettingsRow(
+            engineFieldRoles(draft.engine).forEachIndexed { index, role ->
+                SettingsStackedRow(
                     roleLabel(role),
-                    fieldMappingHint(draft.engine),
+                    // The hint is the same for every field, so it is said once, on the first one.
+                    fieldMappingHint(draft.engine).takeIf { index == 0 },
                 ) {
                     SettingsTextField(
                         value = draft.fieldMappings[role].orEmpty(),
@@ -621,16 +624,17 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                         testTag = "settings-log-format-epoch-unit",
                     )
                 }
-                SettingsRow("Timestamp pattern", "Pattern for custom date and time values.") {
+                SettingsStackedRow("Timestamp pattern", "Pattern for custom date and time values.") {
                     SettingsTextField(
                         draft.timestampPattern,
                         { value -> editDraft { profile -> profile.copy(timestampPattern = value) } },
                         placeholder = "yyyy-MM-dd HH:mm:ss.SSS",
                         monospace = true,
+                        modifier = Modifier.width(settingsFieldWidth(SETTINGS_FIELD_LONG)),
                         testTag = "settings-log-format-time-pattern",
                     )
                 }
-                SettingsRow(
+                SettingsStackedRow(
                     "Timezone",
                     "A blank value keeps a local source clock without assigning UTC.",
                 ) {
@@ -641,7 +645,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                         testTag = "settings-log-format-timezone",
                     )
                 }
-                SettingsRow(
+                SettingsStackedRow(
                     "Relative clock ID",
                     "Name the elapsed-time clock only when records share a known clock.",
                     enabled = draft.timestampKind == ProfileTimestampKind.RELATIVE,
@@ -694,15 +698,14 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                     testTag = "settings-log-format-severity-level-$index",
                                     minWidth = 140.dp,
                                 )
-                                SettingsButton(
-                                    "Remove",
-                                    {
-                                        editDraft { current ->
-                                            current.copy(severityMapping = current.severityMapping - source)
-                                        }
-                                    },
-                                    modifier = Modifier.testTag("settings-log-format-severity-remove-$index"),
-                                )
+                                RemoveItemButton(
+                                    "Remove mapping $source",
+                                    "settings-log-format-severity-remove-$index",
+                                ) {
+                                    editDraft { current ->
+                                        current.copy(severityMapping = current.severityMapping - source)
+                                    }
+                                }
                             }
                         }
                         SettingsButton(
@@ -729,7 +732,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         draft.attributes.forEachIndexed { index, attribute ->
                             Column(
-                                Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(6.dp)).padding(8.dp),
+                                Modifier.fillMaxWidth().background(tc().p2, NESTED_CARD_SHAPE).padding(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Row(
@@ -781,20 +784,16 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                         testTag = "settings-log-format-attribute-visible-$index",
                                     )
                                     Spacer(Modifier.weight(1f))
-                                    SettingsButton(
-                                        "Remove attribute",
-                                        {
-                                            editDraft { current ->
-                                                current.copy(
-                                                    attributes = current.attributes.filterIndexed { attrIndex, _ ->
-                                                        attrIndex != index
-                                                    },
-                                                )
-                                            }
-                                        },
-                                        isDanger = true,
-                                        modifier = Modifier.testTag("settings-log-format-attribute-remove-$index"),
-                                    )
+                                    RemoveItemButton(
+                                        "Remove attribute ${attribute.id.ifBlank { (index + 1).toString() }}",
+                                        "settings-log-format-attribute-remove-$index",
+                                    ) {
+                                        editDraft { current ->
+                                            current.copy(
+                                                attributes = current.attributes.filterIndexed { attrIndex, _ -> attrIndex != index },
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -874,7 +873,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     draft.issueRules.forEachIndexed { index, rule ->
                         Column(
-                            Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(6.dp)).padding(8.dp),
+                            Modifier.fillMaxWidth().background(tc().p2, NESTED_CARD_SHAPE).padding(8.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Row(
@@ -904,20 +903,16 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                     },
                                     testTag = "settings-log-format-issue-enabled-$index",
                                 )
-                                SettingsButton(
-                                    "Remove",
-                                    {
-                                        editDraft { current ->
-                                            current.copy(
-                                                issueRules = current.issueRules.filterIndexed { ruleIndex, _ ->
-                                                    ruleIndex != index
-                                                },
-                                            )
-                                        }
-                                    },
-                                    isDanger = true,
-                                    modifier = Modifier.testTag("settings-log-format-issue-remove-$index"),
-                                )
+                                RemoveItemButton(
+                                    "Remove rule ${rule.id.ifBlank { (index + 1).toString() }}",
+                                    "settings-log-format-issue-remove-$index",
+                                ) {
+                                    editDraft { current ->
+                                        current.copy(
+                                            issueRules = current.issueRules.filterIndexed { ruleIndex, _ -> ruleIndex != index },
+                                        )
+                                    }
+                                }
                             }
                             SettingsTextField(
                                 rule.regex,
@@ -1079,6 +1074,21 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         }
     }
 }
+
+/** The × that removes one item of a list: [description] is its accessible name and tooltip, [tag] its test tag. */
+@Composable
+private fun RemoveItemButton(description: String, tag: String, onRemove: () -> Unit) {
+    SquareIconButton(
+        "×",
+        fontSize = 14.sp,
+        onClick = onRemove,
+        modifier = Modifier.semantics { contentDescription = description }.testTag(tag),
+        size = REMOVE_BUTTON_SIZE,
+        tooltip = description,
+    )
+}
+
+private val REMOVE_BUTTON_SIZE = 22.dp
 
 /** The built-in profile's name, a read-only badge, its description and the one way forward: an editable copy. */
 @Composable
@@ -1285,8 +1295,8 @@ private fun ProfilePreviewResults(parsed: ParsedLog) {
     Column(
         Modifier
             .fillMaxWidth()
-            .background(tc.p2, RoundedCornerShape(6.dp))
-            .border(1.dp, tc.br, RoundedCornerShape(6.dp))
+            .background(tc.p2, NESTED_CARD_SHAPE)
+            .border(1.dp, tc.br, NESTED_CARD_SHAPE)
             .padding(9.dp)
             .testTag("settings-log-format-preview-results"),
         verticalArrangement = Arrangement.spacedBy(7.dp),
@@ -1299,52 +1309,130 @@ private fun ProfilePreviewResults(parsed: ParsedLog) {
         )
         if (parsed.diagnostics.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                parsed.diagnostics.take(4).forEach { AppText(it, color = tc.ts, fontSize = 10.sp, maxLines = 2) }
+                parsed.diagnostics.take(4).forEach { AppText(it, color = tc.ts, fontSize = 11.sp, maxLines = 2) }
             }
         }
-        parsed.entries.take(4).forEach { entry ->
-            Column(
-                Modifier.fillMaxWidth().background(tc.p, RoundedCornerShape(4.dp)).padding(6.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    AppText(
-                        entry.ts.ifBlank { "No timestamp" },
-                        color = tc.ts,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                    AppText(entry.displaySeverityText, color = tc.ac, fontSize = 10.sp)
-                    AppText(entry.tag.ifBlank { "No component" }, color = tc.tx, fontSize = 10.sp)
-                }
-                AppText(entry.msg.ifBlank { "No message" }, color = tc.tx, fontSize = 11.sp, maxLines = 2)
-                if (entry.profileFields.isNotEmpty()) {
-                    AppText(
-                        entry.profileFields.entries.take(6).joinToString("  ·  ") { "${it.key}: ${it.value}" },
-                        color = tc.ts,
-                        fontSize = 10.sp,
-                        maxLines = 2,
-                    )
-                }
-            }
-        }
+        parsed.entries.take(4).forEach { entry -> LogFormatPreviewRecord(entry) }
         if (parsed.capabilities.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                AppText("Available capabilities", color = tc.tx, fontSize = 11.sp)
-                parsed.capabilities.toSortedMap(compareBy { it.ordinal }).forEach { (capability, status) ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.Top) {
-                        AppText(capabilityLabel(capability), color = tc.tx, fontSize = 10.sp)
-                        AppText("· ${availabilityLabel(status.availability)}", color = tc.tx, fontSize = 10.sp)
-                        AppText(status.reason, color = tc.ts, fontSize = 10.sp, maxLines = 2)
-                    }
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                AppText("Capabilities", color = tc.tx, fontSize = 12.sp)
+                LogFormatCapabilityList(parsed.capabilities)
             }
         }
     }
 }
+
+/** The most extra profile fields a previewed record lists under its line. */
+private const val PREVIEW_MAX_FIELDS = 6
+
+/**
+ * The colour of a previewed record's severity text, as the log view draws it: the level's own colour, or [unknown] when the source
+ * severity could not be read.
+ */
+internal fun previewSeverityColor(entry: LogEntry, unknown: Color): Color =
+    if (entry.severityKnown) entry.level.defaultColor else unknown
+
+/**
+ * One previewed record drawn like a log row, in the log font: timestamp, severity (bold, in its level colour), component and message,
+ * then each extra profile field on its own line as "key  value". Placeholders for what the profile did not produce are dim. [fill] is the
+ * row's background, the page fill unless the container around it already is.
+ */
+@Composable
+internal fun LogFormatPreviewRecord(entry: LogEntry, modifier: Modifier = Modifier, fill: Color? = null) {
+    val tc = tc()
+    val severity = entry.displaySeverityText
+    Column(
+        modifier.fillMaxWidth().background(fill ?: tc.p, CORNER_MD).padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+            AppText(
+                entry.ts.ifBlank { "No timestamp" },
+                color = tc.td,
+                fontSize = PREVIEW_LOG_FONT_SIZE,
+                fontFamily = FontFamily.Monospace,
+            )
+            if (severity.isNotBlank()) {
+                AppText(
+                    severity,
+                    color = previewSeverityColor(entry, Color(UNKNOWN_SEVERITY_TEXT_COLOR_ARGB)),
+                    fontSize = PREVIEW_LOG_FONT_SIZE,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            AppText(
+                entry.tag.ifBlank { "No component" },
+                color = if (entry.tag.isBlank()) tc.td else tc.ts,
+                fontSize = PREVIEW_LOG_FONT_SIZE,
+                fontFamily = FontFamily.Monospace,
+            )
+            AppText(
+                entry.msg.ifBlank { "No message" },
+                color = if (entry.msg.isBlank()) tc.td else tc.tx,
+                fontSize = PREVIEW_LOG_FONT_SIZE,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        entry.profileFields.entries.take(PREVIEW_MAX_FIELDS).forEach { (key, value) ->
+            Row(Modifier.padding(start = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppText(key, color = tc.ts, fontSize = PREVIEW_FIELD_FONT_SIZE, fontFamily = FontFamily.Monospace)
+                AppText(
+                    value,
+                    color = tc.tx,
+                    fontSize = PREVIEW_FIELD_FONT_SIZE,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+private val PREVIEW_LOG_FONT_SIZE = 12.sp
+private val PREVIEW_FIELD_FONT_SIZE = 11.sp
+
+/** A tinted chip per capability in words, "Text search · available". The reason for one that is partial or unavailable follows its chip. */
+@Composable
+internal fun LogFormatCapabilityList(capabilities: Map<LogCapability, LogCapabilityStatus>) {
+    val tc = tc()
+    val ordered = capabilities.toSortedMap(compareBy { it.ordinal })
+    val (available, limited) = ordered.entries.partition { it.value.availability == CapabilityAvailability.AVAILABLE }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (available.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                available.forEach { (capability, status) -> CapabilityChip(capability, status.availability) }
+            }
+        }
+        limited.forEach { (capability, status) ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                CapabilityChip(capability, status.availability)
+                AppText(status.reason, color = tc.ts, fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CapabilityChip(capability: LogCapability, availability: CapabilityAvailability) {
+    val tc = tc()
+    SettingsBadge(
+        capabilityChipText(capability, availability),
+        color = when (availability) {
+            CapabilityAvailability.AVAILABLE -> tc.success
+            CapabilityAvailability.PARTIAL -> tc.warn
+            CapabilityAvailability.UNAVAILABLE -> tc.ts
+        },
+        modifier = Modifier.testTag("log-format-capability-${capability.name.lowercase()}"),
+    )
+}
+
+/** What a capability chip says: the capability and its availability, both in words. */
+internal fun capabilityChipText(capability: LogCapability, availability: CapabilityAvailability): String =
+    "${capabilityLabel(capability)} · ${availabilityLabel(availability)}"
 
 @Composable
 private fun LogFormatExportDialog(
@@ -1593,11 +1681,32 @@ private fun roleLabel(role: LogFieldRole): String = when (role) {
     else -> role.name.lowercase().replace('_', ' ').replaceFirstChar(Char::uppercase)
 }
 
-private fun capabilityLabel(capability: LogCapability): String = capability.name.lowercase()
-    .replace('_', ' ').replaceFirstChar(Char::uppercase)
+/** The sentence-case name of a capability. Exhaustive on purpose: a new [LogCapability] must be named here to compile. */
+internal fun capabilityLabel(capability: LogCapability): String = when (capability) {
+    LogCapability.TEXT_SEARCH -> "Text search"
+    LogCapability.NOTES -> "Notes"
+    LogCapability.MANUAL_FOLDING -> "Manual folding"
+    LogCapability.SEVERITY_FILTER -> "Severity filter"
+    LogCapability.COMPONENT_FILTER -> "Component filter"
+    LogCapability.PID_THREAD_FILTER -> "Process and thread filter"
+    LogCapability.PROCESS_MAP -> "Process map"
+    LogCapability.PROCESS_NAMES -> "Process names"
+    LogCapability.TIMELINE -> "Timeline"
+    LogCapability.DELTA_TIME -> "Time delta"
+    LogCapability.MERGE -> "Merge"
+    LogCapability.VIDEO_LINKING -> "Video linking"
+    LogCapability.ANDROID_ISSUES -> "Android issues"
+    LogCapability.SOURCE_LOOKUP -> "Source lookup"
+    LogCapability.INCREMENTAL_TAIL -> "Live tail"
+    LogCapability.RECORD_SPLIT -> "Record split"
+    LogCapability.EXPORT -> "Export"
+}
 
-private fun availabilityLabel(availability: CapabilityAvailability): String = availability.name.lowercase()
-    .replaceFirstChar(Char::uppercase)
+private fun availabilityLabel(availability: CapabilityAvailability): String = when (availability) {
+    CapabilityAvailability.AVAILABLE -> "available"
+    CapabilityAvailability.PARTIAL -> "partial"
+    CapabilityAvailability.UNAVAILABLE -> "unavailable"
+}
 
 private fun splitList(text: String): List<String> = text.split(',').map(String::trim).filter(String::isNotBlank)
 

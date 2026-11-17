@@ -3,15 +3,22 @@ package com.indagium
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -22,12 +29,18 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.indagium.model.AnnBlock
+import com.indagium.model.CapabilityAvailability
+import com.indagium.model.LogCapability
+import com.indagium.model.LogEntry
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
+import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.ProfileTimestampKind
@@ -39,6 +52,9 @@ import com.indagium.ui.SETTINGS_SEARCH_INDEX
 import com.indagium.ui.SettingsAnchorKey
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.SettingsPage
+import com.indagium.ui.capabilityChipText
+import com.indagium.ui.capabilityLabel
+import com.indagium.ui.previewSeverityColor
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -498,8 +514,8 @@ class SettingsLogFormatsUiTest {
         rule.waitUntil(10_000) {
             rule.onAllNodes(hasText("2 parsed records", substring = true)).fetchSemanticsNodes().isNotEmpty()
         }
-        rule.onNodeWithText("Available capabilities").performScrollTo().assertExists()
-        rule.onNodeWithText("Text search").performScrollTo().assertExists()
+        rule.onNodeWithText("Capabilities").performScrollTo().assertExists()
+        rule.onNodeWithText("Text search · available").performScrollTo().assertExists()
         recordScreenshot("preview", "settings-log-format-preview-results")
 
         rule.onNodeWithTag("settings-log-format-save").performScrollTo().performClick()
@@ -507,6 +523,172 @@ class SettingsLogFormatsUiTest {
         val saved = state.availableLogFormatProfiles().single { it.name == "Service JSON" }
         assertEquals(LogFormatEngine.JSON_LINES, saved.engine)
         assertEquals("timestamp", saved.fieldMappings[LogFieldRole.TIMESTAMP])
+    }
+
+    @Test
+    fun everyCapabilityHasAHumanLabelAndAChipThatSaysItsAvailabilityInWords() {
+        val labels = LogCapability.entries.map { capabilityLabel(it) }
+        assertEquals(labels.size, labels.toSet().size, "labels must be distinct: $labels")
+        labels.forEach { label ->
+            assertFalse(label.contains('_'), "label has an underscore: $label")
+            assertEquals(label.replaceFirstChar(Char::uppercase), label, "label is not sentence case: $label")
+            assertEquals(label, label.trim())
+        }
+        assertEquals("Text search · available", capabilityChipText(LogCapability.TEXT_SEARCH, CapabilityAvailability.AVAILABLE))
+        assertEquals("Live tail · partial", capabilityChipText(LogCapability.INCREMENTAL_TAIL, CapabilityAvailability.PARTIAL))
+        assertEquals("Merge · unavailable", capabilityChipText(LogCapability.MERGE, CapabilityAvailability.UNAVAILABLE))
+    }
+
+    @Test
+    fun aPreviewedRecordShowsItsSeverityInTheLevelColourAndTheFieldsOneToALine() {
+        val unknown = Color(0xFF123456)
+
+        fun entry(level: LogLevel, known: Boolean) = LogEntry(
+            id = 1, ts = "12:00:00", level = level, tag = "app", msg = "hello",
+            recordMetadata = if (known) null else LogRecordMetadata(severityKnown = false),
+        )
+        LogLevel.entries.forEach { level ->
+            assertEquals(level.defaultColor, previewSeverityColor(entry(level, known = true), unknown))
+        }
+        assertEquals(unknown, previewSeverityColor(entry(LogLevel.E, known = false), unknown))
+
+        val state = newState()
+        openPage(state)
+        rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-engine").performScrollTo().performClick()
+        rule.onNodeWithText("JSON Lines").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-preview").performScrollTo().performClick()
+        rule.waitUntil(10_000) {
+            rule.onAllNodes(hasText("2 parsed records", substring = true)).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // The sample is one INFO and one WARN line: the letters are drawn bold in those levels' colours, not in the accent.
+        fun colourOf(text: String): Pair<Color, FontWeight?> {
+            val node = rule.onNode(
+                hasText(text) and hasAnyAncestor(hasTestTag("settings-log-format-preview-results")),
+                useUnmergedTree = true,
+            ).fetchSemanticsNode()
+            val layouts = mutableListOf<TextLayoutResult>()
+            node.config[SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+            val style = layouts.single().layoutInput.style
+            return style.color to style.fontWeight
+        }
+        assertEquals(LogLevel.I.defaultColor to FontWeight.Bold, colourOf("I"))
+        assertEquals(LogLevel.W.defaultColor to FontWeight.Bold, colourOf("W"))
+    }
+
+    @Test
+    fun linesThatDoNotMatchIsASwitchThatTogglesTheDraft() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("Regular expression")
+
+        val tag = "settings-log-format-join-lines"
+        rule.onNodeWithTag(tag).performScrollTo().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Switch))
+        val before = rule.onNodeWithTag(tag).fetchSemanticsNode().config[SemanticsProperties.ToggleableState]
+        rule.onNodeWithTag(tag).performClick()
+        rule.waitForIdle()
+        val after = rule.onNodeWithTag(tag).fetchSemanticsNode().config[SemanticsProperties.ToggleableState]
+        assertNotEquals(before, after)
+        rule.onNodeWithTag("settings-log-format-multiline").performScrollTo()
+        recordScreenshot("settings-editor-regex")
+        rule.onNodeWithTag("settings-log-format-save").performScrollTo().performClick()
+        rule.waitForIdle()
+        val saved = state.availableLogFormatProfiles().last()
+        assertEquals(after == ToggleableState.On, saved.joinUnmatchedLines)
+    }
+
+    @Test
+    fun firstRowContainsFieldNamesIsItsOwnSwitchRowUnderTheDelimiter() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("CSV / TSV")
+
+        val tag = "settings-log-format-has-header"
+        rule.onNodeWithTag("settings-log-format-delimiter").performScrollTo().assertExists()
+        rule.onNodeWithText("First row contains field names").performScrollTo().assertExists()
+        rule.onNodeWithTag(tag).performScrollTo().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Switch))
+        val before = rule.onNodeWithTag(tag).fetchSemanticsNode().config[SemanticsProperties.ToggleableState]
+        rule.onNodeWithTag(tag).performClick()
+        rule.waitForIdle()
+        val after = rule.onNodeWithTag(tag).fetchSemanticsNode().config[SemanticsProperties.ToggleableState]
+        assertNotEquals(before, after)
+        rule.onNodeWithTag(tag).performScrollTo()
+        recordScreenshot("settings-editor-csv")
+        rule.onNodeWithTag("settings-log-format-save").performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(after == ToggleableState.On, state.availableLogFormatProfiles().last().hasHeader)
+    }
+
+    @Test
+    fun valueFieldsOfTheEditorAllStartAtTheSameLeftEdge() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("JSON Lines")
+
+        val tags = listOf(
+            "settings-log-format-name",
+            "settings-log-format-description",
+            "settings-log-format-extensions",
+            "settings-log-format-field-timestamp",
+            "settings-log-format-field-message",
+            "settings-log-format-time-pattern",
+            "settings-log-format-timezone",
+            "settings-log-format-relative-clock",
+        )
+        val lefts = tags.map { tag ->
+            rule.onNodeWithTag(tag).performScrollTo()
+            rule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot.left
+        }
+        assertEquals(1, lefts.map { it.toInt() }.toSet().size, "fields start at different x: ${tags.zip(lefts)}")
+        rule.onNodeWithTag("settings-log-format-time-kind").performScrollTo()
+        recordScreenshot("settings-editor-time")
+        rule.onNodeWithTag("settings-log-format-field-timestamp").performScrollTo()
+        recordScreenshot("settings-editor-fields")
+    }
+
+    @Test
+    fun removingAnItemIsAnXButtonNamedAfterTheItem() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("JSON Lines")
+
+        // Attribute
+        rule.onNodeWithTag("settings-log-format-issue-add").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-severity-add").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-attribute-add").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-severity-add").performScrollTo()
+        recordScreenshot("settings-editor-severity")
+        rule.onNodeWithTag("settings-log-format-attribute-add").performScrollTo()
+        recordScreenshot("settings-editor-items")
+        rule.onNodeWithTag("settings-log-format-issue-add").performScrollTo()
+        recordScreenshot("settings-editor-rules")
+        rule.onNodeWithTag("settings-log-format-attribute-id-0").performScrollTo().assertExists()
+        rule.onNodeWithText("Remove attribute", substring = true).assertDoesNotExist()
+        rule.onNodeWithContentDescription("Remove attribute field_1").performScrollTo()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.TestTag, "settings-log-format-attribute-remove-0"))
+            .performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-attribute-id-0").assertDoesNotExist()
+
+        // Issue rule
+        rule.onNodeWithTag("settings-log-format-issue-id-0").performScrollTo().assertExists()
+        rule.onNodeWithContentDescription("Remove rule rule_1").performScrollTo()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.TestTag, "settings-log-format-issue-remove-0"))
+            .performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-issue-id-0").assertDoesNotExist()
+
+        // Severity mapping
+        rule.onNodeWithTag("settings-log-format-severity-source-0").performScrollTo().assertExists()
+        rule.onNodeWithContentDescription("Remove mapping TRACE").performScrollTo()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.TestTag, "settings-log-format-severity-remove-0"))
+            .performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-severity-source-0").assertDoesNotExist()
     }
 
     @Test

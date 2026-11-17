@@ -1068,20 +1068,24 @@ internal fun middleEllipsis(text: String, maxWidth: Int, widthOf: (String) -> In
     return cut(fits)
 }
 
-/** A small accent pill with a [text] (a status such as "Running" or an edition name); [dot] adds a leading status dot. */
+/**
+ * A small pill with a [text] (a status such as "Running" or an edition name); [dot] adds a leading status dot. It is tinted with the accent
+ * unless [color] names another (a status colour such as success or warn): wash, outline, dot and text all follow it.
+ */
 @Composable
-internal fun SettingsBadge(text: String, modifier: Modifier = Modifier, dot: Boolean = false) {
+internal fun SettingsBadge(text: String, modifier: Modifier = Modifier, dot: Boolean = false, color: Color? = null) {
     val tc = tc()
+    val tint = color ?: tc.ac
     val shape = RoundedCornerShape(3.dp)
     Row(
-        modifier.background(tc.ac.copy(alpha = BADGE_FILL_ALPHA), shape)
-            .border(1.dp, tc.ac.copy(alpha = BADGE_BORDER_ALPHA), shape)
+        modifier.background(tint.copy(alpha = BADGE_FILL_ALPHA), shape)
+            .border(1.dp, tint.copy(alpha = BADGE_BORDER_ALPHA), shape)
             .padding(horizontal = 8.dp, vertical = 1.dp),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (dot) Box(Modifier.size(6.dp).background(tc.ac, CircleShape))
-        AppText(text, color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        if (dot) Box(Modifier.size(6.dp).background(tint, CircleShape))
+        AppText(text, color = tint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 
