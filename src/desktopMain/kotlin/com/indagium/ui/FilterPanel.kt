@@ -671,6 +671,9 @@ internal fun FilterPanel(
     // emits each section as its own tile (see SectionHost.kt).
     host: SectionHost? = null,
     profileCapabilities: Map<LogCapability, LogCapabilityStatus> = tab.logCapabilities,
+    // Set when the log view hides the TAG column the Tags filter still matches (a metadata JSON tab): the tile says so, with a way to show it.
+    tagColumnHidden: Boolean = false,
+    onShowTagColumn: () -> Unit = {},
 ) {
     val tc = tc()
     val filter = tab.filter
@@ -1351,6 +1354,7 @@ internal fun FilterPanel(
             ) {
                 tab.filterNormalizationNotice?.let { FilterNormalizationNotice(it) }
                 if (filter.mode == FilterMode.TAGS) {
+                    if (tagColumnHidden && componentUnavailableReason == null) TagColumnHiddenNote(onShowTagColumn)
                     if (componentUnavailableReason != null) {
                         Column(
                             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),

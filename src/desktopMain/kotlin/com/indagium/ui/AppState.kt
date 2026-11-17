@@ -8072,6 +8072,7 @@ class AppState(
             val source = tab(tabId) ?: return
             if (source.contentState != TabContentState.LOADED || source.selectedLogSectionId == sectionId) return
             if (source.logSections.none { it.id == sectionId }) return
+            clearRecordExpansion(listOf(tabId))
             val views = source.logSectionViews.toMutableMap()
             source.selectedLogSectionId?.let { current ->
                 views[current] = LogSectionViewState(source.filter, source.selected, source.expanded, source.manualBlocks)
@@ -10169,8 +10170,31 @@ class AppState(
         }
     }
 
+    // Which structured records are open per tab (ui/RecordExpansion.kt). UI state only: not persisted, dropped with the tab or when its
+    // section changes. An initial value is never stored, so the map stays as small as the tabs that opened a record.
+    private var recordExpansionByTab by mutableStateOf<Map<String, RecordExpansion>>(emptyMap())
+
+    internal fun recordExpansion(tabId: String): RecordExpansion = recordExpansionByTab[tabId] ?: RecordExpansion()
+
+    internal fun toggleRecordExpansion(tabId: String, entryId: Int) {
+        synchronized(stateLock) { setRecordExpansion(tabId, recordExpansion(tabId).toggled(entryId)) }
+    }
+
+    private fun setRecordExpansion(tabId: String, expansion: RecordExpansion) {
+        synchronized(stateLock) {
+            recordExpansionByTab = if (expansion.isInitial) recordExpansionByTab - tabId else recordExpansionByTab + (tabId to expansion)
+        }
+    }
+
+    private fun clearRecordExpansion(tabIds: Collection<String>) {
+        synchronized(stateLock) {
+            if (tabIds.any { it in recordExpansionByTab }) recordExpansionByTab = recordExpansionByTab - tabIds.toSet()
+        }
+    }
+
     fun expandAll(tabId: String) {
         val t = tab(tabId) ?: return
+        if (tabHasExpandableRecords(t)) setRecordExpansion(tabId, RecordExpansion.ALL_EXPANDED)
         if (!t.largeFileMode) {
             upTab(tabId) { it.copy(expanded = visibleExpandableGroupIds(it)) }
             return
@@ -10188,7 +10212,10 @@ class AppState(
         }
     }
 
-    fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
+    fun collapseAll(tabId: String) {
+        setRecordExpansion(tabId, RecordExpansion.ALL_COLLAPSED)
+        upTab(tabId) { it.copy(expanded = emptySet()) }
+    }
 
     fun toggleUnfiltered(tabId: String) {
         val current = tab(tabId) ?: return
@@ -13029,6 +13056,7 @@ class AppState(
             rowsToRelease = closing.mapNotNull(::rowReleaseTarget).distinctBy { it.store }
             // Plain lists have no explicit release; account for them when their tabs close.
             closedRowsSinceTrim += closing.filter { rowReleaseTarget(it) == null }.sumOf { it.logData.size.toLong() }
+            clearRecordExpansion(tabIds)
             tabIds.forEach { tabId ->
                 contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
                 contentLoadJobs.remove(tabId)?.cancel()

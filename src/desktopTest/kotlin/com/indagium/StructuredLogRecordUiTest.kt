@@ -31,6 +31,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.dp
@@ -246,6 +247,58 @@ class StructuredLogRecordUiTest {
         assertEquals(colors.td, colorOf("$row-device", "{1 fields}"))
         val used = listOf("name", "count", "enabled", "gone", "device").flatMap { listOf(colorOf("$row-$it", it)) }
         assertTrue(colors.ac !in used && colors.warn !in used, "no accent or warning colour in the tree")
+    }
+
+    @Test
+    fun aHexFieldShowsDecodedTextAndByteCountAndExpandsToADump() {
+        val text = "Software Version 1"
+        val spaced = text.toByteArray().joinToString(" ") { "%02x".format(it) }
+        val json = """{"name":"x","payload":"$spaced","id":"1794860790349975040","blob":"ffeeddccbbaa00112233"}"""
+        lateinit var colors: com.indagium.ui.ThemeColors
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                colors = tc()
+                Column(Modifier.width(900.dp).background(colors.p).padding(10.dp).testTag("structured-record-qa-root")) {
+                    PreviewRecordRow(id = 301, summary = "10:00:00 INFO api: hex", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-301").performClick()
+        val row = "structured-record-node-301-root"
+        rule.onNodeWithTag("$row-payload").assertTextContains("\"$text\"", substring = true)
+        rule.onNodeWithTag("$row-payload").assertTextContains("hex · 18 bytes", substring = true)
+        assertEquals(colors.td, textColor("$row-payload", "hex · 18 bytes"), "the byte count is dim")
+        assertEquals(colors.tx, textColor("$row-payload", "\"$text\""), "the decoded text is the value colour")
+        rule.onNodeWithTag("$row-blob").assertTextContains("hex · 10 bytes", substring = true)
+        rule.onNodeWithTag("$row-id").assertTextContains("1794860790349975040", substring = true)
+        rule.onNodeWithTag("structured-record-node-toggle-301-root-blob").assertExists()
+        rule.onNodeWithTag("structured-record-node-toggle-301-root-id").assertDoesNotExist()
+        rule.onNodeWithTag("structured-record-node-toggle-301-root-name").assertDoesNotExist()
+        rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-0").assertDoesNotExist()
+
+        rule.onNodeWithTag("structured-record-node-toggle-301-root-payload").performClick()
+        rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-0")
+            .assertTextContains("0000  53 6f 66 74 77 61 72 65 20 56 65 72 73 69 6f 6e  Software Version", substring = true)
+        rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-1").assertTextContains("0010  20 31", substring = true)
+        rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-2").assertDoesNotExist()
+        saveScreenshot("structured-json-hex-expanded")
+    }
+
+    @Test
+    fun aLongHexDumpIsCappedWithTheMoreLinesNotice() {
+        val spaced = (0 until 1400).joinToString(" ") { "%02x".format(it and 0xff) }
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(900.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 302, summary = "10:00:00 INFO api: big hex", source = """{"blob":"$spaced"}""")
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-302").performClick()
+        rule.onNodeWithTag("structured-record-node-toggle-302-root-blob").performClick()
+        rule.onNodeWithTag("structured-record-hex-line-302-302-root-blob-79").assertExists()
+        rule.onNodeWithTag("structured-record-hex-line-302-302-root-blob-80").assertDoesNotExist()
+        rule.onNodeWithText("… 8 more lines omitted").assertExists()
     }
 
     @Test

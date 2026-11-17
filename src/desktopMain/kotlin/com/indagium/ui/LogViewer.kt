@@ -1413,6 +1413,12 @@ internal fun LogViewer(
     onToggleTimeDelta: () -> Unit = {},
     metadataJsonTagVisible: Boolean? = null,
     onToggleMetadataJsonTag: () -> Unit = {},
+    /**
+     * Which structured records are open, kept by the tab's owner so Expand all / Collapse all reach them. Null keeps the state in this
+     * viewer (preview and test callers); [onToggleRecord] then goes unused.
+     */
+    recordExpansion: RecordExpansion? = null,
+    onToggleRecord: (Int) -> Unit = {},
     /** Live source/config-aware availability supplied by FileView; null keeps preview callers working. */
     deltaTimeStatus: LogCapabilityStatus? = null,
     /** Live process-name availability supplied by BoundLogViewer; null keeps legacy tabs unchanged. */
@@ -1562,8 +1568,20 @@ internal fun LogViewer(
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
     }
-    val canExpandAll = computedItems.summary.collapsedGroupCount > 0
-    val canCollapseAll = computedItems.summary.expandedGroupCount > 0
+    var localRecordExpansion by remember(tab.id) { mutableStateOf(RecordExpansion()) }
+    val records = recordExpansion ?: localRecordExpansion
+    val toggleRecord: (Int) -> Unit = if (recordExpansion != null) onToggleRecord else { id -> localRecordExpansion = localRecordExpansion.toggled(id) }
+    val hasExpandableRecords = remember(tab.id, tab.logData.firstOrNull()) { tabHasExpandableRecords(tab) }
+    val canExpandAll = computedItems.summary.collapsedGroupCount > 0 || (hasExpandableRecords && !records.allExpanded)
+    val canCollapseAll = computedItems.summary.expandedGroupCount > 0 || (hasExpandableRecords && records.anyExpanded)
+    val expandAllAction: () -> Unit = {
+        onExpandAll()
+        if (recordExpansion == null) localRecordExpansion = RecordExpansion.ALL_EXPANDED
+    }
+    val collapseAllAction: () -> Unit = {
+        onCollapseAll()
+        if (recordExpansion == null) localRecordExpansion = RecordExpansion.ALL_COLLAPSED
+    }
     var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
     var exportMenuOpen by remember(tab.id) { mutableStateOf(false) }
     var toolbarContextMenuOpen by remember(tab.id) { mutableStateOf(false) }
@@ -1587,8 +1605,8 @@ internal fun LogViewer(
         }
         add(LogViewerToolbarAction("time-delta", deltaTimeEnabled, onToggleTimeDelta))
         add(LogViewerToolbarAction("search", true, onOpenSearch))
-        add(LogViewerToolbarAction("expand-all", canExpandAll, onExpandAll))
-        add(LogViewerToolbarAction("collapse-all", canCollapseAll, onCollapseAll))
+        add(LogViewerToolbarAction("expand-all", canExpandAll, expandAllAction))
+        add(LogViewerToolbarAction("collapse-all", canCollapseAll, collapseAllAction))
         add(LogViewerToolbarAction("unfiltered", true, onToggleUnfiltered))
     }
 
@@ -1683,8 +1701,8 @@ internal fun LogViewer(
                         onExportCaptureRange = onExportCaptureRange,
                         onToggleTimeDelta = onToggleTimeDelta,
                         onOpenSearch = onOpenSearch,
-                        onExpandAll = onExpandAll,
-                        onCollapseAll = onCollapseAll,
+                        onExpandAll = expandAllAction,
+                        onCollapseAll = collapseAllAction,
                         onToggleUnfiltered = onToggleUnfiltered,
                         onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
                     ),
@@ -2183,6 +2201,8 @@ internal fun LogViewer(
                                             processNameMode = renderedProcessNameMode,
                                             pidFieldChars = pidFieldChars,
                                             showPidTid = showPidTid,
+                                            recordExpanded = records.isExpanded(item.entry.id),
+                                            onToggleRecord = toggleRecord,
                                             searchHighlight = if (isSearchMatch) {
                                                 SearchHighlight(
                                                     search.query, search.caseSensitive, isCurrentSearchMatch,
@@ -3695,12 +3715,15 @@ private fun LogRow(
     // the row without its pid/tid text; copying rows (entry-based) is unaffected.
     showPidTid: Boolean = true,
     errorHighlightStyle: ErrorHighlightStyle? = null,
+    // Whether this row's record body is open, and the click that flips it; both live in the tab's RecordExpansion.
+    recordExpanded: Boolean = false,
+    onToggleRecord: (Int) -> Unit = {},
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
     val isSel    = entry.id in tab.selected
     val structuredRecordSource = remember(entry, tab.logFormat) { expandableRecordSource(entry, tab.logFormat) }
-    var structuredRecordExpanded by remember(tab.id, entry.id) { mutableStateOf(false) }
+    val structuredRecordExpanded = recordExpanded
     var structuredDisclosureBounds by remember(tab.id, entry.id) { mutableStateOf<Pair<Float, Float>?>(null) }
     val latestStructuredDisclosureBounds by rememberUpdatedState(structuredDisclosureBounds)
     var hov      by remember { mutableStateOf(false) }
@@ -3711,6 +3734,7 @@ private fun LogRow(
     val latestSelection by rememberUpdatedState(sel)
     val latestOnSelRow by rememberUpdatedState(onSelRow)
     val latestOnCtxMenu by rememberUpdatedState(onCtxMenu)
+    val latestOnToggleRecord by rememberUpdatedState(onToggleRecord)
     val fontSize = baseSp()
     DisposableEffect(entry.id, rowBoundsAbs) {
         onDispose { rowBoundsAbs.remove(entry.id) }
@@ -3989,7 +4013,7 @@ private fun LogRow(
                                         // second-click handling. It therefore preserves desktop word
                                         // selection while adding only the independent video seek action.
                                         if (!pressOnRecordDisclosure && doubleClickInProgress && !pressDragged && pressUnmodified) {
-                                            if (structuredRecordSource != null) structuredRecordExpanded = !structuredRecordExpanded
+                                            if (structuredRecordSource != null) latestOnToggleRecord(entry.id)
                                             onLogRowDoubleClick?.invoke(entry.id)
                                             // Consume this pair; a third rapid click starts the next gesture.
                                             lastPrimaryPressMs = 0L
@@ -4118,7 +4142,7 @@ private fun LogRow(
                     visible = structuredDisclosureVisible(hov, isSel, structuredRecordExpanded),
                     modifier = Modifier.padding(end = 2.dp),
                     onBoundsChanged = { left, right -> structuredDisclosureBounds = left to right },
-                    onClick = { structuredRecordExpanded = !structuredRecordExpanded },
+                    onClick = { onToggleRecord(entry.id) },
                 )
             } else if (profileLayout != null) {
                 // Rows without a disclosure arrow keep its place, so every row's text starts in one column.

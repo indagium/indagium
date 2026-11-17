@@ -98,6 +98,8 @@ internal fun BoundLogViewer(
         onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
         onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
         metadataJsonTagVisible = metadataJsonTagVisible,
+        recordExpansion = state.recordExpansion(tab.id),
+        onToggleRecord = { state.toggleRecordExpansion(tab.id, it) },
         onToggleMetadataJsonTag = { state.toggleMetadataJsonTag(tab.id) },
         onOpenSearch = { if (state.isSearchOpen(tab.id)) state.closeSearch(tab.id) else state.openSearch(tab.id) },
         onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },

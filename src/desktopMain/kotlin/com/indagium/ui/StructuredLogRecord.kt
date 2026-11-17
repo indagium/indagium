@@ -1,6 +1,8 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -29,9 +32,12 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.LogEntry
@@ -51,6 +57,7 @@ private const val KEY_CHAR_WIDTH_DP = 6.7f
 private const val KEY_GAP_DP = 14f
 private const val INDENT_PER_DEPTH_DP = 16
 private val NODE_ROW_HEIGHT = 16.dp
+private val HEX_SUMMARY_GAP = 8.dp
 
 /** Width a row gives the disclosure arrow, arrow or not: the 24dp button and its 2dp gap. */
 internal val STRUCTURED_DISCLOSURE_SLOT = 26.dp
@@ -192,7 +199,9 @@ private fun StructuredContainerRows(
         val childPath = "$path/$label"
         val container = child is StructuredJsonValue.ObjectValue || child is StructuredJsonValue.ArrayValue
         val multilineText = child is StructuredJsonValue.StringValue && recordLines(child.value).size > 1
-        val expandable = container || multilineText
+        // Bytes spelled in hex read as a dump, not one long wrapped run.
+        val hexBytes = remember(childPath, child) { (child as? StructuredJsonValue.StringValue)?.let { parseHexBytes(it.value) } }
+        val expandable = container || multilineText || hexBytes != null
         var expanded by remember(childPath) { mutableStateOf(initiallyExpanded) }
         Row(
             modifier = Modifier.fillMaxWidth()
@@ -230,19 +239,31 @@ private fun StructuredContainerRows(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.width(keyWidth),
             )
-            AppText(
-                if (initiallyExpanded && child is StructuredJsonValue.StringValue && !multilineText) child.value else scalarOrContainerSummary(child),
-                color = jsonValueColor(child, tc),
-                fontSize = 11.sp,
-                fontFamily = mono,
-                maxLines = if (initiallyExpanded) Int.MAX_VALUE else 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
+            if (hexBytes != null) {
+                StructuredHexSummary(hexBytes, mono, tc, wrap = initiallyExpanded, modifier = Modifier.weight(1f))
+            } else {
+                AppText(
+                    if (initiallyExpanded && child is StructuredJsonValue.StringValue && !multilineText) child.value else scalarOrContainerSummary(child),
+                    color = jsonValueColor(child, tc),
+                    fontSize = 11.sp,
+                    fontFamily = mono,
+                    maxLines = if (initiallyExpanded) Int.MAX_VALUE else 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
         if (expandable && expanded) {
             when {
                 container -> StructuredContainerRows(child, childPath, depth + 1, mono, tc, initiallyExpanded, keyColumnDp)
+                hexBytes != null -> StructuredHexDump(
+                    entryId = path.substringBefore('.').toIntOrNull() ?: 0,
+                    path = childPath,
+                    bytes = hexBytes,
+                    depth = depth + 1,
+                    mono = mono,
+                    tc = tc,
+                )
                 child is StructuredJsonValue.StringValue -> StructuredStringLines(
                     entryId = path.substringBefore('.').toIntOrNull() ?: 0,
                     path = childPath,
@@ -333,6 +354,59 @@ private fun StructuredStringLines(
         }
         if (lines.size > MAX_RAW_LINES) {
             AppText("… ${lines.size - MAX_RAW_LINES} more lines omitted", color = tc.ts, fontSize = 10.sp)
+        }
+    }
+}
+
+/** A hex field's line: the bytes as quoted text when they decode to printable UTF-8, then "hex · N bytes" in dim text. */
+@Composable
+private fun StructuredHexSummary(bytes: ByteArray, mono: FontFamily, tc: ThemeColors, wrap: Boolean, modifier: Modifier = Modifier) {
+    val decoded = remember(bytes) { decodeHexText(bytes) }
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(HEX_SUMMARY_GAP), verticalAlignment = Alignment.Top) {
+        if (decoded != null) {
+            AppText(
+                "\"${escapeJsonPreview(decoded)}\"",
+                color = tc.tx,
+                fontSize = 11.sp,
+                fontFamily = mono,
+                maxLines = if (wrap) Int.MAX_VALUE else 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+        }
+        AppText(hexByteCountLabel(bytes.size), color = tc.td, fontSize = 11.sp, fontFamily = mono, maxLines = 1)
+    }
+}
+
+/** The expanded hex field: offset, sixteen lowercase byte pairs and the printable-ASCII column per line, on a subtle background. */
+@Composable
+private fun StructuredHexDump(entryId: Int, path: String, bytes: ByteArray, depth: Int, mono: FontFamily, tc: ThemeColors) {
+    val lines = remember(bytes) { hexDumpLines(bytes) }
+    // A full line is about 70 characters, wider than a narrow tile: the lines scroll sideways inside their box rather than lose the ASCII column.
+    Box(
+        Modifier.padding(start = (depth * INDENT_PER_DEPTH_DP + 20).dp, end = 3.dp, top = 2.dp, bottom = 2.dp)
+            .fillMaxWidth()
+            .background(tc.bg, CORNER_SM)
+            .testTag("structured-record-hex-${pathTag(path)}"),
+    ) {
+        Column(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp)) {
+            lines.take(MAX_RAW_LINES).forEachIndexed { index, line ->
+                androidx.compose.material3.Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(color = tc.td)) { append(line.offset) }
+                        append("  ${line.padded}  ${line.ascii}")
+                    },
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    fontFamily = mono,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.testTag("structured-record-hex-line-$entryId-${pathTag(path)}-$index"),
+                )
+            }
+            if (lines.size > MAX_RAW_LINES) {
+                AppText("… ${lines.size - MAX_RAW_LINES} more lines omitted", color = tc.ts, fontSize = 10.sp, fontFamily = mono)
+            }
         }
     }
 }

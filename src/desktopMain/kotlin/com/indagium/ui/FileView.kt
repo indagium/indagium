@@ -64,6 +64,10 @@ internal fun BoundFilterPanel(
     ) {
         state.logCapabilitiesForTab(tab)
     }
+    // The Tags filter matches the TAG column even where this format hides it (a metadata JSON tab).
+    val tagColumnHidden = remember(tab.logFormatProfileSnapshot, tab.logFormatProfileId) {
+        state.metadataJsonTagVisible(tab.id) == false
+    }
     // Grouped into one data class rather than five more lambdas on this already-~90-parameter
     // call (see LogCompositionActions' own doc) — remember(state, tab.id) so it stays == across
     // recompositions that don't change tab identity, which is what keeps FilterPanel skippable.
@@ -256,6 +260,8 @@ internal fun BoundFilterPanel(
         onCaptureDeviceEventReturnFocus = onCaptureDeviceEventReturnFocus,
         host = host,
         profileCapabilities = profileCapabilities,
+        tagColumnHidden = tagColumnHidden,
+        onShowTagColumn = { state.toggleMetadataJsonTag(tab.id) },
     )
     // Tiled, the splitters between tiles replace this panel's own right-edge divider and its width guard.
     if (host != null && !host.hostsInColumn) return

@@ -386,11 +386,13 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
     val visibleFilters = LOG_VIEW_FILTER_TILES.filterTo(HashSet()) { isVisible(it) }
     ToolbarTile(state, focus.returnToLog)
     if (isVisible(LogViewSectionId.SECTIONS)) {
+        var showEmptySections by remember(tab.id) { mutableStateOf(false) }
         Tile(
             LogViewSectionId.SECTIONS,
             TileSlot(
                 icon = Icons.Outlined.FolderOpen, title = "Sections", collapsible = true, maximizable = true,
-                body = { LogSections(state, tab) },
+                headerAction = { LogSectionsHeaderAction(tab, showEmptySections) { showEmptySections = !showEmptySections } },
+                body = { LogSections(state, tab, showEmptySections) },
             ),
         )
     }
@@ -399,6 +401,7 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
             LogViewSectionId.MESSAGE_DETAILS,
             TileSlot(
                 icon = Icons.Outlined.DataObject, title = "Message details", collapsible = true, maximizable = true,
+                headerAction = { MessageDetailsHeaderAction(state, tab) },
                 body = { MessageDetailsTileBody(tab) },
             ),
         )
