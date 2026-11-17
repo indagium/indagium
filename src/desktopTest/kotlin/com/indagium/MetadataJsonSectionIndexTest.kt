@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.model.LogEntry
+import com.indagium.utils.MetadataJsonSectionIndex
 import com.indagium.utils.ParsedLog
 import com.indagium.utils.loadMetadataJsonSection
 import com.indagium.utils.metadataJsonProfile
@@ -168,10 +169,108 @@ class MetadataJsonSectionIndexTest {
         assertNull(full(utf16).metadataSectionIndex)
     }
 
+    private fun runCount(index: MetadataJsonSectionIndex, section: String): Int = assertNotNull(index.records[section]).runCount
+
+    private fun assertSectionsMatch(file: File): MetadataJsonSectionIndex {
+        val reference = reference(file)
+        val index = assertNotNull(full(file).metadataSectionIndex, "a plain valid file is indexed")
+        assertTrue(reference.sections.isNotEmpty())
+        reference.sections.forEach { section ->
+            val loaded = assertNotNull(loadMetadataJsonSection(file, index, section.id, metadataJsonProfile()), "section ${section.id} loads")
+            assertSameRows(section.entries, loaded, section.id)
+        }
+        return index
+    }
+
     @Test
-    fun anIndexCostsAboutTwentyFourBytesPerRecord() = withDirectory { directory ->
+    fun aNormalSectionIsOneRunWhateverItsSize() = withDirectory { directory ->
+        val index = assertEveryIndexedSectionMatchesAndReturn(write(directory, "export.json", document()))
+        assertEquals(1, runCount(index, "Tethered Bluetooth / HCI"))
+        assertEquals(1, runCount(index, "Tethered Bluetooth / L2CAP"))
+        assertEquals(1, runCount(index, "Other / Events"))
+    }
+
+    private fun assertEveryIndexedSectionMatchesAndReturn(file: File): MetadataJsonSectionIndex {
+        assertEveryIndexedSectionMatches(file)
+        return assertNotNull(full(file).metadataSectionIndex)
+    }
+
+    @Test
+    fun recordsSeparatedBySomethingElseInOneArrayFormSeveralRuns() = withDirectory { directory ->
+        listOf("\n", "\r\n").forEach { newline ->
+            fun r(id: String, time: Long) = record(id, id, time, newline)
+            val items = listOf(
+                r("A.1", T0 + 30), r("A.2", T0 + 10), "{\"note\": \"not a record\"}", r("A.3", T0 + 20), "7", r("A.4", T0 + 5),
+                r("A.5", T0 + 40), "[1, 2]", "\"text\"", r("A.6", T0 + 25),
+            )
+            val other = listOf(r("B.1", T0 + 15), r("B.2", T0 + 35))
+            val text = "{$newline\"S\": {$newline\"A\": [${items.joinToString(",$newline")}],$newline" +
+                "\"B\": [${other.joinToString(",$newline")}]$newline}}$newline"
+            val index = assertSectionsMatch(write(directory, "runs-${newline.length}.json", text))
+            assertEquals(4, runCount(index, "S / A"), "A.1 A.2 | A.3 | A.4 A.5 | A.6: the note, 7 and [1, 2] + text each break the run")
+            assertEquals(1, runCount(index, "S / B"))
+        }
+    }
+
+    @Test
+    fun objectsSpanningManyLinesWithBlankAndCarriageReturnOnlyBreaksKeepTheirLines() = withDirectory { directory ->
+        val gaps = listOf(",\r\r\r", " ,\n\n\n  \n", "\r\n,\r\n\r\n", ",\r\n\r  \n", "\n,\r", ",\n\r\n\r")
+        listOf("\n", "\r", "\r\n").forEach { newline ->
+            val rows = (0 until 12).map { record("Gap.$it", "gap-$it", T0 + (12 - it) * 7L, newline) }
+            val body = buildString {
+                rows.forEachIndexed { i, row ->
+                    append(row)
+                    if (i < rows.lastIndex) append(gaps[i % gaps.size])
+                }
+            }
+            val text = "$newline$newline{$newline\"S\"$newline:$newline{\"A\"\r:\r[\n\r\n$body$newline]}}$newline"
+            val index = assertSectionsMatch(write(directory, "gaps-${newline.length}-${newline.hashCode()}.json", text, bom = newline == "\r\n"))
+            assertEquals(1, runCount(index, "S / A"))
+        }
+    }
+
+    @Test
+    fun aSectionArrayHoldingNestedSectionsKeepsItsRecordsAndLines() = withDirectory { directory ->
+        fun r(id: String, time: Long) = record(id, id, time, "\n")
+        // Records that themselves contain a section array: the inner records are part of the outer record, not rows of their own.
+        val outer = (0 until 4).map { i ->
+            val inner = (0 until 2).joinToString(",\n") { r("In.$i.$it", T0 + 1000L * i + it) }
+            val base = r("Out.$i", T0 + 100L * i)
+            base.dropLast(2) + ",\n\"Inner\": [$inner]\n}"
+        }
+        // Non-record elements, each holding a section array of its own: one nested section, one run per element.
+        val wrappers = (0 until 3).map { i ->
+            "{\"label\": \"w$i\", \"Items\": [${(0 until 2 + i).joinToString(",\n") { r("W.$i.$it", T0 + 5000L + 10L * i + it) }}]}"
+        }
+        val text = "{\n\"S\": {\n\"Records\": [${outer.joinToString(",\n")}],\n\"Wrapped\": [${wrappers.joinToString(",\n")}]}}\n"
+        val file = write(directory, "nested.json", text)
+        val reference = reference(file)
+        assertTrue(reference.sections.any { it.entries.isNotEmpty() })
+        val index = assertSectionsMatch(file)
+        assertEquals(1, runCount(index, "S / Records"))
+        val wrapped = reference.sections.filter { "Items" in it.id }
+        assertTrue(wrapped.isNotEmpty() && wrapped.all { it.entries.size == 9 }, "the wrapped records are one nested section")
+        wrapped.forEach { assertEquals(3, runCount(index, it.id)) }
+    }
+
+    @Test
+    fun anIndexStoresAboutFourBytesPerRecord() = withDirectory { directory ->
+        val count = 10_000
+        val rows = (0 until count).joinToString(",\n") { record("Big.$it", "big-$it", T0 + (it * 37L) % 9_973, "\n") }
+        val file = write(directory, "big.json", "{\n\"S\": {\"A\": [$rows]}}\n")
+        val index = assertNotNull(full(file).metadataSectionIndex)
+        assertEquals(1, runCount(index, "S / A"))
+        assertEquals(count * 4L + 24L, index.estimatedBytes, "ids only per object plus one 24-byte run")
+        assertTrue(index.estimatedBytes < count * 6L, "under six bytes per object")
+        val section = reference(file).sections.single()
+        assertSameRows(section.entries, assertNotNull(loadMetadataJsonSection(file, index, section.id, metadataJsonProfile())), "big")
+    }
+
+    @Test
+    fun anIndexCostsFourBytesPerObjectPlusOneRunPerStretch() = withDirectory { directory ->
         val index = assertNotNull(full(write(directory, "export.json", document())).metadataSectionIndex)
-        val spans = 5 + 3 + 3 + 1
-        assertEquals(spans * 24L, index.estimatedBytes)
+        val objects = 5 + 3 + 3 + 1
+        val runs = 4 // HCI, L2CAP, Events and the Counters summary; RFCOMM is empty
+        assertEquals(objects * 4L + runs * 24L, index.estimatedBytes)
     }
 }

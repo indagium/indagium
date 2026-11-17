@@ -6059,9 +6059,12 @@ field's local state or pending debounce crosses over. Filters, selection and man
 session state per section. The selected section ID is append-only autosave field 21, restored before publishing rows
 (session restore and first open still use the full parse).
 A plain, valid UTF-8 metadata JSON file is parsed from its bytes (`utils/MetadataJsonSectionIndex.kt`), which records per section the
-byte span, source lines and global row id of every record and summary object (24 bytes per object, never persisted, kept per tab in
-`AppState.logSectionIndexes`). A section switch then reads and parses only that section's spans and gives the rows, ids and lines the full parse
-would. The ids are the ones assigned by the document-wide time sort, so notes, saved views and autosave keep resolving. The index is used
+global row id of every record and summary object (4 bytes per object) and its runs: a run is a stretch of directly neighbouring objects of
+one section (normally the whole section array; it breaks wherever anything else lies between two of them) with its byte range, first source
+line and object count (24 bytes per run, a few per section; never persisted, kept per tab in `AppState.logSectionIndexes`). A section switch
+then streams each run through one parser (as the elements of a virtual array, so the commas between objects are legal) and gives the rows, ids
+and lines the full parse would: each object's lines are the run's first line plus the parser's own line count, which counts `\n`, `\r` and `\r\n`
+as the full parse did. The ids are the ones assigned by the document-wide time sort, so notes, saved views and autosave keep resolving. The index is used
 only while the file's path, length and modification time are unchanged; compressed files, archive entries, captures,
 invalid or non-UTF-8 text and damaged or oversized documents are parsed the ordinary way, which also rebuilds the index.
 Unloading discards derived section metadata, the index and view state while retaining the selected ID. Status errors retain

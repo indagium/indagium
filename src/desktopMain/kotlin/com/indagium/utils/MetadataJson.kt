@@ -50,16 +50,22 @@ internal fun isMetadataJsonSample(text: String): Boolean {
     return sample.packetMetadataSeen || sample.records.isNotEmpty() || sample.sectionStatus.isNotEmpty()
 }
 
-/** [byteStart] / [byteEnd] are the object's byte span in the scanned stream, or -1 when the scan did not track bytes. */
+/**
+ * [byteStart] / [byteEnd] are the object's byte span in the scanned stream, or -1 when the scan did not track bytes. [run] names the
+ * stretch of directly neighbouring record or summary objects of one array it belongs to (see [MetadataJsonScanner]), or -1.
+ */
 internal data class MetadataJsonSummary(
     val value: JsonObject, val section: String, val startLine: Long, val endLine: Long,
-    val byteStart: Long = -1, val byteEnd: Long = -1,
+    val byteStart: Long = -1, val byteEnd: Long = -1, val run: Int = -1,
 )
 
-/** [fileIndex] is the packet's position in document order, which the section index uses to pair it with its sorted id. */
+/**
+ * [fileIndex] is the packet's position in document order, which the section index uses to pair it with its sorted id; [run] is as in
+ * [MetadataJsonSummary].
+ */
 internal data class MetadataJsonPacket(
     val value: JsonObject, val section: String, val startLine: Long, val endLine: Long,
-    val byteStart: Long = -1, val byteEnd: Long = -1, val fileIndex: Int = -1,
+    val byteStart: Long = -1, val byteEnd: Long = -1, val fileIndex: Int = -1, val run: Int = -1,
 )
 
 internal data class MetadataJsonScan(
@@ -69,11 +75,25 @@ internal data class MetadataJsonScan(
 
 internal data class MetadataJsonValue(val element: JsonElement, val chars: Int)
 
+/** A fragment's value with the parser's own line of its first token and of the position just after its last. */
+internal data class MetadataJsonLocatedValue(val element: JsonElement, val startLine: Long, val endLine: Long)
+
+/** The run in progress at some moment: its number, its kind and the token index of its last object's closing brace. */
+private class RunMark(val run: Int, val kind: Int, val end: Long)
+
+private const val CHAIN_NONE = 0
+private const val CHAIN_RECORD = 1
+private const val CHAIN_SUMMARY = 2
+
 private class MetadataJsonSampleComplete : RuntimeException(null, null, false, false)
 
 /**
  * Walk envelopes within bounded trees, extracting metadata records and object-valued sections.
  * Nested arrays and linked objects remain inside their containing record's original JSON tree.
+ *
+ * Each extracted record or summary gets a `run` number. Objects share one only when they are directly neighbouring elements of one array,
+ * of the same kind, with no token between them (JSON puts only commas and whitespace there). The section index stores one byte range per
+ * run, so a run's range holds nothing but those objects and their separators.
  */
 internal class MetadataJsonScanner(
     private val parser: JsonParser,
@@ -88,10 +108,19 @@ internal class MetadataJsonScanner(
     var sectionStatus: Map<String, JsonObject> = emptyMap()
     var packetMetadataSeen = false
         private set
-    private var tokens = 0
+    private var tokens = 0L
+
+    // The run in progress: its number, kind, the token index of the last object's closing brace, and how many runs were numbered.
+    private var chainRun = -1
+    private var chainKind = CHAIN_NONE
+    private var chainEnd = -1L
+    private var runsNumbered = 0
+
+    /** Set by [readArray] just before reading an element, so [readValue] knows the element sits directly in an array. */
+    private var arrayElement = false
 
     private fun next(): JsonToken? {
-        if (++tokens % METADATA_JSON_CANCELLATION_TOKENS == 0) checkParserCancellation()
+        if (++tokens % METADATA_JSON_CANCELLATION_TOKENS == 0L)checkParserCancellation()
         return parser.nextToken()
     }
 
@@ -105,12 +134,26 @@ internal class MetadataJsonScanner(
         return readValue(path)
     }
 
+    /** Like [readFragment], also giving the parser's line at the value's first token and just after its last. */
+    fun readLocatedFragment(path: List<String>): MetadataJsonLocatedValue? {
+        require(next() != null) { "Incomplete metadata JSON value." }
+        val startLine = parser.currentTokenLocation().lineNr.toLong()
+        val value = readValue(path) ?: return null
+        return MetadataJsonLocatedValue(value.element, startLine, parser.currentLocation().lineNr.toLong())
+    }
+
     private fun tokenByte(): Long = if (byteBase >= 0) parser.currentTokenLocation().byteOffset + byteBase else -1
 
     private fun endByte(): Long = if (byteBase >= 0) parser.currentLocation().byteOffset + byteBase else -1
 
-    private fun readValue(path: List<String>): MetadataJsonValue? = when (parser.currentToken()) {
-        JsonToken.START_OBJECT -> readObject(path)
+    private fun readValue(path: List<String>): MetadataJsonValue? {
+        val element = arrayElement
+        arrayElement = false
+        return readValueToken(path, element)
+    }
+
+    private fun readValueToken(path: List<String>, element: Boolean): MetadataJsonValue? = when (parser.currentToken()) {
+        JsonToken.START_OBJECT -> readObject(path, element)
         JsonToken.START_ARRAY -> readArray(path)
         JsonToken.VALUE_STRING -> parser.text.let { MetadataJsonValue(JsonPrimitive(it), it.length) }
         JsonToken.VALUE_NULL -> MetadataJsonValue(kotlinx.serialization.json.JsonNull, 4)
@@ -121,7 +164,26 @@ internal class MetadataJsonScanner(
         else -> error("Expected a JSON value at line ${parser.currentLocation().lineNr}.")
     }
 
-    private fun readObject(path: List<String>): MetadataJsonValue? {
+    /** Numbers the object that just ended: it continues the run in progress only when it directly follows that run's last object. */
+    private fun numberRun(kind: Int, startToken: Long, element: Boolean): Int {
+        if (!element || kind != chainKind || startToken != chainEnd + 1) chainRun = runsNumbered++
+        chainKind = kind
+        chainEnd = tokens
+        return chainRun
+    }
+
+    private fun markRun() = RunMark(chainRun, chainKind, chainEnd)
+
+    /** Forgets the runs of objects just dropped from the lists (records nested in a record), so they cannot split their neighbours' run. */
+    private fun restoreRun(mark: RunMark) {
+        chainRun = mark.run
+        chainKind = mark.kind
+        chainEnd = mark.end
+    }
+
+    private fun readObject(path: List<String>, element: Boolean): MetadataJsonValue? {
+        val startToken = tokens
+        val mark = markRun()
         val startLine = parser.currentTokenLocation().lineNr.toLong()
         val startByte = tokenByte()
         val values = linkedMapOf<String, JsonElement>()
@@ -141,7 +203,7 @@ internal class MetadataJsonScanner(
             if (oversized) values.clear() else if (child != null) values[key] = child.element
         }
         if (oversized) {
-            discardOversizedObject(recordMetadata, firstRecord, firstSummary)
+            discardOversizedObject(recordMetadata, firstRecord, firstSummary, mark)
             return null
         }
         val value = JsonObject(values)
@@ -156,28 +218,31 @@ internal class MetadataJsonScanner(
             if (path.size == 2 && path[0] != JSON_SECTION_STATUS) {
                 summaries += MetadataJsonSummary(
                     value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong(), startByte, endByte(),
+                    numberRun(CHAIN_SUMMARY, startToken, element),
                 )
             }
             return MetadataJsonValue(value, chars)
         }
-        discardNestedRecords(firstRecord, firstSummary)
+        discardNestedRecords(firstRecord, firstSummary, mark)
         records += MetadataJsonPacket(
             value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong(), startByte, endByte(), records.size,
+            numberRun(CHAIN_RECORD, startToken, element),
         )
         if (records.size >= maxRecords) throw MetadataJsonSampleComplete()
         return MetadataJsonValue(value, chars)
     }
 
-    private fun discardOversizedObject(recordMetadata: Boolean, firstRecord: Int, firstSummary: Int) {
-        if (recordMetadata) discardNestedRecords(firstRecord, firstSummary)
+    private fun discardOversizedObject(recordMetadata: Boolean, firstRecord: Int, firstSummary: Int, mark: RunMark) {
+        if (recordMetadata) discardNestedRecords(firstRecord, firstSummary, mark)
         if (recordMetadata || records.size == firstRecord) {
             diagnostics.addJsonDiagnostic("A JSON object exceeded the 4 MiB record limit; complete records remain available.")
         }
     }
 
-    private fun discardNestedRecords(firstRecord: Int, firstSummary: Int) {
+    private fun discardNestedRecords(firstRecord: Int, firstSummary: Int, mark: RunMark) {
         records.subList(firstRecord, records.size).clear()
         summaries.subList(firstSummary, summaries.size).clear()
+        restoreRun(mark)
     }
 
     private fun readArray(path: List<String>): MetadataJsonValue? {
@@ -187,6 +252,7 @@ internal class MetadataJsonScanner(
         var oversized = false
         while (next() != JsonToken.END_ARRAY) {
             require(parser.currentToken() != null) { "Incomplete metadata JSON array." }
+            arrayElement = true
             val child = readValue(path)
             chars += child?.chars ?: 0
             if (chars > METADATA_JSON_MAX_RECORD_CHARS) oversized = true
