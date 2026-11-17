@@ -79,6 +79,7 @@ import com.indagium.utils.passesFilter
 import com.indagium.utils.profileColumnLayout
 import com.indagium.utils.profileDisplayColumns
 import com.indagium.utils.profileDisplayTextProjection
+import com.indagium.utils.profileMessageIndentChars
 import com.indagium.utils.regexRanges
 import com.indagium.utils.remapOffset
 import com.indagium.utils.resolveLineHighlight
@@ -940,9 +941,15 @@ internal fun buildFullLineAnnotation(
     searchHighlight, processDisplay, pidFieldWidth, cellBg,
 ).text
 
-/** A row's rendered text plus the whole-line [Highlighter] that owns its tint (null when none
- *  does) — LogRow paints the row background/stripe from it. */
-internal data class LogLineRender(val text: AnnotatedString, val wholeLine: Highlighter?)
+/**
+ * A row's rendered text plus the whole-line [Highlighter] that owns its tint (null when none
+ * does) — LogRow paints the row background/stripe from it.
+ *
+ * [messageIndentChars] is where the message column starts in [text] for a row drawn from a format
+ * profile (the characters of every column and separator before it), and 0 for any other row. A wrapped
+ * profile row hangs its continuation lines at that column.
+ */
+internal data class LogLineRender(val text: AnnotatedString, val wholeLine: Highlighter?, val messageIndentChars: Int = 0)
 
 private fun renderedRangeRemapper(
     entry: LogEntry,
@@ -1132,7 +1139,7 @@ internal fun buildLogLineRender(
             addStylesInRanges(searchRanges, SpanStyle(background = background, fontWeight = FontWeight.SemiBold), boundaries)
         }
     }
-    return LogLineRender(text, lineHighlight.wholeLine)
+    return LogLineRender(text, lineHighlight.wholeLine, profileProjection?.let(::profileMessageIndentChars) ?: 0)
 }
 
 private fun profileFieldColor(
@@ -1273,11 +1280,13 @@ internal fun highlightSpanStyle(span: HlSpan, lineText: String): SpanStyle {
 // base64 blob, ...) exceeds the whole limit by itself, which still guarantees bounded overflow.
 // Never removes or adds a character — the break is always a choice of *where* to insert '\n'
 // into the existing sequence — so stripVisualWrapBreaks always reconstructs the original exactly.
-private fun wrapBreakStarts(text: CharSequence, limit: Int): List<Int> {
+//
+// [continuationLimit] is the budget of every line after the first (a hanging indent takes some of it).
+private fun wrapBreakStarts(text: CharSequence, limit: Int, continuationLimit: Int = limit): List<Int> {
     val starts = mutableListOf(0)
     var start = 0
     while (start < text.length) {
-        val maxEnd = (start + limit).coerceAtMost(text.length)
+        val maxEnd = (start + if (start == 0) limit else continuationLimit).coerceAtMost(text.length)
         if (maxEnd == text.length) break
         var breakAt = maxEnd
         var i = maxEnd - 1
@@ -1308,10 +1317,15 @@ fun stripVisualWrapBreaks(text: String): String = text.replace("\n", "")
 fun keyboardCopyTextForLogPanel(selectedText: String?, selectedRowsText: () -> String): String =
     selectedText?.takeIf { it.isNotBlank() } ?: selectedRowsText()
 
-internal fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
+/**
+ * [hangingIndentChars] is the width a profile row's continuation lines are indented by (see
+ * [LogLineRender.messageIndentChars]); they then hold that many fewer characters, so every line ends at
+ * the same column. 0 wraps exactly as before.
+ */
+internal fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int, hangingIndentChars: Int = 0): AnnotatedString {
     val limit = limitChars.coerceAtLeast(1)
     if (line.length <= limit) return line
-    val starts = wrapBreakStarts(line.text, limit)
+    val starts = wrapBreakStarts(line.text, limit, hangingContinuationLimit(limit, hangingIndentChars))
     val builder = AnnotatedString.Builder()
     starts.forEachIndexed { idx, from ->
         if (idx > 0) builder.append('\n')
@@ -1319,6 +1333,17 @@ internal fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): 
     }
     return builder.toAnnotatedString()
 }
+
+private const val MIN_HANGING_CONTINUATION_CHARS = 20
+
+// A continuation line's budget once its indent is taken off: never so small that a long indent would
+// leave a line with a few characters (or none).
+internal fun hangingContinuationLimit(limit: Int, hangingIndentChars: Int): Int =
+    if (hangingIndentChars <= 0) {
+        limit
+    } else {
+        (limit - hangingIndentChars).coerceAtLeast(MIN_HANGING_CONTINUATION_CHARS.coerceAtMost(limit))
+    }
 
 private const val MIN_WRAP_LIMIT_CHARS = 80
 private const val MAX_WRAP_LIMIT_CHARS = 20_000
@@ -3779,9 +3804,23 @@ private fun LogRow(
             showPidTid = showPidTid,
             errorHighlightStyle = errorHighlightStyle,
         )
-        if (autoWrap) built else built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars))
+        if (autoWrap) {
+            built
+        } else {
+            built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars, built.messageIndentChars))
+        }
     }
-    val annoLine = if (structuredRecordSource != null) compactRecordSummary(lineRender.text) else lineRender.text
+    val compactLine = if (structuredRecordSource != null) compactRecordSummary(lineRender.text) else lineRender.text
+    // A profile row wraps under its message column. One paragraph over the whole row: the indent
+    // applies after a soft wrap and after a wrap-limit "\n" alike, and the row stays one text field,
+    // so drag-selection and copy are untouched (no padding characters are added).
+    var textFieldWidthPx by remember(tab.id, entry.id) { mutableStateOf(0) }
+    val hangingIndent = if (profileLayout != null && lineRender.messageIndentChars > 0) {
+        rememberHangingIndent(lineRender.messageIndentChars, mono, fontSize, textFieldWidthPx)
+    } else {
+        null
+    }
+    val annoLine = if (hangingIndent != null) compactLine.withHangingIndent(hangingIndent) else compactLine
     val wholeLineHl = lineRender.wholeLine
     val wholeLineBgHl = wholeLineHl?.takeIf { it.backgroundEnabled }
 
@@ -4076,6 +4115,7 @@ private fun LogRow(
                     entryId = entry.id,
                     expanded = structuredRecordExpanded,
                     color = tc.ts,
+                    visible = structuredDisclosureVisible(hov, isSel, structuredRecordExpanded),
                     modifier = Modifier.padding(end = 2.dp),
                     onBoundsChanged = { left, right -> structuredDisclosureBounds = left to right },
                     onClick = { structuredRecordExpanded = !structuredRecordExpanded },
@@ -4122,7 +4162,10 @@ private fun LogRow(
             // sit alongside the field as a sibling — Popup has no content slot of its own on
             // BasicTextField — and does not affect drag-selection, which is entirely a property of the
             // single BasicTextField inside it.
-            Box(Modifier.weight(1f)) {
+            Box(
+                Modifier.weight(1f)
+                    .then(if (profileLayout != null) Modifier.onSizeChanged { textFieldWidthPx = it.width } else Modifier),
+            ) {
                 SelectableLogLineField(
                     value = TextFieldValue(annotatedString = annoLine, selection = sel),
                     onValueChange = { new ->

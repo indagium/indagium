@@ -2,18 +2,18 @@ package com.indagium
 
 import com.indagium.model.CapabilityAvailability
 import com.indagium.model.LogCapability
-import com.indagium.model.LogLevel
 import com.indagium.model.LogFieldRole
-import com.indagium.utils.metadataJsonProfile
-import com.indagium.utils.parseMetadataJson
-import java.io.StringReader
+import com.indagium.model.LogLevel
 import com.indagium.utils.isMetadataJsonSample
+import com.indagium.utils.metadataJsonProfile
 import com.indagium.utils.parseLogContent
+import com.indagium.utils.parseMetadataJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import java.io.StringReader
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

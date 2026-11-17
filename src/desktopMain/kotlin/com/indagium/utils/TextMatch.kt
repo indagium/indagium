@@ -256,6 +256,13 @@ internal fun profileDisplayTextProjection(
     )
 }
 
+/**
+ * Characters before the message column in the rendered row: every earlier column at its padded
+ * width, with the separators. A wrapped line hangs here. 0 when the row has no message to indent.
+ */
+internal fun profileMessageIndentChars(projection: ProfileDisplayTextProjection): Int =
+    projection.renderedFields.firstOrNull { it.id == "message" }?.start ?: 0
+
 internal fun profileDisplayText(
     columns: List<LogDisplayField>,
     processDisplayName: String? = null,

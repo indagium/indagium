@@ -8,10 +8,10 @@ import com.fasterxml.jackson.core.StreamReadConstraints
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormat
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
-import com.indagium.model.LogFieldRole
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ParsedTime
@@ -413,7 +413,9 @@ private const val TAG_VISIBILITY_REVISION = 2
 internal fun metadataJsonPresentationProfile(profile: LogFormatProfile): LogFormatProfile =
     if (profile.id == metadataJsonProfile().id && profile.engine == LogFormatEngine.METADATA_JSON && profile.revision < TAG_VISIBILITY_REVISION) {
         profile.copy(revision = TAG_VISIBILITY_REVISION, visibleColumns = profile.visibleColumns - LogFieldRole.COMPONENT)
-    } else profile
+    } else {
+        profile
+    }
 
 /** Changes presentation without removing tag data used by filters and record details. */
 internal fun withMetadataJsonColumns(entry: LogEntry, profile: LogFormatProfile): LogEntry {

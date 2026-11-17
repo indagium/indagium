@@ -19,11 +19,15 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -51,6 +55,7 @@ import com.indagium.ui.StructuredRecordBody
 import com.indagium.ui.StructuredRecordDisclosure
 import com.indagium.ui.compactRecordSummary
 import com.indagium.ui.expandableRecordSource
+import com.indagium.ui.structuredDisclosureVisible
 import com.indagium.ui.tc
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.computeSearchMatches
@@ -185,6 +190,97 @@ class StructuredLogRecordUiTest {
         rule.onNodeWithTag("logical-record-row-104").assertExists()
         assertEquals(4, listOf(101, 102, 103, 104).size, "expansion does not create new parent IDs")
         saveScreenshot("structured-multiline-expanded")
+    }
+
+    @Test
+    fun everyValueOfOneTreeStartsAtTheSameXAtEveryDepthAndStaysPutWhenANodeToggles() {
+        val json = """{"alpha":{"n":42,"nested":{"aVeryLongKeyName":true,"t":null}},"x":null,"enabled":false,"list":[1,2]}"""
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Column(Modifier.width(700.dp).background(tc().p).padding(10.dp)) {
+                    PreviewRecordRow(id = 201, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-201").performClick()
+        val collapsedEnabledX = valueLeft("structured-record-node-201-root-enabled", "false")
+        val collapsedSummaryX = valueLeft("structured-record-node-201-root-alpha", "{2 fields}")
+        assertEquals(collapsedEnabledX, collapsedSummaryX, 0.5f, "depth 0 values share a column")
+
+        rule.onNodeWithTag("structured-record-node-toggle-201-root-alpha").performClick()
+        rule.onNodeWithTag("structured-record-node-toggle-201-root-alpha-nested").performClick()
+        rule.onNodeWithTag("structured-record-node-toggle-201-root-list").performClick()
+        val depthOne = valueLeft("structured-record-node-201-root-alpha-n", "42")
+        val depthTwo = valueLeft("structured-record-node-201-root-alpha-nested-aVeryLongKeyName", "true")
+        val arrayItem = valueLeft("structured-record-node-201-root-list-0", "1")
+        assertEquals(collapsedEnabledX, depthOne, 0.5f, "depth 1 value starts where depth 0 values do")
+        assertEquals(collapsedEnabledX, depthTwo, 0.5f, "depth 2 value starts where depth 0 values do")
+        assertEquals(collapsedEnabledX, arrayItem, 0.5f, "array items count as keys of the same column")
+        assertEquals(collapsedEnabledX, valueLeft("structured-record-node-201-root-enabled", "false"), 0.5f, "expanding moves nothing")
+    }
+
+    @Test
+    fun fieldTreeKeysAreSecondaryTextAndValuesNeverUseTheAccentOrWarningColour() {
+        val json = """{"name":"sensor","count":42,"enabled":false,"gone":null,"device":{"a":1}}"""
+        lateinit var colors: com.indagium.ui.ThemeColors
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                colors = tc()
+                Column(Modifier.width(700.dp).background(colors.p).padding(10.dp)) {
+                    PreviewRecordRow(id = 202, summary = "10:00:00 INFO api: tree", source = json)
+                }
+            }
+        }
+        rule.onNodeWithTag("structured-record-disclosure-202").performClick()
+
+        fun colorOf(rowTag: String, text: String) = textColor(rowTag, text)
+
+        val row = "structured-record-node-202-root"
+        listOf("name", "count", "enabled", "gone", "device").forEach { key ->
+            assertEquals(colors.ts, colorOf("$row-$key", key), "key $key is text-secondary")
+        }
+        assertEquals(colors.tx, colorOf("$row-name", "\"sensor\""))
+        assertEquals(colors.tx, colorOf("$row-count", "42"))
+        assertEquals(colors.tx, colorOf("$row-enabled", "false"))
+        assertEquals(colors.td, colorOf("$row-gone", "null"))
+        assertEquals(colors.td, colorOf("$row-device", "{1 fields}"))
+        val used = listOf("name", "count", "enabled", "gone", "device").flatMap { listOf(colorOf("$row-$it", it)) }
+        assertTrue(colors.ac !in used && colors.warn !in used, "no accent or warning colour in the tree")
+    }
+
+    @Test
+    fun theDisclosureChevronIsShownOnlyWhileHoveredSelectedOrExpanded() {
+        assertEquals(false, structuredDisclosureVisible(hovered = false, selected = false, expanded = false))
+        assertEquals(true, structuredDisclosureVisible(hovered = true, selected = false, expanded = false))
+        assertEquals(true, structuredDisclosureVisible(hovered = false, selected = true, expanded = false))
+        assertEquals(true, structuredDisclosureVisible(hovered = false, selected = false, expanded = true))
+        assertEquals(true, structuredDisclosureVisible(hovered = true, selected = true, expanded = true))
+    }
+
+    @Test
+    fun aHiddenDisclosureChevronKeepsItsSlotItsSemanticsAndItsClick() {
+        var clicks = 0
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides DARK_GITHUB) {
+                Row {
+                    StructuredRecordDisclosure(
+                        entryId = 301, expanded = false, color = tc().ts, visible = false, onClick = { clicks++ },
+                    )
+                    StructuredRecordDisclosure(
+                        entryId = 302, expanded = false, color = tc().ts, visible = true, onClick = {},
+                    )
+                }
+            }
+        }
+        val hidden = rule.onNodeWithTag("structured-record-disclosure-301")
+        val shown = rule.onNodeWithTag("structured-record-disclosure-302")
+        hidden.assertExists()
+        val shownBounds = shown.getBoundsInRoot()
+        val hiddenBounds = hidden.getBoundsInRoot()
+        assertEquals(shownBounds.right.value - shownBounds.left.value, hiddenBounds.right.value - hiddenBounds.left.value, 0.01f, "same slot width")
+        hidden.assertContentDescriptionEquals("Expand record")
+        hidden.performClick()
+        assertEquals(1, clicks)
     }
 
     @Test
@@ -358,6 +454,17 @@ class StructuredLogRecordUiTest {
         ),
         visibleColumns = listOf(LogFieldRole.TIMESTAMP, LogFieldRole.SEVERITY, LogFieldRole.COMPONENT, LogFieldRole.MESSAGE),
     )
+
+    private fun valueLeft(rowTag: String, valueText: String): Float =
+        rule.onNode(hasText(valueText) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true)
+            .getBoundsInRoot().left.value
+
+    private fun textColor(rowTag: String, text: String): androidx.compose.ui.graphics.Color {
+        val node = rule.onNode(hasText(text) and hasAnyAncestor(hasTestTag(rowTag)), useUnmergedTree = true).fetchSemanticsNode()
+        val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+        node.config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+        return layouts.single().layoutInput.style.color
+    }
 
     private fun saveIntegrationScreenshot(name: String) {
         val image = rule.onNodeWithTag("structured-record-integration-root").captureToImage()

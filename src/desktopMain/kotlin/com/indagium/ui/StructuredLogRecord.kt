@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -48,6 +49,7 @@ private const val MIN_KEY_CHARS = 4
 private const val MAX_KEY_CHARS = 28
 private const val KEY_CHAR_WIDTH_DP = 6.7f
 private const val KEY_GAP_DP = 14f
+private const val INDENT_PER_DEPTH_DP = 16
 private val NODE_ROW_HEIGHT = 16.dp
 
 /** Width a row gives the disclosure arrow, arrow or not: the 24dp button and its 2dp gap. */
@@ -74,14 +76,29 @@ internal fun compactRecordSummary(text: androidx.compose.ui.text.AnnotatedString
     return androidx.compose.ui.text.buildAnnotatedString {
         append(normalizedText)
         source.spanStyles.forEach { addStyle(it.item, it.start, it.end) }
-        source.paragraphStyles.forEach { addStyle(it.item, it.start, it.end) }
-        if (text.length > MAX_RECORD_PREVIEW_CHARS) {
+        val truncated = text.length > MAX_RECORD_PREVIEW_CHARS
+        // A paragraph style that ran to the end of the preview must also cover the " …" after it, or
+        // that suffix would become a paragraph of its own and drop to a new line.
+        val suffix = " …"
+        val paragraphEnd = normalizedText.length + if (truncated) suffix.length else 0
+        source.paragraphStyles.forEach {
+            addStyle(it.item, it.start, if (it.end >= normalizedText.length) paragraphEnd else it.end)
+        }
+        if (truncated) {
             pushStyle(androidx.compose.ui.text.SpanStyle(color = Color.Unspecified))
-            append(" …")
+            append(suffix)
             pop()
         }
     }
 }
+
+/**
+ * Whether a row's disclosure chevron is drawn: only while the row is hovered or selected, or while
+ * the record is open (so an open record always shows how to close it). A hidden chevron still holds
+ * its slot, stays clickable and keeps its semantics.
+ */
+internal fun structuredDisclosureVisible(hovered: Boolean, selected: Boolean, expanded: Boolean): Boolean =
+    hovered || selected || expanded
 
 /** Root disclosure chevron. Its click is kept separate from the log row's selection gesture. */
 @Composable
@@ -90,6 +107,7 @@ internal fun StructuredRecordDisclosure(
     expanded: Boolean,
     color: Color,
     modifier: Modifier = Modifier,
+    visible: Boolean = true,
     onBoundsChanged: (Float, Float) -> Unit = { _, _ -> },
     onClick: () -> Unit,
 ) {
@@ -99,6 +117,7 @@ internal fun StructuredRecordDisclosure(
         color = color.takeUnless { it == Color.Unspecified } ?: tc.ts,
         onClick = onClick,
         modifier = modifier.size(width = 24.dp, height = 16.dp)
+            .alpha(if (visible) 1f else 0f)
             .onGloballyPositioned { coordinates ->
                 val left = coordinates.positionInRoot().x
                 onBoundsChanged(left, left + coordinates.size.width)
@@ -122,6 +141,7 @@ internal fun StructuredRecordBody(
 ) {
     val tc = tc()
     val tree = remember(source) { runCatching { BoundedJsonReader(source).parseRoot() }.getOrNull() }
+    val keyColumn = remember(tree) { tree?.let { structuredKeyColumnDp(it) } ?: 0f }
     SelectionContainer(
         modifier = modifier.fillMaxWidth()
             .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
@@ -129,7 +149,15 @@ internal fun StructuredRecordBody(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
             if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
-                StructuredContainerRows(tree, path = rootPath, depth = 0, mono = mono, tc = tc, initiallyExpanded = initiallyExpanded)
+                StructuredContainerRows(
+                    tree,
+                    path = rootPath,
+                    depth = 0,
+                    mono = mono,
+                    tc = tc,
+                    initiallyExpanded = initiallyExpanded,
+                    keyColumnDp = keyColumn,
+                )
             } else {
                 RawRecordLines(entryId = entryId, source = source, mono = mono, tc = tc)
             }
@@ -145,6 +173,7 @@ private fun StructuredContainerRows(
     mono: FontFamily,
     tc: ThemeColors,
     initiallyExpanded: Boolean,
+    keyColumnDp: Float,
 ) {
     val children = when (value) {
         is StructuredJsonValue.ObjectValue -> value.fields.map { it.first to it.second }
@@ -156,9 +185,9 @@ private fun StructuredContainerRows(
         is StructuredJsonValue.ArrayValue -> value.truncated
         else -> false
     }
-    // The key column is as wide as the longest key here needs, so values start right after the keys
-    // instead of after a fixed gap that a narrow log pane cannot afford.
-    val keyWidth = ((children.maxOfOrNull { it.first.length } ?: 0).coerceIn(MIN_KEY_CHARS, MAX_KEY_CHARS) * KEY_CHAR_WIDTH_DP + KEY_GAP_DP).dp
+    // One key column for the whole tree (keyColumnDp, measured from the row's own start), so every
+    // value starts at the same x whatever its depth; a row already spends depth * indent of it.
+    val keyWidth = (keyColumnDp - depth * INDENT_PER_DEPTH_DP).dp
     children.forEach { (label, child) ->
         val childPath = "$path/$label"
         val container = child is StructuredJsonValue.ObjectValue || child is StructuredJsonValue.ArrayValue
@@ -167,7 +196,7 @@ private fun StructuredContainerRows(
         var expanded by remember(childPath) { mutableStateOf(initiallyExpanded) }
         Row(
             modifier = Modifier.fillMaxWidth()
-                .padding(start = (depth * 16).dp, end = 3.dp)
+                .padding(start = (depth * INDENT_PER_DEPTH_DP).dp, end = 3.dp)
                 // One node per field: a screen reader hears "key value" together.
                 .semantics(mergeDescendants = true) {}
                 .testTag("structured-record-node-${pathTag(childPath)}"),
@@ -193,7 +222,7 @@ private fun StructuredContainerRows(
             }
             AppText(
                 label,
-                color = tc.ac,
+                color = tc.ts,
                 fontSize = 11.sp,
                 fontFamily = mono,
                 fontWeight = FontWeight.Medium,
@@ -213,7 +242,7 @@ private fun StructuredContainerRows(
         }
         if (expandable && expanded) {
             when {
-                container -> StructuredContainerRows(child, childPath, depth + 1, mono, tc, initiallyExpanded)
+                container -> StructuredContainerRows(child, childPath, depth + 1, mono, tc, initiallyExpanded, keyColumnDp)
                 child is StructuredJsonValue.StringValue -> StructuredStringLines(
                     entryId = path.substringBefore('.').toIntOrNull() ?: 0,
                     path = childPath,
@@ -339,11 +368,34 @@ private fun escapeJsonPreview(value: String): String = buildString {
 }
 
 private fun jsonValueColor(value: StructuredJsonValue, tc: ThemeColors): Color = when (value) {
-    is StructuredJsonValue.ObjectValue, is StructuredJsonValue.ArrayValue -> tc.ts
-    is StructuredJsonValue.StringValue -> tc.tx
-    is StructuredJsonValue.NumberValue -> tc.ac
-    is StructuredJsonValue.BooleanValue -> tc.warn
-    StructuredJsonValue.NullValue -> tc.ts
+    is StructuredJsonValue.ObjectValue, is StructuredJsonValue.ArrayValue -> tc.td
+    is StructuredJsonValue.StringValue, is StructuredJsonValue.NumberValue, is StructuredJsonValue.BooleanValue -> tc.tx
+    StructuredJsonValue.NullValue -> tc.td
+}
+
+/**
+ * Width, in dp from a row's start, of the key column shared by every row of one tree: the widest
+ * (indent of its depth + clamped key text + gap) over all nodes, array labels "[0]" included. The
+ * whole parsed tree is measured, so toggling a node never moves the values.
+ */
+private fun structuredKeyColumnDp(root: StructuredJsonValue): Float {
+    var widest = 0f
+
+    fun visit(value: StructuredJsonValue, depth: Int) {
+        val children = when (value) {
+            is StructuredJsonValue.ObjectValue -> value.fields
+            is StructuredJsonValue.ArrayValue -> value.values.mapIndexed { index, child -> "[$index]" to child }
+            else -> return
+        }
+        children.forEach { (label, child) ->
+            val width = depth * INDENT_PER_DEPTH_DP +
+                label.length.coerceIn(MIN_KEY_CHARS, MAX_KEY_CHARS) * KEY_CHAR_WIDTH_DP + KEY_GAP_DP
+            if (width > widest) widest = width
+            visit(child, depth + 1)
+        }
+    }
+    visit(root, 0)
+    return widest
 }
 
 private fun pathTag(path: String): String = path.map { if (it.isLetterOrDigit()) it else '-' }
