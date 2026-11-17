@@ -6,9 +6,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -31,6 +34,8 @@ import com.indagium.ui.ActiveLogFormatDetailsDialog
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
 import com.indagium.ui.LogFormatTabContextAction
+import com.indagium.ui.SETTINGS_SEARCH_INDEX
+import com.indagium.ui.SettingsAnchorKey
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.SettingsPage
 import org.junit.After
@@ -93,6 +98,31 @@ class SettingsLogFormatsUiTest {
         assertTrue(ImageIO.write(rendered, "png", File(directory, "$name.png")))
     }
 
+    private fun anchorsOnScreen(): Set<String> = rule
+        .onAllNodes(SemanticsMatcher.keyIsDefined(SettingsAnchorKey), useUnmergedTree = true)
+        .fetchSemanticsNodes()
+        .map { it.config[SettingsAnchorKey] }
+        .toSet()
+
+    private fun assertEveryIndexedAnchorRenders(context: String) {
+        val shown = anchorsOnScreen()
+        val missing = SETTINGS_SEARCH_INDEX.filter { it.page == SettingsPage.LogFormats && it.anchor !in shown }.map { it.anchor }
+        assertTrue(missing.isEmpty(), "$context: indexed anchors that do not render: $missing")
+    }
+
+    /** Starts a new custom profile on [engineLabel] (the label the engine dropdown shows for it). */
+    private fun newProfileWithEngine(engineLabel: String) {
+        rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-engine").performScrollTo().performClick()
+        rule.onNodeWithText(engineLabel).performClick()
+        rule.waitForIdle()
+    }
+
+    private fun assertTagsAbsent(vararg tags: String) = tags.forEach { rule.onNodeWithTag(it).assertDoesNotExist() }
+
+    private fun assertTagsPresent(vararg tags: String) = tags.forEach { rule.onNodeWithTag(it).assertExists() }
+
     @Test
     fun builtInProfilesAreReadOnlyAndCanBeDuplicatedIntoAnEditableProfile() {
         val state = newState()
@@ -100,20 +130,168 @@ class SettingsLogFormatsUiTest {
         recordScreenshot("settings-editor")
 
         assertTrue(state.availableLogFormatProfiles().first().readOnly)
-        rule.onNodeWithTag("settings-log-format-save").performScrollTo().assertIsNotEnabled()
+        // A built-in shows its definition as plain rows: no editor fields, no Save button.
+        assertTagsPresent("settings-log-format-summary", "settings-log-format-builtin-header", "settings-log-format-duplicate-to-edit")
+        rule.onNodeWithTag("settings-log-format-summary-parser-engine", useUnmergedTree = true).assertExists()
+        rule.onNodeWithText("Built-in · read-only", substring = true).assertExists()
+        assertTagsAbsent(
+            "settings-log-format-name",
+            "settings-log-format-description",
+            "settings-log-format-engine",
+            "settings-log-format-extensions",
+            "settings-log-format-header",
+            "settings-log-format-content-regex",
+            "settings-log-format-time-kind",
+            "settings-log-format-save",
+            "settings-log-format-delete",
+            "settings-log-format-builder-sample",
+        )
         rule.onNodeWithTag("settings-log-format-preview").performScrollTo().assertIsEnabled().performClick()
         rule.waitUntil(10_000) {
             rule.onAllNodes(hasText("1 parsed record", substring = true))
                 .fetchSemanticsNodes().isNotEmpty()
         }
-        rule.onNodeWithTag("settings-log-format-duplicate").performScrollTo().performClick()
+        val profileCount = state.availableLogFormatProfiles().size
+        rule.onNodeWithTag("settings-log-format-duplicate-to-edit").performScrollTo().performClick()
         rule.waitForIdle()
 
+        assertEquals(profileCount + 1, state.availableLogFormatProfiles().size)
         val duplicate = state.availableLogFormatProfiles().last()
         assertFalse(duplicate.readOnly)
         assertNotEquals("android-logcat", duplicate.id)
+        // The copy is selected and opens in the editor.
+        rule.onNodeWithTag("settings-log-format-summary").assertDoesNotExist()
+        rule.onNodeWithTag("settings-log-format-builtin-header").assertDoesNotExist()
         rule.onNodeWithTag("settings-log-format-save").performScrollTo().assertIsEnabled()
+        rule.onNodeWithTag("settings-log-format-delete").performScrollTo().assertIsEnabled()
         rule.onNodeWithTag("settings-log-format-name").performScrollTo().assertExists()
+    }
+
+    @Test
+    fun theBuiltInSummaryShowsEachValueOfTheProfile() {
+        val state = newState()
+        openPage(state)
+
+        fun assertValue(label: String, text: String) {
+            rule.onNodeWithTag("settings-log-format-summary-$label", useUnmergedTree = true)
+                .performScrollTo()
+                .assert(hasAnyDescendant(hasText(text, substring = true)))
+        }
+        // Android Logcat reads its own fields, time and severity.
+        assertValue("parser-engine", "Android Logcat")
+        assertValue("fields", "Logcat rows provide")
+        assertValue("timestamp-interpretation", "Read directly by this engine.")
+        assertValue("severity-mapping", "Read directly by this engine.")
+        assertValue("file-extensions", "log, txt")
+        assertValue("compatible-analyzers", "None")
+        assertValue("default-columns", "Timestamp, Process ID, Thread ID, Severity, Component, Message")
+    }
+
+    @Test
+    fun everyIndexedLogFormatsAnchorRendersForABuiltInAndForCustomProfilesOfEveryEngineKind() {
+        val state = newState()
+        openPage(state)
+        assertEveryIndexedAnchorRenders("built-in profile")
+
+        // Plain text has neither field mappings, timestamps nor severity mapping.
+        rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEveryIndexedAnchorRenders("custom plain text")
+
+        newProfileWithEngine("JSON with metadata")
+        assertEveryIndexedAnchorRenders("custom JSON with metadata")
+
+        newProfileWithEngine("JSON Lines")
+        assertEveryIndexedAnchorRenders("custom JSON Lines")
+
+        newProfileWithEngine("CSV / TSV")
+        assertEveryIndexedAnchorRenders("custom CSV")
+
+        newProfileWithEngine("Regular expression")
+        assertEveryIndexedAnchorRenders("custom regex")
+    }
+
+    @Test
+    fun aCustomJsonLinesProfileDrawsNoRowsThatOnlyOtherEnginesUse() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("JSON Lines")
+
+        assertTagsAbsent(
+            "settings-log-format-regex",
+            "settings-log-format-multiline",
+            "settings-log-format-join-lines",
+            "settings-log-format-delimiter",
+            "settings-log-format-has-header",
+        )
+        assertTagsPresent(
+            "settings-log-format-time-kind",
+            "settings-log-format-epoch-unit",
+            "settings-log-format-time-pattern",
+            "settings-log-format-timezone",
+            "settings-log-format-relative-clock",
+            "settings-log-format-severity-add",
+            "settings-log-format-attribute-add",
+            "settings-log-format-field-timestamp",
+        )
+    }
+
+    @Test
+    fun aCustomMetadataJsonProfileShowsCompactReadOnlyLinesInsteadOfDimmedControls() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("JSON with metadata")
+
+        assertTagsAbsent(
+            "settings-log-format-regex",
+            "settings-log-format-multiline",
+            "settings-log-format-join-lines",
+            "settings-log-format-delimiter",
+            "settings-log-format-time-kind",
+            "settings-log-format-epoch-unit",
+            "settings-log-format-time-pattern",
+            "settings-log-format-timezone",
+            "settings-log-format-relative-clock",
+            "settings-log-format-severity-add",
+            "settings-log-format-attribute-add",
+            "settings-log-format-field-timestamp",
+        )
+        rule.onNodeWithTag("settings-log-format-summary-timestamp-interpretation", useUnmergedTree = true).performScrollTo().assertExists()
+        rule.onNodeWithTag("settings-log-format-summary-severity-mapping", useUnmergedTree = true).assertExists()
+        rule.onNodeWithTag("settings-log-format-summary-extra-attributes", useUnmergedTree = true).assertExists()
+        rule.onNodeWithText("This engine does not expose additional source fields.").assertExists()
+        // A custom profile keeps its editor and Save button.
+        rule.onNodeWithTag("settings-log-format-save").performScrollTo().assertIsEnabled()
+    }
+
+    @Test
+    fun aCustomRegexProfileHasTheRecordRegexAndMultilineRowsAndNoCsvRow() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("Regular expression")
+
+        assertTagsPresent(
+            "settings-log-format-regex",
+            "settings-log-format-multiline",
+            "settings-log-format-join-lines",
+            "settings-log-format-time-kind",
+        )
+        assertTagsAbsent("settings-log-format-delimiter", "settings-log-format-has-header")
+        rule.onNodeWithTag("settings-log-format-join-lines").performScrollTo().assertIsEnabled()
+        // A multiline record start decides where a record ends, so the join choice stops applying (the row stays, dimmed).
+        rule.onNodeWithTag("settings-log-format-multiline").performScrollTo().performTextInput("^\\d{4}-")
+        rule.waitForIdle()
+        rule.onNodeWithTag("settings-log-format-join-lines").performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test
+    fun aCustomCsvProfileHasTheCsvRowAndNoRegexRows() {
+        val state = newState()
+        openPage(state)
+        newProfileWithEngine("CSV / TSV")
+
+        assertTagsPresent("settings-log-format-delimiter", "settings-log-format-has-header", "settings-log-format-time-kind")
+        assertTagsAbsent("settings-log-format-regex", "settings-log-format-multiline", "settings-log-format-join-lines")
     }
 
     @Test

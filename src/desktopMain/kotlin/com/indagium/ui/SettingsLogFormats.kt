@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -56,6 +57,16 @@ private val LOG_FORMAT_ROLE_FIELDS = listOf(
     LogFieldRole.HTTP_METHOD,
     LogFieldRole.HTTP_PATH,
     LogFieldRole.SOURCE,
+)
+
+private const val READ_DIRECTLY_BY_ENGINE = "Read directly by this engine."
+private const val NO_EXTRA_SOURCE_FIELDS = "This engine does not expose additional source fields."
+
+/** The engines whose "Lines that do not match" choice means something: they read records that can span lines. */
+private val JOIN_LINES_ENGINES = setOf(
+    LogFormatEngine.REGEX,
+    LogFormatEngine.SYSLOG_RFC5424,
+    LogFormatEngine.SYSLOG_RFC3164,
 )
 
 private data class LogFormatPreview(
@@ -103,14 +114,6 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
     val scope = rememberCoroutineScope()
 
     val canEdit = !selectedProfile.readOnly
-    val canMapFields = canEdit && supportsProfileFields(draft.engine)
-    val canConfigureTime = canEdit && supportsProfileTimestamps(draft.engine)
-    val canConfigureSeverity = canEdit && draft.engine !in setOf(
-        LogFormatEngine.LOGCAT,
-        LogFormatEngine.DLT,
-        LogFormatEngine.METADATA_JSON,
-        LogFormatEngine.PLAIN_TEXT,
-    )
     val customProfiles = profiles.filterNot { it.readOnly }
 
     fun clearPreview() {
@@ -220,6 +223,12 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 )
             }
         }
+        if (!canEdit) {
+            BuiltInProfileHeader(selectedProfile) {
+                state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile)
+                reclaimFocus()
+            }
+        }
         SettingsStackedRow(
             "Library actions",
             "Import a single profile or bundle. Export the current profile or choose a bundle.",
@@ -251,13 +260,16 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                     { exportDialogOpen = true; reclaimFocus() },
                     modifier = Modifier.testTag("settings-log-format-export-bundle"),
                 )
-                SettingsButton(
-                    "Delete…",
-                    { deleteConfirmationOpen = true; reclaimFocus() },
-                    isDanger = true,
-                    enabled = canEdit && profiles.any { it.id == selectedId },
-                    modifier = Modifier.testTag("settings-log-format-delete"),
-                )
+                // A built-in cannot be deleted, so it gets no button; an unsaved new profile has nothing to delete yet.
+                if (canEdit) {
+                    SettingsButton(
+                        "Delete…",
+                        { deleteConfirmationOpen = true; reclaimFocus() },
+                        isDanger = true,
+                        enabled = profiles.any { it.id == selectedId },
+                        modifier = Modifier.testTag("settings-log-format-delete"),
+                    )
+                }
             }
         }
         val pendingImport = state.pendingLogFormatImport
@@ -357,559 +369,556 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         }
     }
 
-    SettingsGroup("Definition") {
-        SettingsStackedRow("Name", enabled = canEdit) {
-            SettingsTextField(
-                draft.name,
-                { value -> editDraft { profile -> profile.copy(name = value) } },
-                placeholder = "My log format",
-                testTag = "settings-log-format-name",
-            )
-        }
-        SettingsStackedRow("Description", enabled = canEdit) {
-            SettingsTextField(
-                draft.description,
-                { value -> editDraft { profile -> profile.copy(description = value) } },
-                placeholder = "What this profile parses",
-                testTag = "settings-log-format-description",
-            )
-        }
-        SettingsStackedRow("Parser engine", "Selects how records and their fields are read.", enabled = canEdit) {
-            SettingsDropdown(
-                options = LogFormatEngine.entries,
-                selected = draft.engine,
-                label = ::engineLabel,
-                onSelect = { engine ->
-                    val mappings = engineDefaultMappings(engine)
-                    editDraft {
-                        it.copy(
-                            engine = engine,
-                            fieldMappings = mappings,
-                            regexPattern = if (engine == LogFormatEngine.REGEX && it.regexPattern.isBlank()) {
-                                DEFAULT_PROFILE_REGEX
-                            } else {
-                                it.regexPattern
-                            },
-                        )
-                    }
-                    sample = defaultProfileSample(engine)
-                },
-                testTag = "settings-log-format-engine",
-                minWidth = 250.dp,
-            )
-        }
-        SettingsStackedRow("File extensions", "Optional suffix hints, without a leading dot.", enabled = canEdit) {
-            SettingsTextField(
-                extensionText,
-                { extensionText = it; clearPreview() },
-                placeholder = "log, jsonl",
-                modifier = Modifier.fillMaxWidth(),
-                testTag = "settings-log-format-extensions",
-            )
-        }
-        val hasExtensions = splitList(extensionText).isNotEmpty()
-        SettingsRow(
-            "Always open these extensions with this format",
-            "Skips content detection for files with these extensions. Needs at least one extension.",
-            enabled = canEdit && hasExtensions,
-        ) {
-            SettingsSwitch(
-                checked = draft.detection.alwaysUseForExtensions && hasExtensions,
-                onCheckedChange = { value ->
-                    editDraft { it.copy(detection = it.detection.copy(alwaysUseForExtensions = value)) }
-                },
-                label = "Always open these extensions with this format",
-                enabled = canEdit && hasExtensions,
-                testTag = "settings-log-format-always-extensions",
-            )
-        }
-        SettingsStackedRow(
-            "Header text",
-            "All listed strings must occur in the file sample for this profile to be a detection candidate.",
-            enabled = canEdit,
-        ) {
-            SettingsTextField(
-                headerText,
-                { headerText = it; clearPreview() },
-                placeholder = "timestamp, level",
-                modifier = Modifier.fillMaxWidth(),
-                testTag = "settings-log-format-header",
-            )
-        }
-        SettingsStackedRow(
-            "Content detection regex",
-            "Optional safe regex checked against a bounded file sample.",
-            enabled = canEdit,
-        ) {
-            SettingsTextField(
-                contentRegex,
-                { contentRegex = it; clearPreview() },
-                placeholder = "^\\{.*\\}\u0024",
-                monospace = true,
-                modifier = Modifier.fillMaxWidth(),
-                testTag = "settings-log-format-content-regex",
-            )
-        }
-        SettingsStackedRow(
-            "Record regex",
-            "The parsing rule. Each (bracket pair) is one column, numbered from 1; the fields below refer to those numbers. " +
-                "\"Set up from a sample line\" above writes it for you.",
-            enabled = canEdit && draft.engine == LogFormatEngine.REGEX,
-        ) {
-            SettingsTextField(
-                draft.regexPattern,
-                { value -> editDraft { profile -> profile.copy(regexPattern = value) } },
-                placeholder = "^(\\S+)\\s+(\\w+)\\s+(.*)$",
-                monospace = true,
-                modifier = Modifier.fillMaxWidth(),
-                testTag = "settings-log-format-regex",
-            )
-        }
-        SettingsStackedRow(
-            "Multiline record start",
-            "A matching line starts a record; following lines stay with it until the next match.",
-            enabled = canEdit && draft.engine == LogFormatEngine.REGEX,
-        ) {
-            SettingsTextField(
-                draft.multilineStartPattern,
-                { value -> editDraft { profile -> profile.copy(multilineStartPattern = value) } },
-                placeholder = "^\\d{4}-",
-                monospace = true,
-                modifier = Modifier.fillMaxWidth(),
-                testTag = "settings-log-format-multiline",
-            )
-        }
-        val canJoinLines = canEdit && (
-            draft.engine == LogFormatEngine.SYSLOG_RFC5424 || draft.engine == LogFormatEngine.SYSLOG_RFC3164 ||
-                (draft.engine == LogFormatEngine.REGEX && draft.multilineStartPattern.isBlank())
-        )
-        SettingsStackedRow(
-            "Lines that do not match",
-            "On: a line that does not fit the format continues the record above it, so a stack trace under a log line stays " +
-                "one record you can expand. Off: every such line is its own raw row.",
-            enabled = canJoinLines,
-        ) {
-            SettingsCheckbox(
-                draft.joinUnmatchedLines,
-                "Add them to the record above",
-                { checked ->
-                    editDraft { profile -> profile.copy(joinUnmatchedLines = checked) }
-                    reclaimFocus()
-                },
-                enabled = canJoinLines,
-                testTag = "settings-log-format-join-lines",
-            )
-        }
-        SettingsStackedRow(
-            "CSV delimiter and header",
-            "Use one character as the delimiter and choose whether row one contains field names.",
-            enabled = canEdit && draft.engine == LogFormatEngine.CSV,
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+    if (!canEdit) {
+        BuiltInProfileSummary(selectedProfile)
+    } else {
+        SettingsGroup("Definition") {
+            SettingsStackedRow("Name") {
                 SettingsTextField(
-                    draft.delimiter.toString(),
-                    { value ->
-                        value.singleOrNull()?.let { delimiter ->
-                            editDraft { current -> current.copy(delimiter = delimiter) }
-                        }
-                    },
-                    placeholder = ",",
-                    modifier = Modifier.width(80.dp),
-                    testTag = "settings-log-format-delimiter",
-                )
-                SettingsCheckbox(
-                    draft.hasHeader,
-                    "First row contains field names",
-                    { checked ->
-                        editDraft { profile -> profile.copy(hasHeader = checked) }
-                        reclaimFocus()
-                    },
-                    enabled = canEdit,
-                    testTag = "settings-log-format-has-header",
+                    draft.name,
+                    { value -> editDraft { profile -> profile.copy(name = value) } },
+                    placeholder = "My log format",
+                    testTag = "settings-log-format-name",
                 )
             }
-        }
-    }
-
-    SettingsGroup("Fields and time") {
-        if (!supportsProfileFields(draft.engine)) {
-            SettingsStackedRow(
-                "Field mapping",
-                "This engine reads its fields directly, so custom field mappings do not apply.",
-            ) {
-                AppText(nativeFieldDescription(draft.engine), color = tc().ts, fontSize = 11.sp)
-            }
-        }
-        engineFieldRoles(draft.engine).forEach { role ->
-            SettingsRow(
-                roleLabel(role),
-                fieldMappingHint(draft.engine),
-                enabled = canMapFields,
-            ) {
+            SettingsStackedRow("Description") {
                 SettingsTextField(
-                    value = draft.fieldMappings[role].orEmpty(),
-                    onValueChange = { value ->
-                        editDraft { current ->
-                            val mappings = current.fieldMappings.toMutableMap()
-                            if (value.isBlank()) mappings.remove(role) else mappings[role] = value.trim()
-                            current.copy(fieldMappings = mappings)
-                        }
-                    },
-                    placeholder = automaticFieldHint(draft.engine, role),
-                    testTag = "settings-log-format-field-${role.name.lowercase()}",
+                    draft.description,
+                    { value -> editDraft { profile -> profile.copy(description = value) } },
+                    placeholder = "What this profile parses",
+                    testTag = "settings-log-format-description",
                 )
             }
-        }
-        SettingsStackedRow(
-            "Timestamp interpretation",
-            if (supportsProfileTimestamps(draft.engine)) "Choose how timestamp values become source-clock time."
-            else "This engine reads its native timestamp format directly.",
-            enabled = canConfigureTime,
-        ) {
-            SettingsDropdown(
-                options = ProfileTimestampKind.entries,
-                selected = draft.timestampKind,
-                label = ::timestampKindLabel,
-                onSelect = { kind -> editDraft { profile -> profile.copy(timestampKind = kind) } },
-                testTag = "settings-log-format-time-kind",
-            )
-        }
-        SettingsStackedRow(
-            "Epoch unit",
-            "Used when timestamps are epoch or elapsed-time numbers.",
-            enabled = canConfigureTime,
-        ) {
-            SettingsDropdown(
-                options = ProfileEpochUnit.entries,
-                selected = draft.epochUnit,
-                label = ::epochUnitLabel,
-                onSelect = { unit -> editDraft { profile -> profile.copy(epochUnit = unit) } },
-                testTag = "settings-log-format-epoch-unit",
-            )
-        }
-        SettingsRow("Timestamp pattern", "Pattern for custom date and time values.", enabled = canConfigureTime) {
-            SettingsTextField(
-                draft.timestampPattern,
-                { value -> editDraft { profile -> profile.copy(timestampPattern = value) } },
-                placeholder = "yyyy-MM-dd HH:mm:ss.SSS",
-                monospace = true,
-                testTag = "settings-log-format-time-pattern",
-            )
-        }
-        SettingsRow(
-            "Timezone",
-            "A blank value keeps a local source clock without assigning UTC.",
-            enabled = canConfigureTime,
-        ) {
-            SettingsTextField(
-                draft.timezone,
-                { value -> editDraft { profile -> profile.copy(timezone = value) } },
-                placeholder = "Europe/Kyiv",
-                testTag = "settings-log-format-timezone",
-            )
-        }
-        SettingsRow(
-            "Relative clock ID",
-            "Name the elapsed-time clock only when records share a known clock.",
-            enabled = canConfigureTime && draft.timestampKind == ProfileTimestampKind.RELATIVE,
-        ) {
-            SettingsTextField(
-                draft.relativeClock,
-                { value -> editDraft { profile -> profile.copy(relativeClock = value) } },
-                placeholder = "device-boot-123",
-                testTag = "settings-log-format-relative-clock",
-            )
-        }
-        SettingsStackedRow(
-            "Severity mapping",
-            if (canConfigureSeverity) "Map source values to the six normalized severity levels."
-            else "This engine reads severity directly and does not use custom severity mappings.",
-            enabled = canConfigureSeverity,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                draft.severityMapping.entries.forEachIndexed { index, (source, target) ->
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        SettingsTextField(
-                            source,
-                            { value ->
-                                editDraft { current ->
-                                    val mappings = current.severityMapping.toMutableMap()
-                                    mappings.remove(source)
-                                    if (value.isNotBlank()) mappings[value.trim().uppercase()] = target
-                                    current.copy(severityMapping = mappings)
-                                }
-                            },
-                            placeholder = "Source value",
-                            modifier = Modifier.width(150.dp),
-                            testTag = "settings-log-format-severity-source-$index",
-                        )
-                        AppText("maps to", color = tc().ts, fontSize = 11.sp)
-                        SettingsDropdown(
-                            options = LogLevel.entries,
-                            selected = LogLevel.from(target),
-                            label = { "${it.label} (${it.key})" },
-                            onSelect = { level ->
-                                editDraft { current ->
-                                    current.copy(severityMapping = current.severityMapping + (source to level.key))
-                                }
-                            },
-                            testTag = "settings-log-format-severity-level-$index",
-                            minWidth = 140.dp,
-                        )
-                        SettingsButton(
-                            "Remove",
-                            {
-                                editDraft { current ->
-                                    current.copy(severityMapping = current.severityMapping - source)
-                                }
-                            },
-                            modifier = Modifier.testTag("settings-log-format-severity-remove-$index"),
-                        )
-                    }
-                }
-                SettingsButton(
-                    "Add severity mapping",
-                    {
-                        val commonSources = listOf("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
-                        val nextSource = commonSources.firstOrNull { it !in draft.severityMapping }
-                            ?: "LEVEL${draft.severityMapping.size + 1}"
-                        editDraft { it.copy(severityMapping = it.severityMapping + (nextSource to LogLevel.I.key)) }
-                        reclaimFocus()
-                    },
-                    enabled = canEdit,
-                    modifier = Modifier.testTag("settings-log-format-severity-add"),
-                )
-            }
-        }
-        SettingsStackedRow(
-            "Extra attributes",
-            if (supportsProfileFields(draft.engine)) "Add typed fields such as container ID, request ID, or HTTP path."
-            else "This engine does not expose additional source fields.",
-            enabled = canMapFields,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                draft.attributes.forEachIndexed { index, attribute ->
-                    Column(
-                        Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(6.dp)).padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            SettingsTextField(
-                                attribute.id,
-                                { value -> updateAttribute(index) { it.copy(id = value) } },
-                                placeholder = "field_id",
-                                modifier = Modifier.width(120.dp),
-                                testTag = "settings-log-format-attribute-id-$index",
-                            )
-                            SettingsTextField(
-                                attribute.label,
-                                { value -> updateAttribute(index) { it.copy(label = value) } },
-                                placeholder = "Column label",
-                                modifier = Modifier.weight(1f),
-                                testTag = "settings-log-format-attribute-label-$index",
-                            )
-                            SettingsTextField(
-                                attribute.source,
-                                { value -> updateAttribute(index) { it.copy(source = value) } },
-                                placeholder = "source field",
-                                modifier = Modifier.weight(1f),
-                                testTag = "settings-log-format-attribute-source-$index",
-                            )
-                        }
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            AppText("Value type", color = tc().ts, fontSize = 11.sp)
-                            SettingsDropdown(
-                                options = LogProfileValueType.entries,
-                                selected = attribute.type,
-                                label = ::valueTypeLabel,
-                                onSelect = { type -> updateAttribute(index) { it.copy(type = type) } },
-                                testTag = "settings-log-format-attribute-type-$index",
-                                minWidth = 140.dp,
-                            )
-                            SettingsCheckbox(
-                                attribute.visibleByDefault,
-                                "Show as a column",
-                                { visible ->
-                                    updateAttribute(index) { it.copy(visibleByDefault = visible) }
-                                    reclaimFocus()
-                                },
-                                enabled = canEdit,
-                                testTag = "settings-log-format-attribute-visible-$index",
-                            )
-                            Spacer(Modifier.weight(1f))
-                            SettingsButton(
-                                "Remove attribute",
-                                {
-                                    editDraft { current ->
-                                        current.copy(
-                                            attributes = current.attributes.filterIndexed { attrIndex, _ ->
-                                                attrIndex != index
-                                            },
-                                        )
-                                    }
-                                },
-                                isDanger = true,
-                                modifier = Modifier.testTag("settings-log-format-attribute-remove-$index"),
-                            )
-                        }
-                    }
-                }
-                SettingsButton(
-                    "Add attribute",
-                    {
-                        val next = draft.attributes.size + 1
+            SettingsStackedRow("Parser engine", "Selects how records and their fields are read.") {
+                SettingsDropdown(
+                    options = LogFormatEngine.entries,
+                    selected = draft.engine,
+                    label = ::engineLabel,
+                    onSelect = { engine ->
+                        val mappings = engineDefaultMappings(engine)
                         editDraft {
                             it.copy(
-                                attributes = it.attributes + LogFormatAttribute(
-                                    "field_$next",
-                                    "Field $next",
-                                    "",
-                                    visibleByDefault = false,
-                                ),
+                                engine = engine,
+                                fieldMappings = mappings,
+                                regexPattern = if (engine == LogFormatEngine.REGEX && it.regexPattern.isBlank()) {
+                                    DEFAULT_PROFILE_REGEX
+                                } else {
+                                    it.regexPattern
+                                },
                             )
                         }
-                        reclaimFocus()
+                        sample = defaultProfileSample(engine)
                     },
-                    modifier = Modifier.testTag("settings-log-format-attribute-add"),
+                    testTag = "settings-log-format-engine",
+                    minWidth = 250.dp,
                 )
             }
-        }
-        SettingsStackedRow(
-            "Default columns",
-            "The fields a row shows in the log view, in this order. Hiding a field does not stop it being parsed or filtered.",
-            enabled = canEdit,
-        ) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+            SettingsStackedRow("File extensions", "Optional suffix hints, without a leading dot.") {
+                SettingsTextField(
+                    extensionText,
+                    { extensionText = it; clearPreview() },
+                    placeholder = "log, jsonl",
+                    modifier = Modifier.fillMaxWidth(),
+                    testTag = "settings-log-format-extensions",
+                )
+            }
+            val hasExtensions = splitList(extensionText).isNotEmpty()
+            SettingsRow(
+                "Always open these extensions with this format",
+                "Skips content detection for files with these extensions. Needs at least one extension.",
+                enabled = hasExtensions,
             ) {
-                LOG_FORMAT_ROLE_FIELDS.forEach { role ->
-                    SettingsCheckbox(
-                        checked = role in draft.visibleColumns,
-                        label = roleLabel(role),
-                        onChange = { visible ->
-                            editDraft { current ->
-                                val columns = if (visible) {
-                                    current.visibleColumns + role
-                                } else {
-                                    current.visibleColumns - role
-                                }
-                                current.copy(visibleColumns = columns)
-                            }
-                            reclaimFocus()
-                        },
-                        enabled = canEdit,
-                        testTag = "settings-log-format-column-${role.name.lowercase()}",
+                SettingsSwitch(
+                    checked = draft.detection.alwaysUseForExtensions && hasExtensions,
+                    onCheckedChange = { value ->
+                        editDraft { it.copy(detection = it.detection.copy(alwaysUseForExtensions = value)) }
+                    },
+                    label = "Always open these extensions with this format",
+                    enabled = hasExtensions,
+                    testTag = "settings-log-format-always-extensions",
+                )
+            }
+            SettingsStackedRow(
+                "Header text",
+                "All listed strings must occur in the file sample for this profile to be a detection candidate.",
+            ) {
+                SettingsTextField(
+                    headerText,
+                    { headerText = it; clearPreview() },
+                    placeholder = "timestamp, level",
+                    modifier = Modifier.fillMaxWidth(),
+                    testTag = "settings-log-format-header",
+                )
+            }
+            SettingsStackedRow(
+                "Content detection regex",
+                "Optional safe regex checked against a bounded file sample.",
+            ) {
+                SettingsTextField(
+                    contentRegex,
+                    { contentRegex = it; clearPreview() },
+                    placeholder = "^\\{.*\\}\u0024",
+                    monospace = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    testTag = "settings-log-format-content-regex",
+                )
+            }
+            if (draft.engine == LogFormatEngine.REGEX) {
+                SettingsStackedRow(
+                    "Record regex",
+                    "The parsing rule. Each (bracket pair) is one column, numbered from 1; the fields below refer to those numbers. " +
+                        "\"Set up from a sample line\" above writes it for you.",
+                ) {
+                    SettingsTextField(
+                        draft.regexPattern,
+                        { value -> editDraft { profile -> profile.copy(regexPattern = value) } },
+                        placeholder = "^(\\S+)\\s+(\\w+)\\s+(.*)$",
+                        monospace = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        testTag = "settings-log-format-regex",
+                    )
+                }
+                SettingsStackedRow(
+                    "Multiline record start",
+                    "A matching line starts a record; following lines stay with it until the next match.",
+                ) {
+                    SettingsTextField(
+                        draft.multilineStartPattern,
+                        { value -> editDraft { profile -> profile.copy(multilineStartPattern = value) } },
+                        placeholder = "^\\d{4}-",
+                        monospace = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        testTag = "settings-log-format-multiline",
                     )
                 }
             }
-        }
-        SettingsStackedRow(
-            "Compatible analyzers",
-            "Choose analyses that understand the records this profile produces.",
-            enabled = canEdit,
-        ) {
-            SettingsCheckbox(
-                checked = "android-crash" in draft.compatibleAnalyzers,
-                label = "Android crash analysis",
-                onChange = { enabled ->
-                    editDraft { current ->
-                        val analyzers = current.compatibleAnalyzers.toMutableSet()
-                        if (enabled) analyzers += "android-crash" else analyzers -= "android-crash"
-                        current.copy(compatibleAnalyzers = analyzers)
-                    }
-                    reclaimFocus()
-                },
-                enabled = canEdit,
-                testTag = "settings-log-format-analyzer-android-crash",
-            )
-        }
-        SettingsStackedRow(
-            "Issue rules",
-            "Each rule adds a named safe regex match to this profile's issue analysis.",
-            enabled = canEdit,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                draft.issueRules.forEachIndexed { index, rule ->
-                    Column(
-                        Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(6.dp)).padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            SettingsTextField(
-                                rule.id,
-                                { value -> updateIssueRule(index) { it.copy(id = value) } },
-                                placeholder = "rule_id",
-                                modifier = Modifier.width(120.dp),
-                                testTag = "settings-log-format-issue-id-$index",
-                            )
-                            SettingsTextField(
-                                rule.name,
-                                { value -> updateIssueRule(index) { it.copy(name = value) } },
-                                placeholder = "Rule name",
-                                modifier = Modifier.weight(1f),
-                                testTag = "settings-log-format-issue-name-$index",
-                            )
-                            SettingsCheckbox(
-                                rule.enabled,
-                                "Enabled",
-                                { enabled ->
-                                    updateIssueRule(index) { it.copy(enabled = enabled) }
-                                    reclaimFocus()
-                                },
-                                enabled = canEdit,
-                                testTag = "settings-log-format-issue-enabled-$index",
-                            )
-                            SettingsButton(
-                                "Remove",
-                                {
-                                    editDraft { current ->
-                                        current.copy(
-                                            issueRules = current.issueRules.filterIndexed { ruleIndex, _ ->
-                                                ruleIndex != index
-                                            },
-                                        )
-                                    }
-                                },
-                                isDanger = true,
-                                modifier = Modifier.testTag("settings-log-format-issue-remove-$index"),
-                            )
-                        }
+            if (draft.engine in JOIN_LINES_ENGINES) {
+                // A multiline record start already decides where a regex record ends, so the choice does not apply then.
+                val canJoinLines = draft.engine != LogFormatEngine.REGEX || draft.multilineStartPattern.isBlank()
+                SettingsStackedRow(
+                    "Lines that do not match",
+                    "On: a line that does not fit the format continues the record above it, so a stack trace under a log line stays " +
+                        "one record you can expand. Off: every such line is its own raw row.",
+                    enabled = canJoinLines,
+                ) {
+                    SettingsCheckbox(
+                        draft.joinUnmatchedLines,
+                        "Add them to the record above",
+                        { checked ->
+                            editDraft { profile -> profile.copy(joinUnmatchedLines = checked) }
+                            reclaimFocus()
+                        },
+                        enabled = canJoinLines,
+                        testTag = "settings-log-format-join-lines",
+                    )
+                }
+            }
+            if (draft.engine == LogFormatEngine.CSV) {
+                SettingsStackedRow(
+                    "CSV delimiter and header",
+                    "Use one character as the delimiter and choose whether row one contains field names.",
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         SettingsTextField(
-                            rule.regex,
-                            { value -> updateIssueRule(index) { it.copy(regex = value) } },
-                            placeholder = "(?i)fatal error",
-                            monospace = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            testTag = "settings-log-format-issue-regex-$index",
+                            draft.delimiter.toString(),
+                            { value ->
+                                value.singleOrNull()?.let { delimiter ->
+                                    editDraft { current -> current.copy(delimiter = delimiter) }
+                                }
+                            },
+                            placeholder = ",",
+                            modifier = Modifier.width(80.dp),
+                            testTag = "settings-log-format-delimiter",
+                        )
+                        SettingsCheckbox(
+                            draft.hasHeader,
+                            "First row contains field names",
+                            { checked ->
+                                editDraft { profile -> profile.copy(hasHeader = checked) }
+                                reclaimFocus()
+                            },
+                            testTag = "settings-log-format-has-header",
                         )
                     }
                 }
-                SettingsButton(
-                    "Add issue rule",
-                    {
-                        val next = draft.issueRules.size + 1
+            }
+        }
+
+        SettingsGroup("Fields and time") {
+            if (!supportsProfileFields(draft.engine)) {
+                SettingsStackedRow(
+                    "Field mapping",
+                    "This engine reads its fields directly, so custom field mappings do not apply.",
+                ) {
+                    AppText(nativeFieldDescription(draft.engine), color = tc().ts, fontSize = 11.sp)
+                }
+            }
+            engineFieldRoles(draft.engine).forEach { role ->
+                SettingsRow(
+                    roleLabel(role),
+                    fieldMappingHint(draft.engine),
+                ) {
+                    SettingsTextField(
+                        value = draft.fieldMappings[role].orEmpty(),
+                        onValueChange = { value ->
+                            editDraft { current ->
+                                val mappings = current.fieldMappings.toMutableMap()
+                                if (value.isBlank()) mappings.remove(role) else mappings[role] = value.trim()
+                                current.copy(fieldMappings = mappings)
+                            }
+                        },
+                        placeholder = automaticFieldHint(draft.engine, role),
+                        testTag = "settings-log-format-field-${role.name.lowercase()}",
+                    )
+                }
+            }
+            if (supportsProfileTimestamps(draft.engine)) {
+                SettingsStackedRow(
+                    "Timestamp interpretation",
+                    "Choose how timestamp values become source-clock time.",
+                ) {
+                    SettingsDropdown(
+                        options = ProfileTimestampKind.entries,
+                        selected = draft.timestampKind,
+                        label = ::timestampKindLabel,
+                        onSelect = { kind -> editDraft { profile -> profile.copy(timestampKind = kind) } },
+                        testTag = "settings-log-format-time-kind",
+                    )
+                }
+                SettingsStackedRow(
+                    "Epoch unit",
+                    "Used when timestamps are epoch or elapsed-time numbers.",
+                ) {
+                    SettingsDropdown(
+                        options = ProfileEpochUnit.entries,
+                        selected = draft.epochUnit,
+                        label = ::epochUnitLabel,
+                        onSelect = { unit -> editDraft { profile -> profile.copy(epochUnit = unit) } },
+                        testTag = "settings-log-format-epoch-unit",
+                    )
+                }
+                SettingsRow("Timestamp pattern", "Pattern for custom date and time values.") {
+                    SettingsTextField(
+                        draft.timestampPattern,
+                        { value -> editDraft { profile -> profile.copy(timestampPattern = value) } },
+                        placeholder = "yyyy-MM-dd HH:mm:ss.SSS",
+                        monospace = true,
+                        testTag = "settings-log-format-time-pattern",
+                    )
+                }
+                SettingsRow(
+                    "Timezone",
+                    "A blank value keeps a local source clock without assigning UTC.",
+                ) {
+                    SettingsTextField(
+                        draft.timezone,
+                        { value -> editDraft { profile -> profile.copy(timezone = value) } },
+                        placeholder = "Europe/Kyiv",
+                        testTag = "settings-log-format-timezone",
+                    )
+                }
+                SettingsRow(
+                    "Relative clock ID",
+                    "Name the elapsed-time clock only when records share a known clock.",
+                    enabled = draft.timestampKind == ProfileTimestampKind.RELATIVE,
+                ) {
+                    SettingsTextField(
+                        draft.relativeClock,
+                        { value -> editDraft { profile -> profile.copy(relativeClock = value) } },
+                        placeholder = "device-boot-123",
+                        testTag = "settings-log-format-relative-clock",
+                    )
+                }
+            } else {
+                ProfileSummaryRow("Timestamp interpretation", READ_DIRECTLY_BY_ENGINE)
+            }
+            if (supportsSeverityMapping(draft.engine)) {
+                SettingsStackedRow(
+                    "Severity mapping",
+                    "Map source values to the six normalized severity levels.",
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        draft.severityMapping.entries.forEachIndexed { index, (source, target) ->
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SettingsTextField(
+                                    source,
+                                    { value ->
+                                        editDraft { current ->
+                                            val mappings = current.severityMapping.toMutableMap()
+                                            mappings.remove(source)
+                                            if (value.isNotBlank()) mappings[value.trim().uppercase()] = target
+                                            current.copy(severityMapping = mappings)
+                                        }
+                                    },
+                                    placeholder = "Source value",
+                                    modifier = Modifier.width(150.dp),
+                                    testTag = "settings-log-format-severity-source-$index",
+                                )
+                                AppText("maps to", color = tc().ts, fontSize = 11.sp)
+                                SettingsDropdown(
+                                    options = LogLevel.entries,
+                                    selected = LogLevel.from(target),
+                                    label = { "${it.label} (${it.key})" },
+                                    onSelect = { level ->
+                                        editDraft { current ->
+                                            current.copy(severityMapping = current.severityMapping + (source to level.key))
+                                        }
+                                    },
+                                    testTag = "settings-log-format-severity-level-$index",
+                                    minWidth = 140.dp,
+                                )
+                                SettingsButton(
+                                    "Remove",
+                                    {
+                                        editDraft { current ->
+                                            current.copy(severityMapping = current.severityMapping - source)
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("settings-log-format-severity-remove-$index"),
+                                )
+                            }
+                        }
+                        SettingsButton(
+                            "Add severity mapping",
+                            {
+                                val commonSources = listOf("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
+                                val nextSource = commonSources.firstOrNull { it !in draft.severityMapping }
+                                    ?: "LEVEL${draft.severityMapping.size + 1}"
+                                editDraft { it.copy(severityMapping = it.severityMapping + (nextSource to LogLevel.I.key)) }
+                                reclaimFocus()
+                            },
+                            modifier = Modifier.testTag("settings-log-format-severity-add"),
+                        )
+                    }
+                }
+            } else {
+                ProfileSummaryRow("Severity mapping", READ_DIRECTLY_BY_ENGINE)
+            }
+            if (supportsProfileFields(draft.engine)) {
+                SettingsStackedRow(
+                    "Extra attributes",
+                    "Add typed fields such as container ID, request ID, or HTTP path.",
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        draft.attributes.forEachIndexed { index, attribute ->
+                            Column(
+                                Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(6.dp)).padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    SettingsTextField(
+                                        attribute.id,
+                                        { value -> updateAttribute(index) { it.copy(id = value) } },
+                                        placeholder = "field_id",
+                                        modifier = Modifier.width(120.dp),
+                                        testTag = "settings-log-format-attribute-id-$index",
+                                    )
+                                    SettingsTextField(
+                                        attribute.label,
+                                        { value -> updateAttribute(index) { it.copy(label = value) } },
+                                        placeholder = "Column label",
+                                        modifier = Modifier.weight(1f),
+                                        testTag = "settings-log-format-attribute-label-$index",
+                                    )
+                                    SettingsTextField(
+                                        attribute.source,
+                                        { value -> updateAttribute(index) { it.copy(source = value) } },
+                                        placeholder = "source field",
+                                        modifier = Modifier.weight(1f),
+                                        testTag = "settings-log-format-attribute-source-$index",
+                                    )
+                                }
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AppText("Value type", color = tc().ts, fontSize = 11.sp)
+                                    SettingsDropdown(
+                                        options = LogProfileValueType.entries,
+                                        selected = attribute.type,
+                                        label = ::valueTypeLabel,
+                                        onSelect = { type -> updateAttribute(index) { it.copy(type = type) } },
+                                        testTag = "settings-log-format-attribute-type-$index",
+                                        minWidth = 140.dp,
+                                    )
+                                    SettingsCheckbox(
+                                        attribute.visibleByDefault,
+                                        "Show as a column",
+                                        { visible ->
+                                            updateAttribute(index) { it.copy(visibleByDefault = visible) }
+                                            reclaimFocus()
+                                        },
+                                        testTag = "settings-log-format-attribute-visible-$index",
+                                    )
+                                    Spacer(Modifier.weight(1f))
+                                    SettingsButton(
+                                        "Remove attribute",
+                                        {
+                                            editDraft { current ->
+                                                current.copy(
+                                                    attributes = current.attributes.filterIndexed { attrIndex, _ ->
+                                                        attrIndex != index
+                                                    },
+                                                )
+                                            }
+                                        },
+                                        isDanger = true,
+                                        modifier = Modifier.testTag("settings-log-format-attribute-remove-$index"),
+                                    )
+                                }
+                            }
+                        }
+                        SettingsButton(
+                            "Add attribute",
+                            {
+                                val next = draft.attributes.size + 1
+                                editDraft {
+                                    it.copy(
+                                        attributes = it.attributes + LogFormatAttribute(
+                                            "field_$next",
+                                            "Field $next",
+                                            "",
+                                            visibleByDefault = false,
+                                        ),
+                                    )
+                                }
+                                reclaimFocus()
+                            },
+                            modifier = Modifier.testTag("settings-log-format-attribute-add"),
+                        )
+                    }
+                }
+            } else {
+                ProfileSummaryRow("Extra attributes", NO_EXTRA_SOURCE_FIELDS)
+            }
+            SettingsStackedRow(
+                "Default columns",
+                "The fields a row shows in the log view, in this order. Hiding a field does not stop it being parsed or filtered.",
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    LOG_FORMAT_ROLE_FIELDS.forEach { role ->
+                        SettingsCheckbox(
+                            checked = role in draft.visibleColumns,
+                            label = roleLabel(role),
+                            onChange = { visible ->
+                                editDraft { current ->
+                                    val columns = if (visible) {
+                                        current.visibleColumns + role
+                                    } else {
+                                        current.visibleColumns - role
+                                    }
+                                    current.copy(visibleColumns = columns)
+                                }
+                                reclaimFocus()
+                            },
+                            testTag = "settings-log-format-column-${role.name.lowercase()}",
+                        )
+                    }
+                }
+            }
+            SettingsStackedRow(
+                "Compatible analyzers",
+                "Choose analyses that understand the records this profile produces.",
+            ) {
+                SettingsCheckbox(
+                    checked = "android-crash" in draft.compatibleAnalyzers,
+                    label = "Android crash analysis",
+                    onChange = { enabled ->
                         editDraft { current ->
-                            current.copy(
-                                issueRules = current.issueRules + CustomIssueRule("rule_$next", "Rule $next", ""),
-                            )
+                            val analyzers = current.compatibleAnalyzers.toMutableSet()
+                            if (enabled) analyzers += "android-crash" else analyzers -= "android-crash"
+                            current.copy(compatibleAnalyzers = analyzers)
                         }
                         reclaimFocus()
                     },
-                    modifier = Modifier.testTag("settings-log-format-issue-add"),
+                    testTag = "settings-log-format-analyzer-android-crash",
                 )
+            }
+            SettingsStackedRow(
+                "Issue rules",
+                "Each rule adds a named safe regex match to this profile's issue analysis.",
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    draft.issueRules.forEachIndexed { index, rule ->
+                        Column(
+                            Modifier.fillMaxWidth().background(tc().p2, RoundedCornerShape(6.dp)).padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SettingsTextField(
+                                    rule.id,
+                                    { value -> updateIssueRule(index) { it.copy(id = value) } },
+                                    placeholder = "rule_id",
+                                    modifier = Modifier.width(120.dp),
+                                    testTag = "settings-log-format-issue-id-$index",
+                                )
+                                SettingsTextField(
+                                    rule.name,
+                                    { value -> updateIssueRule(index) { it.copy(name = value) } },
+                                    placeholder = "Rule name",
+                                    modifier = Modifier.weight(1f),
+                                    testTag = "settings-log-format-issue-name-$index",
+                                )
+                                SettingsCheckbox(
+                                    rule.enabled,
+                                    "Enabled",
+                                    { enabled ->
+                                        updateIssueRule(index) { it.copy(enabled = enabled) }
+                                        reclaimFocus()
+                                    },
+                                    testTag = "settings-log-format-issue-enabled-$index",
+                                )
+                                SettingsButton(
+                                    "Remove",
+                                    {
+                                        editDraft { current ->
+                                            current.copy(
+                                                issueRules = current.issueRules.filterIndexed { ruleIndex, _ ->
+                                                    ruleIndex != index
+                                                },
+                                            )
+                                        }
+                                    },
+                                    isDanger = true,
+                                    modifier = Modifier.testTag("settings-log-format-issue-remove-$index"),
+                                )
+                            }
+                            SettingsTextField(
+                                rule.regex,
+                                { value -> updateIssueRule(index) { it.copy(regex = value) } },
+                                placeholder = "(?i)fatal error",
+                                monospace = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                testTag = "settings-log-format-issue-regex-$index",
+                            )
+                        }
+                    }
+                    SettingsButton(
+                        "Add issue rule",
+                        {
+                            val next = draft.issueRules.size + 1
+                            editDraft { current ->
+                                current.copy(
+                                    issueRules = current.issueRules + CustomIssueRule("rule_$next", "Rule $next", ""),
+                                )
+                            }
+                            reclaimFocus()
+                        },
+                        modifier = Modifier.testTag("settings-log-format-issue-add"),
+                    )
+                }
             }
         }
     }
@@ -1008,21 +1017,23 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                         enabled = state.activeTabId.isNotBlank() && !previewLoading,
                         modifier = Modifier.testTag("settings-log-format-preview-current"),
                     )
-                    SettingsButton(
-                        "Save profile",
-                        {
-                            runCatching { state.saveLogFormatProfile(buildDraft()).getOrThrow() }
-                                .onSuccess { saved ->
-                                    chooseProfile(saved)
-                                    state.clearLogFormatProfileError()
-                                }
-                                .onFailure { localError = it.message ?: "Could not save this profile." }
-                            reclaimFocus()
-                        },
-                        variant = ButtonVariant.Primary,
-                        enabled = canEdit && !previewLoading,
-                        modifier = Modifier.testTag("settings-log-format-save"),
-                    )
+                    if (canEdit) {
+                        SettingsButton(
+                            "Save profile",
+                            {
+                                runCatching { state.saveLogFormatProfile(buildDraft()).getOrThrow() }
+                                    .onSuccess { saved ->
+                                        chooseProfile(saved)
+                                        state.clearLogFormatProfileError()
+                                    }
+                                    .onFailure { localError = it.message ?: "Could not save this profile." }
+                                reclaimFocus()
+                            },
+                            variant = ButtonVariant.Primary,
+                            enabled = !previewLoading,
+                            modifier = Modifier.testTag("settings-log-format-save"),
+                        )
+                    }
                 }
                 localError?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
                 val currentDraft = runCatching(::buildDraft).getOrNull()
@@ -1061,6 +1072,139 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         }
     }
 }
+
+/** The built-in profile's name, a read-only badge, its description and the one way forward: an editable copy. */
+@Composable
+private fun BuiltInProfileHeader(profile: LogFormatProfile, onDuplicate: () -> Unit) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp).testTag("settings-log-format-builtin-header"),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                AppText(
+                    profile.name,
+                    color = tc.tx,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                SettingsBadge("Built-in · read-only")
+            }
+            if (profile.description.isNotBlank()) {
+                AppText(profile.description, color = tc.ts, fontSize = 11.sp, maxLines = Int.MAX_VALUE)
+            }
+        }
+        SettingsButton(
+            "Duplicate to edit",
+            onDuplicate,
+            variant = ButtonVariant.Primary,
+            modifier = Modifier.testTag("settings-log-format-duplicate-to-edit"),
+        )
+    }
+}
+
+/** A built-in profile as plain label and value rows: nothing here looks editable, because nothing is. */
+@Composable
+private fun BuiltInProfileSummary(profile: LogFormatProfile) {
+    val engine = profile.engine
+    val detection = profile.detection
+    SettingsGroup("Definition", modifier = Modifier.testTag("settings-log-format-summary")) {
+        ProfileSummaryRow("Parser engine", engineLabel(engine))
+        ProfileSummaryRow("File extensions", detection.extensions.joinToString(", ").ifBlank { "None" })
+        ProfileSummaryRow(
+            "Always open these extensions with this format",
+            if (detection.alwaysUseForExtensions && detection.extensions.isNotEmpty()) "On" else "Off",
+        )
+        ProfileSummaryRow("Header text", detection.headerContains.joinToString(", ").ifBlank { "None" })
+        ProfileSummaryRow("Content detection regex", detection.contentRegex?.ifBlank { null } ?: "None", monospace = true)
+        ProfileSummaryRow("Fields", summaryFields(profile))
+        ProfileSummaryRow("Timestamp interpretation", summaryTimestamp(profile))
+        ProfileSummaryRow("Severity mapping", summarySeverity(profile))
+        ProfileSummaryRow(
+            "Extra attributes",
+            profile.attributes.joinToString(", ") { "${it.label} (${it.id})" }
+                .ifBlank { if (supportsProfileFields(engine)) "None" else NO_EXTRA_SOURCE_FIELDS },
+        )
+        val columns = profile.visibleColumns.map(::roleLabel) + profile.attributes.filter { it.visibleByDefault }.map { it.label }
+        ProfileSummaryRow("Default columns", columns.joinToString(", ").ifBlank { "None" })
+        ProfileSummaryRow(
+            "Compatible analyzers",
+            profile.compatibleAnalyzers.sorted().joinToString(", ") { analyzerLabel(it) }.ifBlank { "None" },
+        )
+        ProfileSummaryRow(
+            "Issue rules",
+            profile.issueRules.joinToString(", ") { if (it.enabled) it.name else "${it.name} (disabled)" }.ifBlank { "None" },
+        )
+    }
+}
+
+/** One label and its value, both at full strength; a long value wraps. Anchored by [label] so Settings search finds it. */
+@Composable
+private fun ProfileSummaryRow(label: String, value: String, monospace: Boolean = false) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth()
+            .settingsAnchor(label)
+            .padding(horizontal = 12.dp, vertical = 9.dp)
+            .testTag("settings-log-format-summary-${label.lowercase().replace(' ', '-')}"),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        AppText(
+            label,
+            color = tc.tx,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = Int.MAX_VALUE,
+            modifier = Modifier.width(SUMMARY_LABEL_WIDTH),
+        )
+        AppText(
+            value,
+            color = tc.tx,
+            fontSize = 12.sp,
+            fontFamily = if (monospace) FontFamily.Monospace else LocalUiFontFamily.current,
+            maxLines = Int.MAX_VALUE,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+private val SUMMARY_LABEL_WIDTH = 210.dp
+
+private fun summaryFields(profile: LogFormatProfile): String {
+    if (!supportsProfileFields(profile.engine)) return nativeFieldDescription(profile.engine)
+    val mapped = profile.fieldMappings.entries.sortedBy { it.key.ordinal }.filter { it.value.isNotBlank() }
+    return if (mapped.isEmpty()) {
+        "Detected automatically"
+    } else {
+        mapped.joinToString("\n") { (role, source) -> "${roleLabel(role)} → $source" }
+    }
+}
+
+private fun summaryTimestamp(profile: LogFormatProfile): String {
+    if (!supportsProfileTimestamps(profile.engine)) return READ_DIRECTLY_BY_ENGINE
+    val parts = mutableListOf(timestampKindLabel(profile.timestampKind))
+    if (profile.timestampKind == ProfileTimestampKind.EPOCH || profile.timestampKind == ProfileTimestampKind.RELATIVE) {
+        parts += epochUnitLabel(profile.epochUnit)
+    }
+    if (profile.timestampPattern.isNotBlank()) parts += "pattern ${profile.timestampPattern}"
+    if (profile.timestampKind == ProfileTimestampKind.RELATIVE && profile.relativeClock.isNotBlank()) {
+        parts += "clock ${profile.relativeClock}"
+    }
+    if (profile.timezone.isNotBlank()) parts += "timezone ${profile.timezone}"
+    return parts.joinToString(" · ")
+}
+
+private fun summarySeverity(profile: LogFormatProfile): String = when {
+    !supportsSeverityMapping(profile.engine) -> READ_DIRECTLY_BY_ENGINE
+    profile.severityMapping.isEmpty() -> "None"
+    else -> profile.severityMapping.entries.joinToString(", ") { (source, level) -> "$source → ${LogLevel.from(level).label}" }
+}
+
+private fun analyzerLabel(id: String): String = if (id == "android-crash") "Android crash analysis" else id
 
 @Composable
 private fun ProfilePreviewResults(parsed: ParsedLog) {
@@ -1286,6 +1430,9 @@ private fun isBinaryEngine(engine: LogFormatEngine): Boolean = engine == LogForm
 
 private fun supportsProfileFields(engine: LogFormatEngine): Boolean =
     engine !in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON, LogFormatEngine.PLAIN_TEXT)
+
+/** Severity mapping applies to the same engines as field mapping: the others read severity themselves. */
+private fun supportsSeverityMapping(engine: LogFormatEngine): Boolean = supportsProfileFields(engine)
 
 private fun supportsProfileTimestamps(engine: LogFormatEngine): Boolean =
     engine !in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON, LogFormatEngine.PLAIN_TEXT)

@@ -224,7 +224,8 @@ Text that matches none of them opens as before, one row per line.
   compact summary; expand it to inspect nested fields, array elements, or the message's original
   lines. A multiline JSON string can be expanded into its decoded lines too. These child rows keep
   the parent log record's identity; they do not become separate search results or note references.
-- **Settings › Log formats** is where you make your own. For a plain text log, press **New profile**, paste one
+- **Settings › Log formats** is where you make your own. A built-in format shows its definition as a read-only
+  summary; press **Duplicate to edit** to get an editable copy. For a plain text log, press **New profile**, paste one
   typical line under **Set up from a sample line**, and say what each column is (level, message, timestamp, tag,
   process id, thread id, an extra field, or skip). Choose Message for every word of the text; lines with more or fewer
   words still match. **Use these columns** writes the parsing rule for you, **Preview** shows the result, **Save**
