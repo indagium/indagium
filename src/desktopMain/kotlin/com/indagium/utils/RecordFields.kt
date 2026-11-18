@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.security.MessageDigest
 import kotlinx.serialization.json.Json as KJson
 
 // Pure helpers for "fields of a JSON record" in notes: finding a field by its path, freezing the chosen subtrees as compact JSON, and
@@ -49,12 +50,34 @@ internal fun jsonSubtreeAt(root: JsonElement, path: List<String>): JsonElement? 
     return node
 }
 
-/** "metadata.bluetooth.accessory_address", array indices attached to what they index: "items[2].name". */
+private val RECORD_ARRAY_INDEX = Regex("\\[[0-9]+\\]")
+
+/** Dot paths with array indices and quoted brackets for keys that would otherwise be read as path syntax. */
 internal fun joinRecordPath(path: List<String>): String = buildString {
     path.forEachIndexed { index, segment ->
-        if (index > 0 && !(segment.startsWith("[") && segment.endsWith("]"))) append('.')
-        append(segment)
+        when {
+            RECORD_ARRAY_INDEX.matches(segment) -> append(segment)
+            segment.isEmpty() || segment.any { it in ".[]" || it.isISOControl() } -> append('[').append(JsonPrimitive(segment)).append(']')
+            else -> {
+                if (index > 0) append('.')
+                append(segment)
+            }
+        }
     }
+}
+
+internal fun String.recordFingerprint(): String =
+    MessageDigest.getInstance("SHA-256").digest(toByteArray()).toHexString()
+
+/** Keep the visible record header and a locator when a note contains only selected fields. */
+internal fun AnnBlock.LogRef.withSelectedRecordSnapshot(): AnnBlock.LogRef {
+    if (recordFields.isNullOrEmpty()) return this
+    val row = sourceEntries?.singleOrNull()
+    return copy(
+        sourceEntries = row?.let { listOf(LogEntry(it.id, it.ts, it.level, it.tag, msg = "")) },
+        presentation = presentation?.copy(rows = emptyList()),
+        sourceRecordFingerprint = sourceRecordFingerprint ?: row?.rawRecord?.recordFingerprint(),
+    )
 }
 
 /** "metadata › bluetooth › accessory_address": how a note shows where a field sits. */

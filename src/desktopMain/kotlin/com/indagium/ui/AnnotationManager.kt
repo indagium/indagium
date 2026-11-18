@@ -13,6 +13,7 @@ import com.indagium.utils.captureAnnotationLogRef
 import com.indagium.utils.captureFilteredAnnotationLogRef
 import com.indagium.utils.computeItems
 import com.indagium.utils.downscaleAndEncodeJpeg
+import com.indagium.utils.withSelectedRecordSnapshot
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -83,7 +84,7 @@ internal class AnnotationManager(private val appState: AppState) {
                 presentation = capture?.presentation?.copy(options = options),
                 sourceSectionId = request.sourceSectionId,
                 recordFields = request.recordFields,
-            )
+            ).withSelectedRecordSnapshot()
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
         addAnnRequest = null

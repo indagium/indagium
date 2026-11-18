@@ -13613,8 +13613,11 @@ class AppState(
             logFormatProfileError = "That profile no longer exists."
             return null
         }
-        return openFileInternal(file, bypassSplitPrompt = bypassSplitPrompt, profile = profile)
+        return openFileWithLogFormatProfile(file, profile, bypassSplitPrompt)
     }
+
+    internal fun openFileWithLogFormatProfile(file: File, profile: LogFormatProfile, bypassSplitPrompt: Boolean = false): String? =
+        openFileInternal(file, bypassSplitPrompt = bypassSplitPrompt, profile = profile)
 
     internal fun openFile(file: File, origin: TabRef?): String? =
         openFileInternal(file, bypassSplitPrompt = false, originGroupId = tabGroupIdForOrigin(origin))

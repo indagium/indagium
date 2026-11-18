@@ -758,6 +758,42 @@ class SharedNoteOperationsTest {
     }
 
     @Test
+    fun reopenSharedNoteMemberUsesThePinnedProfileWithAnotherParseAlreadyOpen() {
+        val dir = createTempDirectory("shared-ops-reopen-profile").toFile()
+        val state = state(dir)
+        try {
+            val file = File(dir, "events.json").apply { writeText("""{"message":"hello"}""" + "\n") }
+            val pinned = assertNotNull(state.logFormatProfile("plain-text"))
+                .copy(id = "text-events", name = "Text events", readOnly = false)
+            state.updateSettings { it.copy(customLogFormatProfiles = listOf(pinned)) }
+            val originalId = assertNotNull(state.openFileWithLogFormatProfile(file, pinned.id))
+            waitUntil { state.tab(originalId) != null }
+            val snapshot = assertNotNull(state.tab(originalId)?.logFormatProfileSnapshot)
+            val hostId = assertNotNull(state.createSharedNote("Main", listOf(originalId)))
+            state.putBlocks(hostId, logRef("r1", originalId, 1))
+            state.closeTab(originalId)
+
+            state.updateSettings { it.copy(customLogFormatProfiles = emptyList()) }
+            val otherId = assertNotNull(state.openFileWithLogFormatProfile(file, "json-lines"))
+            waitUntil { state.tab(otherId) != null }
+            assertEquals(originalId, state.host(hostId).sharedNote!!.closedMembers.single().tabId)
+            assertNull(state.tab(otherId)?.notesView)
+
+            assertTrue(state.reopenSharedNoteMember(hostId, originalId))
+            waitUntil { state.host(hostId).sharedNote!!.memberTabIds.singleOrNull()?.let { state.tab(it) != null } == true }
+
+            val reopened = assertNotNull(state.tab(state.host(hostId).sharedNote!!.memberTabIds.single()))
+            assertNotEquals(otherId, reopened.id)
+            assertEquals(snapshot, reopened.logFormatProfileSnapshot)
+            assertEquals(reopened.id, (state.host(hostId).annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
+            assertTrue(state.host(hostId).sharedNote!!.closedMembers.isEmpty())
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun reopenSharedNoteMemberWithAMissingFileReportsAnOpenError() {
         val dir = createTempDirectory("shared-ops-reopen-missing").toFile()
         val state = withTabs(dir)

@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.debug.IndagiumToolOperations
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
+import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.SharedNoteClosedMember
@@ -13,6 +14,7 @@ import com.indagium.ui.AppState
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.mkTab
 import com.indagium.ui.sharedNoteHostTab
+import com.indagium.utils.logFormatProfileJson
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -38,7 +40,12 @@ class SharedNoteModelTest {
             id = id,
             name = name,
             memberTabIds = members,
-            closedMembers = listOf(SharedNoteClosedMember("c", "old|file.json", "/tmp/old|file.json"), SharedNoteClosedMember("d", "gone.log", null)),
+            closedMembers = listOf(
+                SharedNoteClosedMember(
+                    "c", "old|file.json", "/tmp/old|file.json", logFormatProfileJson(BUILTIN_LOG_FORMAT_PROFILES.first { it.id == "json-lines" }),
+                ),
+                SharedNoteClosedMember("d", "gone.log", null),
+            ),
             createdAtMs = 1_700_000_000_123L,
         )
 

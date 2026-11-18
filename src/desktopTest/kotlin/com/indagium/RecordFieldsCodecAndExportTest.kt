@@ -5,13 +5,20 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
+import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.AppState
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
+import com.indagium.ui.b64
 import com.indagium.ui.mkTab
+import com.indagium.ui.recordFieldsToken
+import com.indagium.ui.requestAddRecordFields
+import com.indagium.ui.resolveLogRefRowIds
+import com.indagium.ui.tokenFields
+import com.indagium.ui.unb64
 import com.indagium.utils.RECORD_EXPORT_MAX_LINES
 import com.indagium.utils.RECORD_FIELDS_MAX_JSON_CHARS
 import com.indagium.utils.RecordFieldsResult
@@ -19,6 +26,9 @@ import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
 import com.indagium.utils.joinRecordPath
 import com.indagium.utils.recordFieldRefs
+import com.indagium.utils.withSelectedRecordSnapshot
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -105,16 +115,63 @@ class RecordFieldsCodecAndExportTest {
             ref("r1", fields(), section = "Tethered Bluetooth / HCI", source = "j"),
             ref("r2", fields(), section = null, source = null),
             ref("r3", null, section = "G / S"),
-            ref("r4", fields() + AnnBlock.RecordFieldRef(listOf("", "a,b;c:d|e"), "\"v | ; : ,\"")),
+            ref("r4", fields() + AnnBlock.RecordFieldRef(listOf(""), "7") + AnnBlock.RecordFieldRef(listOf("", "a,b;c:d|e"), "\"v | ; : ,\"")),
         )
 
-        val decoded = assertNotNull(original.annotationsToken().annotationsFromToken())
+        val token = original.annotationsToken()
+        val sanitized = original.copy(blocks = original.blocks.filterIsInstance<AnnBlock.LogRef>().map { it.withSelectedRecordSnapshot() })
+        val decoded = assertNotNull(token.annotationsFromToken())
 
-        assertEquals(original.blocks, decoded.blocks)
+        assertEquals(sanitized.annotationsToken(), token)
+        assertEquals(sanitized.blocks, decoded.blocks)
         val refs = decoded.blocks.filterIsInstance<AnnBlock.LogRef>()
         assertEquals(listOf("Tethered Bluetooth / HCI", null, "G / S", null), refs.map { it.sourceSectionId })
         assertEquals(listOf(true, true, false, true), refs.map { it.recordFields != null })
+        assertEquals(listOf(""), refs[3].recordFields!![2].path)
         assertEquals(listOf("", "a,b;c:d|e"), refs[3].recordFields!!.last().path)
+    }
+
+    @Test
+    fun aLegacyFieldsReferenceUsesItsFullSnapshotToCreateTheLocatorBeforeDiscardingIt() {
+        val whole = ref(fields = null, section = "section")
+        val wholeNote = notes(whole)
+        val rowToken = wholeNote.annotationsToken().tokenFields()[2].unb64()
+        val legacyRefToken = "$rowToken|${fields().recordFieldsToken().b64()}"
+
+        val decoded = assertNotNull(tokenFields(wholeNote.prefix, wholeNote.suffix, legacyRefToken.b64()).annotationsFromToken())
+        val block = assertIs<AnnBlock.LogRef>(decoded.blocks.single())
+        val row = jsonRow(1)
+        assertEquals(whole.copy(recordFields = fields()).withSelectedRecordSnapshot(), block)
+        assertEquals(listOf(1), resolveLogRefRowIds(block, listOf(row), mapOf(1 to row)))
+    }
+
+    @Test
+    fun savingSelectedFieldsKeepsTheHeaderAndFindsTheOriginalRecordAfterItMoves() {
+        val dir = createTempDirectory("record-fields-sidecar").toFile()
+        val app = AppState(File(dir, "state.cache"), autoExportNotes = false)
+        try {
+            val packet = jsonRow(1, """{"id":7,"detail":"unselected"}""").let { row ->
+                row.copy(recordMetadata = row.recordMetadata!!.copy(displayColumns = listOf(LogDisplayField("detail", "Detail", "unselected"))))
+            }
+            app.tabs = listOf(mkTab("a", "a.json", listOf(packet)))
+            app.activeTabId = "a"
+            app.requestAddRecordFields("a", packet.id, listOf(listOf("id")))
+            app.confirmAddAnn(assertNotNull(app.addAnnRequest), "", AnnBlock.LogRefPresentationOptions())
+
+            val sidecar = File(dir, "a.ann")
+            assertTrue(app.saveAnnotationsTo("a", sidecar))
+            val saved = assertIs<AnnBlock.LogRef>(assertNotNull(sidecar.readText().annotationsFromToken()).blocks.single())
+            assertEquals(listOf(AnnBlock.RecordFieldRef(listOf("id"), "7")), saved.recordFields)
+            assertEquals(listOf(LogEntry(1, packet.ts, packet.level, packet.tag, "")), saved.sourceEntries)
+            assertTrue(saved.presentation?.rows.orEmpty().isEmpty())
+
+            val rows = listOf(packet.copy(recordMetadata = LogRecordMetadata(rawRecord = """{"id":7,"detail":"other"}""")), packet.copy(id = 2))
+            assertEquals(listOf(2), resolveLogRefRowIds(saved, rows, rows.associateBy { it.id }))
+            assertEquals(emptyList(), resolveLogRefRowIds(saved, rows.take(1), mapOf(1 to rows.first())))
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
     }
 
     @Test
@@ -233,6 +290,23 @@ class RecordFieldsCodecAndExportTest {
 
         assertContains(html, "&quot;accessory_address&quot;: &quot;AA:BB:CC&quot;,")
         assertContains(html, "<pre><code>{\n  &quot;metadata.bluetooth.accessory_address&quot;: &quot;AA:BB:CC&quot;,\n  &quot;id&quot;: 7\n}\n</code></pre>")
+    }
+
+    @Test
+    fun exportsKeepLiteralPathSyntaxSeparateFromNestedFields() {
+        val json = """{"x.y":1,"x":{"y":2},"items[0]":3,"items":[4],"":5}"""
+        val paths = listOf(listOf("x.y"), listOf("x", "y"), listOf("items[0]"), listOf("items", "[0]"), listOf(""))
+        val fields = assertIs<RecordFieldsResult.Ok>(recordFieldRefs(json, paths)).fields
+        val tab = tabWith(ref(fields = fields))
+        val settings = AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_CLOUD)
+
+        val markdown = buildMd(tab, settings).substringAfter("```json\n").substringBefore("\n```")
+        val html = buildAnnotationsHtml(tab, settings).substringAfter("<pre><code>").substringBefore("\n</code></pre>")
+            .replace("&quot;", "\"")
+        val expected = mapOf("[\"x.y\"]" to "1", "x.y" to "2", "[\"items[0]\"]" to "3", "items[0]" to "4", "[\"\"]" to "5")
+        for (export in listOf(markdown, html)) {
+            assertEquals(expected, Json.parseToJsonElement(export).jsonObject.mapValues { it.value.toString() })
+        }
     }
 
     @Test

@@ -7,6 +7,8 @@ import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedMember
 import com.indagium.model.SharedNoteInfo
 import com.indagium.model.resolveRows
+import com.indagium.utils.logFormatProfileFromJson
+import com.indagium.utils.recordFingerprint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -74,6 +76,13 @@ private fun plainSourcePathKey(sourcePath: String?): String? {
     return File(sourcePath).absoluteFile.normalize().path
 }
 
+/** Older sessions have no profile snapshot, so their closed members match by path alone. */
+private fun SharedNoteClosedMember.matches(tab: LogTab): Boolean {
+    val key = plainSourcePathKey(sourcePath) ?: return false
+    return plainSourcePathKey(tab.sourcePath) == key &&
+        (logFormatProfileSnapshot == null || logFormatProfileSnapshot == tab.logFormatProfileSnapshot)
+}
+
 /** Open ordinary tabs only: never a shared-note host (not in `tabs`) and never the New-tab launcher. Caller holds stateLock. */
 private fun AppState.eligibleMemberIds(ids: List<String>): List<String> =
     ids.distinct().filter { id -> tabs.any { it.id == id && !it.isCaptureLauncher } }
@@ -119,11 +128,10 @@ private fun Annotations.returnedTo(tabId: String): Annotations = mapLogRefs { re
     if (ref.sourceTabId == tabId) ref.copy(sourceTabId = null, sourceFilename = null) else ref
 }
 
-/** A host with [tab] added as an open member; a closed member for the same file is dropped and its row references follow the new tab id. */
+/** Adds [tab] and retargets references from closed members with the same source and profile. */
 private fun LogTab.withMember(tab: LogTab): LogTab {
     val info = sharedNote ?: return this
-    val key = plainSourcePathKey(tab.sourcePath)
-    val matched = key?.let { k -> info.closedMembers.filter { plainSourcePathKey(it.sourcePath) == k } }.orEmpty()
+    val matched = info.closedMembers.filter { it.matches(tab) }
     val retargeted = matched.fold(annotations) { notes, closed -> notes.retargetLogRefSource(closed.tabId, tab.id) }
     return copy(
         annotations = retargeted,
@@ -139,7 +147,7 @@ private fun LogTab.withMemberClosed(tab: LogTab): LogTab {
     val info = sharedNote ?: return this
     if (tab.id !in info.memberTabIds) return this
     val path = tab.sourcePath?.takeIf { plainSourcePathKey(it) != null }
-    val closed = path?.let { SharedNoteClosedMember(tab.id, tab.filename, it) }
+    val closed = path?.let { SharedNoteClosedMember(tab.id, tab.filename, it, tab.logFormatProfileSnapshot) }
     return copy(
         sharedNote = info.copy(
             memberTabIds = info.memberTabIds - tab.id,
@@ -350,11 +358,15 @@ internal fun AppState.setNotesView(tabId: String, hostId: String?): Boolean = sy
 internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
     if (closing.isEmpty() || sharedNoteHosts.isEmpty()) return
     val closingIds = closing.mapTo(HashSet()) { it.id }
-    // A closing member whose file is still open in another tab (a reparse opens the new tab before closing the original)
-    // hands its membership to that tab instead of becoming a closed member.
+    // A closing member can hand off to another tab showing the same source with the same profile.
     val successors = closing.associate { tab ->
         val key = plainSourcePathKey(tab.sourcePath)
-        tab.id to key?.let { k -> tabs.firstOrNull { it.id !in closingIds && plainSourcePathKey(it.sourcePath) == k } }
+        tab.id to key?.let { k ->
+            tabs.firstOrNull {
+                it.id !in closingIds && plainSourcePathKey(it.sourcePath) == k &&
+                    (tab.logFormatProfileSnapshot == null || it.logFormatProfileSnapshot == tab.logFormatProfileSnapshot)
+            }
+        }
     }
     val viewHandOver = HashMap<String, String>()
     val updated = sharedNoteHosts.map { host ->
@@ -362,7 +374,7 @@ internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
             val wasMember = acc.sharedNote?.memberTabIds?.contains(tab.id) == true
             val closed = acc.withMemberClosed(tab)
             val successor = successors[tab.id]
-            if (!wasMember || successor == null || closed.sharedNote?.memberTabIds?.contains(successor.id) == true) {
+            if (!wasMember || successor == null) {
                 closed
             } else {
                 if (tab.notesView == host.id && successor.notesView == null) viewHandOver[successor.id] = host.id
@@ -381,13 +393,10 @@ internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
  * restored tabs are already members and never come through here. Caller holds stateLock.
  */
 internal fun AppState.attachReopenedTabToSharedNotesLocked(opened: LogTab): LogTab {
-    val key = plainSourcePathKey(opened.sourcePath)
-    if (key == null || sharedNoteHosts.isEmpty()) return opened
+    if (plainSourcePathKey(opened.sourcePath) == null || sharedNoteHosts.isEmpty()) return opened
     var firstHostId: String? = null
     val updated = sharedNoteHosts.map { host ->
-        val info = host.sharedNote
-        val reattaches = info != null && opened.id !in info.memberTabIds &&
-            info.closedMembers.any { plainSourcePathKey(it.sourcePath) == key }
+        val reattaches = host.sharedNote?.closedMembers?.any { it.matches(opened) } == true
         if (reattaches) {
             if (firstHostId == null) firstHostId = host.id
             host.withMember(opened)
@@ -417,9 +426,8 @@ internal fun AppState.reopenSharedNoteMember(hostId: String, closedTabId: String
         showOpenError("Could not open file", path, "The file does not exist or is not readable.")
         return false
     }
-    val key = plainSourcePathKey(path)
     val alreadyOpen = synchronized(stateLock) {
-        val existing = tabs.firstOrNull { plainSourcePathKey(it.sourcePath) == key } ?: return@synchronized null
+        val existing = tabs.firstOrNull { closed.matches(it) } ?: return@synchronized null
         val attached = attachReopenedTabToSharedNotesLocked(existing)
         if (attached != existing) updateTabsLocked(setOf(existing.id)) { attached }
         existing.id
@@ -428,7 +436,14 @@ internal fun AppState.reopenSharedNoteMember(hostId: String, closedTabId: String
         activateTab(alreadyOpen)
         return true
     }
-    return openPath(file) != null
+    val snapshot = closed.logFormatProfileSnapshot ?: return openPath(file) != null
+    val profile = logFormatProfileFromJson(snapshot)
+    return if (profile == null) {
+        showOpenError("Could not reopen ${closed.filename}", path, "The saved log format profile is invalid.")
+        false
+    } else {
+        openFileWithLogFormatProfile(file, profile) != null
+    }
 }
 
 // ── Go to rows ───────────────────────────────────────────────────────────────────────────────
@@ -451,14 +466,27 @@ internal sealed interface GoToRowsResult {
 private const val REOPEN_WAIT_MS = 60_000L
 private const val REOPEN_POLL_MS = 25L
 
-private fun LogEntry.sameRowContent(other: LogEntry): Boolean = ts == other.ts && msg == other.msg && tag == other.tag
+private fun LogEntry.sameRowContent(saved: LogEntry): Boolean =
+    ts == saved.ts && msg == saved.msg && tag == saved.tag && (saved.rawRecord == null || rawRecord == saved.rawRecord)
+
+private fun resolveSelectedRecordId(block: AnnBlock.LogRef, rows: List<LogEntry>, rmap: Map<Int, LogEntry>, fingerprint: String): Int? {
+    val id = block.logIds.singleOrNull() ?: return null
+    val saved = block.sourceEntries?.singleOrNull()
+
+    fun matches(row: LogEntry): Boolean =
+        (saved == null || (row.ts == saved.ts && row.tag == saved.tag)) && row.rawRecord?.recordFingerprint() == fingerprint
+
+    if (rmap[id]?.let(::matches) == true) return id
+    return rows.asSequence().filter(::matches).minByOrNull { abs(it.id - id) }?.id
+}
 
 /**
  * The ids in [rows] that stand for [block]'s rows. A saved id is kept when the row now under it is the frozen one (same time,
- * message and tag); an id that changed (a reparse, a reopened file) is looked up by content, taking the closest id when the
+ * message, tag and JSON when available); an id that changed (a reparse, a reopened file) is looked up by content, taking the closest id when the
  * content repeats. A reference without frozen rows keeps the ids that still exist. One pass over [rows] serves every changed id.
  */
 internal fun resolveLogRefRowIds(block: AnnBlock.LogRef, rows: List<LogEntry>, rmap: Map<Int, LogEntry>): List<Int> {
+    block.sourceRecordFingerprint?.let { return listOfNotNull(resolveSelectedRecordId(block, rows, rmap, it)) }
     val frozen = block.sourceEntries?.associateBy { it.id }.orEmpty()
     val found = LinkedHashSet<Int>()
     val lost = ArrayList<LogEntry>()

@@ -175,10 +175,12 @@ class RecordFieldsUiTest : SharedNoteUiTestBase() {
         val block = state.tab("a")!!.annotations.blocks.single() as AnnBlock.LogRef
         assertEquals(id, block.id)
         assertEquals(listOf(1), block.logIds)
-        assertEquals(listOf(ADDRESS, listOf("id")), block.recordFields!!.map { it.path })
-        assertEquals(listOf("\"AA:BB:CC:DD\"", "7"), block.recordFields!!.map { it.json })
+        val fields = assertNotNull(block.recordFields)
+        assertEquals(listOf(ADDRESS, listOf("id")), fields.map { it.path })
+        assertEquals(listOf("\"AA:BB:CC:DD\"", "7"), fields.map { it.json })
         assertNull(block.sourceTabId, "the tab's own note keeps no source tab")
-        assertEquals(RECORD_ONE, block.sourceEntries!!.single().rawRecord, "the record is frozen with the reference")
+        assertNotNull(block.sourceRecordFingerprint)
+        assertNull(block.sourceEntries!!.single().rawRecord)
 
         // The note shows each chosen field under its path (parents in secondary text), the last segment as the field.
         assertTrue(exists(logRefFieldsTag(id)))

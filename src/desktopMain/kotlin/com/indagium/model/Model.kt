@@ -549,15 +549,17 @@ sealed class AnnBlock {
         /**
          * The log section (a metadata JSON file's section id) the source tab was showing when the rows were captured, or null
          * for a log without sections. [logIds] are ids within that section, so "Go to rows" selects it first. Persisted in
-         * the "R" token (AutosaveCodec), appended last.
+         * the "R" token (AutosaveCodec).
          */
         val sourceSectionId: String? = null,
         /**
          * Set when the reference was made from chosen fields of a JSON record instead of the whole record (the field tree's
-         * "Add field to notes"): the one row in [sourceEntries] is the record, and these are the fields picked from it. Null
-         * for a whole-record or plain row reference. Persisted in the "R" token (AutosaveCodec), appended last.
+         * "Add field to notes"). [sourceEntries] holds the record's header for display, and these are the fields picked
+         * from it. Null for a whole-record or plain row reference. Persisted in the "R" token (AutosaveCodec).
          */
         val recordFields: List<RecordFieldRef>? = null,
+        /** Digest of the original JSON of a fields reference, used to find the source record after its row id changes. */
+        val sourceRecordFingerprint: String? = null,
     ) : AnnBlock()
 
     /**
@@ -1159,6 +1161,7 @@ data class SharedNoteClosedMember(
     val tabId: String,
     val filename: String,
     val sourcePath: String?,
+    val logFormatProfileSnapshot: String? = null,
 )
 
 /** Copy presentation preferences captured when a legacy note is opened/restored. */

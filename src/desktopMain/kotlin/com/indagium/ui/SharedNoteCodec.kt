@@ -13,7 +13,9 @@ internal fun SharedNoteInfo.sharedNoteToken(): String = tokenFields(
     id,
     name,
     memberTabIds.joinToString(",") { it.b64() },
-    closedMembers.joinToString(",") { tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty()).b64() },
+    closedMembers.joinToString(",") {
+        tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty(), it.logFormatProfileSnapshot.orEmpty()).b64()
+    },
     createdAtMs.toString(),
 )
 
@@ -26,7 +28,9 @@ private fun String.sharedNoteFromToken(): SharedNoteInfo? = runCatching {
         closedMembers = p.getOrNull(3).orEmpty().encodedList().mapNotNull { encoded ->
             runCatching {
                 val f = encoded.tokenFields()
-                SharedNoteClosedMember(f[0], f[1], f.getOrNull(2)?.takeIf { it.isNotBlank() })
+                SharedNoteClosedMember(
+                    f[0], f[1], f.getOrNull(2)?.takeIf { it.isNotBlank() }, f.getOrNull(3)?.takeIf { it.isNotBlank() },
+                )
             }.getOrNull()
         },
         createdAtMs = p.getOrNull(4)?.toLongOrNull() ?: 0L,

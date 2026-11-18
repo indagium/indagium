@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.LogRecordMetadata
 import com.indagium.model.TabContentState
 import com.indagium.ui.AppState
 import com.indagium.ui.GoToRowsResult
@@ -219,6 +220,16 @@ class SharedNoteGoToRowsTest {
 
         val legacy = AnnBlock.LogRef("l", listOf(2, 500), "legacy")
         assertEquals(listOf(2), resolveLogRefRowIds(legacy, rows, rmap), "without frozen rows the ids that exist are kept")
+    }
+
+    @Test
+    fun structuredRowsWithIdenticalSummariesAreMatchedByTheirOriginalJson() {
+        val saved = entry(1, "packet").copy(recordMetadata = LogRecordMetadata(rawRecord = """{"payload":17}"""))
+        val current = listOf(saved.copy(recordMetadata = LogRecordMetadata(rawRecord = """{"payload":21}""")), saved.copy(id = 2))
+        val block = ref(source = "a", ids = listOf(1), frozen = listOf(saved))
+
+        assertEquals(listOf(2), resolveLogRefRowIds(block, current, current.associateBy { it.id }))
+        assertEquals(emptyList(), resolveLogRefRowIds(block, current.take(1), mapOf(1 to current.first())))
     }
 
     // ── Sections ─────────────────────────────────────────────────────────────────────────────────

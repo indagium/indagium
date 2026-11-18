@@ -12,6 +12,7 @@ import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
 import com.indagium.utils.logFormatProfilesFromJson
 import com.indagium.utils.logFormatProfilesJson
+import com.indagium.utils.withSelectedRecordSnapshot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -1578,14 +1579,15 @@ private fun String.toLogEntryFromAnnToken(): LogEntry? = runCatching {
 private fun AnnBlock.annBlockToken(): String = when (this) {
     is AnnBlock.Note -> tokenFields("N", id, text)
     is AnnBlock.LogRef -> {
+        val snapshot = withSelectedRecordSnapshot()
         val fields = mutableListOf(
             "R", id,
             logIds.joinToString(","),
             caption,
             sourceTabId.orEmpty(),
             sourceFilename.orEmpty(),
-            sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
-            presentation?.let(AnnotationLogRefPresentationCodec::encode).orEmpty(),
+            snapshot.sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
+            snapshot.presentation?.let(AnnotationLogRefPresentationCodec::encode).orEmpty(),
         )
         // Appended — index 8, written only when set so a note without sections encodes exactly as before. A reader
         // that predates it never looks past index 7; a token without it decodes as no section.
@@ -1593,7 +1595,10 @@ private fun AnnBlock.annBlockToken(): String = when (this) {
         // reference without a section writes an empty one (decoded as no section) before it.
         val chosen = recordFields?.takeIf { it.isNotEmpty() }
         if (sourceSectionId != null || chosen != null) fields += sourceSectionId.orEmpty()
-        chosen?.let { fields += it.recordFieldsToken() }
+        if (chosen != null) {
+            fields += chosen.recordFieldsToken()
+            snapshot.sourceRecordFingerprint?.let { fields += it }
+        }
         fields.joinToString("|") { it.fieldToken() }
     }
     // bytes is base64'd with a plain java.util.Base64 call (NOT the .b64() field helper below,
@@ -1625,7 +1630,8 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
                 ?.let(AnnotationLogRefPresentationCodec::decode),
             sourceSectionId = p.getOrElse(8) { "" }.takeIf { it.isNotBlank() },
             recordFields = p.getOrElse(9) { "" }.takeIf { it.isNotBlank() }?.recordFieldsFromToken(),
-        )
+            sourceRecordFingerprint = p.getOrNull(10)?.takeIf { it.isNotBlank() },
+        ).withSelectedRecordSnapshot()
         "I" -> AnnBlock.Image(
             id = p[1],
             caption = p.getOrElse(2) { "" },

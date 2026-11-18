@@ -3,7 +3,7 @@ package com.indagium.ui
 import com.indagium.model.AnnBlock
 import com.indagium.utils.RECORD_FIELDS_MAX_JSON_CHARS
 
-// The chosen fields of a fields reference as the last field of the "R" annotation block token (AutosaveCodec.kt's annBlockToken).
+// The chosen fields in the "R" annotation block token (AutosaveCodec.kt's annBlockToken).
 
 /**
  * The chosen fields of a fields reference: each one `<path segments, base64, comma separated>:<json, base64>`, the fields
@@ -16,7 +16,7 @@ internal fun List<AnnBlock.RecordFieldRef>.recordFieldsToken(): String =
 internal fun String.recordFieldsFromToken(): List<AnnBlock.RecordFieldRef>? {
     val fields = split(";").mapNotNull { part ->
         val separator = part.indexOf(':')
-        if (separator <= 0) return@mapNotNull null
+        if (separator < 0) return@mapNotNull null
         runCatching {
             val path = part.substring(0, separator).split(",").map { it.unb64() }
             AnnBlock.RecordFieldRef(path, part.substring(separator + 1).unb64())
