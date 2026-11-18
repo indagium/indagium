@@ -204,6 +204,8 @@ internal class TileSlot(
     val actionsCentered: Boolean = false,
     /** The body's focusable root represents a panel, so restoring its focus should not reveal its clipped lower edge. */
     val preserveBodyRootFocus: Boolean = false,
+    /** Drawn right after the title (before the [summary]) in the header's title part, given the card's width in dp: the Notes tile's Shared badge. */
+    val titleExtra: (@Composable (widthDp: Float) -> Unit)? = null,
     val body: @Composable (TileBodyInfo) -> Unit,
 )
 
@@ -765,17 +767,23 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
         // part and the action share one group instead: the title takes what it needs (it shortens first when the room is short) and the action
         // is centred in the room that is left, before the header icons.
         val titleGroup: @Composable (Modifier) -> Unit = { groupModifier ->
-            if (parts.showSummary && slot.summary != null) {
+            val extra = slot.titleExtra
+            val summary = slot.summary?.takeIf { parts.showSummary }
+            if (summary != null || extra != null) {
                 Row(groupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
-                    title(Modifier.weight(1f, fill = false))
-                    AppText(
-                        slot.summary,
-                        color = tc.td,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
+                    // With an extra part the title is measured first at its natural width, so the extra (which may fill what is left) never squeezes it out.
+                    title(if (extra != null) Modifier else Modifier.weight(1f, fill = false))
+                    extra?.invoke(rect?.w ?: 0f)
+                    if (summary != null) {
+                        AppText(
+                            summary,
+                            color = tc.td,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    }
                 }
             } else {
                 title(groupModifier)

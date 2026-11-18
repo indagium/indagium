@@ -6635,6 +6635,9 @@ class AppState(
      *  it. */
     var pendingDiagramNotice by mutableStateOf<DiagramNotice?>(null)
 
+    /** The shared-note dialog being shown (share, rename, stop sharing, add tabs, delete), or null. Drawn by [SharedNoteDialogHost] in App.kt. */
+    internal var sharedNoteDialog by mutableStateOf<SharedNoteDialogRequest?>(null)
+
     // R8/ProGuard retracing is explicitly opt-in and non-destructive: this state is only the
     // modal's transient loading/result surface, while the selected mapping path belongs to the
     // individual LogTab and is persisted with the session.

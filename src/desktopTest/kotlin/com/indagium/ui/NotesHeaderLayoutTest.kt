@@ -6,6 +6,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 private const val WIDEST_DP = 1400
+private const val ARROW_ROOM_DP = 19
 
 /** The pure rules that decide where the Notes tile's action buttons are, and how they look, at a given card width. */
 class NotesHeaderLayoutTest {
@@ -114,5 +115,40 @@ class NotesHeaderLayoutTest {
             assertTrue(notesHeaderParts(w.toFloat()).showTitle, "$w: the title stays")
             assertFalse(notesHeaderParts(w.toFloat()).showSummary, "$w: no summary")
         }
+    }
+
+    @Test
+    fun theNewArrowAndTheSharedBadgeMakeTheHeaderNeedMoreRoom() {
+        fun firstInHeader(hasNewMenu: Boolean, sharedBadge: Boolean): Int =
+            (0..WIDEST_DP).first { notesHeaderLayout(it.toFloat(), false, false, 3, hasNewMenu, sharedBadge).actionsInHeader }
+        val plain = firstInHeader(hasNewMenu = false, sharedBadge = false)
+        val withArrow = firstInHeader(hasNewMenu = true, sharedBadge = false)
+        val withBadge = firstInHeader(hasNewMenu = false, sharedBadge = true)
+
+        assertTrue(withArrow in plain + 1..plain + ARROW_ROOM_DP, "New's ▾ half needs its width: $plain -> $withArrow")
+        assertTrue(withBadge in plain + SHARED_BADGE_DP.toInt() - 1..plain + SHARED_BADGE_DP.toInt() + 1, "the badge needs its width: $plain -> $withBadge")
+        assertTrue(kotlin.math.abs(withArrow + SHARED_BADGE_DP.toInt() - firstInHeader(hasNewMenu = true, sharedBadge = true)) <= 1)
+    }
+
+    @Test
+    fun theBarKeepsItsLabelsOnlyWhileTheNewArrowFitsToo() {
+        val plain = (0..WIDEST_DP).first { notesBarLook(it.toFloat(), false, false) == NotesButtonLook.LABELS }
+        val withArrow = (0..WIDEST_DP).first { notesBarLook(it.toFloat(), false, false, hasNewMenu = true) == NotesButtonLook.LABELS }
+
+        assertTrue(withArrow > plain, "the labelled bar needs more room with New's arrow: $plain -> $withArrow")
+        for (w in 0..WIDEST_DP) {
+            val layout = notesHeaderLayout(w.toFloat(), false, false, 3, hasNewMenu = true)
+            if (!layout.actionsInHeader) assertEquals(notesBarLook(w.toFloat(), false, false, hasNewMenu = true), layout.look, "$w")
+        }
+    }
+
+    @Test
+    fun theButtonsStillLeaveTheHeaderOnceAndNeverComeBackWithTheNewArrowAndTheBadge() {
+        var leftHeader = false
+        for (w in WIDEST_DP downTo 0) {
+            val layout = notesHeaderLayout(w.toFloat(), true, true, 3, hasNewMenu = true, sharedBadge = true)
+            if (layout.actionsInHeader) assertFalse(leftHeader, "$w: the buttons came back to the header") else leftHeader = true
+        }
+        assertTrue(leftHeader)
     }
 }

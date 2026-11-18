@@ -93,7 +93,7 @@ private fun appHasOpenFilterDialog(state: AppState): Boolean =
         state.filterExportDialogOpen || state.mergeTabsDialogOpen || state.pendingSplitPrompt != null
 
 private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
-    state.pendingNoteOverwrite != null || state.pendingLogRelink != null || state.pendingDiagramNotice != null ||
+    state.pendingNoteOverwrite != null || state.pendingLogRelink != null || state.pendingDiagramNotice != null || state.sharedNoteDialog != null ||
         state.pendingImportReview != null || state.importError != null || state.workspaceProfileError != null || state.logViewLayoutError != null ||
         state.openError != null ||
         state.retraceDialogState != null
@@ -2039,6 +2039,8 @@ fun App(
                     }
                 }
             }
+
+            SharedNoteDialogHost(state)
 
             state.pendingDeleteFilterId?.let { filterId ->
                 val draftName = state.filterDraftsByTab.values.find { it.id == filterId }?.name

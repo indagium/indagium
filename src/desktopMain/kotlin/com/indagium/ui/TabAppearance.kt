@@ -184,6 +184,8 @@ internal data class TabAppearance(
     val groupTintAlpha: Float = 0f,
     /** A 1 dp outline in this colour around the tab's own shape, over its chrome (a group chip's border). Null draws none. */
     val outlineColor: Color? = null,
+    /** True for a log tab that is an open member of a shared note: it draws a small link mark before its label. */
+    val inSharedNote: Boolean = false,
 ) {
     companion object {
         val Default = TabAppearance()
@@ -205,11 +207,12 @@ private fun appearanceOf(settings: AppSettings, kind: TabKind, secondLine: Strin
     closeButtonPosition = settings.tabCloseButtonPosition,
 )
 
-internal fun logTabDescriptor(tab: LogTab, allTabs: List<LogTab>, settings: AppSettings): TabDescriptor {
+internal fun logTabDescriptor(tab: LogTab, allTabs: List<LogTab>, settings: AppSettings, inSharedNote: Boolean = false): TabDescriptor {
     val kind = tabKind(tab)
     val mode = settings.tabLabelMode
     val second = if (settings.tabStripStyle == TabStripStyle.TWO_LINE) tabDetailLine(tab, kind, mode) else null
-    return TabDescriptor(tabLabelParts(tab, allTabs, mode).joined(), appearanceOf(settings, kind, second, tab.tailing))
+    val appearance = appearanceOf(settings, kind, second, tab.tailing).copy(inSharedNote = inSharedNote)
+    return TabDescriptor(tabLabelParts(tab, allTabs, mode).joined(), appearance)
 }
 
 internal fun workspaceTabDescriptor(label: String, kind: TabKind, settings: AppSettings): TabDescriptor =
@@ -229,6 +232,9 @@ private const val BADGE_DP = 32f
 private const val DOT_DP = 14f
 private const val SEGMENT_DOT_DP = 12f
 
+/** The size (dp) of the link mark a shared-note member's tab draws before its label. */
+internal const val SHARED_NOTE_MARK_DP = 12f
+
 /** The natural width in dp of a tab with [label]: its padding, the label (estimated from the character count), badge, dot and close button. */
 internal fun tabFitContentDp(label: String, appearance: TabAppearance): Float {
     val charDp = when (appearance.style) {
@@ -240,6 +246,7 @@ internal fun tabFitContentDp(label: String, appearance: TabAppearance): Float {
     var width = TAB_PADDING_DP + longest * charDp + CLOSE_BUTTON_DP + TAB_GAP_DP
     if (appearance.showBadge) width += BADGE_DP + TAB_GAP_DP
     if (appearance.tailing) width += DOT_DP + TAB_GAP_DP
+    if (appearance.inSharedNote) width += SHARED_NOTE_MARK_DP + TAB_GAP_DP
     if (appearance.style == TabStripStyle.SEGMENTED) width += SEGMENT_DOT_DP
     return width
 }

@@ -629,6 +629,9 @@ internal fun AnnotationPanel(
     // width); the panel then leaves its button bar out. The tile owns the Copy feedback, so the header, the preview dialog and the shortcut share one.
     actionsInHeader: Boolean = false,
     copyFeedbackState: CopyFeedbackState? = null,
+    // The shared-note items of the New ▾ / Open ▾ menus and the log-reference actions (Go to rows); null for a panel used without them.
+    shared: NotesSharedActions? = null,
+    logRefActions: LogRefActions? = null,
 ) {
     val tc = tc()
     val notesLocked = LocalNotesEditLocked.current
@@ -641,7 +644,8 @@ internal fun AnnotationPanel(
     val mainWindowSize = LocalWindowInfo.current.containerSize
     val ann = tab.annotations
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
-    val hasRecentNotes = recentNotes.isNotEmpty()
+    // Open's ▾ half (and its keyboard target) exists for recent notes or for shared notes to switch to.
+    val hasRecentNotes = recentNotes.isNotEmpty() || shared?.hasNoteSections == true
 
     // A click or a dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
     fun reclaimFocus() {
@@ -753,8 +757,8 @@ internal fun AnnotationPanel(
                 } else {
                     26f + visibleRows * 16f + (if (rowCount > 3) 16f else 0f)
                 }
-                val filenameBadgeDp = if (block.sourceFilename != null) 21f + spacingDp else 0f
-                headerDp + cardChromeDp + filenameBadgeDp + captionDp +
+                // The source badge sits in the header line, so it adds no height of its own.
+                headerDp + cardChromeDp + captionDp +
                     (if (rowCount > 0) spacingDp + excerptDp else 0f) + bodyBottomDp + gapDp
             }
             is AnnBlock.Image -> {
@@ -1097,6 +1101,7 @@ internal fun AnnotationPanel(
                 onOpenNote = onOpenNote,
                 onLocateLog = onLocateLog,
                 onReclaimFocus = ::reclaimFocus,
+                shared = shared,
             )
             Box(
                 Modifier.fillMaxWidth().heightIn(min = TILE_TOOLBAR_HEIGHT_DP.dp).testTag("notes-toolbar").tileToolbarDivider(tc.br)
@@ -1107,7 +1112,7 @@ internal fun AnnotationPanel(
                     Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
                     horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp, Alignment.CenterHorizontally),
-                ) { NotesActionButtons(actions, notesBarLook(width, actions.hasLocate, actions.hasRecent)) }
+                ) { NotesActionButtons(actions, notesBarLook(width, actions.hasLocate, actions.hasOpenMenu, actions.hasNewMenu)) }
             }
         }
         // "Locate log…" landed on this tab but couldn't be checked against anything (Change 2c's
@@ -1440,6 +1445,7 @@ internal fun AnnotationPanel(
                             onMoveDown = { mutate { onMoveBlock(block.id, 1) } },
                             onAddBelow = { mutate { onAddNoteAfter(block.id) } },
                             onNavigate = { onNavigateLogRef(block) },
+                            logRefActions = logRefActions,
                             excerptExpanded = logExcerptExpanded[block.id] ?: false,
                             onToggleExcerpt = {
                                 anchorBeforeBlockResize(block.id)
@@ -1919,6 +1925,34 @@ internal fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, on
     }
 }
 
+/** One selectable row of Open ▾: a note to show in the tile (this tab's own or a shared one), or a recent note file to open. */
+private sealed interface OpenMenuEntry {
+    val id: String
+    val enabled: Boolean
+
+    class NoteChoice(
+        override val id: String,
+        val label: String,
+        val caption: String,
+        val checked: Boolean,
+        val onChoose: () -> Unit,
+    ) : OpenMenuEntry {
+        override val enabled: Boolean get() = true
+    }
+
+    class Recent(val path: String) : OpenMenuEntry {
+        override val id: String get() = "recent:$path"
+        override val enabled: Boolean get() = File(path).exists()
+    }
+}
+
+/** Test tags of Open ▾'s note rows: this tab's own note, a shared note this tab is in and another shared note. */
+internal const val NOTES_OPEN_OWN_TAG = "notes-open-own"
+
+internal fun notesOpenSharedTag(hostId: String): String = "notes-open-shared-$hostId"
+
+internal fun notesOpenOtherTag(hostId: String): String = "notes-open-other-$hostId"
+
 @Composable
 internal fun RecentNotesPopup(
     recentNotes: List<String>,
@@ -1930,6 +1964,8 @@ internal fun RecentNotesPopup(
     onOpenNote: (File) -> Unit,
     onDismiss: () -> Unit,
     tc: ThemeColors,
+    // The notes this tab can show (its own, the shared notes it is in, the others), listed above the recent files when any shared note exists.
+    sections: NotesSharedActions? = null,
 ) {
     val density = LocalDensity.current.density
     Popup(
@@ -1939,8 +1975,40 @@ internal fun RecentNotesPopup(
         properties = PopupProperties(focusable = true),
     ) {
         val displayNotes = recentNotes.take(10)
+        val ownEntries = sections?.let {
+            listOf(OpenMenuEntry.NoteChoice(NOTES_OPEN_OWN_TAG, it.ownNoteLabel, "private", it.shownHostId == null, it.onShowOwnNote))
+        }.orEmpty()
+        val sharedEntries = sections?.sharedNotes.orEmpty().map { info ->
+            OpenMenuEntry.NoteChoice(notesOpenSharedTag(info.id), info.name, tabCountLabel(info.memberTabIds.size), sections?.shownHostId == info.id) {
+                sections?.onShowSharedNote?.invoke(info.id)
+            }
+        }
+        val otherEntries = sections?.otherSharedNotes.orEmpty().map { info ->
+            OpenMenuEntry.NoteChoice(notesOpenOtherTag(info.id), info.name, tabCountLabel(info.memberTabIds.size), false) {
+                sections?.onShowSharedNote?.invoke(info.id)
+            }
+        }
+        val recentEntries = displayNotes.map { OpenMenuEntry.Recent(it) }
+        val entries = ownEntries + sharedEntries + otherEntries + recentEntries
         val popupFr = remember { FocusRequester() }
-        var selectedIdx by remember(displayNotes) { mutableStateOf(displayNotes.indexOfFirst { File(it).exists() }.coerceAtLeast(0)) }
+        // The shown note when the shared notes are listed, else the first recent file that still exists (as it always was).
+        var selectedIdx by remember(entries.map { it.id }) {
+            mutableStateOf(
+                if (sections != null) {
+                    entries.indexOfFirst { it is OpenMenuEntry.NoteChoice && it.checked }.coerceAtLeast(0)
+                } else {
+                    entries.indexOfFirst { it.enabled }.coerceAtLeast(0)
+                },
+            )
+        }
+
+        fun choose(entry: OpenMenuEntry?) {
+            when (entry) {
+                is OpenMenuEntry.NoteChoice -> { entry.onChoose(); onDismiss() }
+                is OpenMenuEntry.Recent -> if (entry.enabled) onOpenNote(File(entry.path))
+                null -> Unit
+            }
+        }
         LaunchedEffect(Unit) { runCatching { popupFr.requestFocus() } }
         Box(
             Modifier.width(300.dp)
@@ -1953,28 +2021,15 @@ internal fun RecentNotesPopup(
                     if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (ev.key) {
                         Key.DirectionDown -> {
-                            selectedIdx = rovingMove(
-                                displayNotes.map { RovingItem(it, File(it).exists()) },
-                                selectedIdx,
-                                +1,
-                                wrap = true,
-                            )
+                            selectedIdx = rovingMove(entries.map { RovingItem(it.id, it.enabled) }, selectedIdx, +1, wrap = true)
                             true
                         }
                         Key.DirectionUp -> {
-                            selectedIdx = rovingMove(
-                                displayNotes.map { RovingItem(it, File(it).exists()) },
-                                selectedIdx,
-                                -1,
-                                wrap = true,
-                            )
+                            selectedIdx = rovingMove(entries.map { RovingItem(it.id, it.enabled) }, selectedIdx, -1, wrap = true)
                             true
                         }
                         Key.Enter, Key.NumPadEnter -> {
-                            displayNotes.getOrNull(selectedIdx)
-                                ?.let(::File)
-                                ?.takeIf { it.exists() }
-                                ?.let(onOpenNote)
+                            choose(entries.getOrNull(selectedIdx))
                             true
                         }
                         Key.Escape -> { onDismiss(); true }
@@ -1985,7 +2040,50 @@ internal fun RecentNotesPopup(
             val popupScroll = rememberScrollState()
             Box(Modifier.heightIn(max = 260.dp)) {
                 Column(Modifier.fillMaxWidth().verticalScroll(popupScroll).padding(vertical = 4.dp)) {
-                    displayNotes.forEachIndexed { idx, path ->
+                    var next = 0
+
+                    @Composable
+                    fun noteSection(title: String, rows: List<OpenMenuEntry.NoteChoice>, first: Boolean) {
+                        if (rows.isEmpty()) return
+                        AppText(
+                            title,
+                            color = tc.ts,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = if (first) 6.dp else 8.dp, bottom = 2.dp),
+                        )
+                        rows.forEach { entry ->
+                            val idx = next++
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().testTag(entry.id),
+                                forceHover = idx == selectedIdx,
+                                onClick = { choose(entry) },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AppText(
+                                        if (entry.checked) "✓" else "",
+                                        color = tc.ac,
+                                        fontSize = 11.sp,
+                                        fontFamily = MONO,
+                                        modifier = Modifier.width(14.dp),
+                                    )
+                                    AppText(entry.label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                    AppText(entry.caption, color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(start = 8.dp))
+                                }
+                            }
+                        }
+                    }
+                    noteSection("This tab", ownEntries, first = true)
+                    noteSection("Shared notes", sharedEntries, first = false)
+                    noteSection("Other shared notes", otherEntries, first = false)
+                    if (ownEntries.isNotEmpty() && displayNotes.isNotEmpty()) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).height(1.dp).background(tc.br))
+                    }
+                    displayNotes.forEach { path ->
+                        val idx = next++
                         val file = File(path)
                         val exists = file.exists()
                         // Exact-path match against activeNotePath — see this popup's own param
@@ -3219,6 +3317,15 @@ private fun DiagramSummaryRow(
 }
 
 // ── LogRef block ───────────────────────────────────────────────────────
+private val SOURCE_BADGE_MAX_WIDTH = 240.dp
+
+/** Test tags of a row reference's source badge, its Go to rows link and its Reopen prompt link. */
+internal fun logRefSourceBadgeTag(blockId: String): String = "logref-source-$blockId"
+
+internal fun logRefGoToRowsTag(blockId: String): String = "logref-go-to-rows-$blockId"
+
+internal fun logRefReopenTag(blockId: String): String = "logref-reopen-$blockId"
+
 @Composable
 private fun LogRefBlock(
     block: AnnBlock.LogRef,
@@ -3240,11 +3347,16 @@ private fun LogRefBlock(
     onToggleExcerpt: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
     editingEnabled: Boolean = true,
+    logRefActions: LogRefActions? = null,
 ) {
     val rows = block.resolveRows(tab)
     val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
     val context = if (block.presentation == null) rememberAnnotationLogLineContext(tab, settings, localSource) else null
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
+    // Where the rows come from ("file" or "file · section"), shown as a badge in the header line; null for rows of the note's own tab.
+    val sourceLabel = logRefActions?.sourceLabel?.invoke(block) ?: logRefSourceLabel(block, emptyList())
+    // Set when Go to rows found the source tab closed: the prompt under the header offers to reopen it.
+    var reopenOffer by remember(block.id) { mutableStateOf<GoToRowsResult.NeedsReopen?>(null) }
 
     BlockCard(
         tc = tc,
@@ -3257,15 +3369,42 @@ private fun LogRefBlock(
                 onEdit = onEdit,
                 mutationEnabled = editingEnabled,
                 dragHandleModifier = dragHandleModifier,
+                afterBadgeContent = sourceLabel?.let { label ->
+                    {
+                        SettingsBadge(
+                            label,
+                            color = tc.ts,
+                            monospace = true,
+                            modifier = Modifier.widthIn(max = SOURCE_BADGE_MAX_WIDTH).testTag(logRefSourceBadgeTag(block.id)),
+                        )
+                    }
+                },
+                leadingActions = if (sourceLabel != null && logRefActions != null) {
+                    {
+                        AccentLink(
+                            "Go to rows",
+                            onClick = { logRefActions.goToRows(block) { offer -> reopenOffer = offer } },
+                            modifier = Modifier.testTag(logRefGoToRowsTag(block.id)),
+                        )
+                    }
+                } else {
+                    null
+                },
             )
         },
     ) {
-        if (block.sourceFilename != null) {
-            Box(
-                Modifier.background(tc.ac.copy(.12f), CORNER_SM)
-                    .border(1.dp, tc.ac.copy(.25f), CORNER_SM)
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
+        reopenOffer?.let { offer ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                AppText("${block.sourceFilename ?: "This file"} is closed.", color = tc.ts, fontSize = 11.sp)
+                AccentLink(
+                    "Reopen",
+                    onClick = {
+                        reopenOffer = null
+                        logRefActions?.reopenAndGoToRows(offer, block)
+                    },
+                    modifier = Modifier.testTag(logRefReopenTag(block.id)),
+                )
+            }
         }
         MarkdownInlineOrTextField(
             value = block.caption,
@@ -3539,6 +3678,8 @@ private fun BlockControls(
     onCopyImage: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
     afterBadgeContent: (@Composable () -> Unit)? = null,
+    /** Drawn first in the actions group, before the copy and move buttons (a log reference's Go to rows). */
+    leadingActions: (@Composable () -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
     mutationEnabled: Boolean = true,
     /** Navigation remains usable while Notes mutations are locked. */
@@ -3622,6 +3763,7 @@ private fun BlockControls(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                leadingActions?.invoke()
                 // Leads the actions group, before the arrows — see BlockHeaderLayout's doc for
                 // why this can never be the thing that gets clipped.
                 if (onCopyImage != null) CopyImageIconButton(enabled = copyEnabled, onClick = onCopyImage)

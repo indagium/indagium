@@ -67,9 +67,17 @@ internal class NotesActionModel(
     val onOpenNote: (File) -> Unit,
     val onLocateLog: (File) -> Unit,
     val onReclaimFocus: () -> Unit,
+    /** The shared-note items of New ▾ and Open ▾; null keeps New a plain button and Open ▾ a plain recent-notes list. */
+    val shared: NotesSharedActions? = null,
 ) {
     val hasBlocks: Boolean get() = tab.annotations.blocks.isNotEmpty()
     val hasRecent: Boolean get() = recentNotes.isNotEmpty()
+
+    /** New has its ▾ half. */
+    val hasNewMenu: Boolean get() = shared != null
+
+    /** Open has its ▾ half: recent notes to open again, or shared notes to switch to. */
+    val hasOpenMenu: Boolean get() = hasRecent || shared?.hasNoteSections == true
 
     // A shared note has no log of its own to locate: its references name their source tabs.
     val hasLocate: Boolean get() = tab.logData.isEmpty() && tab.sharedNote == null
@@ -106,8 +114,8 @@ internal fun pickLogFileToLocate(onPick: (File) -> Unit) {
 }
 
 // Open+▾ split-button shapes: the same joined-pair idea as TabBar's log-file Open/▾, at the 4 dp radius every other AppButton here has.
-private val OPEN_JOINED_SHAPE = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
-private val RECENT_DROPDOWN_SHAPE = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
+internal val OPEN_JOINED_SHAPE = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
+internal val RECENT_DROPDOWN_SHAPE = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
 
 private val LABEL_PADDING = 10.dp
 private val COMPACT_PADDING = 6.dp
@@ -151,7 +159,13 @@ internal fun NotesActionButtons(model: NotesActionModel, look: NotesButtonLook =
         mainTag = notesButtonTag(NotesAction.COPY),
     )
     NotesButton(NotesAction.SAVE, "Save", look, !model.locked) { model.tap { model.mutate(model.onSave) } }
-    NotesButton(NotesAction.NEW, "New", look, !model.locked) { model.tap { model.mutate(model.onNewAnalysis) } }
+    // New+▾ is one unit like Open+▾ below (zero spacing between the halves), so a wrap point never splits the pair.
+    Row {
+        NotesButton(NotesAction.NEW, "New", look, !model.locked, shape = if (model.hasNewMenu) OPEN_JOINED_SHAPE else CORNER_MD) {
+            model.tap { model.mutate(model.onNewAnalysis) }
+        }
+        model.shared?.let { NewMenuHalf(model, it, tc) }
+    }
     // Only when this tab has no log at all (opened via Case Library's "Open notes only," a blank new tab, or its own log going missing): the guided
     // reconnect path for the "note opened without its log" hazard. See AppState.locateLogForTab.
     if (model.hasLocate) {
@@ -159,11 +173,11 @@ internal fun NotesActionButtons(model: NotesActionModel, look: NotesButtonLook =
     }
     // Open+▾ is one unit (zero spacing between the halves), so a wrap point never splits the pair.
     Row {
-        NotesButton(NotesAction.OPEN, "Open", look, !model.locked, shape = if (model.hasRecent) OPEN_JOINED_SHAPE else CORNER_MD) {
+        NotesButton(NotesAction.OPEN, "Open", look, !model.locked, shape = if (model.hasOpenMenu) OPEN_JOINED_SHAPE else CORNER_MD) {
             model.tap { model.mutate(model::openNote) }
         }
-        // Hidden (not disabled) when there's no history: a dropdown arrow with nothing behind it is dead chrome.
-        if (model.hasRecent) {
+        // Hidden (not disabled) when there's no history and no shared note: a dropdown arrow with nothing behind it is dead chrome.
+        if (model.hasOpenMenu) {
             Box {
                 AppButton(
                     "▾",
@@ -190,12 +204,18 @@ private fun RecentNotes(model: NotesActionModel, tc: ThemeColors) {
         onOpenNote = { file -> model.tap { model.mutate { model.onOpenNote(file) } } },
         onDismiss = { model.tap(model.onToggleRecentNotes) },
         tc = tc,
+        sections = model.shared?.takeIf { it.hasNoteSections },
     )
 }
 
 /** Test tag of the ▾ half of the Copy split button (its main half carries the caller's tag, `notes-button-copy` on the Notes buttons). */
 internal const val NOTES_COPY_FORMATS_TAG = "notes-copy-formats"
 internal const val NOTES_RECENT_NOTES_TAG = "notes-recent-notes"
+internal const val NOTES_NEW_MENU_TAG = "notes-new-menu"
+internal const val NOTES_NEW_POPUP_TAG = "notes-new-popup"
+internal const val NOTES_NEW_ITEM_NEW_TAG = "notes-new-item-new"
+internal const val NOTES_NEW_ITEM_SHARED_TAG = "notes-new-item-shared"
+internal const val NOTES_NEW_ITEM_SHARE_TAG = "notes-new-item-share"
 internal const val NOTES_RECENT_POPUP_TAG = "notes-recent-popup"
 internal const val NOTES_COPY_POPUP_TAG = "notes-copy-popup"
 

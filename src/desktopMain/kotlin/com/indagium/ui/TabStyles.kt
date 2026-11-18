@@ -25,6 +25,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -587,6 +590,14 @@ internal fun TabShell(
                     )
                 }
                 leading?.invoke()
+                if (appearance.inSharedNote) {
+                    Icon(
+                        Icons.Outlined.Link,
+                        contentDescription = "In a shared note",
+                        tint = if (isActive && packTabs?.theme?.inverseActiveTab == true) tc.onAc else tc.ac,
+                        modifier = Modifier.size(SHARED_NOTE_MARK_DP.dp).testTag("tab-shared-$pointerKey"),
+                    )
+                }
                 if (style == TabStripStyle.SEGMENTED && isActive) {
                     Box(Modifier.testTag("tab-dot-$pointerKey").size(SEGMENT_DOT).background(tc.ac, CircleShape))
                 }

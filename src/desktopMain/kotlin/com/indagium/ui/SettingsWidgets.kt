@@ -101,6 +101,8 @@ private val CHECKBOX_SHAPE = RoundedCornerShape(3.dp)
 private val DETAIL_ICON_SIZE = 12.dp
 private const val BADGE_FILL_ALPHA = 0.13f
 private const val BADGE_BORDER_ALPHA = 0.27f
+private const val BADGE_EMPHASIS_FILL_ALPHA = 0.15f
+private const val BADGE_EMPHASIS_BORDER_ALPHA = 0.45f
 private val SETTINGS_ROW_INDENT = 28.dp
 private val SETTINGS_CARD_SHAPE = RoundedCornerShape(8.dp)
 private val DROPDOWN_POPUP_SHAPE = RoundedCornerShape(8.dp)
@@ -1069,23 +1071,45 @@ internal fun middleEllipsis(text: String, maxWidth: Int, widthOf: (String) -> In
 }
 
 /**
- * A small pill with a [text] (a status such as "Running" or an edition name); [dot] adds a leading status dot. It is tinted with the accent
- * unless [color] names another (a status colour such as success or warn): wash, outline, dot and text all follow it.
+ * A small pill with a [text] (a status such as "Running" or an edition name); [dot] adds a leading status dot and [icon] a small picture. It is
+ * tinted with the accent unless [color] names another (a status colour such as success or warn): wash, outline, dot, icon and text all follow it.
+ * [monospace] sets the text in the code font (a file name); [onClick] makes the pill a button (the Notes header's Shared badge), and
+ * [emphasized] strengthens its wash and outline for a clickable or open state.
  */
 @Composable
-internal fun SettingsBadge(text: String, modifier: Modifier = Modifier, dot: Boolean = false, color: Color? = null) {
+internal fun SettingsBadge(
+    text: String,
+    modifier: Modifier = Modifier,
+    dot: Boolean = false,
+    color: Color? = null,
+    icon: ImageVector? = null,
+    monospace: Boolean = false,
+    emphasized: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
     val tc = tc()
     val tint = color ?: tc.ac
     val shape = RoundedCornerShape(3.dp)
     Row(
-        modifier.background(tint.copy(alpha = BADGE_FILL_ALPHA), shape)
-            .border(1.dp, tint.copy(alpha = BADGE_BORDER_ALPHA), shape)
+        modifier.clip(shape)
+            .background(tint.copy(alpha = if (emphasized) BADGE_EMPHASIS_FILL_ALPHA else BADGE_FILL_ALPHA), shape)
+            .border(1.dp, tint.copy(alpha = if (emphasized) BADGE_EMPHASIS_BORDER_ALPHA else BADGE_BORDER_ALPHA), shape)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 8.dp, vertical = 1.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (icon != null) 4.dp else 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (dot) Box(Modifier.size(6.dp).background(tint, CircleShape))
-        AppText(text, color = tint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        if (icon != null) Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(12.dp))
+        AppText(
+            text,
+            color = tint,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = if (monospace) MONO else LocalUiFontFamily.current,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

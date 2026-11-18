@@ -45,7 +45,7 @@ internal fun BoundAnnotationPanel(
         onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
         onExportFrames = { state.exportAnnotationFrames(noteId) },
         onSave = { state.saveAnalysis(noteId) },
-        onNewAnalysis = { state.newAnalysis(noteId) },
+        onNewAnalysis = { state.newPrivateNote(tab.id) },
         onToggleRecentNotes = { state.toggleRecentNotesMenu() },
         onOpenNote = { state.openNoteFileAsync(noteId, it) },
         onLocateLog = { state.locateLogForTab(tab.id, it) },
@@ -61,8 +61,8 @@ internal fun BoundAnnotationPanel(
         onAddNoteAfter = { state.addNoteBlock(noteId, it) },
         onAddImage = { bytes, provenance, after -> state.addImageBlock(noteId, bytes, provenance, after) },
         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
-        // A shared note's references name their own source tab and section; a tab's own note keeps its navigation as it was.
-        onNavigateLogRef = { if (ownNote) state.requestAnnotationNavigation(tab.id, it) else state.launchGoToLogRefRows(it, tab.id) },
+        // Every reference goes through go-to-rows, which also switches the source tab's section (a private note's references name no source tab).
+        onNavigateLogRef = { state.launchGoToLogRefRows(it, tab.id) },
         onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
         onUpdateLogRefPresentation = { blockId, caption, presentation ->
             state.updateLogRefPresentation(noteId, blockId, caption, presentation)
@@ -98,6 +98,8 @@ internal fun BoundAnnotationPanel(
         modifier = modifier,
         actionsInHeader = actionsInHeader,
         copyFeedbackState = copyFeedbackState,
+        shared = state.notesSharedActionsFor(tab) { runCatching { focusRequester?.requestFocus() } },
+        logRefActions = state.logRefActionsFor(tab.id),
     )
 }
 

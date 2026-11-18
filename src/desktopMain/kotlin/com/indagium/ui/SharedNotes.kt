@@ -269,7 +269,7 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
     }
 
 /** True when the tab's private note holds something worth confirming over: blocks, text, or a prefix other than the seeded one. */
-private fun AppState.privateNoteHasContent(tab: LogTab): Boolean {
+internal fun AppState.privateNoteHasContent(tab: LogTab): Boolean {
     val note = tab.annotations
     val seededPrefix = note.prefix.isBlank() || note.prefix == defaultNotePrefix(tab)
     return note.blocks.isNotEmpty() || !seededPrefix || note.suffix.isNotBlank() || note.issueDescription.isNotBlank()

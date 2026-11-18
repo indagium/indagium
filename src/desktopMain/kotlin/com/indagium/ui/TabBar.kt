@@ -426,6 +426,8 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         }
     }
     val logById = state.tabs.associateBy { it.id }
+    // The tabs that are open members of a shared note (SharedNotes.kt) get a link mark before their label.
+    val sharedMemberIds = state.sharedNoteHosts.flatMapTo(HashSet()) { it.sharedNote?.memberTabIds.orEmpty() }
     val diagramById = state.seq3Sessions.sessions.associateBy { it.id }
     val activeGroup = activeStripRef?.let(state::tabGroupOf)
 
@@ -447,7 +449,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
 
     // Label and look of every tab in the strip, per the Tabs appearance settings (the default is today's tabDisplayLabel).
     fun describe(ref: TabRef): TabDescriptor? = when (ref) {
-        is TabRef.Log -> logById[ref.tabId]?.let { logTabDescriptor(it, state.tabs, settings) }
+        is TabRef.Log -> logById[ref.tabId]?.let { logTabDescriptor(it, state.tabs, settings, inSharedNote = it.id in sharedMemberIds) }
         is TabRef.Diagram -> diagramById[ref.sessionId]?.let {
             workspaceTabDescriptor(it.document.title.ifBlank { "Diagram" }, TabKind.DIAGRAM, settings)
         }

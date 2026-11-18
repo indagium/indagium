@@ -57,17 +57,21 @@ private const val HEADER_ICON_DP = 22f + TILE_HEADER_GAP_DP
 // The bar's side padding and the card's border: what the buttons do not get of the card's width.
 private const val BAR_FIXED_DP = 2f * TILE_TOOLBAR_PADDING_DP + 2f
 
-private fun actionDp(action: NotesAction, look: NotesButtonLook, hasRecent: Boolean): Float {
+private fun actionDp(action: NotesAction, look: NotesButtonLook, hasRecent: Boolean, hasNewMenu: Boolean): Float {
     val base = if (look == NotesButtonLook.LABELS) LABEL_DP.getValue(action) else COMPACT_DP.getValue(action)
-    return base + if (action == NotesAction.OPEN && hasRecent) ARROW_DP else 0f
+    val arrow = (action == NotesAction.OPEN && hasRecent) || (action == NotesAction.NEW && hasNewMenu)
+    return base + if (arrow) ARROW_DP else 0f
 }
 
 /** The actions there are: Locate log… only while the tab has no log. */
 private fun presentActions(hasLocate: Boolean): List<NotesAction> = NotesAction.entries.filter { it != NotesAction.LOCATE || hasLocate }
 
-/** The estimated width (dp) of all the buttons in [look] on one line. */
-internal fun notesActionsDp(look: NotesButtonLook, hasLocate: Boolean, hasRecent: Boolean): Float {
-    val parts = presentActions(hasLocate).map { actionDp(it, look, hasRecent) }
+/**
+ * The estimated width (dp) of all the buttons in [look] on one line. [hasRecent] says Open has its ▾ half (recent notes or shared notes to pick), [hasNewMenu]
+ * that New has one (its shared-note menu).
+ */
+internal fun notesActionsDp(look: NotesButtonLook, hasLocate: Boolean, hasRecent: Boolean, hasNewMenu: Boolean = false): Float {
+    val parts = presentActions(hasLocate).map { actionDp(it, look, hasRecent, hasNewMenu) }
     return parts.sum() + TILE_HEADER_GAP_DP * (parts.size - 1).coerceAtLeast(0)
 }
 
@@ -75,19 +79,30 @@ internal fun notesActionsDp(look: NotesButtonLook, hasLocate: Boolean, hasRecent
  * The look of the buttons in the bar under a card [widthDp] wide: their labels while they all fit on one line, otherwise compact ones (which wrap
  * onto a second line when they do not fit either). Also what the panel uses on its own, without a tile.
  */
-internal fun notesBarLook(widthDp: Float, hasLocate: Boolean, hasRecent: Boolean): NotesButtonLook =
-    if (notesActionsDp(NotesButtonLook.LABELS, hasLocate, hasRecent) <= widthDp - BAR_FIXED_DP) NotesButtonLook.LABELS else NotesButtonLook.COMPACT
+internal fun notesBarLook(widthDp: Float, hasLocate: Boolean, hasRecent: Boolean, hasNewMenu: Boolean = false): NotesButtonLook =
+    if (notesActionsDp(NotesButtonLook.LABELS, hasLocate, hasRecent, hasNewMenu) <= widthDp - BAR_FIXED_DP) NotesButtonLook.LABELS else NotesButtonLook.COMPACT
+
+/** The estimated width (dp) of the Shared badge ("Shared · N tabs") that follows the title while the tile shows a shared note, with its gap. */
+internal const val SHARED_BADGE_DP = 104f + TILE_HEADER_GAP_DP
 
 /**
  * What a Notes card [widthDp] wide draws, with [headerIcons] buttons (collapse, maximize, hide) at the right of its header. The buttons in the
- * header need room next to the title; the bar is the one that always fits.
+ * header need room next to the title (and next to the Shared badge while [sharedBadge] says the tile shows a shared note); the bar is the one that
+ * always fits. [hasRecent] says Open has its ▾ half and [hasNewMenu] New.
  */
-internal fun notesHeaderLayout(widthDp: Float, hasLocate: Boolean, hasRecent: Boolean, headerIcons: Int = 3): NotesHeaderLayout {
+internal fun notesHeaderLayout(
+    widthDp: Float,
+    hasLocate: Boolean,
+    hasRecent: Boolean,
+    headerIcons: Int = 3,
+    hasNewMenu: Boolean = false,
+    sharedBadge: Boolean = false,
+): NotesHeaderLayout {
     val room = widthDp - FIXED_DP - headerIcons * HEADER_ICON_DP
-    val title = TITLE_DP + TILE_HEADER_GAP_DP
-    val buttons = notesActionsDp(NotesButtonLook.LABELS, hasLocate, hasRecent) + TILE_HEADER_GAP_DP
+    val title = TITLE_DP + TILE_HEADER_GAP_DP + if (sharedBadge) SHARED_BADGE_DP else 0f
+    val buttons = notesActionsDp(NotesButtonLook.LABELS, hasLocate, hasRecent, hasNewMenu) + TILE_HEADER_GAP_DP
     if (room >= title + buttons) return NotesHeaderLayout.Full
-    return NotesHeaderLayout(actionsInHeader = false, look = notesBarLook(widthDp, hasLocate, hasRecent))
+    return NotesHeaderLayout(actionsInHeader = false, look = notesBarLook(widthDp, hasLocate, hasRecent, hasNewMenu))
 }
 
 /** The tile header parts of the Notes card: the icon stays down to the generic icon threshold, the title always stays, there is no summary. */

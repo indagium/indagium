@@ -453,6 +453,7 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
     // The note the tile shows: the tab's own, or the shared note it views. Its buttons act on that note, never on the tab's own.
     val note = state.shownNoteOf(tab)
     val noteId = note.id
+    val reclaimNotesFocus: () -> Unit = { runCatching { focus.notes.requestFocus() } }
     // The Notes actions are part of the tile's header row while they fit there (NotesHeaderActions.kt), so the tile, not the panel, owns the Copy
     // feedback they and the panel's preview dialog and shortcut share.
     val copyFeedback = rememberCopyFeedback(noteId) { format, done -> state.copyAnnotationFormatAsync(noteId, format, done) }
@@ -466,18 +467,22 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
         activeNotePath = state.activeNoteFilePath(note),
         onToggleMd = { state.toggleMd(noteId) },
         onSave = { state.saveAnalysis(noteId) },
-        onNewAnalysis = { state.newAnalysis(noteId) },
+        onNewAnalysis = { state.newPrivateNote(tab.id) },
         onToggleRecentNotes = { state.toggleRecentNotesMenu() },
         onOpenNote = { state.openNoteFileAsync(noteId, it) },
         onLocateLog = { state.locateLogForTab(tab.id, it) },
-        onReclaimFocus = { runCatching { focus.notes.requestFocus() } },
+        onReclaimFocus = reclaimNotesFocus,
+        shared = state.notesSharedActionsFor(tab, reclaimNotesFocus),
     )
     // Collapse (when it is in a column), maximize and hide are the header icons the buttons must leave room for.
     val headerIcons = (if (collapsible) 1 else 0) + 2
 
     // One decision for the card's width, asked by the header and by the body (they are the same width): the buttons are in the header row while
     // they fit next to the title, otherwise in the panel's bar under it, never in both and never in neither (NotesHeaderLayout.kt).
-    fun layoutAt(width: Float) = notesHeaderLayout(width, actions.hasLocate, actions.hasRecent, headerIcons)
+    val showsSharedNote = note.sharedNote != null
+
+    fun layoutAt(width: Float) =
+        notesHeaderLayout(width, actions.hasLocate, actions.hasOpenMenu, headerIcons, actions.hasNewMenu, sharedBadge = showsSharedNote)
     Tile(
         LogViewSectionId.NOTES,
         TileSlot(
@@ -487,6 +492,11 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
                 if (layoutAt(LocalTileHeaderWidthDp.current).actionsInHeader) NotesActionButtons(actions)
             },
             headerParts = { width -> notesHeaderParts(width) },
+            titleExtra = if (showsSharedNote) {
+                { width -> SharedNoteBadge(state, tab.id, noteId, width, reclaimNotesFocus) }
+            } else {
+                null
+            },
             actionsCentered = true,
             preserveBodyRootFocus = true,
             collapsible = collapsible,
