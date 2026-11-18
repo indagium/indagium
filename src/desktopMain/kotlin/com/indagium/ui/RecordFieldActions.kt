@@ -40,6 +40,8 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import com.indagium.utils.RECORD_FIELDS_MAX_JSON_CHARS
 import com.indagium.utils.RecordFieldsResult
 import com.indagium.utils.joinRecordPath
@@ -101,6 +103,9 @@ internal interface RecordFieldActions {
 
     /** Lets the log view look at a mounted tree (for the log row's menu); the returned function takes it out again. */
     fun registerTree(handle: RecordTreeHandle): () -> Unit = {}
+
+    /** A primary press landed in a tree, so the view's plain-press clearing of the pick must leave it to the tree. */
+    fun noteTreePress() = Unit
 }
 
 internal val LocalRecordFieldActions = staticCompositionLocalOf<RecordFieldActions?> { null }
@@ -144,6 +149,8 @@ internal class RecordFieldContext(
     val source: String,
     val probe: TreeSelectionProbe = TreeSelectionProbe(),
     val geometry: RecordTreeGeometry = RecordTreeGeometry(),
+    /** Gives keyboard focus to the tree (a click on a row, a closed menu): the arrow keys and Copy then act on its picked rows. */
+    val focusTree: () -> Unit = {},
 ) {
     /**
      * Whether a Shift-press would pick a range of fields: there is an anchor and no text is selected (with text selected it extends
@@ -155,6 +162,34 @@ internal class RecordFieldContext(
     fun anchorAt(path: List<String>) = actions.setRangeAnchor(tabId, entryId, path)
 
     /**
+     * A click on the row of [path], as on a log row: the pick becomes just that field, which is also where a Shift-click range and the
+     * arrow keys start from. [takeFocus] gives the tree keyboard focus (which also drops a text selection a click should not leave
+     * behind); the second click of a double-click keeps focus where it is, so the word it selects stays selected.
+     */
+    fun clickSelect(path: List<String>, takeFocus: Boolean) {
+        moveSelectionTo(path)
+        if (takeFocus) focusTree()
+    }
+
+    /** Makes just [path] the pick, the anchor and the keyboard's cursor. */
+    fun moveSelectionTo(path: List<String>) {
+        actions.pickFields(tabId, entryId, listOf(path), additive = false)
+        actions.setRangeAnchor(tabId, entryId, path)
+        geometry.cursor = path
+    }
+
+    /** A right-click on the row of [path]: a row that is not part of the pick (or of a text selection) is picked first, as on a log row. */
+    fun selectForMenu(path: List<String>) {
+        if (path in actions.selectedPaths(tabId, entryId)) return
+        val covered = geometry.textSelectionFields(probe.selectedText())?.covered
+        if (covered != null && path in covered) return
+        moveSelectionTo(path)
+    }
+
+    /** A text drag begins: the picked rows (of this record or another) make way for the text. */
+    fun dropPick() = actions.pickFields(tabId, entryId, emptyList(), additive = false)
+
+    /**
      * Picks the fields from the anchor to [path]: what lies between them, normalised like a text selection (just [path] when the
      * anchor is not in the tree any more). [additive] (Shift with Ctrl/Cmd) keeps the rest of the pick. False when there is no anchor.
      */
@@ -163,7 +198,14 @@ internal class RecordFieldContext(
         val covered = geometry.between(anchor, path) ?: setOf(path)
         val picked = normalizeFieldPaths(geometry.order(), covered).ifEmpty { listOf(path) }
         actions.pickFields(tabId, entryId, picked, additive)
+        geometry.cursor = path
         return true
+    }
+
+    /** A Ctrl/Cmd-click on [path]: adds it to the pick or takes it out, and the keyboard continues from it. */
+    fun toggleRow(path: List<String>) {
+        actions.toggleSelected(tabId, entryId, path)
+        geometry.cursor = path
     }
 }
 
@@ -247,6 +289,10 @@ private class AppRecordFieldActions(private val state: AppState, private val rec
         state.recordFieldOpenRequest?.takeIf { it.tabId == tabId && it.entryId == entryId && it.sectionId == sectionOf(tabId) }
 
     override fun reclaimFocus() = reclaim()
+
+    override fun noteTreePress() {
+        state.recordFieldTrees.pressInTree = true
+    }
 }
 
 /** The actions for a log view; [reclaimFocus] returns keyboard focus to the view after a field menu closes. */
@@ -317,45 +363,104 @@ internal fun AppState.openRecordFields(tabId: String, entryId: Int, paths: Set<L
 
 /**
  * Watches a field row's presses without taking part in the ones it does not use: a right press asks for the menu at the pointer (consumed,
- * so the text selection around the tree does not open its own menu), a Ctrl/Cmd-press toggles the field in the pick, a plain press only
- * tells [onPlainPress] (the anchor of a later Shift-click range) and goes on to the text selection. A press with Shift is the
- * tree's ([trackTextSelection] picks the range or extends the selection), so it is left alone here.
+ * so the text selection around the tree does not open its own menu), a Ctrl/Cmd-press toggles the field in the pick, a plain press tells
+ * [onPlainPress] (the anchor of a later Shift-click range) and goes on to the text selection. A plain press that is released without
+ * moving beyond touch slop is a click on the row and calls [onClick] (true for the second click of a double-click); one that moves is a
+ * text drag and is not. A press left of [clickStart] (the row's indent and disclosure chevron, which has its own click) is no row click.
+ * A press with Shift is the tree's ([trackTextSelection] picks the range or extends the selection), so it is left alone here.
  */
 internal fun Modifier.recordFieldGestures(
     key: Any,
     onToggle: () -> Unit,
     onMenu: (Offset) -> Unit,
     onPlainPress: () -> Unit = {},
+    onClick: (repeated: Boolean) -> Unit = {},
+    clickStart: Dp = 0.dp,
 ): Modifier =
     pointerInput(key) {
         awaitPointerEventScope {
+            val click = RowClick(viewConfiguration.touchSlop, viewConfiguration.doubleTapTimeoutMillis)
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.firstOrNull() ?: continue
-                if (event.type != PointerEventType.Press) continue
-                val keys = event.keyboardModifiers
-                when {
-                    event.buttons.isSecondaryPressed -> {
-                        change.consume()
-                        onMenu(change.position)
+                when (event.type) {
+                    PointerEventType.Press -> {
+                        click.cancel()
+                        val keys = event.keyboardModifiers
+                        when {
+                            event.buttons.isSecondaryPressed -> {
+                                change.consume()
+                                onMenu(change.position)
+                            }
+                            !event.buttons.isPrimaryPressed || keys.isShiftPressed -> Unit
+                            keys.isCtrlPressed || keys.isMetaPressed -> {
+                                change.consume()
+                                onToggle()
+                            }
+                            else -> {
+                                onPlainPress()
+                                if (!change.isConsumed && change.position.x >= clickStart.toPx()) click.press(change.position, change.uptimeMillis)
+                            }
+                        }
                     }
-                    !event.buttons.isPrimaryPressed || keys.isShiftPressed -> Unit
-                    keys.isCtrlPressed || keys.isMetaPressed -> {
-                        change.consume()
-                        onToggle()
-                    }
-                    else -> onPlainPress()
+                    // A pointer that leaves the row while pressed is a drag too (it arrives as Exit, not Move).
+                    PointerEventType.Move, PointerEventType.Exit -> click.moved(change.position)
+                    PointerEventType.Release -> if (click.release(change.position)) onClick(click.repeated)
                 }
             }
         }
     }
 
-/** A plain left press anywhere in the view clears the pick (a Ctrl/Cmd press builds it, a right press opens a menu on it). */
+/** One row's plain click in progress: a press that is released within touch slop of where it began, and whether it is a double-click's second. */
+private class RowClick(private val slop: Float, private val doubleTapMs: Long) {
+    private var at: Offset? = null
+    private var lastMs = NO_CLICK
+
+    /** Whether the click just released was the second of a double-click. */
+    var repeated = false
+        private set
+
+    fun press(position: Offset, uptimeMs: Long) {
+        at = position
+        repeated = uptimeMs - lastMs <= doubleTapMs
+        lastMs = if (repeated) NO_CLICK else uptimeMs
+    }
+
+    fun cancel() {
+        at = null
+    }
+
+    fun moved(position: Offset) {
+        val start = at ?: return
+        if ((position - start).getDistance() > slop) at = null
+    }
+
+    /** True when the release at [position] ends a click (the press stayed within slop), false when it ends a drag or no click. */
+    fun release(position: Offset): Boolean {
+        val start = at ?: return false
+        at = null
+        return (position - start).getDistance() <= slop
+    }
+}
+
+/** "No earlier click": far enough in the past that the next click never counts as the second of a double-click. */
+private const val NO_CLICK = Long.MIN_VALUE / 2
+
+/**
+ * A plain left press anywhere in the view clears the pick, except one that lands in a record tree (which picks, or starts a text
+ * drag that clears it, itself) and a Ctrl/Cmd press (which builds it); a right press opens a menu on it. The clearing runs after
+ * the tree has seen the press, so a click on a picked row never flickers through "nothing picked".
+ */
 internal fun Modifier.clearRecordFieldSelectionOnPlainPress(state: AppState): Modifier =
     onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
+        if (event.buttons.isPrimaryPressed) {
+            state.recordFieldTrees.clearCaptured()
+            state.recordFieldTrees.pressInTree = false
+        }
+    }.onPointerEvent(PointerEventType.Press, PointerEventPass.Final) { event ->
         val keys = event.keyboardModifiers
-        if (event.buttons.isPrimaryPressed) state.recordFieldTrees.clearCaptured()
-        if (event.buttons.isPrimaryPressed && !keys.isCtrlPressed && !keys.isMetaPressed) state.clearRecordFieldSelection()
+        val plain = event.buttons.isPrimaryPressed && !keys.isCtrlPressed && !keys.isMetaPressed
+        if (plain && !state.recordFieldTrees.pressInTree) state.clearRecordFieldSelection()
     }
 
 /**
@@ -423,6 +528,8 @@ internal fun RecordFieldMenu(context: RecordFieldContext, path: List<String>, at
         if (state.status is ContextMenuState.Status.Closed) {
             closed()
             context.actions.reclaimFocus()
+            // Picked rows keep the keyboard (arrow keys, Copy) once the menu is gone.
+            if (context.actions.selectedPaths(context.tabId, context.entryId).isNotEmpty()) context.focusTree()
         }
     }
     // The menu opens inside the tree's SelectionContainer; its texts must not register as selectable text there.

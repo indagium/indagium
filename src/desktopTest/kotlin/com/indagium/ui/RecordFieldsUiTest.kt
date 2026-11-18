@@ -312,16 +312,29 @@ class RecordFieldsUiTest : SharedNoteUiTestBase() {
     }
 
     @Test
-    fun aPlainClickClearsThePick() {
+    fun aPlainClickOnALogRowClearsThePick() {
         setupJson()
         selectRow(1)
         ctrlClick(detailsNode("id"))
         assertNotNull(state.recordFieldSelection)
 
+        selectRow(2)
+
+        assertNull(state.recordFieldSelection)
+    }
+
+    @Test
+    fun aPlainClickOnAFieldMakesThatFieldTheWholePick() {
+        setupJson()
+        selectRow(1)
+        ctrlClick(detailsNode("id"))
+        ctrlClick(detailsNode("timestamp"))
+        assertEquals(setOf(listOf("id"), listOf("timestamp")), state.recordFieldSelection!!.paths)
+
         rule.onNodeWithTag(detailsNode("timestamp")).performClick()
         rule.waitForIdle()
 
-        assertNull(state.recordFieldSelection)
+        assertEquals(setOf(listOf("timestamp")), state.recordFieldSelection!!.paths)
     }
 
     @Test
@@ -389,6 +402,8 @@ class RecordFieldsUiTest : SharedNoteUiTestBase() {
             keyDown(Key.Escape)
             keyUp(Key.Escape)
         }
+        // The pointer is still over the last clicked row, which shows the hover tint: take it away before comparing colours.
+        rule.onAllNodes(isRoot())[0].performMouseInput { moveTo(Offset(2f, 2f)) }
         rule.waitForIdle()
         assertNull(state.recordFieldSelection)
         assertTrue(rowEdgeColor(address) == rowEdgeColor(sibling), "Esc clears the marks")
@@ -407,11 +422,13 @@ class RecordFieldsUiTest : SharedNoteUiTestBase() {
         assertEquals(setOf(ADDRESS), state.recordFieldSelection!!.paths)
         val address = detailsNode("metadata", "bluetooth", "accessory_address")
         assertTrue(rowEdgeColor(address) != rowEdgeColor(detailsNode("id")), "the chosen field is marked in Message details")
-        // A plain click anywhere clears it.
-        rule.onNodeWithTag(detailsNode("timestamp")).performClick()
+        // A plain click on another field picks that one instead, and the marks move.
+        rule.onNodeWithTag(detailsNode("id")).performClick()
+        rule.onAllNodes(isRoot())[0].performMouseInput { moveTo(Offset(2f, 2f)) }
         rule.waitForIdle()
-        assertNull(state.recordFieldSelection)
-        assertTrue(rowEdgeColor(address) == rowEdgeColor(detailsNode("id")))
+        assertEquals(setOf(listOf("id")), state.recordFieldSelection!!.paths)
+        assertTrue(rowEdgeColor(address) == rowEdgeColor(detailsNode("timestamp")), "the old marks are gone")
+        assertTrue(rowEdgeColor(detailsNode("id")) != rowEdgeColor(detailsNode("timestamp")), "the clicked field is marked")
     }
 
     @Test

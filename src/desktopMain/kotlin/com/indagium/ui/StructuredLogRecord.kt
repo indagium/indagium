@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.background
@@ -29,10 +31,15 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -235,15 +242,29 @@ internal fun StructuredRecordBody(
     val actions = LocalRecordFieldActions.current
     val probe = remember { TreeSelectionProbe() }
     val geometry = remember { RecordTreeGeometry() }
+    // The tree's own keyboard focus target: a click on a row takes it, and only while it is in the tree do the arrow keys and Copy act on
+    // the picked rows (see RecordFieldKeyboard.kt).
+    val treeFocus = remember { FocusRequester() }
+    var treeHasFocus by remember { mutableStateOf(false) }
+    val focusTree = remember(treeFocus) { { runCatching { treeFocus.requestFocus() }; Unit } }
     val fieldContext = if (recordTabId != null && actions != null) {
-        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry)
+        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry, focusTree)
     } else {
         null
     }
     val currentFieldContext by rememberUpdatedState(fieldContext)
+    val currentTreeHasFocus by rememberUpdatedState(treeHasFocus)
     if (fieldContext != null) {
         DisposableEffect(actions, recordTabId, entryId) {
-            val unregister = actions?.registerTree(RecordTreeHandle(recordTabId.orEmpty(), entryId, geometry, probe))
+            val handle = RecordTreeHandle(
+                tabId = recordTabId.orEmpty(),
+                entryId = entryId,
+                geometry = geometry,
+                probe = probe,
+                hasFocus = { currentTreeHasFocus },
+                onKey = { event -> currentFieldContext?.let { handleRecordTreeKey(it, event) } == true },
+            )
+            val unregister = actions?.registerTree(handle)
             onDispose { unregister?.invoke() }
         }
     }
@@ -262,7 +283,20 @@ internal fun StructuredRecordBody(
             modifier = modifier.fillMaxWidth()
                 .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
                 .testTag(bodyTag)
-                .then(if (fieldContext != null) Modifier.trackTextSelection(geometry) { currentFieldContext } else Modifier),
+                .then(
+                    if (fieldContext != null) {
+                        // No focusable of its own: the selection container's is the tree's focus target (a second one in front of it
+                        // stopped the container from selecting text).
+                        Modifier.onFocusChanged { treeHasFocus = it.hasFocus }
+                            .focusRequester(treeFocus)
+                            // Reached when a host with no key handling of its own above the tree holds focus here; the log view's
+                            // FileView hands keys to the tree before its own row navigation sees them.
+                            .onPreviewKeyEvent { event -> currentFieldContext?.let { handleRecordTreeKey(it, event) } == true }
+                            .trackTextSelection(geometry) { currentFieldContext }
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
@@ -337,10 +371,20 @@ private fun StructuredContainerRows(
         val expandable = container || multilineText || hexBytes != null
         val fieldPath = segments + label
         val startsOpen = initiallyExpanded || (container && depth < env.open.depth) || env.open.covers(fieldPath)
-        var expanded by remember(childPath, env.open.nonce) { mutableStateOf(startsOpen) }
+        val expandedState = remember(childPath, env.open.nonce) { mutableStateOf(startsOpen) }
+        var expanded by expandedState
         val picked = fieldContext != null && fieldPath in fieldContext.selected
+        var hovered by remember(childPath) { mutableStateOf(false) }
         var menuAt by remember(childPath) { mutableStateOf<Offset?>(null) }
         val currentContext by rememberUpdatedState(fieldContext)
+        if (fieldContext != null) {
+            // The keyboard opens and closes the row through this (Left/Right).
+            val control = remember(expandedState, expandable) { RowControl(expandable, expandedState) }
+            DisposableEffect(fieldContext.geometry, fieldPath, control) {
+                fieldContext.geometry.setControl(fieldPath, control)
+                onDispose { fieldContext.geometry.clearControl(fieldPath, control) }
+            }
+        }
         // "Go to rows" brings the first chosen field into view, however tall the record is.
         val scrollTarget = env.open.scrollTo == fieldPath
         val bringIntoView = remember { BringIntoViewRequester() }
@@ -350,19 +394,41 @@ private fun StructuredContainerRows(
                 bringIntoView.bringIntoView()
             }
         }
+        // The keyboard moved to this row: keep it on screen however far the record is scrolled.
+        val reveal = fieldContext?.geometry?.reveal?.takeIf { it.path == fieldPath }
+        if (reveal != null) {
+            LaunchedEffect(reveal.nonce) {
+                withFrameNanos { }
+                bringIntoView.bringIntoView()
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth()
-                .then(if (scrollTarget) Modifier.bringIntoViewRequester(bringIntoView) else Modifier)
-                .then(if (picked) Modifier.background(tc.sl) else Modifier)
+                .then(if (scrollTarget || reveal != null) Modifier.bringIntoViewRequester(bringIntoView) else Modifier)
+                // A picked row has the fill a selected log row has, a hovered one the hover tint (never both).
+                .then(
+                    when {
+                        picked -> Modifier.background(tc.sl)
+                        hovered && fieldContext != null -> Modifier.background(tc.hv)
+                        else -> Modifier
+                    },
+                )
                 .trackFieldRow(fieldContext?.geometry, fieldPath)
                 .then(
                     if (fieldContext != null) {
-                        Modifier.recordFieldGestures(
-                            key = childPath,
-                            onToggle = { currentContext?.let { it.actions.toggleSelected(it.tabId, it.entryId, fieldPath) } },
-                            onMenu = { menuAt = it },
-                            onPlainPress = { currentContext?.anchorAt(fieldPath) },
-                        )
+                        Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }
+                            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                            .recordFieldGestures(
+                                key = childPath,
+                                onToggle = { currentContext?.toggleRow(fieldPath) },
+                                onMenu = {
+                                    currentContext?.selectForMenu(fieldPath)
+                                    menuAt = it
+                                },
+                                onPlainPress = { currentContext?.anchorAt(fieldPath) },
+                                onClick = { repeated -> currentContext?.clickSelect(fieldPath, takeFocus = !repeated) },
+                                clickStart = (depth * INDENT_PER_DEPTH_DP).dp + TREE_TOGGLE_WIDTH,
+                            )
                     } else {
                         Modifier
                     },
@@ -489,9 +555,13 @@ private fun FieldValueArea(
             .trackFieldRow(fieldContext.geometry, fieldPath, area = true)
             .recordFieldGestures(
                 key = key,
-                onToggle = { currentContext.let { it.actions.toggleSelected(it.tabId, it.entryId, fieldPath) } },
-                onMenu = { menuAt = it },
+                onToggle = { currentContext.toggleRow(fieldPath) },
+                onMenu = {
+                    currentContext.selectForMenu(fieldPath)
+                    menuAt = it
+                },
                 onPlainPress = { currentContext.anchorAt(fieldPath) },
+                onClick = { repeated -> currentContext.clickSelect(fieldPath, takeFocus = !repeated) },
             ),
     ) {
         content()

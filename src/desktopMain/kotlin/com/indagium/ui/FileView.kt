@@ -334,9 +334,10 @@ internal fun FileView(
     val recordFieldActions = remember(state, logViewerFr) { state.recordFieldActions { runCatching { logViewerFr.requestFocus() } } }
     CompositionLocalProvider(LocalRecordFieldActions provides recordFieldActions) {
         Column(
-            // A plain click anywhere in the view, or Esc, clears the picked fields.
+            // A plain click elsewhere in the view, or Esc, clears the picked fields; while a record tree holds keyboard focus its picked
+            // rows get the arrow keys and Copy first, before the log view's own row navigation (an ancestor of the tree) sees them.
             Modifier.fillMaxSize().clearRecordFieldSelectionOnPlainPress(state).captureRecordFieldSelectionOnRightPress(state).onPreviewKeyEvent { ev ->
-                if (state.handleRecordFieldEscape(ev)) return@onPreviewKeyEvent true
+                if (state.handleRecordFieldEscape(ev) || state.handleRecordFieldKey(ev)) return@onPreviewKeyEvent true
                 if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
                     val frs = visiblePanelFrs()
                     if (frs.isNotEmpty()) {

@@ -2,8 +2,13 @@ package com.indagium.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -53,6 +58,12 @@ internal fun normalizeFieldPaths(order: List<List<String>>, covered: Set<List<St
 /** The fields a text selection in a tree covers: every [covered] row the selection touches, and [fields], what adding them adds. */
 internal class TextSelectionFields(val covered: Set<List<String>>, val fields: List<List<String>>)
 
+/** What a field row lets the keyboard do to it: whether it opens and closes, and the open state itself (the row's own). */
+internal class RowControl(val expandable: Boolean, val expanded: MutableState<Boolean>)
+
+/** The row the keyboard just moved to, to scroll into view; [nonce] tells a repeated move to the same row from the last one. */
+internal class RowReveal(val path: List<String>, val nonce: Int)
+
 /**
  * Where one record tree's field rows are (the row of a field and, for a hex dump or multi-line string, its expanded value area) and
  * which two rows the last text selection ran between. Rows report in as they are laid out and out as they leave the tree; everything
@@ -64,9 +75,31 @@ internal class RecordTreeGeometry {
     private class Span(val path: List<String>, val top: Float, val bottom: Float)
 
     private val slots = LinkedHashMap<List<String>, Slot>()
+    private val controls = HashMap<List<String>, RowControl>()
     private var container: LayoutCoordinates? = null
     private var selectionStart: List<String>? = null
     private var selectionEnd: List<String>? = null
+
+    /** The field the keyboard (or the last click) is on: where Up/Down go from and Shift-Up/Down extend to. Null until one is set. */
+    var cursor: List<String>? = null
+
+    /** The row to bring into view after a keyboard move; the rows watch it. */
+    var reveal: RowReveal? by mutableStateOf(null)
+        private set
+
+    fun revealRow(path: List<String>) {
+        reveal = RowReveal(path, (reveal?.nonce ?: 0) + 1)
+    }
+
+    fun setControl(path: List<String>, control: RowControl) {
+        controls[path] = control
+    }
+
+    fun clearControl(path: List<String>, control: RowControl) {
+        if (controls[path] === control) controls.remove(path)
+    }
+
+    fun control(path: List<String>): RowControl? = controls[path]
 
     fun attach(coordinates: LayoutCoordinates) {
         container = coordinates
@@ -160,6 +193,8 @@ internal fun Modifier.trackTextSelection(geometry: RecordTreeGeometry, context: 
     onGloballyPositioned { geometry.attach(it) }.pointerInput(geometry) {
         awaitPointerEventScope {
             var dragging = false
+            var pressAt = Offset.Zero
+            var pickDropped = false
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull() ?: continue
@@ -167,9 +202,21 @@ internal fun Modifier.trackTextSelection(geometry: RecordTreeGeometry, context: 
                 when (event.type) {
                     PointerEventType.Press -> {
                         dragging = false
-                        if (event.buttons.isPrimaryPressed) dragging = onPrimaryPress(geometry, context(), change, event.keyboardModifiers)
+                        if (event.buttons.isPrimaryPressed) {
+                            pressAt = change.position
+                            pickDropped = false
+                            context()?.actions?.noteTreePress()
+                            dragging = onPrimaryPress(geometry, context(), change, event.keyboardModifiers)
+                        }
                     }
-                    PointerEventType.Move -> if (dragging) geometry.extendSelection(y)
+                    PointerEventType.Move -> if (dragging) {
+                        geometry.extendSelection(y)
+                        // A press that moves is a text drag, not a click on a row: the rows picked so far make way for the text.
+                        if (!pickDropped && (change.position - pressAt).getDistance() > viewConfiguration.touchSlop) {
+                            pickDropped = true
+                            context()?.dropPick()
+                        }
+                    }
                     PointerEventType.Release -> {
                         if (dragging) geometry.extendSelection(y)
                         dragging = false
@@ -219,7 +266,14 @@ internal class RecordTreeHandle(
     val entryId: Int,
     private val geometry: RecordTreeGeometry,
     private val probe: TreeSelectionProbe,
+    /** Whether keyboard focus is in this tree right now. */
+    private val hasFocus: () -> Boolean = { false },
+    /** Takes a key press for the tree's selected fields; true when it did something. */
+    private val onKey: (KeyEvent) -> Boolean = { false },
 ) {
+    /** The tree handles [event] when it holds keyboard focus and the key means something to its selected fields. */
+    fun handleKey(event: KeyEvent): Boolean = hasFocus() && onKey(event)
+
     /** The fields the tree's text selection would add, in document order; empty when no text is selected. */
     fun selectedFields(): List<List<String>> = geometry.textSelectionFields(probe.selectedText())?.fields.orEmpty()
 }
@@ -231,6 +285,12 @@ internal class RecordTreeHandle(
 internal class RecordFieldTrees {
     private val handles = CopyOnWriteArrayList<RecordTreeHandle>()
     private var atRightPress: Map<Pair<String, Int>, List<List<String>>> = emptyMap()
+
+    /** Whether the primary press being dispatched landed in a tree (so the view's plain-press clearing leaves the pick to the tree). */
+    var pressInTree = false
+
+    /** Gives [event] to the tree that holds keyboard focus; true when it handled it. */
+    fun handleKey(event: KeyEvent): Boolean = handles.any { it.handleKey(event) }
 
     /** Adds [handle]; the returned function takes it out again. */
     fun register(handle: RecordTreeHandle): () -> Unit {
