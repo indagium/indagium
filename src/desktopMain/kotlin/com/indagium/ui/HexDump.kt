@@ -11,8 +11,6 @@ internal const val HEX_BYTES_PER_LINE = 16
 
 private const val HEX_DIGITS_PER_BYTE = 2
 private const val HEX_RADIX = 16
-private const val ASCII_PRINTABLE_FIRST = 0x20
-private const val ASCII_PRINTABLE_LAST = 0x7e
 private const val OFFSET_DIGITS = 4
 private const val BYTE_MASK = 0xff
 private val SPACED_HEX_PAIRS = Regex("[0-9a-fA-F]{2}( [0-9a-fA-F]{2})*")
@@ -56,18 +54,8 @@ internal fun hexDumpLines(bytes: ByteArray): List<HexDumpLine> =
         HexDumpLine(
             offset = (index * HEX_BYTES_PER_LINE).toString(HEX_RADIX).padStart(OFFSET_DIGITS, '0'),
             hex = chunk.joinToString(" ") { (it.toInt() and BYTE_MASK).toString(HEX_RADIX).padStart(HEX_DIGITS_PER_BYTE, '0') },
-            ascii = chunk.joinToString("") { byte ->
-                val value = byte.toInt() and BYTE_MASK
-                if (value in ASCII_PRINTABLE_FIRST..ASCII_PRINTABLE_LAST) value.toChar().toString() else "."
-            },
         )
     }
 
-/** One dump line, with its columns apart so the view can colour the offset. [hex] is padded to a full line by [padded]. */
-internal data class HexDumpLine(val offset: String, val hex: String, val ascii: String) {
-    /** [hex] padded to the width of a full line, so the ASCII column of a short last line still lines up. */
-    val padded: String get() = hex.padEnd(HEX_BYTES_PER_LINE * (HEX_DIGITS_PER_BYTE + 1) - 1)
-
-    /** The whole line as plain text, as it reads when copied. */
-    val text: String get() = "$offset  $padded  $ascii"
-}
+/** The offset and byte pairs are separate so the view can colour the offset. */
+internal data class HexDumpLine(val offset: String, val hex: String)

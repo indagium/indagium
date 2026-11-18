@@ -489,11 +489,11 @@ private fun StructuredHexSummary(bytes: ByteArray, mono: FontFamily, tc: ThemeCo
     }
 }
 
-/** The expanded hex field: offset, sixteen lowercase byte pairs and the printable-ASCII column per line, on a subtle background. */
+/** The expanded hex field shows an offset and up to sixteen byte pairs per line. */
 @Composable
 private fun StructuredHexDump(entryId: Int, path: String, bytes: ByteArray, depth: Int, mono: FontFamily, tc: ThemeColors) {
     val lines = remember(bytes) { hexDumpLines(bytes) }
-    // A full line is about 70 characters, wider than a narrow tile: the lines scroll sideways inside their box rather than lose the ASCII column.
+    // Keep byte pairs on the same line even when the tile is narrow.
     Box(
         Modifier.padding(start = (depth * INDENT_PER_DEPTH_DP + 20).dp, end = 3.dp, top = 2.dp, bottom = 2.dp)
             .fillMaxWidth()
@@ -505,7 +505,8 @@ private fun StructuredHexDump(entryId: Int, path: String, bytes: ByteArray, dept
                 androidx.compose.material3.Text(
                     buildAnnotatedString {
                         withStyle(SpanStyle(color = tc.td)) { append(line.offset) }
-                        append("  ${line.padded}  ${line.ascii}")
+                        append("  ")
+                        append(line.hex)
                     },
                     color = tc.tx,
                     fontSize = 11.sp,

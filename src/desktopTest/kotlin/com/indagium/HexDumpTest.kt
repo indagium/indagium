@@ -58,18 +58,13 @@ class HexDumpTest {
     }
 
     @Test
-    fun dumpLinesCarryAnOffsetSixteenLowercasePairsAndAnAsciiColumn() {
+    fun dumpLinesCarryAnOffsetAndUpToSixteenLowercasePairs() {
         val bytes = ByteArray(20) { index -> if (index == 1) 0x0a else (0x41 + index).toByte() }
         val lines = hexDumpLines(bytes)
         assertEquals(2, lines.size)
         assertEquals("0000", lines[0].offset)
         assertEquals("41 0a 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f 50", lines[0].hex)
-        assertEquals("A.CDEFGHIJKLMNOP", lines[0].ascii)
         assertEquals("0010", lines[1].offset)
         assertEquals("51 52 53 54", lines[1].hex)
-        assertEquals("QRST", lines[1].ascii)
-        assertEquals("0000  41 0a 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f 50  A.CDEFGHIJKLMNOP", lines[0].text)
-        assertEquals(lines[0].padded.length, lines[1].padded.length, "a short last line pads to the full width")
-        assertEquals("0010  51 52 53 54" + " ".repeat(36) + "  QRST", lines[1].text)
     }
 }

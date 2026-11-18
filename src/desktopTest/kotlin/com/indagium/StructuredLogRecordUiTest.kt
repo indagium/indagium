@@ -482,9 +482,12 @@ class StructuredLogRecordUiTest {
 
         rule.onNodeWithTag("structured-record-node-toggle-301-root-payload").performClick()
         rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-0")
-            .assertTextContains("0000  53 6f 66 74 77 61 72 65 20 56 65 72 73 69 6f 6e  Software Version", substring = true)
-        rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-1").assertTextContains("0010  20 31", substring = true)
+            .assertTextContains("0000  53 6f 66 74 77 61 72 65 20 56 65 72 73 69 6f 6e")
+        rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-1").assertTextContains("0010  20 31")
         rule.onNodeWithTag("structured-record-hex-line-301-301-root-payload-2").assertDoesNotExist()
+        rule.onNodeWithTag("structured-record-node-toggle-301-root-blob").performClick()
+        rule.onNodeWithTag("structured-record-hex-line-301-301-root-blob-0")
+            .assertTextContains("0000  ff ee dd cc bb aa 00 11 22 33")
         saveScreenshot("structured-json-hex-expanded")
     }
 
