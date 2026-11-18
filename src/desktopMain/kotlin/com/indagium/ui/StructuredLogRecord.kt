@@ -12,15 +12,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -179,9 +183,9 @@ internal fun StructuredRecordDisclosure(
 /**
  * Which containers of a tree start open, besides every one when it is [initiallyExpanded]: those within [depth] levels of the root
  * (a note shows the first level of a record open), and each field of [paths] with the way down to it. [nonce] changes with every new
- * request, so a tree that already composed applies it again.
+ * request, so a tree that already composed applies it again. [scrollTo] is the field a "Go to rows" request brings into view.
  */
-private class TreeOpen(val depth: Int, val paths: Set<List<String>>, val nonce: Int) {
+private class TreeOpen(val depth: Int, val paths: Set<List<String>>, val nonce: Int, val scrollTo: List<String>? = null) {
     /** [segments] is a chosen field or on the way to one. */
     fun covers(segments: List<String>): Boolean =
         paths.isNotEmpty() && paths.any { it.size >= segments.size && it.subList(0, segments.size) == segments }
@@ -228,33 +232,55 @@ internal fun StructuredRecordBody(
     val gapPx = monoSpaceWidthPx(mono)
     val valueLayout = remember(alignment, keyColumn, gapPx) { RecordValueLayout(alignment, keyColumn, gapPx) }
     val actions = LocalRecordFieldActions.current
+    val probe = remember { TreeSelectionProbe() }
     val fieldContext = if (recordTabId != null && actions != null) {
-        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source)
+        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe)
     } else {
         null
     }
     val request = if (recordTabId != null) actions?.openRequest(recordTabId, entryId) else null
+    val scrollTo = remember(tree, request?.nonce) { if (request != null && tree != null) firstFieldOf(tree, request.paths) else null }
     val env = TreeEnv(
         mono = mono,
         tc = tc,
         initiallyExpanded = initiallyExpanded,
         valueLayout = valueLayout,
-        open = TreeOpen(openDepth, request?.paths ?: openPaths, request?.nonce ?: openNonce),
+        open = TreeOpen(openDepth, request?.paths ?: openPaths, request?.nonce ?: openNonce, scrollTo),
         fieldContext = fieldContext,
     )
-    SelectionContainer(
-        modifier = modifier.fillMaxWidth()
-            .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
-            .testTag(bodyTag),
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
-                StructuredContainerRows(tree, path = rootPath, segments = emptyList(), depth = 0, env = env)
-            } else {
-                RawRecordLines(entryId = entryId, source = source, mono = mono, tc = tc)
+    ProvideSelectionProbe(probe) {
+        SelectionContainer(
+            modifier = modifier.fillMaxWidth()
+                .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
+                .testTag(bodyTag),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
+                    StructuredContainerRows(tree, path = rootPath, segments = emptyList(), depth = 0, env = env)
+                } else {
+                    RawRecordLines(entryId = entryId, source = source, mono = mono, tc = tc)
+                }
             }
         }
     }
+}
+
+/** The first of [paths] met walking [root] in the order its rows are drawn (a field before what it holds), or null. */
+private fun firstFieldOf(root: StructuredJsonValue, paths: Set<List<String>>): List<String>? {
+    fun visit(value: StructuredJsonValue, segments: List<String>): List<String>? {
+        val children = when (value) {
+            is StructuredJsonValue.ObjectValue -> value.fields
+            is StructuredJsonValue.ArrayValue -> value.values.mapIndexed { index, child -> "[$index]" to child }
+            else -> return null
+        }
+        for ((label, child) in children) {
+            val path = segments + label
+            if (path in paths) return path
+            visit(child, path)?.let { return it }
+        }
+        return null
+    }
+    return visit(root, emptyList())
 }
 
 /** Whether [source] is a JSON object or array the field tree can show (within its size and depth limits). */
@@ -305,8 +331,18 @@ private fun StructuredContainerRows(
         val picked = fieldContext != null && fieldPath in fieldContext.selected
         var menuAt by remember(childPath) { mutableStateOf<Offset?>(null) }
         val currentContext by rememberUpdatedState(fieldContext)
+        // "Go to rows" brings the first chosen field into view, however tall the record is.
+        val scrollTarget = env.open.scrollTo == fieldPath
+        val bringIntoView = remember { BringIntoViewRequester() }
+        if (scrollTarget) {
+            LaunchedEffect(env.open.nonce) {
+                withFrameNanos { }
+                bringIntoView.bringIntoView()
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth()
+                .then(if (scrollTarget) Modifier.bringIntoViewRequester(bringIntoView) else Modifier)
                 .then(if (picked) Modifier.background(tc.sl) else Modifier)
                 .then(
                     if (fieldContext != null) {
@@ -381,23 +417,27 @@ private fun StructuredContainerRows(
         if (expandable && expanded) {
             when {
                 container -> StructuredContainerRows(child, childPath, fieldPath, depth + 1, env)
-                hexBytes != null -> StructuredHexDump(
-                    entryId = path.substringBefore('.').toIntOrNull() ?: 0,
-                    path = childPath,
-                    bytes = hexBytes,
-                    depth = depth + 1,
-                    mono = mono,
-                    tc = tc,
-                )
-                child is StructuredJsonValue.StringValue -> StructuredStringLines(
-                    entryId = path.substringBefore('.').toIntOrNull() ?: 0,
-                    path = childPath,
-                    value = child.value,
-                    depth = depth + 1,
-                    mono = mono,
-                    tc = tc,
-                    fullValues = initiallyExpanded,
-                )
+                hexBytes != null -> FieldValueArea(fieldContext, fieldPath, childPath, picked) {
+                    StructuredHexDump(
+                        entryId = path.substringBefore('.').toIntOrNull() ?: 0,
+                        path = childPath,
+                        bytes = hexBytes,
+                        depth = depth + 1,
+                        mono = mono,
+                        tc = tc,
+                    )
+                }
+                child is StructuredJsonValue.StringValue -> FieldValueArea(fieldContext, fieldPath, childPath, picked) {
+                    StructuredStringLines(
+                        entryId = path.substringBefore('.').toIntOrNull() ?: 0,
+                        path = childPath,
+                        value = child.value,
+                        depth = depth + 1,
+                        mono = mono,
+                        tc = tc,
+                        fullValues = initiallyExpanded,
+                    )
+                }
             }
         }
     }
@@ -409,6 +449,39 @@ private fun StructuredContainerRows(
             fontFamily = mono,
             modifier = Modifier.padding(start = (depth * 16 + 20).dp, top = 2.dp),
         )
+    }
+}
+
+/**
+ * The expanded value of a field (its hex dump or numbered string lines) as part of that field for the field menu and the pick: a
+ * right-click anywhere in it opens the field's menu, a Ctrl/Cmd-click toggles the field, and a pick tints it like the field's row.
+ * Dragging still selects text. Outside the log view ([fieldContext] null) it only passes [content] through.
+ */
+@Composable
+private fun FieldValueArea(
+    fieldContext: RecordFieldContext?,
+    fieldPath: List<String>,
+    key: String,
+    picked: Boolean,
+    content: @Composable () -> Unit,
+) {
+    if (fieldContext == null) {
+        content()
+        return
+    }
+    var menuAt by remember(key) { mutableStateOf<Offset?>(null) }
+    val currentContext by rememberUpdatedState(fieldContext)
+    Box(
+        Modifier.fillMaxWidth()
+            .then(if (picked) Modifier.background(tc().sl) else Modifier)
+            .recordFieldGestures(
+                key = key,
+                onToggle = { currentContext.let { it.actions.toggleSelected(it.tabId, it.entryId, fieldPath) } },
+                onMenu = { menuAt = it },
+            ),
+    ) {
+        content()
+        menuAt?.let { at -> RecordFieldMenu(fieldContext, fieldPath, at) { menuAt = null } }
     }
 }
 

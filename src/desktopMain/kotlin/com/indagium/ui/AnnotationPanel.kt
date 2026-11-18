@@ -3343,7 +3343,7 @@ private fun DiagramSummaryRow(
 // ── LogRef block ───────────────────────────────────────────────────────
 private val SOURCE_BADGE_MAX_WIDTH = 240.dp
 
-/** Test tags of a row reference's source badge, its Go to rows link and its Reopen prompt link. */
+/** Test tags of a row reference's source badge, its "log ↗" chip (Go to rows) and its Reopen prompt link. */
 internal fun logRefSourceBadgeTag(blockId: String): String = "logref-source-$blockId"
 
 internal fun logRefGoToRowsTag(blockId: String): String = "logref-go-to-rows-$blockId"
@@ -3387,9 +3387,15 @@ private fun LogRefBlock(
         edgeColor = borderColor,
         focused = focused,
         header = {
+            // The "log ↗" chip is the reference's one link to its rows: with the actions it goes there across tabs and
+            // sections (and offers Reopen when the source is closed); without them it is the panel's own navigation.
+            val goToRows: () -> Unit = logRefActions?.let { actions ->
+                { actions.goToRows(block) { offer -> reopenOffer = offer } }
+            } ?: onNavigate
             BlockControls(
-                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
-                onNavigateTooltip = "Show in log",
+                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, goToRows,
+                onNavigateTooltip = sourceLabel?.let { "Go to rows in $it" } ?: "Go to rows",
+                navigateTestTag = logRefGoToRowsTag(block.id),
                 onEdit = onEdit,
                 mutationEnabled = editingEnabled,
                 dragHandleModifier = dragHandleModifier,
@@ -3402,17 +3408,6 @@ private fun LogRefBlock(
                             modifier = Modifier.widthIn(max = SOURCE_BADGE_MAX_WIDTH).testTag(logRefSourceBadgeTag(block.id)),
                         )
                     }
-                },
-                leadingActions = if (sourceLabel != null && logRefActions != null) {
-                    {
-                        AccentLink(
-                            "Go to rows",
-                            onClick = { logRefActions.goToRows(block) { offer -> reopenOffer = offer } },
-                            modifier = Modifier.testTag(logRefGoToRowsTag(block.id)),
-                        )
-                    }
-                } else {
-                    null
                 },
             )
         },
@@ -3778,11 +3773,11 @@ private fun BlockControls(
     onAddBelow: () -> Unit,
     onNavigate: (() -> Unit)? = null,
     onNavigateTooltip: String? = null,
+    /** Test tag of the clickable type chip (only set when it navigates). */
+    navigateTestTag: String? = null,
     onCopyImage: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
     afterBadgeContent: (@Composable () -> Unit)? = null,
-    /** Drawn first in the actions group, before the copy and move buttons (a log reference's Go to rows). */
-    leadingActions: (@Composable () -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
     mutationEnabled: Boolean = true,
     /** Navigation remains usable while Notes mutations are locked. */
@@ -3802,6 +3797,7 @@ private fun BlockControls(
                 Modifier
                     .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
                     .clickable(onClick = onNavigate)
+                    .then(navigateTestTag?.let { Modifier.testTag(it) } ?: Modifier)
             } else {
                 Modifier
             },
@@ -3866,7 +3862,6 @@ private fun BlockControls(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                leadingActions?.invoke()
                 // Leads the actions group, before the arrows — see BlockHeaderLayout's doc for
                 // why this can never be the thing that gets clipped.
                 if (onCopyImage != null) CopyImageIconButton(enabled = copyEnabled, onClick = onCopyImage)

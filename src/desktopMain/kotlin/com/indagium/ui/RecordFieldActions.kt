@@ -8,13 +8,17 @@ package com.indagium.ui
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.ContextMenuState
 import androidx.compose.foundation.LocalContextMenuRepresentation
+import androidx.compose.foundation.text.LocalTextContextMenu
+import androidx.compose.foundation.text.TextContextMenu
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -89,6 +93,36 @@ internal interface RecordFieldActions {
 
 internal val LocalRecordFieldActions = staticCompositionLocalOf<RecordFieldActions?> { null }
 
+/**
+ * Reads the text a tree's selection container has selected right now. The container's own menu knows it (its text manager), so
+ * [ProvideSelectionProbe] lends that manager to the field menu, which then offers "Copy" for the selected text next to the field's items.
+ */
+internal class TreeSelectionProbe {
+    var manager: TextContextMenu.TextManager? = null
+
+    /** The selected text, or "" when nothing is selected. */
+    fun selectedText(): String {
+        val current = manager ?: return ""
+        return if (current.copy?.enabled == true) current.selectedText.text else ""
+    }
+}
+
+/** Wraps a tree's selection container so [probe] sees its text manager; the container's own menu is the surrounding one. */
+@Composable
+internal fun ProvideSelectionProbe(probe: TreeSelectionProbe, content: @Composable () -> Unit) {
+    val outer = LocalTextContextMenu.current
+    val menu = remember(outer, probe) {
+        object : TextContextMenu {
+            @Composable
+            override fun Area(textManager: TextContextMenu.TextManager, state: ContextMenuState, content: @Composable () -> Unit) {
+                SideEffect { probe.manager = textManager }
+                outer.Area(textManager, state, content)
+            }
+        }
+    }
+    CompositionLocalProvider(LocalTextContextMenu provides menu, content = content)
+}
+
 /** The wiring of one record's tree: which record it is, what is picked in it and its JSON (for Copy value). */
 internal class RecordFieldContext(
     val actions: RecordFieldActions,
@@ -96,6 +130,7 @@ internal class RecordFieldContext(
     val entryId: Int,
     val selected: Set<List<String>>,
     val source: String,
+    val probe: TreeSelectionProbe = TreeSelectionProbe(),
 )
 
 /** Whether [paths] of [selected] picks more than one field, so a menu on one of them offers all of them. */
@@ -163,13 +198,18 @@ internal fun AppState.requestAddRecordFields(tabId: String, entryId: Int, paths:
     }
 }
 
-/** Opens the record of row [entryId] in [tabId] and asks its tree to open [paths]; "Go to rows" on a fields reference. */
+/**
+ * Opens the record of row [entryId] in [tabId] and asks its tree to open [paths] and to scroll the first one into view; "Go to rows" on
+ * a fields reference. The fields are also picked, so the tree marks them with the pick's tint until Esc or a plain click clears it.
+ */
 internal fun AppState.openRecordFields(tabId: String, entryId: Int, paths: Set<List<String>>) {
     if (!recordExpansion(tabId).isExpanded(entryId)) toggleRecordExpansion(tabId, entryId)
+    val sectionId = tab(tabId)?.selectedLogSectionId
+    recordFieldSelection = paths.takeIf { it.isNotEmpty() }?.let { RecordFieldSelection(tabId, sectionId, entryId, it) }
     recordFieldOpenRequest = RecordFieldOpenRequest(
         nonce = (recordFieldOpenRequest?.nonce ?: 0) + 1,
         tabId = tabId,
-        sectionId = tab(tabId)?.selectedLogSectionId,
+        sectionId = sectionId,
         entryId = entryId,
         paths = paths,
     )
@@ -212,16 +252,21 @@ internal fun Modifier.clearRecordFieldSelectionOnPlainPress(state: AppState): Mo
 internal fun AppState.handleRecordFieldEscape(event: KeyEvent): Boolean =
     event.type == KeyEventType.KeyDown && event.key == Key.Escape && clearRecordFieldSelection()
 
-/** What the menu of the field at [path] offers: add it (or the whole pick) to the notes, copy its value, copy its path. */
-private fun recordFieldMenuItems(context: RecordFieldContext, path: List<String>): List<ContextMenuItem> {
+/**
+ * What the menu of the field at [path] offers: "Copy" for the text selected in the tree when there is some ([selectedText]), then add
+ * the field (or the whole pick) to the notes, copy its value, copy its path.
+ */
+private fun recordFieldMenuItems(context: RecordFieldContext, path: List<String>, selectedText: String): List<ContextMenuItem> {
     val targets = fieldsForMenu(context.selected, path)
-    val items = mutableListOf<ContextMenuItem>(
-        IndagiumContextMenuItem(
-            addFieldsLabel(targets.size),
-            true,
-            { context.actions.addToNotes(context.tabId, context.entryId, targets) },
-            Icons.AutoMirrored.Outlined.PlaylistAdd,
-        ),
+    val items = mutableListOf<ContextMenuItem>()
+    if (selectedText.isNotEmpty()) {
+        items += IndagiumContextMenuItem("Copy", true, { context.actions.copyText(selectedText) }, Icons.Outlined.ContentCopy)
+    }
+    items += IndagiumContextMenuItem(
+        addFieldsLabel(targets.size),
+        true,
+        { context.actions.addToNotes(context.tabId, context.entryId, targets) },
+        Icons.AutoMirrored.Outlined.PlaylistAdd,
     )
     if (targets.size == 1) {
         items += IndagiumContextMenuItem(
@@ -245,6 +290,8 @@ private fun recordFieldMenuItems(context: RecordFieldContext, path: List<String>
 @Composable
 internal fun RecordFieldMenu(context: RecordFieldContext, path: List<String>, at: Offset, onClosed: () -> Unit) {
     val state = remember(at) { ContextMenuState().also { it.status = ContextMenuState.Status.Open(Rect(at, at)) } }
+    // Read once, as the menu opens: the text selected in the tree is what "Copy" copies.
+    val selectedText = remember(at) { context.probe.selectedText() }
     val closed by rememberUpdatedState(onClosed)
     LaunchedEffect(state.status) {
         if (state.status is ContextMenuState.Status.Closed) {
@@ -253,5 +300,5 @@ internal fun RecordFieldMenu(context: RecordFieldContext, path: List<String>, at
         }
     }
     // The menu opens inside the tree's SelectionContainer; its texts must not register as selectable text there.
-    DisableSelection { LocalContextMenuRepresentation.current.Representation(state) { recordFieldMenuItems(context, path) } }
+    DisableSelection { LocalContextMenuRepresentation.current.Representation(state) { recordFieldMenuItems(context, path, selectedText) } }
 }

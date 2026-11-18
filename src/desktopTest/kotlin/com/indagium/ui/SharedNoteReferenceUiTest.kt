@@ -69,13 +69,21 @@ class SharedNoteReferenceUiTest : SharedNoteUiTestBase() {
     }
 
     @Test
-    fun aReferenceToTheTabsOwnRowsHasNoBadgeAndNoGoToRowsLink() {
+    fun aReferenceToTheTabsOwnRowsHasNoBadgeButKeepsItsChip() {
         setup()
         putBlocks("a", ref(id = "own", source = null, ids = listOf(1)))
 
         assertFalse(exists(logRefSourceBadgeTag("own")))
-        assertFalse(exists(logRefGoToRowsTag("own")))
-        assertTrue(textExists("log ↗"), "its header still has the Show in log chip")
+        assertTrue(exists(logRefGoToRowsTag("own")), "the log ↗ chip is the reference's link to its rows")
+        assertTrue(textExists("log ↗"))
+    }
+
+    @Test
+    fun theChipIsTheOnlyLinkToTheRows() {
+        setupShared(ref())
+
+        assertFalse(textExists("Go to rows"), "no separate Go to rows link next to the chip")
+        assertTrue(textExists("log ↗"))
     }
 
     @Test

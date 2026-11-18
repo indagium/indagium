@@ -28,7 +28,45 @@ private const val SHARED_NOTE_ID_PREFIX = "shared-"
 
 // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
-private fun sharedNoteName(name: String): String = name.trim().ifBlank { DEFAULT_SHARED_NOTE_NAME }
+/**
+ * The name a shared note gets for [typed]: what the user typed, trimmed; a blank one becomes "Shared note", then "Shared note 2",
+ * "Shared note 3"... among the other notes ([exceptHostId] is a note being renamed, which does not count against itself).
+ */
+internal fun AppState.sharedNoteNameFor(typed: String, exceptHostId: String? = null): String {
+    val name = typed.trim()
+    if (name.isNotEmpty()) return name
+    val taken = sharedNoteHosts.filter { it.id != exceptHostId }.mapNotNull { it.sharedNote?.name }.toSet()
+    if (DEFAULT_SHARED_NOTE_NAME !in taken) return DEFAULT_SHARED_NOTE_NAME
+    var number = 2
+    while ("$DEFAULT_SHARED_NOTE_NAME $number" in taken) number++
+    return "$DEFAULT_SHARED_NOTE_NAME $number"
+}
+
+/** What a blank name would become right now: the share dialog shows it as the name field's placeholder. */
+internal fun AppState.nextDefaultSharedNoteName(): String = sharedNoteNameFor("")
+
+/**
+ * The first note file name from [baseName] (then "_2", "_3"...) that nothing owns: not pinned by any tab or shared note, and neither
+ * its .md nor its .ann on disk in the notes folder. Caller holds stateLock.
+ */
+private fun AppState.freeNoteTargetName(baseName: String): String {
+    val notesDir = activeNotesDir()
+    val pinned = (tabs.mapNotNull { it.noteTargetName } + sharedNoteHosts.mapNotNull { it.noteTargetName }).map { it.lowercase() }.toSet()
+    return nextFreeNoteTargetName(baseName, MAX_NOTE_TARGET_SUFFIX) { candidate ->
+        candidate.lowercase() in pinned || File(notesDir, candidate).exists() ||
+            File(notesDir, "${candidate.removeSuffix(".md")}.ann").exists()
+    }
+}
+
+/** The text of the "Existing notes found" prompt: a shared note has no log file to have "never opened", so it only says another session wrote it. */
+internal fun noteOverwriteMessage(targetName: String, sharedNote: Boolean): String =
+    if (sharedNote) {
+        "\"$targetName\" already has saved notes from another session. Nothing is being written to disk while this is open — " +
+            "choose how to proceed."
+    } else {
+        "\"$targetName\" already has saved notes for this log, from a session that never opened this file. " +
+            "Nothing is being written to disk while this is open — choose how to proceed."
+    }
 
 /** The path of a tab opened from one plain file, normalized for comparison; null for no source or an archive entry ("zip!entry"). */
 private fun plainSourcePathKey(sourcePath: String?): String? {
@@ -149,15 +187,21 @@ internal fun AppState.otherSharedNotes(tabId: String): List<SharedNoteInfo> =
 
 // ── Create / share ───────────────────────────────────────────────────────────────────────────
 
-private fun newSharedNoteHost(name: String, members: List<String>): LogTab =
-    sharedNoteHostTab(
+/**
+ * A new, empty host. It pins its export file right away to a name nothing else owns (a shared note has no source file to tell its
+ * note file from another's, so the unpinned default would be the same "<name>_analysis.md" for two notes of one name). Caller holds stateLock.
+ */
+private fun AppState.newSharedNoteHost(name: String, members: List<String>): LogTab {
+    val host = sharedNoteHostTab(
         SharedNoteInfo(
             id = SHARED_NOTE_ID_PREFIX + UUID.randomUUID(),
-            name = sharedNoteName(name),
+            name = sharedNoteNameFor(name),
             memberTabIds = members,
             createdAtMs = System.currentTimeMillis(),
         ),
     )
+    return host.copy(noteTargetName = freeNoteTargetName(analysisNoteMarkdownName(host.filename.replace(".", "_"))))
+}
 
 /**
  * Creates an empty shared note with [memberTabIds] (open ordinary tabs; others are ignored) and points every member's Notes
@@ -185,19 +229,14 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
     val host = newSharedNoteHost(name, members).let {
         it.copy(
             annotations = tab.annotations.ownedBy(tab),
-            noteTargetName = tab.noteTargetName,
+            // The tab's pinned file goes with its note; a tab that had none leaves the host the free pin it was made with.
+            noteTargetName = tab.noteTargetName ?: it.noteTargetName,
             recoveredNoteRows = tab.recoveredNoteRows,
         )
     }
     addSharedNoteHost(host)
-    val notesDir = activeNotesDir()
     // Only a tab that had a pin has a shared file to stay away from; "taken" also covers a file that is not on disk yet.
-    val freshPin = tab.noteTargetName?.let {
-        nextFreeNoteTargetName(analysisNoteMarkdownName(tab.filename, tab.sourcePath), MAX_NOTE_TARGET_SUFFIX) { candidate ->
-            candidate == host.noteTargetName || File(notesDir, candidate).exists() ||
-                File(notesDir, "${candidate.removeSuffix(".md")}.ann").exists()
-        }
-    }
+    val freshPin = tab.noteTargetName?.let { freeNoteTargetName(analysisNoteMarkdownName(tab.filename, tab.sourcePath)) }
     updateTabsLocked(members.toSet()) { member ->
         if (member.id == tabId) {
             member.copy(
@@ -238,7 +277,7 @@ internal fun AppState.setSharedNoteMembers(hostId: String, memberTabIds: List<St
 internal fun AppState.renameSharedNote(hostId: String, name: String): Boolean = synchronized(stateLock) {
     val host = sharedNoteHost(hostId) ?: return false
     val info = host.sharedNote ?: return false
-    val newName = sharedNoteName(name)
+    val newName = sharedNoteNameFor(name, exceptHostId = hostId)
     replaceHostLocked(host.copy(filename = newName, sharedNote = info.copy(name = newName)))
     true
 }
@@ -260,7 +299,8 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
         updateTabsLocked(setOf(intoTabId)) {
             it.copy(
                 annotations = host.annotations.returnedTo(intoTabId),
-                noteTargetName = host.noteTargetName ?: it.noteTargetName,
+                // A host that holds nothing never wrote its file, so the tab keeps its own pin then.
+                noteTargetName = host.noteTargetName?.takeIf { host.annotations.blocks.isNotEmpty() } ?: it.noteTargetName,
                 recoveredNoteRows = host.recoveredNoteRows.ifEmpty { it.recoveredNoteRows },
             )
         }

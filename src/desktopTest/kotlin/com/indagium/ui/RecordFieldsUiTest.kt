@@ -6,16 +6,22 @@ package com.indagium.ui
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalContextMenuRepresentation
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.isRoot
@@ -50,6 +56,9 @@ private const val RECORD_ONE = """{"timestamp":"2026-11-16T10:00:00Z",""" +
     """"metadata":{"bluetooth":{"accessory_address":"AA:BB:CC:DD","rssi":-61},"tags":["a","b"]},"id":7}"""
 private const val RECORD_TWO = """{"timestamp":"2026-11-16T10:00:03Z",""" +
     """"metadata":{"bluetooth":{"accessory_address":"11:22:33:44","rssi":-70}},"id":8}"""
+
+private const val RECORD_BLOB = """{"id":7,"blob":"00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 01 02",""" +
+    """"note":"first line of text\nsecond line of text\nthird line"}"""
 
 private val ADDRESS = listOf("metadata", "bluetooth", "accessory_address")
 private val RSSI = listOf("metadata", "bluetooth", "rssi")
@@ -352,6 +361,89 @@ class RecordFieldsUiTest : SharedNoteUiTestBase() {
         rule.onNodeWithTag(nodeTag("1.root", "metadata", "tags", "[0]")).assertDoesNotExist()
     }
 
+    /** The colour at the left edge of the row [tag], inside its own background (past no text), to tell a tinted row from a plain one. */
+    private fun rowEdgeColor(tag: String) = rule.onNodeWithTag(tag).captureToImage().toPixelMap().let { it[2, it.height / 2] }
+
+    @Test
+    fun goToRowsMarksTheReferencedFieldsLikeAPickAndEscClearsThem() {
+        setupJson()
+        val id = state.addFields("a", 1, ADDRESS, RSSI)
+        val block = state.tab("a")!!.annotations.blocks.single { it.id == id } as AnnBlock.LogRef
+        rule.waitForIdle()
+
+        runBlocking { withTimeout(20_000) { state.goToLogRefRows(block, "a") } }
+        rule.waitForIdle()
+
+        assertEquals(setOf(ADDRESS, RSSI), state.recordFieldSelection!!.paths, "the fields are the pick")
+        val address = nodeTag("1.root", "metadata", "bluetooth", "accessory_address")
+        val rssi = nodeTag("1.root", "metadata", "bluetooth", "rssi")
+        val sibling = nodeTag("1.root", "metadata", "tags")
+        assertTrue(rowEdgeColor(address) == rowEdgeColor(rssi), "both marked rows share the pick tint")
+        assertTrue(rowEdgeColor(address) != rowEdgeColor(sibling), "an unchosen row is not marked")
+
+        // Picking a third field and unpicking it again gives the view keyboard focus (as using the marks would) and leaves the two.
+        ctrlClick(sibling)
+        ctrlClick(sibling)
+        assertEquals(setOf(ADDRESS, RSSI), state.recordFieldSelection!!.paths)
+        rule.onNodeWithTag(address).performKeyInput {
+            keyDown(Key.Escape)
+            keyUp(Key.Escape)
+        }
+        rule.waitForIdle()
+        assertNull(state.recordFieldSelection)
+        assertTrue(rowEdgeColor(address) == rowEdgeColor(sibling), "Esc clears the marks")
+    }
+
+    @Test
+    fun goToRowsOnARecordShownInMessageDetailsMarksItsFieldsThereToo() {
+        setupJson()
+        val id = state.addFields("a", 1, ADDRESS)
+        val block = state.tab("a")!!.annotations.blocks.single { it.id == id } as AnnBlock.LogRef
+        rule.waitForIdle()
+
+        runBlocking { withTimeout(20_000) { state.goToLogRefRows(block, "a") } }
+        rule.waitForIdle()
+
+        assertEquals(setOf(ADDRESS), state.recordFieldSelection!!.paths)
+        val address = detailsNode("metadata", "bluetooth", "accessory_address")
+        assertTrue(rowEdgeColor(address) != rowEdgeColor(detailsNode("id")), "the chosen field is marked in Message details")
+        // A plain click anywhere clears it.
+        rule.onNodeWithTag(detailsNode("timestamp")).performClick()
+        rule.waitForIdle()
+        assertNull(state.recordFieldSelection)
+        assertTrue(rowEdgeColor(address) == rowEdgeColor(detailsNode("id")))
+    }
+
+    @Test
+    fun goToRowsScrollsTheFirstChosenFieldIntoViewInATallRecord() {
+        val filler = (1..60).joinToString(",") { """"f$it":$it""" }
+        val tall = """{$filler,"zz":{"deep":{"target":"found"}}}"""
+        setupJson(height = 420) { s ->
+            s.tabs = s.tabs.map { tab ->
+                if (tab.id == "a") mkTab("a", "a.log", listOf(jsonRow(1, tall), jsonRow(2, RECORD_TWO))).copy(sourcePath = tab.sourcePath) else tab
+            }
+        }
+        val id = state.addFields("a", 1, listOf("zz", "deep", "target"))
+        val block = state.tab("a")!!.annotations.blocks.single { it.id == id } as AnnBlock.LogRef
+        rule.waitForIdle()
+
+        runBlocking { withTimeout(20_000) { state.goToLogRefRows(block, "a") } }
+        rule.waitForIdle()
+
+        rule.onNodeWithTag(nodeTag("1.root", "zz", "deep", "target")).assertIsDisplayed()
+    }
+
+    @Test
+    fun aGoToRowsWithoutFieldsPicksNothing() {
+        setupJson()
+        val id = state.addWholeRecord()
+        val block = state.tab("a")!!.annotations.blocks.single { it.id == id } as AnnBlock.LogRef
+
+        runBlocking { withTimeout(20_000) { state.goToLogRefRows(block, "a") } }
+
+        assertNull(state.recordFieldSelection)
+    }
+
     @Test
     fun aWholeRecordReferenceOnlyNavigatesToTheRow() {
         setupJson()
@@ -475,6 +567,175 @@ class RecordFieldMenuUiTest {
     }
 }
 
+/** The field menu from the expanded value areas of a field: a hex dump and the numbered lines of a multi-line string. */
+@OptIn(ExperimentalTestApi::class)
+class RecordFieldValueAreaMenuUiTest {
+    @get:Rule
+    val rule = createComposeRule()
+
+    private class Recorder : RecordFieldActions {
+        var picked by mutableStateOf(emptySet<List<String>>())
+        val added = mutableListOf<List<List<String>>>()
+        val copied = mutableListOf<String>()
+
+        override fun selectedPaths(tabId: String, entryId: Int) = picked
+
+        override fun toggleSelected(tabId: String, entryId: Int, path: List<String>) {
+            picked = if (path in picked) picked.minusElement(path) else picked.plusElement(path)
+        }
+
+        override fun addToNotes(tabId: String, entryId: Int, paths: List<List<String>>) {
+            added += paths
+        }
+
+        override fun copyText(text: String) {
+            copied += text
+        }
+
+        override fun openRequest(tabId: String, entryId: Int): RecordFieldOpenRequest? = null
+
+        override fun reclaimFocus() = Unit
+    }
+
+    private val hexLine = "structured-record-hex-line-1-1-root-blob-0"
+    private val stringLine = "structured-record-string-line-1-1-root-note-1"
+
+    private fun show(recorder: Recorder) {
+        rule.setContent {
+            CompositionLocalProvider(
+                LocalTheme provides LIGHT_THEME,
+                LocalRecordFieldActions provides recorder,
+                LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
+                androidx.compose.foundation.text.LocalTextContextMenu provides IndagiumTextContextMenu,
+            ) {
+                Box(Modifier.size(620.dp, 360.dp)) {
+                    StructuredRecordBody(1, RECORD_BLOB, FontFamily.Monospace, startIndent = 4.dp, initiallyExpanded = true, recordTabId = "t")
+                }
+            }
+        }
+        rule.waitForIdle()
+    }
+
+    @Test
+    fun rightClickingAHexDumpOffersTheFieldsMenuAndNotJustCopy() {
+        val recorder = Recorder()
+        show(recorder)
+
+        rule.onNodeWithTag(hexLine).performMouseInput { rightClick(center) }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("Add field to notes").assertExists()
+        rule.onNodeWithText("Copy value").assertExists()
+        rule.onNodeWithText("Copy path").assertExists()
+        rule.onNodeWithText("Copy").assertDoesNotExist()
+        rule.onNodeWithText("Add field to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf(listOf("blob"))), recorder.added)
+    }
+
+    @Test
+    fun rightClickingTheLinesOfAMultiLineStringOffersItsFieldsMenu() {
+        val recorder = Recorder()
+        show(recorder)
+
+        rule.onNodeWithTag(stringLine).performMouseInput { rightClick(center) }
+        rule.waitForIdle()
+        rule.onNodeWithText("Copy path").performClick()
+        rule.waitForIdle()
+
+        assertEquals("note", recorder.copied.single())
+        rule.onNodeWithTag(stringLine).performMouseInput { rightClick(center) }
+        rule.waitForIdle()
+        rule.onNodeWithText("Copy value").performClick()
+        rule.waitForIdle()
+        assertEquals("first line of text\nsecond line of text\nthird line", recorder.copied.last())
+    }
+
+    @Test
+    fun ctrlClickingTheValueAreaTogglesTheField() {
+        val recorder = Recorder()
+        show(recorder)
+
+        rule.ctrlClickNode(hexLine, Key.CtrlLeft)
+        rule.ctrlClickNode(stringLine, Key.MetaLeft)
+        assertEquals(setOf(listOf("blob"), listOf("note")), recorder.picked)
+        rule.ctrlClickNode(hexLine, Key.CtrlLeft)
+        assertEquals(setOf(listOf("note")), recorder.picked)
+        rule.ctrlClickNode(hexLine, Key.CtrlLeft)
+
+        // The field is part of the pick, so its value area's menu adds the whole pick.
+        rule.onNodeWithTag(hexLine).performMouseInput { rightClick(center) }
+        rule.waitForIdle()
+        rule.onNodeWithText("Add 2 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(listOf("blob"), listOf("note")), recorder.added.single().toSet())
+    }
+
+    @Test
+    fun withTextSelectedTheMenuAlsoOffersCopyForIt() {
+        val recorder = Recorder()
+        show(recorder)
+
+        // Drag over the second line of the string to select text in the tree.
+        rule.onNodeWithTag(stringLine).performMouseInput {
+            moveTo(Offset(2f, center.y))
+            press()
+            moveTo(Offset(width - 2f, center.y))
+            release()
+        }
+        rule.waitForIdle()
+        rule.onNodeWithTag(stringLine).performMouseInput { rightClick(Offset(10f, center.y)) }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("Copy").assertExists()
+        rule.onNodeWithText("Add field to notes").assertExists()
+        rule.onNodeWithText("Copy").performClick()
+        rule.waitForIdle()
+        assertTrue(recorder.copied.single().contains("second line"), "Copy copies the selected text: ${recorder.copied}")
+    }
+
+    @Test
+    fun aDragInTheValueAreaStillSelectsAndOpensNoMenu() {
+        val recorder = Recorder()
+        show(recorder)
+
+        rule.onNodeWithTag(hexLine).performMouseInput {
+            moveTo(Offset(2f, center.y))
+            press()
+            moveTo(Offset(width - 2f, center.y))
+            release()
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("Add field to notes").assertDoesNotExist()
+        assertTrue(recorder.picked.isEmpty())
+    }
+
+    @Test
+    fun theChosenFieldIsBroughtIntoViewInATallRecord() {
+        val recorder = object : RecordFieldActions by Recorder() {
+            override fun selectedPaths(tabId: String, entryId: Int) = setOf(listOf("zz", "deep", "target"))
+
+            override fun openRequest(tabId: String, entryId: Int) =
+                RecordFieldOpenRequest(1, tabId, null, entryId, setOf(listOf("zz", "deep", "target")))
+        }
+        val filler = (1..40).joinToString(",") { """"f$it":$it""" }
+        val record = "{$filler,\"zz\":{\"deep\":{\"target\":\"found\"}}}"
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME, LocalRecordFieldActions provides recorder) {
+                Box(Modifier.size(500.dp, 160.dp)) {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        StructuredRecordBody(1, record, FontFamily.Monospace, startIndent = 4.dp, recordTabId = "t")
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithTag(nodeTag("1.root", "zz", "deep", "target")).assertIsDisplayed()
+    }
+}
+
 /** Writes the record-field surfaces to build/shared-notes-qa (8-structured-*.png) so they can be looked at. */
 @OptIn(ExperimentalTestApi::class)
 class RecordFieldsQaScreenshotsUiTest : SharedNoteUiTestBase() {
@@ -484,17 +745,19 @@ class RecordFieldsQaScreenshotsUiTest : SharedNoteUiTestBase() {
     )
 
     /** The log view of tab a with two JSON records, drawn as the app draws it (its own context-menu look). */
-    private fun setupShot(width: Int = 1000, height: Int = 760) {
+    private fun setupShot(width: Int = 1000, height: Int = 760, records: List<String> = listOf(RECORD_ONE, RECORD_TWO)) {
         dir = createTempDirectory("record-fields-qa").toFile()
         state = AppState(File(dir, "state.cache"), notesDir = File(dir, "notes"), autoExportNotes = false)
         state.tabs = listOf(
-            mkTab("a", "Untitled.json", listOf(jsonRow(1, RECORD_ONE), jsonRow(2, RECORD_TWO))).copy(sourcePath = logFile("a.log").absolutePath),
+            mkTab("a", "Untitled.json", records.mapIndexed { index, json -> jsonRow(index + 1, json) })
+                .copy(sourcePath = logFile("a.log").absolutePath),
         )
         state.activeTabId = "a"
         rule.setContent {
             CompositionLocalProvider(
                 LocalTheme provides LIGHT_THEME,
                 LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
+                androidx.compose.foundation.text.LocalTextContextMenu provides IndagiumTextContextMenu,
             ) {
                 Box(Modifier.size(width.dp, height.dp)) { state.tab("a")?.let { FileView(state, it) } }
             }
@@ -556,5 +819,41 @@ class RecordFieldsQaScreenshotsUiTest : SharedNoteUiTestBase() {
         rule.onNodeWithTag(nodeTag("1.details", "id")).performMouseInput { rightClick(center) }
         rule.waitForIdle()
         shot("8-structured-multiselect-menu")
+    }
+
+    @Test
+    fun theFieldMenuOverAHexDumpWithTextSelected() {
+        setupShot(records = listOf(RECORD_BLOB, RECORD_TWO))
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+        val line = rule.onNodeWithTag("structured-record-hex-line-1-1-details-blob-0")
+
+        line.performMouseInput {
+            moveTo(Offset(2f, center.y))
+            press()
+            moveTo(Offset(width * 0.6f, center.y))
+            release()
+        }
+        rule.waitForIdle()
+        line.performMouseInput { rightClick(Offset(width * 0.3f, center.y)) }
+        rule.waitForIdle()
+
+        // Two "Copy": the Notes bar's button and the menu's item for the selected text.
+        assertEquals(2, rule.onAllNodesWithText("Copy").fetchSemanticsNodes().size)
+        rule.onNodeWithText("Add field to notes").assertExists()
+        shot("9-hex-dump-field-menu-with-selection")
+    }
+
+    @Test
+    fun theFieldsMarkedAfterGoToRows() {
+        setupShot()
+        state.add { state.requestAddRecordFields("a", 1, listOf(ADDRESS, RSSI)) }
+        val block = state.tab("a")!!.annotations.blocks.single() as AnnBlock.LogRef
+        rule.waitForIdle()
+
+        runBlocking { withTimeout(20_000) { state.goToLogRefRows(block, "a") } }
+        rule.waitForIdle()
+
+        shot("9-go-to-rows-marked-fields")
     }
 }

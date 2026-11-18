@@ -188,7 +188,7 @@ private fun ShareNoteDialog(state: AppState, request: SharedNoteDialogRequest.Sh
                     value = name,
                     onValueChange = { name = it },
                     modifier = Modifier.fillMaxWidth().focusRequester(nameFocus),
-                    placeholder = DEFAULT_SHARED_NOTE_NAME,
+                    placeholder = remember(request) { state.nextDefaultSharedNoteName() },
                     onSubmit = ::confirm,
                     testTag = SHARE_DIALOG_NAME_TAG,
                 )

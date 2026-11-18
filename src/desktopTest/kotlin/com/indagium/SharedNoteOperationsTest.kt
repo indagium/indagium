@@ -12,6 +12,8 @@ import com.indagium.ui.PendingNoteOverwrite
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.deleteSharedNote
 import com.indagium.ui.mkTab
+import com.indagium.ui.nextDefaultSharedNoteName
+import com.indagium.ui.noteOverwriteMessage
 import com.indagium.ui.otherSharedNotes
 import com.indagium.ui.renameSharedNote
 import com.indagium.ui.reopenSharedNoteMember
@@ -138,6 +140,97 @@ class SharedNoteOperationsTest {
         assertTrue(state.tabs === tabsBefore)
     }
 
+    // ── names and files of new shared notes ──────────────────────────────────────────────────────
+
+    @Test
+    fun blankNamedSharedNotesCountUpAndEachPinsItsOwnFile() {
+        val dir = createTempDirectory("shared-ops-defaults").toFile()
+        val state = withTabs(dir, autoExport = true)
+
+        val first = assertNotNull(state.createSharedNote("", listOf("a")))
+        val second = assertNotNull(state.createSharedNote("  ", listOf("b")))
+        val third = assertNotNull(state.createSharedNote("", listOf("c")))
+
+        assertEquals(listOf("Shared note", "Shared note 2", "Shared note 3"), listOf(first, second, third).map { state.host(it).sharedNote?.name })
+        assertEquals(
+            listOf("Shared_note_analysis.md", "Shared_note_2_analysis.md", "Shared_note_3_analysis.md"),
+            listOf(first, second, third).map { state.host(it).noteTargetName },
+        )
+        assertEquals("Shared note 4", state.nextDefaultSharedNoteName())
+
+        // Adding to the second never meets the first's file: no "Existing notes found" prompt, and each writes its own file.
+        state.putBlocks(first, noteBlock("n1", "first"))
+        waitUntil { File(dir, "notes/Shared_note_analysis.md").exists() }
+        state.putBlocks(second, noteBlock("n2", "second"))
+        waitUntil { File(dir, "notes/Shared_note_2_analysis.md").exists() }
+        assertNull(state.pendingNoteOverwrite)
+        assertTrue(File(dir, "notes/Shared_note_analysis.md").readText().contains("first"))
+        assertTrue(File(dir, "notes/Shared_note_2_analysis.md").readText().contains("second"))
+        state.close()
+    }
+
+    @Test
+    fun aTypedNameIsKeptAndADeletedDefaultNameIsFreeAgain() {
+        val dir = createTempDirectory("shared-ops-typed").toFile()
+        val state = withTabs(dir)
+        val named = assertNotNull(state.createSharedNote("Pairing", listOf("a")))
+        val blank = assertNotNull(state.createSharedNote("", listOf("b")))
+        assertEquals("Pairing", state.host(named).sharedNote?.name)
+        assertEquals("Shared note", state.host(blank).sharedNote?.name)
+        assertEquals("Pairing_analysis.md", state.host(named).noteTargetName)
+        // A note's name is not a file name: a dot in it is kept (as "_"), not cut off as an extension.
+        val versioned = assertNotNull(state.createSharedNote("Pairing v1.2", listOf("c")))
+        assertEquals("Pairing_v1_2_analysis.md", state.host(versioned).noteTargetName)
+
+        state.deleteSharedNote(blank)
+
+        assertEquals("Shared note", state.nextDefaultSharedNoteName())
+    }
+
+    @Test
+    fun aHostPinSkipsFilesOnDiskAndNamesPinnedByTabsOrOtherNotes() {
+        val dir = createTempDirectory("shared-ops-pin-free").toFile()
+        val notes = File(dir, "notes").apply { mkdirs() }
+        File(notes, "Pairing_analysis.md").writeText("# old")
+        File(notes, "Pairing_analysis_2.ann").writeText("old")
+        val state = withTabs(dir)
+        state.upTab("c") { it.copy(noteTargetName = "Pairing_analysis_3.md") }
+
+        val id = assertNotNull(state.createSharedNote("Pairing", listOf("a")))
+        val other = assertNotNull(state.createSharedNote("Pairing", listOf("b")))
+
+        assertEquals("Pairing_analysis_4.md", state.host(id).noteTargetName)
+        assertEquals("Pairing_analysis_5.md", state.host(other).noteTargetName, "another note's pin counts even before its file exists")
+    }
+
+    @Test
+    fun renamingAndSharingKeepTheRightPins() {
+        val dir = createTempDirectory("shared-ops-pin-rename").toFile()
+        val state = withTabs(dir)
+        val first = assertNotNull(state.createSharedNote("", listOf("a")))
+        val second = assertNotNull(state.createSharedNote("", listOf("b")))
+
+        assertTrue(state.renameSharedNote(second, ""))
+        assertEquals("Shared note 2", state.host(second).sharedNote?.name, "a blank rename keeps counting past the other notes only")
+        assertTrue(state.renameSharedNote(first, "Renamed"))
+        assertEquals("Shared_note_analysis.md", state.host(first).noteTargetName, "a rename leaves the pin")
+
+        state.putBlocks("c", noteBlock())
+        val shared = assertNotNull(state.shareTabNote("c", "", listOf("c")))
+        assertEquals("Shared note", state.host(shared).sharedNote?.name, "the name freed by the rename is used again")
+        assertEquals("Shared_note_analysis_2.md", state.host(shared).noteTargetName)
+    }
+
+    @Test
+    fun theOverwritePromptSaysAnotherSessionForASharedNoteAndForThisLogForATab() {
+        val shared = noteOverwriteMessage("Shared_note_analysis.md", sharedNote = true)
+        val tab = noteOverwriteMessage("a_analysis.md", sharedNote = false)
+
+        assertTrue(shared.startsWith("\"Shared_note_analysis.md\" already has saved notes from another session."), shared)
+        assertFalse("this log" in shared || "never opened" in shared, shared)
+        assertTrue(tab.startsWith("\"a_analysis.md\" already has saved notes for this log, from a session that never opened this file."), tab)
+    }
+
     // ── shareTabNote ─────────────────────────────────────────────────────────────────────────────
 
     @Test
@@ -187,7 +280,7 @@ class SharedNoteOperationsTest {
         val id = assertNotNull(state.shareTabNote("a", "", listOf("a")))
 
         assertEquals("Shared note", state.host(id).filename)
-        assertNull(state.host(id).noteTargetName)
+        assertEquals("Shared_note_analysis.md", state.host(id).noteTargetName, "a host is pinned to a free file as it is made")
         assertNull(state.tab("a")?.noteTargetName)
         assertEquals(listOf("a"), state.host(id).sharedNote?.memberTabIds)
         assertEquals(1, state.host(id).annotations.blocks.size)

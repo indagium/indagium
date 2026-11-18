@@ -1652,9 +1652,7 @@ fun App(
                             )
                             Spacer(Modifier.height(6.dp))
                             AppText(
-                                "\"${pending.targetName}\" already has saved notes for this log, from a session that " +
-                                    "never opened this file. Nothing is being written to disk while this is open — " +
-                                    "choose how to proceed.",
+                                noteOverwriteMessage(pending.targetName, sharedNote = state.sharedNoteHost(pending.tabId) != null),
                                 color = tc2.td,
                                 fontSize = 11.sp,
                                 maxLines = 5,
