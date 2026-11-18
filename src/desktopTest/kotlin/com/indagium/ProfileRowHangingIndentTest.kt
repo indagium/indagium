@@ -11,6 +11,7 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.buildLogLineRender
+import com.indagium.ui.chooseHangingIndentChars
 import com.indagium.ui.compactRecordSummary
 import com.indagium.ui.hangingContinuationLimit
 import com.indagium.ui.hangingIndentFits
@@ -197,4 +198,28 @@ class ProfileRowHangingIndentTest {
         text.spanStyles.filter { offset >= it.start && offset < it.end }
             .fold(SpanStyle()) { style, range -> style.merge(range.item) }
             .color
+
+    @Test
+    fun theFallbackIndentIsWhereTheSecondColumnStarts() {
+        val render = render(profileRow())
+        assertEquals(10 + 2, render.fallbackIndentChars)
+        assertEquals(render.text.text.indexOf("api"), render.fallbackIndentChars)
+        // A row without a message (an access log) still gets one.
+        val withoutMessage = profileRow(cols = columns.filter { it.id != "message" })
+        assertEquals(0, render(withoutMessage).messageIndentChars)
+        assertEquals(10 + 2, render(withoutMessage).fallbackIndentChars)
+    }
+
+    @Test
+    fun wrappedLinesHangAtTheMessageThenAfterTheFirstColumnThenNowhere() {
+        // The message column fits: wrap under it.
+        assertEquals(40, chooseHangingIndentChars(40, 12) { it <= 50 })
+        // The message starts too far right (many columns): wrap just after the first column, never under it.
+        assertEquals(12, chooseHangingIndentChars(80, 12) { it <= 50 })
+        // No message at all: the same fallback.
+        assertEquals(12, chooseHangingIndentChars(0, 12) { it <= 50 })
+        // A pane too narrow even for that: no indent.
+        assertEquals(0, chooseHangingIndentChars(80, 30) { it <= 20 })
+        assertEquals(0, chooseHangingIndentChars(0, 0) { true })
+    }
 }

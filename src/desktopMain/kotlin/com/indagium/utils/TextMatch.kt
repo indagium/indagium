@@ -266,6 +266,14 @@ internal fun profileDisplayTextProjection(
 internal fun profileMessageIndentChars(projection: ProfileDisplayTextProjection): Int =
     projection.renderedFields.firstOrNull { it.id == "message" }?.start ?: 0
 
+/**
+ * Characters before the second column in the rendered row: the indent a wrapped line falls back to
+ * when the message starts too far right for its own indent, or the row has no message. Continuation
+ * lines then never start under the first column, where a new row's timestamp would be.
+ */
+internal fun profileFallbackIndentChars(projection: ProfileDisplayTextProjection): Int =
+    projection.renderedFields.getOrNull(1)?.start ?: 0
+
 internal fun profileDisplayText(
     columns: List<LogDisplayField>,
     processDisplayName: String? = null,

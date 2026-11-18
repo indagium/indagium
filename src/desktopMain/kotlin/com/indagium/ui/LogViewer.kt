@@ -79,6 +79,7 @@ import com.indagium.utils.passesFilter
 import com.indagium.utils.profileColumnLayout
 import com.indagium.utils.profileDisplayColumns
 import com.indagium.utils.profileDisplayTextProjection
+import com.indagium.utils.profileFallbackIndentChars
 import com.indagium.utils.profileMessageIndentChars
 import com.indagium.utils.regexRanges
 import com.indagium.utils.remapOffset
@@ -947,9 +948,16 @@ internal fun buildFullLineAnnotation(
  *
  * [messageIndentChars] is where the message column starts in [text] for a row drawn from a format
  * profile (the characters of every column and separator before it), and 0 for any other row. A wrapped
- * profile row hangs its continuation lines at that column.
+ * profile row hangs its continuation lines at that column. [fallbackIndentChars] is where its second
+ * column starts: the indent used when the message one does not fit, or the row has no message (see
+ * [chooseHangingIndentChars]).
  */
-internal data class LogLineRender(val text: AnnotatedString, val wholeLine: Highlighter?, val messageIndentChars: Int = 0)
+internal data class LogLineRender(
+    val text: AnnotatedString,
+    val wholeLine: Highlighter?,
+    val messageIndentChars: Int = 0,
+    val fallbackIndentChars: Int = 0,
+)
 
 private fun renderedRangeRemapper(
     entry: LogEntry,
@@ -1139,7 +1147,12 @@ internal fun buildLogLineRender(
             addStylesInRanges(searchRanges, SpanStyle(background = background, fontWeight = FontWeight.SemiBold), boundaries)
         }
     }
-    return LogLineRender(text, lineHighlight.wholeLine, profileProjection?.let(::profileMessageIndentChars) ?: 0)
+    return LogLineRender(
+        text,
+        lineHighlight.wholeLine,
+        messageIndentChars = profileProjection?.let(::profileMessageIndentChars) ?: 0,
+        fallbackIndentChars = profileProjection?.let(::profileFallbackIndentChars) ?: 0,
+    )
 }
 
 private fun profileFieldColor(
@@ -3850,7 +3863,10 @@ private fun LogRow(
         if (autoWrap) {
             built
         } else {
-            built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars, built.messageIndentChars))
+            val indent = chooseHangingIndentChars(built.messageIndentChars, built.fallbackIndentChars) {
+                it <= wrapLimitChars * MAX_HANGING_INDENT_FRACTION
+            }
+            built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars, indent))
         }
     }
     val compactLine = if (structuredRecordSource != null) compactRecordSummary(lineRender.text) else lineRender.text
@@ -3858,8 +3874,8 @@ private fun LogRow(
     // applies after a soft wrap and after a wrap-limit "\n" alike, and the row stays one text field,
     // so drag-selection and copy are untouched (no padding characters are added).
     var textFieldWidthPx by remember(tab.id, entry.id) { mutableStateOf(0) }
-    val hangingIndent = if (profileLayout != null && lineRender.messageIndentChars > 0) {
-        rememberHangingIndent(lineRender.messageIndentChars, mono, fontSize, textFieldWidthPx)
+    val hangingIndent = if (profileLayout != null && (lineRender.messageIndentChars > 0 || lineRender.fallbackIndentChars > 0)) {
+        rememberHangingIndent(lineRender.messageIndentChars, lineRender.fallbackIndentChars, mono, fontSize, textFieldWidthPx)
     } else {
         null
     }

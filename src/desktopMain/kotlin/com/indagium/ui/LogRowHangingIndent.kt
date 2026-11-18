@@ -45,25 +45,39 @@ internal fun hangingIndentSp(chars: Int, advancePx: Float, density: Density): Te
     with(density) { (chars * advancePx).toSp() }
 
 /** The most of a row's width a hanging indent may take; a pane narrower than that gets no indent. */
-private const val MAX_INDENT_WIDTH_FRACTION = 0.5f
+internal const val MAX_HANGING_INDENT_FRACTION = 0.5f
+
+/**
+ * The indent a profile row's wrapped lines hang at: its message column when that [fits], else just
+ * after its first column ([fallbackChars]) when that fits, else none. A row whose message starts far to
+ * the right (many columns) or that has no message still keeps its continuation lines off the first
+ * column, so they never read as a new row.
+ */
+internal fun chooseHangingIndentChars(messageChars: Int, fallbackChars: Int, fits: (Int) -> Boolean): Int = when {
+    messageChars > 0 && fits(messageChars) -> messageChars
+    fallbackChars > 0 && fits(fallbackChars) -> fallbackChars
+    else -> 0
+}
 
 /**
  * Whether an indent of [indentPx] still leaves a wrapped row room to read in a field [fieldWidthPx]
  * wide. A width not measured yet (0) is taken as wide enough.
  */
 internal fun hangingIndentFits(indentPx: Float, fieldWidthPx: Int): Boolean =
-    fieldWidthPx <= 0 || indentPx <= fieldWidthPx * MAX_INDENT_WIDTH_FRACTION
+    fieldWidthPx <= 0 || indentPx <= fieldWidthPx * MAX_HANGING_INDENT_FRACTION
 
 /**
- * The hanging indent for a profile row: [chars] characters of the row's own font, or null when the
- * field is too narrow for it (the continuation lines then start at the left edge, as without one).
+ * The hanging indent for a profile row in the row's own font: [messageChars] when it fits the field,
+ * else [fallbackChars] (see [chooseHangingIndentChars]), or null when neither does (the continuation
+ * lines then start at the left edge, as without one).
  */
 @Composable
-internal fun rememberHangingIndent(chars: Int, family: FontFamily, fontSize: TextUnit, fieldWidthPx: Int): TextUnit? {
+internal fun rememberHangingIndent(messageChars: Int, fallbackChars: Int, family: FontFamily, fontSize: TextUnit, fieldWidthPx: Int): TextUnit? {
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer(cacheSize = 1)
     val advance = remember(measurer, density, family, fontSize) { monoAdvancePx(measurer, family, fontSize) }
-    return remember(chars, advance, density, fieldWidthPx) {
-        hangingIndentSp(chars, advance, density).takeIf { hangingIndentFits(chars * advance, fieldWidthPx) }
+    return remember(messageChars, fallbackChars, advance, density, fieldWidthPx) {
+        val chars = chooseHangingIndentChars(messageChars, fallbackChars) { hangingIndentFits(it * advance, fieldWidthPx) }
+        if (chars > 0) hangingIndentSp(chars, advance, density) else null
     }
 }
