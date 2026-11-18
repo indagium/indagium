@@ -450,22 +450,25 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
     focus: LogViewPanelFocus,
     collapsible: Boolean,
 ) {
+    // The note the tile shows: the tab's own, or the shared note it views. Its buttons act on that note, never on the tab's own.
+    val note = state.shownNoteOf(tab)
+    val noteId = note.id
     // The Notes actions are part of the tile's header row while they fit there (NotesHeaderActions.kt), so the tile, not the panel, owns the Copy
     // feedback they and the panel's preview dialog and shortcut share.
-    val copyFeedback = rememberCopyFeedback(tab.id) { format, done -> state.copyAnnotationFormatAsync(tab.id, format, done) }
+    val copyFeedback = rememberCopyFeedback(noteId) { format, done -> state.copyAnnotationFormatAsync(noteId, format, done) }
     val actions = NotesActionModel(
-        tab = tab,
+        tab = note,
         defaultFormat = state.settings.annotationCopyFormat,
         feedback = copyFeedback,
         locked = LocalNotesEditLocked.current,
-        recentNotes = state.recentNotesForTab(tab),
+        recentNotes = state.recentNotesForTab(note),
         recentMenuOpen = state.recentNotesMenuOpen,
-        activeNotePath = state.activeNoteFilePath(tab),
-        onToggleMd = { state.toggleMd(tab.id) },
-        onSave = { state.saveAnalysis(tab.id) },
-        onNewAnalysis = { state.newAnalysis(tab.id) },
+        activeNotePath = state.activeNoteFilePath(note),
+        onToggleMd = { state.toggleMd(noteId) },
+        onSave = { state.saveAnalysis(noteId) },
+        onNewAnalysis = { state.newAnalysis(noteId) },
         onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-        onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+        onOpenNote = { state.openNoteFileAsync(noteId, it) },
         onLocateLog = { state.locateLogForTab(tab.id, it) },
         onReclaimFocus = { runCatching { focus.notes.requestFocus() } },
     )

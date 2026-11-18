@@ -1522,7 +1522,7 @@ private fun StringBuilder.appendLogRefBlock(
     } else if (settings.numberAnnotationBlocks) {
         appendLine()
     }
-    if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
+    logRefSourceLabel(block, tab.logSections)?.let { appendLine("${sourcePrefixLabel(settings)} $it") }
     val rows = block.resolveRows(tab)
     // Legacy recovered/cross-tab refs have no reliable current baseline or name map, so this
     // fallback uses numeric PIDs and omits Δt. Snapshot refs bypass it and use captured metadata.

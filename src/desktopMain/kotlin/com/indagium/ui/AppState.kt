@@ -8138,6 +8138,16 @@ class AppState(
         }
     }
 
+    /**
+     * [selectLogSection], then suspends until that switch has published its rows or ended (a newer pick superseded it, it failed, or
+     * the tab closed). Waits on the switch's own load job, so nothing polls. True when [sectionId] is the section the tab now shows.
+     */
+    internal suspend fun selectLogSectionAndAwait(tabId: String, sectionId: String): Boolean {
+        selectLogSection(tabId, sectionId)
+        synchronized(stateLock) { sectionLoadJobs[tabId] }?.join()
+        return tab(tabId)?.let { it.selectedLogSectionId == sectionId && pendingLogSection[tabId] != sectionId } == true
+    }
+
     /** stateLock must be held: a closed tab's section load is cancelled and its pending target and index dropped. */
     private fun forgetLogSectionState(tabId: String) {
         sectionLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
@@ -10283,7 +10293,7 @@ class AppState(
      *  the collapsed-block reveal rather than re-deriving them. */
     fun navigateToLogLine(tabId: String, entryId: Int) = requestAiLogNavigation(tabId, listOf(entryId))
 
-    private fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
+    internal fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
         val tab = tab(tabId) ?: return
         val actualIds = lineIds.distinct().filter { it in tab.rmap }
         if (actualIds.isEmpty()) return
@@ -16263,7 +16273,9 @@ class AppState(
     fun openCaseLibrary(tabId: String) {
         val tab = noteTab(tabId)
         caseLibraryTabId = tabId
-        caseLibraryQuery = tab?.annotations?.issueDescription.orEmpty()
+        // The seed is the issue description of the note the tab shows (its own, or the shared note it views); the filter and the
+        // excluded source are the tab's own.
+        caseLibraryQuery = noteTab(notesTargetFor(tabId))?.annotations?.issueDescription.orEmpty()
         caseLibraryTags = tab?.filter?.activeTags?.toList().orEmpty()
         caseLibraryExcludeSourcePath = tab?.sourcePath
         caseLibraryResults = emptyList()

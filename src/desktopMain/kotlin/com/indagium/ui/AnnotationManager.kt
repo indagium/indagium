@@ -34,7 +34,10 @@ internal class AnnotationManager(private val appState: AppState) {
     var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)
 
     fun requestAddAnn(sourceTabId: String, logIds: List<Int>, capture: AnnBlock.LogRefCapture? = null) {
-        val targetTabId = if (appState.compareMode && sourceTabId != appState.activeTabId) appState.activeTabId else sourceTabId
+        // Compare mode: lines from the other pane go into the ACTIVE tab's note; whichever tab owns the note, the note it shows
+        // (its own, or a shared note) is the one that receives them.
+        val noteOwnerTabId = if (appState.compareMode && sourceTabId != appState.activeTabId) appState.activeTabId else sourceTabId
+        val targetTabId = appState.notesTargetFor(noteOwnerTabId)
         val crossFile = targetTabId != sourceTabId
         val sourceTab = appState.tab(sourceTabId)
         val frozenCapture = capture ?: sourceTab?.let { captureFilteredAnnotationLogRef(it, logIds, appState.settings) }
@@ -48,6 +51,7 @@ internal class AnnotationManager(private val appState: AppState) {
                 null
             },
             capture = frozenCapture,
+            sourceSectionId = sourceTab?.selectedLogSectionId,
         )
         appState.ctx = null
     }
@@ -70,6 +74,7 @@ internal class AnnotationManager(private val appState: AppState) {
                 // keeps subsequent rendering independent of a live source tab's lifetime.
                 sourceEntries = rows,
                 presentation = capture?.presentation?.copy(options = options),
+                sourceSectionId = request.sourceSectionId,
             )
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
@@ -85,7 +90,7 @@ internal class AnnotationManager(private val appState: AppState) {
     ) {
         val sourceTab = appState.tab(sourceTabId)
         val capture = sourceTab?.let { captureFilteredAnnotationLogRef(it, logIds, appState.settings) }
-        val req = AddAnnRequest(targetTabId, sourceTabId, logIds, sourceFilename, capture)
+        val req = AddAnnRequest(targetTabId, sourceTabId, logIds, sourceFilename, capture, sourceTab?.selectedLogSectionId)
         confirmAddAnn(req, caption, capture?.presentation?.options ?: AnnBlock.LogRefPresentationOptions())
     }
 

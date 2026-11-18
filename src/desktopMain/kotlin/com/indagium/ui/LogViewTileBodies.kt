@@ -27,44 +27,50 @@ internal fun BoundAnnotationPanel(
     actionsInHeader: Boolean = false,
     copyFeedbackState: CopyFeedbackState? = null,
 ) {
+    // The note the panel shows and edits: the tab's own, or the shared note it views (every edit below goes to `noteId`). What
+    // belongs to the log the user is looking at (the relink notice, diagram lines, video frames) stays on `tab`.
+    val note = state.shownNoteOf(tab)
+    val noteId = note.id
+    val ownNote = noteId == tab.id
     AnnotationPanel(
-        tab = tab,
+        tab = note,
         settings = state.settings,
         rewriteState = state,
-        recentNotes = state.recentNotesForTab(tab),
+        recentNotes = state.recentNotesForTab(note),
         recentNotesMenuOpen = state.recentNotesMenuOpen,
-        activeNotePath = state.activeNoteFilePath(tab),
-        onToggleMd = { state.toggleMd(tab.id) },
-        onCopyFormat = { format, done -> state.copyAnnotationFormatAsync(tab.id, format, done) },
+        activeNotePath = state.activeNoteFilePath(note),
+        onToggleMd = { state.toggleMd(noteId) },
+        onCopyFormat = { format, done -> state.copyAnnotationFormatAsync(noteId, format, done) },
         onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
         onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
-        onExportFrames = { state.exportAnnotationFrames(tab.id) },
-        onSave = { state.saveAnalysis(tab.id) },
-        onNewAnalysis = { state.newAnalysis(tab.id) },
+        onExportFrames = { state.exportAnnotationFrames(noteId) },
+        onSave = { state.saveAnalysis(noteId) },
+        onNewAnalysis = { state.newAnalysis(noteId) },
         onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-        onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+        onOpenNote = { state.openNoteFileAsync(noteId, it) },
         onLocateLog = { state.locateLogForTab(tab.id, it) },
-        showUnverifiedRelinkNotice = state.logRelinkUnverifiedTabId == tab.id,
+        showUnverifiedRelinkNotice = ownNote && state.logRelinkUnverifiedTabId == tab.id,
         onDismissUnverifiedRelinkNotice = { state.dismissLogRelinkUnverifiedNotice() },
-        onUpdatePrefix = { state.setPrefix(tab.id, it) },
-        onUpdateSuffix = { state.setSuffix(tab.id, it) },
-        onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
-        onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-        onRemoveBlock = { state.removeBlock(tab.id, it) },
-        onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-        onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
-        onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
-        onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
+        onUpdatePrefix = { state.setPrefix(noteId, it) },
+        onUpdateSuffix = { state.setSuffix(noteId, it) },
+        onUpdateIssueDescription = { state.setIssueDescription(noteId, it) },
+        onUpdateBlock = { blockId, text -> state.updateBlock(noteId, blockId, text) },
+        onRemoveBlock = { state.removeBlock(noteId, it) },
+        onMoveBlock = { blockId, d -> state.moveBlock(noteId, blockId, d) },
+        onReorderBlock = { blockId, idx -> state.reorderBlock(noteId, blockId, idx) },
+        onAddNoteAfter = { state.addNoteBlock(noteId, it) },
+        onAddImage = { bytes, provenance, after -> state.addImageBlock(noteId, bytes, provenance, after) },
         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
-        onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+        // A shared note's references name their own source tab and section; a tab's own note keeps its navigation as it was.
+        onNavigateLogRef = { if (ownNote) state.requestAnnotationNavigation(tab.id, it) else state.launchGoToLogRefRows(it, tab.id) },
         onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
         onUpdateLogRefPresentation = { blockId, caption, presentation ->
-            state.updateLogRefPresentation(tab.id, blockId, caption, presentation)
+            state.updateLogRefPresentation(noteId, blockId, caption, presentation)
         },
-        onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(tab.id, blockId) },
+        onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(noteId, blockId) },
         onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
         onImportLinkedDiagram = { blockId, source, dialect, confirm ->
-            val diagramId = tab.annotations.blocks
+            val diagramId = note.annotations.blocks
                 .filterIsInstance<AnnBlock.Note>()
                 .firstOrNull { it.id == blockId }
                 ?.text
@@ -88,7 +94,7 @@ internal fun BoundAnnotationPanel(
         onPanelFocusChanged = onPanelFocusChanged,
         keyboardFocusVisible = state.keyboardFocusVisible,
         scrollStateStore = state.logViewerScrollStateStore,
-        highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
+        highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == noteId }?.blockId,
         modifier = modifier,
         actionsInHeader = actionsInHeader,
         copyFeedbackState = copyFeedbackState,

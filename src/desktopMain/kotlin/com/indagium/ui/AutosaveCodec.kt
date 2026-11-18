@@ -1577,15 +1577,21 @@ private fun String.toLogEntryFromAnnToken(): LogEntry? = runCatching {
 
 private fun AnnBlock.annBlockToken(): String = when (this) {
     is AnnBlock.Note -> tokenFields("N", id, text)
-    is AnnBlock.LogRef -> tokenFields(
-        "R", id,
-        logIds.joinToString(","),
-        caption,
-        sourceTabId.orEmpty(),
-        sourceFilename.orEmpty(),
-        sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
-        presentation?.let(AnnotationLogRefPresentationCodec::encode).orEmpty(),
-    )
+    is AnnBlock.LogRef -> {
+        val fields = mutableListOf(
+            "R", id,
+            logIds.joinToString(","),
+            caption,
+            sourceTabId.orEmpty(),
+            sourceFilename.orEmpty(),
+            sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
+            presentation?.let(AnnotationLogRefPresentationCodec::encode).orEmpty(),
+        )
+        // Appended — index 8, written only when set so a note without sections encodes exactly as before. A reader
+        // that predates it never looks past index 7; a token without it decodes as no section.
+        sourceSectionId?.let { fields += it }
+        fields.joinToString("|") { it.fieldToken() }
+    }
     // bytes is base64'd with a plain java.util.Base64 call (NOT the .b64() field helper below,
     // which round-trips a String through UTF-8 and would corrupt raw JPEG bytes) — the result is
     // an ASCII string, so it's safe to pass through tokenFields' own b64()-per-field encoding on
@@ -1613,6 +1619,7 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
                 ?.split(";")?.mapNotNull { it.toLogEntryFromAnnToken() },
             presentation = p.getOrElse(7) { "" }.takeIf { it.isNotBlank() }
                 ?.let(AnnotationLogRefPresentationCodec::decode),
+            sourceSectionId = p.getOrElse(8) { "" }.takeIf { it.isNotBlank() },
         )
         "I" -> AnnBlock.Image(
             id = p[1],

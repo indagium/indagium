@@ -546,6 +546,12 @@ sealed class AnnBlock {
         val sourceEntries: List<LogEntry>? = null,
         /** Null only for legacy blocks that still need one-time migration on open/restore. */
         val presentation: LogRefPresentation? = null,
+        /**
+         * The log section (a metadata JSON file's section id) the source tab was showing when the rows were captured, or null
+         * for a log without sections. [logIds] are ids within that section, so "Go to rows" selects it first. Persisted in
+         * the "R" token (AutosaveCodec), appended last.
+         */
+        val sourceSectionId: String? = null,
     ) : AnnBlock()
 
     /** A video frame or screenshot, captured via the video panel's "Add frame to notes" button
@@ -2225,6 +2231,8 @@ data class AddAnnRequest(
     val sourceFilename: String? = null,
     /** Captured at the Add annotation action, so closing/switching the source cannot lose it. */
     val capture: AnnBlock.LogRefCapture? = null,
+    /** The section the source tab showed when the dialog was requested (see [AnnBlock.LogRef.sourceSectionId]). */
+    val sourceSectionId: String? = null,
 )
 
 sealed class LogItem {

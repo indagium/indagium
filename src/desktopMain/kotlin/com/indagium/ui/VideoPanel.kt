@@ -840,7 +840,7 @@ private fun VideoTransportBar(
                         controller.grabCurrentFrame()?.let { bytes ->
                             rotatedFramePng(bytes, rotationDegrees)?.let { orientedBytes ->
                                 state.addVideoFrameNote(
-                                    tabId = tab.id,
+                                    tabId = state.notesTargetFor(tab.id),
                                     sourceBytes = orientedBytes,
                                     source = attachment.source,
                                     sourceLabel = attachment.sourceLabel,

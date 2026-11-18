@@ -70,7 +70,9 @@ internal class NotesActionModel(
 ) {
     val hasBlocks: Boolean get() = tab.annotations.blocks.isNotEmpty()
     val hasRecent: Boolean get() = recentNotes.isNotEmpty()
-    val hasLocate: Boolean get() = tab.logData.isEmpty()
+
+    // A shared note has no log of its own to locate: its references name their source tabs.
+    val hasLocate: Boolean get() = tab.logData.isEmpty() && tab.sharedNote == null
 
     fun tap(action: () -> Unit) {
         action()

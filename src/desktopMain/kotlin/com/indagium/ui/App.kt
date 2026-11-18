@@ -3084,7 +3084,7 @@ private fun handleGlobalImagePaste(ev: KeyEvent, state: AppState): Boolean {
         .getOrNull()
         ?.let(::imageBytesFromTransferable) ?: return false
     // Appended at the end: with focus outside Notes there is no "block being edited" to anchor to.
-    state.addImageBlock(tabId, bytes, "pasted from clipboard", null) ?: return false
+    state.addImageBlock(state.notesTargetFor(tabId), bytes, "pasted from clipboard", null) ?: return false
     state.showLogViewTile(LogViewSectionId.NOTES)
     return true
 }

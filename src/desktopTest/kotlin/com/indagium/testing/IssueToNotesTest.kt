@@ -8,6 +8,7 @@ import com.indagium.testing.model.IssueStatus
 import com.indagium.ui.AppState
 import com.indagium.ui.IssueActionResult
 import com.indagium.ui.buildIssueSeed
+import com.indagium.ui.createSharedNote
 import com.indagium.ui.deliverIssue
 import com.indagium.ui.saveIssue
 import kotlinx.coroutines.delay
@@ -95,6 +96,27 @@ class IssueToNotesTest {
         assertEquals(IssueStatus.SENT, after.status)
         assertEquals(IssueDestination.NOTES, after.destinationResults.single().destination)
         assertEquals(tabId, after.destinationResults.single().reference)
+    }
+
+    @Test
+    fun aTabThatViewsASharedNoteGetsTheIssueInTheSharedNote() {
+        val issue = storedIssue()
+        val tabId = openAndAwait(laneLog())
+        val host = assertNotNull(state.createSharedNote("Pairing", listOf(tabId)))
+
+        val result = assertIs<IssueActionResult.Done>(deliver(issue))
+
+        assertEquals(host, result.tabId, "the note it was added to")
+        val shared = checkNotNull(state.noteTab(host)).annotations.blocks
+        assertTrue(shared.first() is AnnBlock.Note)
+        assertTrue(shared[1] is AnnBlock.Image)
+        assertTrue(checkNotNull(state.tab(tabId)).annotations.blocks.isEmpty(), "the tab's own note is left alone")
+        assertEquals(host, checkNotNull(state.issueStore.load(issue.id)).destinationResults.single().reference)
+
+        // An explicit tab id (what an MCP call passes) names its note and is never routed.
+        val explicit = assertIs<IssueActionResult.Done>(deliver(issue, tabId = tabId))
+        assertEquals(tabId, explicit.tabId)
+        assertTrue(checkNotNull(state.tab(tabId)).annotations.blocks.first() is AnnBlock.Note)
     }
 
     @Test

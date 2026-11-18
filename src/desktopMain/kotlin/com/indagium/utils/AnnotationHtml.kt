@@ -141,8 +141,8 @@ private fun StringBuilder.appendLogRefHtml(
         val prefix = if (settings.numberAnnotationBlocks) "${num++}. " else ""
         append(annotationMarkdownToHtml(prefix + maskText(block.caption)))
     }
-    if (block.sourceFilename != null) {
-        append("<p><i>").append(escapeHtml(maskText("From ${block.sourceFilename}"))).append("</i></p>")
+    logRefSourceLabel(block, tab.logSections)?.let { label ->
+        append("<p><i>").append(escapeHtml(maskText("From $label"))).append("</i></p>")
     }
     val rows = block.resolveRows(tab)
     // Legacy persisted/cross-tab refs cannot safely inherit this tab's name map or Δt baseline.

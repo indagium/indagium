@@ -27,11 +27,14 @@ private fun AppState.noteText(record: IssueRecord, hasImage: Boolean): String {
     return if (hasImage) "$markdown\n_The screenshot of the step follows as an image._\n" else markdown
 }
 
-/** The tab to write into: the explicit [tabId], else the open tab that shows [logFile]. Null when there is none. */
+/**
+ * The note to write into: the explicit [tabId] (an MCP call names its note, a shared note's id included), else the note the open
+ * tab that shows [logFile] is looking at (its own, or the shared note it views). Null when there is none.
+ */
 private fun AppState.targetTab(tabId: String?, logFile: File?): String? {
     if (tabId != null) return noteTab(tabId)?.id
     if (logFile == null) return null
-    return tabs.firstOrNull { tab -> tab.sourcePath?.let { sameFile(File(it), logFile) } == true }?.id
+    return tabs.firstOrNull { tab -> tab.sourcePath?.let { sameFile(File(it), logFile) } == true }?.id?.let(::notesTargetFor)
 }
 
 /** Opens [logFile] as a tab and waits (bounded) until it is loaded. Null when it did not open. */
@@ -53,7 +56,7 @@ internal suspend fun AppState.deliverToNotes(record: IssueRecord, tabId: String?
     if (target == null) {
         if (logFile == null || !withContext(Dispatchers.IO) { logFile.isFile }) return IssueActionResult.Failed(NO_LANE_LOG_MESSAGE)
         if (!openLaneLog) return IssueActionResult.NeedsLogTab(record, logFile)
-        target = openLogTab(logFile) ?: return IssueActionResult.Failed("The lane's log could not be opened as a tab.")
+        target = openLogTab(logFile)?.let(::notesTargetFor) ?: return IssueActionResult.Failed("The lane's log could not be opened as a tab.")
     }
     val screenshot = withContext(Dispatchers.IO) {
         record.draft.attachments.firstOrNull { it.kind == IssueAttachmentKind.SCREENSHOT }?.let { issueStore.attachmentFile(record, it) }?.readBytes()

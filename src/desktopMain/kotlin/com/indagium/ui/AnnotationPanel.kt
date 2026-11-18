@@ -99,6 +99,7 @@ import com.indagium.model.VideoFrameReference
 import com.indagium.model.hasSameRow
 import com.indagium.model.resolveRows
 import com.indagium.utils.LogLinePresentationContext
+import com.indagium.utils.logRefSourceLabel
 import com.indagium.utils.presentAnnotationLogLine
 import com.indagium.utils.visibleEntries
 import com.mikepenz.markdown.m3.Markdown
@@ -2250,8 +2251,8 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                 numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
                             )
                         }
-                        if (block.sourceFilename != null) {
-                            AppText("$label ${block.sourceFilename}", color = tc.td, fontSize = 11.sp, fontFamily = mono)
+                        logRefSourceLabel(block, tab.logSections)?.let { sourceLabel ->
+                            AppText("$label $sourceLabel", color = tc.td, fontSize = 11.sp, fontFamily = mono)
                         }
                         Column(
                             Modifier.fillMaxWidth()
