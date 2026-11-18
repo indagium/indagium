@@ -1149,16 +1149,7 @@ internal class IndagiumToolOperations(
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val profile = profileId?.let { appState.logFormatProfile(it) }
         if (profileId != null && profile == null) return mapOf("error" to "no such log format profile: $profileId")
-        profile?.let(::profileSplitUnsupportedReason)?.let { reason ->
-            return mapOf("error" to reason, "capability" to LogCapability.RECORD_SPLIT.name, "reason" to reason)
-        }
         val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
-        if (appState.isUnsplittableSource(source)) {
-            return mapOf(
-                "ok" to false,
-                "error" to "DLT splitting unavailable: DLT protocol v2 is not supported, so this capture can't be split.",
-            )
-        }
         val destination = destinationDir?.takeIf { it.isNotBlank() }?.let(::File) ?: appState.defaultSplitDestination(source)
         // The memory shortfall that blocked (or would block) opening this source whole: the pending
         // prompt's own when one is waiting, else a fresh estimate. It lifts the default part count to
@@ -1168,10 +1159,13 @@ internal class IndagiumToolOperations(
         if (appState.pendingSplitPrompt?.sources?.any { it.id == source.id } == true) {
             appState.cancelSplitPrompt()
         }
-        val before = appState.tabs.size
         val result = appState.splitSourceAndOpenWithinMemory(source, destination, postfix, count, shortfall, profile = profile)
+        result.failure?.let { failure ->
+            val capability = failure.capability?.let { mapOf("capability" to it.name, "reason" to failure.message) }.orEmpty()
+            return mapOf("ok" to false, "error" to "${failure.title}. ${failure.message}") + capability
+        }
         awaitLoad()
-        val openedTabs = appState.tabs.drop(before).map { tab ->
+        val openedTabs = result.openedTabIds.mapNotNull(appState::tab).map { tab ->
             mapOf(
                 "tabId" to tab.id,
                 "filename" to tab.filename,
@@ -1194,19 +1188,6 @@ internal class IndagiumToolOperations(
                     (profileId?.let { " Reuse profileId '$it' to keep the same parser." } ?: ""),
             )
         }
-    }
-
-    private fun profileSplitUnsupportedReason(profile: LogFormatProfile): String? = when (profile.engine) {
-        com.indagium.model.LogFormatEngine.METADATA_JSON ->
-            "Record splitting is unavailable for ${profile.name}: captures and nested export sections must be read as a whole."
-        com.indagium.model.LogFormatEngine.CSV, com.indagium.model.LogFormatEngine.CRI ->
-            "Record splitting is unavailable for ${profile.name}: multiline/partial records can cross file boundaries."
-        com.indagium.model.LogFormatEngine.REGEX -> if (profile.multilineStartPattern.isNotBlank()) {
-            "Record splitting is unavailable for ${profile.name}: multiline records cannot be split safely."
-        } else {
-            null
-        }
-        else -> null
     }
 
     // The memory shortfall behind [source]'s split prompt: the pending prompt's own when one holds

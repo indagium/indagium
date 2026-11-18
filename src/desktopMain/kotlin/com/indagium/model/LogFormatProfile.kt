@@ -193,7 +193,6 @@ fun deriveLogCapabilities(
     val comparableTime = if (clockCompatibility.comparable) timeCoverage else unavailable(clockCompatibility.reason)
     val deltaTime = if (withTime < 2) unavailable("At least two comparable timestamps are needed for deltas.") else comparableTime
     val mergeTime = mergeTimeAvailability(entries, withTime, clockCompatibility)
-    val safeSplit = profile.engine !in setOf(LogFormatEngine.CRI, LogFormatEngine.METADATA_JSON)
     val result = linkedMapOf(
         LogCapability.TEXT_SEARCH to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Parsed records are searchable."),
         LogCapability.NOTES to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Notes can reference parsed records."),
@@ -218,14 +217,17 @@ fun deriveLogCapabilities(
             unavailable("A configured source resolver and matching source root are required.")
         },
         LogCapability.INCREMENTAL_TAIL to incrementalTailStatus(profile, incremental),
-        LogCapability.RECORD_SPLIT to if (safeSplit) {
-            available("The splitter preserves this engine's complete record boundaries.")
-        } else {
-            unavailable("The current splitter cannot preserve this engine's record boundaries.")
-        },
+        LogCapability.RECORD_SPLIT to (profile.recordSplitUnavailableReason()?.let(::unavailable)
+            ?: available("The splitter preserves this engine's complete record boundaries.")),
         LogCapability.EXPORT to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Parsed record text can be exported."),
     )
     return result
+}
+
+internal fun LogFormatProfile.recordSplitUnavailableReason(): String? = when (engine) {
+    LogFormatEngine.METADATA_JSON -> "$name must be read as a whole to preserve its JSON sections."
+    LogFormatEngine.CRI -> "$name can interleave partial records across split boundaries."
+    else -> null
 }
 
 private fun androidIssuesStatus(profile: LogFormatProfile): LogCapabilityStatus =

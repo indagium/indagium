@@ -84,11 +84,8 @@ internal class IncrementalProfileParser(
         val entries = ArrayList<LogEntry>(records.size)
         val replaced = linkedSetOf<Int>()
         var nextId = startId
-        // A record shown early and extended within the same batch appears twice; the later state wins.
-        val lastIndexByStart = HashMap<Long, Int>()
-        records.forEachIndexed { index, record -> lastIndexByStart[record.sourceStartLine] = index }
-        records.forEachIndexed { index, record ->
-            if (lastIndexByStart[record.sourceStartLine] != index) return@forEachIndexed
+        for (record in records) {
+            // The line locates a previously seeded row, but several new JSON records may share it.
             val seededId = seedEntryIdsByStartLine.remove(record.sourceStartLine)
             val id = seededId ?: nextId++
             if (seededId != null) replaced += seededId

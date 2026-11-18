@@ -119,51 +119,25 @@ internal fun splitProfileRecordsToFiles(
     val targetBytes = max(1L, (sourceSizeBytes + outputFiles.size - 1) / outputFiles.size)
     val boundary = profile.multilineStartPattern.takeIf(String::isNotBlank)?.let(::BoundedProfileRegexMatcher)
     val writer = ProfileRecordSplitWriter(outputFiles, targetBytes)
-    var current = ByteArrayOutputStream()
+    val current = ByteArrayOutputStream()
     var csvQuoted = false
     var csvHeader: ByteArray? = null
     var physicalLine = 0L
-    val jsonMachine = if (profile.engine == LogFormatEngine.JSON_LINES) JsonRecordMachine(profile, mutableListOf(), 0) else null
-    val jsonReady = ArrayList<ProfileRecord>(2)
-    var jsonArrayActive = false
     try {
         PushbackInputStream(BufferedInputStream(input, SPLIT_BUFFER_BYTES), SPLIT_ENCODING_SAMPLE_BYTES).use { stream ->
             val prefix = stream.readNBytes(SPLIT_ENCODING_SAMPLE_BYTES)
             stream.unread(prefix)
             val (charset, newlineBytes) = splitEncoding(prefix)
-            writer.setTextCharset(charset)
             val lineReader = SplitPhysicalLineReader(stream, newlineBytes)
+            if (profile.engine == LogFormatEngine.JSON_LINES) {
+                writer.setJsonEncoding(charset)
+                splitJsonRecords(lineReader, charset, writer, profile)
+                return@use
+            }
             while (true) {
                 val lineBytes = lineReader.next() ?: break
                 physicalLine++
                 val lineText = decodeSplitLine(lineBytes, physicalLine == 1L, charset)
-                if (jsonMachine != null) {
-                    jsonMachine.accept(lineText, jsonReady)
-                    if (jsonMachine.arrayTouchedOnLastLine() || jsonArrayActive) {
-                        if (!jsonArrayActive) {
-                            writer.beginJsonArray()
-                            jsonArrayActive = true
-                        }
-                        jsonReady.forEach { record ->
-                            writer.writeJsonArrayElement(record.raw.toByteArray(charset))
-                        }
-                        if (jsonMachine.arrayClosedOnLastLine()) {
-                            writer.endJsonArray()
-                            jsonArrayActive = false
-                        }
-                    } else {
-                        current.write(lineBytes)
-                        require(current.size() <= MAX_PROFILE_SPLIT_RECORD_BYTES) {
-                            "A JSON record exceeds the 1 MiB safe splitting limit."
-                        }
-                        if (!jsonMachine.hasPendingRecord()) {
-                            writer.writeRecord(current.toByteArray())
-                            current.reset()
-                        }
-                    }
-                    jsonReady.clear()
-                    continue
-                }
                 if (profile.engine == LogFormatEngine.REGEX &&
                     current.size() > 0 && boundary?.groups(lineText) != null
                 ) {
@@ -196,13 +170,6 @@ internal fun splitProfileRecordsToFiles(
                     csvQuoted = false
                 }
             }
-            if (jsonMachine != null && jsonArrayActive) {
-                jsonMachine.finish(jsonReady)
-                jsonReady.forEach { record -> writer.writeJsonArrayElement(record.raw.toByteArray(charset)) }
-                jsonReady.clear()
-                writer.endJsonArray()
-                jsonArrayActive = false
-            }
             if (current.size() > 0) {
                 val record = current.toByteArray()
                 if (profile.engine == LogFormatEngine.CSV && profile.hasHeader && csvHeader == null) {
@@ -220,6 +187,28 @@ internal fun splitProfileRecordsToFiles(
         outputFiles.forEach { it.delete() }
         throw failure
     }
+}
+
+private fun splitJsonRecords(
+    lines: SplitPhysicalLineReader,
+    charset: Charset,
+    writer: ProfileRecordSplitWriter,
+    profile: LogFormatProfile,
+) {
+    val ready = ArrayList<ProfileRecord>(2)
+    // Drain the completed records before changing the output envelope, even mid-line.
+    val machine = JsonRecordMachine(profile, mutableListOf(), 0) { opening ->
+        writer.writeJsonRecords(ready)
+        if (opening) writer.beginJsonArray() else writer.endJsonArray()
+    }
+    while (true) {
+        val bytes = lines.next() ?: break
+        machine.accept(decodeSplitLine(bytes, machine.lineNumber == 0L, charset), ready)
+        writer.writeJsonRecords(ready)
+    }
+    machine.finish(ready)
+    writer.writeJsonRecords(ready)
+    writer.endJsonArray()
 }
 
 private const val MAX_PROFILE_SPLIT_RECORD_BYTES = 1 shl 20
@@ -302,11 +291,26 @@ private class ProfileRecordSplitWriter(
     private var output = outputFiles[0].outputStream().buffered(SPLIT_BUFFER_BYTES)
     private var written = 0L
     private var textCharset: Charset = StandardCharsets.UTF_8
+    private var jsonPreamble: ByteArray? = null
     private var jsonArrayOpen = false
     private var jsonArrayHasElement = false
 
-    fun setTextCharset(charset: Charset) {
+    fun setJsonEncoding(charset: Charset) {
         textCharset = charset
+        // Parts are decoded independently, and Unicode-heavy UTF-16 may have too few NULs to sniff.
+        jsonPreamble = when (charset) {
+            StandardCharsets.UTF_16BE, StandardCharsets.UTF_16LE -> "\uFEFF".toByteArray(charset)
+            else -> null
+        }
+    }
+
+    fun writeJsonRecords(records: MutableList<ProfileRecord>) {
+        for (record in records) {
+            val text = if (jsonArrayOpen) record.raw else record.raw + "\n"
+            val bytes = text.toByteArray(textCharset)
+            if (jsonArrayOpen) writeJsonArrayElement(bytes) else writeRecord(bytes)
+        }
+        records.clear()
     }
 
     fun beginJsonArray() {
@@ -328,8 +332,7 @@ private class ProfileRecordSplitWriter(
             beginJsonArray()
         }
         if (jsonArrayHasElement) writeText(",\n")
-        output.write(record)
-        written += record.size
+        writeBytes(record)
         jsonArrayHasElement = true
     }
 
@@ -346,8 +349,7 @@ private class ProfileRecordSplitWriter(
             rotate()
             repeatedHeader?.let(output::write)
         }
-        output.write(record)
-        written += record.size
+        writeBytes(record)
     }
 
     private fun rotate() {
@@ -358,8 +360,10 @@ private class ProfileRecordSplitWriter(
         written = 0L
     }
 
-    private fun writeText(text: String) {
-        val bytes = text.toByteArray(textCharset)
+    private fun writeText(text: String) = writeBytes(text.toByteArray(textCharset))
+
+    private fun writeBytes(bytes: ByteArray) {
+        if (written == 0L) jsonPreamble?.let(output::write)
         output.write(bytes)
         written += bytes.size
     }

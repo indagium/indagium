@@ -864,8 +864,9 @@ with each row badged by the file it came from. Use it to interleave a main log w
 > still use an estimated day rollover.
 
 **Split** (tab right-click → **Split…**, or accept the prompt when opening a very large file).
-Divides the file into N parts on line boundaries. Concatenating the parts reproduces the original
-byte for byte, and Indagium can open the parts as tabs immediately.
+Divides the file into parts and opens them as tabs. Plain-text and Logcat splits retain the
+original bytes. Record-aware splits can repeat CSV headers or reformat JSON so each part can be
+read on its own. Sectioned metadata JSON and Kubernetes CRI logs need to be opened whole.
 
 ---
 

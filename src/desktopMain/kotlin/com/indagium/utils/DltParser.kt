@@ -110,31 +110,42 @@ fun parseLogContent(
     input.reset()
     val atEof = sample.size < CONTENT_SNIFF_BYTES
     val kind = classifyLogContent(sample, atEof, fileName)
-    val isHardDltKind = kind in setOf(
-        LogContentKind.DLT_STORAGE,
-        LogContentKind.DLT_RAW,
-        LogContentKind.DLT_UNSUPPORTED_V2,
-    )
-    // Binary DLT classification is authoritative even when the filename or selected profile says text.
-    if (isHardDltKind) return parseClassifiedDlt(input, kind, startId, profile, sourceClockId)
-    if (profile == null && kind in DLT_VIEWER_TEXT_KINDS) {
-        return parseClassifiedDlt(input, kind, startId, null, sourceClockId)
-    }
-    if (profile?.engine == LogFormatEngine.DLT && kind in DLT_VIEWER_TEXT_KINDS) {
-        return parseClassifiedDlt(input, kind, startId, profile, sourceClockId)
-    }
-
-    val selection = selectTextProfile(sample, fileName, profile, profiles)
+    val selection = selectLogContentProfile(sample, kind, fileName, profile, profiles)
+    if (selection.parseAsDlt) return parseClassifiedDlt(input, kind, startId, selection.profile, sourceClockId)
     return parseTextWithProfile(input, selection.profile, profile, startId, sourceClockId, fileName, indexSource)
         .withDetectionDiagnostics(selection.diagnostics)
         .let { if (selection.candidateProfileIds.isEmpty()) it else it.copy(candidateProfileIds = selection.candidateProfileIds) }
 }
 
-private data class TextProfileSelection(
+internal data class LogContentProfileSelection(
     val profile: LogFormatProfile,
-    val diagnostics: List<String>,
+    val diagnostics: List<String> = emptyList(),
     val candidateProfileIds: List<String> = emptyList(),
+    val parseAsDlt: Boolean = false,
 )
+
+/** Shared by opening a log and choosing a splitter for its original, unsplit stream. */
+internal fun selectLogContentProfile(
+    sample: ByteArray,
+    kind: LogContentKind,
+    fileName: String?,
+    requestedProfile: LogFormatProfile?,
+    profiles: List<LogFormatProfile>,
+): LogContentProfileSelection {
+    // Binary DLT classification is authoritative even with an explicitly selected text profile.
+    val parseAsDlt = when (kind) {
+        LogContentKind.DLT_STORAGE, LogContentKind.DLT_RAW, LogContentKind.DLT_UNSUPPORTED_V2 -> true
+        in DLT_VIEWER_TEXT_KINDS -> requestedProfile == null || requestedProfile.engine == LogFormatEngine.DLT
+        else -> false
+    }
+    if (parseAsDlt) {
+        val dlt = requestedProfile?.takeIf { it.engine == LogFormatEngine.DLT } ?: builtinDltProfile()
+        return LogContentProfileSelection(dlt, parseAsDlt = true)
+    }
+    return selectTextProfile(sample, fileName, requestedProfile, profiles)
+}
+
+private fun builtinDltProfile(): LogFormatProfile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.DLT }
 
 private const val ASSOCIATION_AMBIGUOUS_DIAGNOSTIC =
     "Several format profiles are set to always open this file extension; kept as plain text. Choose a profile explicitly."
@@ -156,12 +167,12 @@ private fun selectTextProfile(
     fileName: String?,
     requestedProfile: LogFormatProfile?,
     profiles: List<LogFormatProfile>,
-): TextProfileSelection {
-    if (requestedProfile != null) return TextProfileSelection(requestedProfile, emptyList())
+): LogContentProfileSelection {
+    if (requestedProfile != null) return LogContentProfileSelection(requestedProfile)
     val associated = associatedLogProfiles(fileName, profiles)
-    if (associated.size == 1) return TextProfileSelection(associated.single(), emptyList())
+    if (associated.size == 1) return LogContentProfileSelection(associated.single())
     if (associated.size > 1) {
-        return TextProfileSelection(plainTextProfile(), listOf(ASSOCIATION_AMBIGUOUS_DIAGNOSTIC), associated.map { it.id })
+        return LogContentProfileSelection(plainTextProfile(), listOf(ASSOCIATION_AMBIGUOUS_DIAGNOSTIC), associated.map { it.id })
     }
     val configured = detectConfiguredLogProfile(sample, fileName, profiles)
     val additional = if (configured.profile == null && !configured.ambiguous) {
@@ -195,7 +206,7 @@ private fun selectTextProfile(
             add("The sample matches multiple built-in format profiles; kept as plain text. Choose a profile explicitly.")
         }
     }
-    return TextProfileSelection(selected, diagnostics, candidateIds)
+    return LogContentProfileSelection(selected, diagnostics, candidateIds)
 }
 
 private fun parseTextWithProfile(
@@ -226,12 +237,10 @@ private fun parseClassifiedDlt(
     input: InputStream,
     kind: LogContentKind,
     startId: Int,
-    requestedProfile: LogFormatProfile?,
+    profile: LogFormatProfile,
     sourceClockId: String?,
 ): ParsedLog {
-    val builtin = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.DLT }
-    val profile = requestedProfile?.takeIf { it.engine == LogFormatEngine.DLT } ?: builtin
-    if (profile !== builtin) validateLogFormatProfile(profile)
+    if (profile !== builtinDltProfile()) validateLogFormatProfile(profile)
     val parsed = when (kind) {
         LogContentKind.DLT_STORAGE -> ParsedLog(LogFormat.DLT, parseDltBinary(input, true, startId), profile)
         LogContentKind.DLT_RAW -> ParsedLog(LogFormat.DLT, parseDltBinary(input, false, startId), profile)

@@ -197,6 +197,27 @@ class JsonSectionSwitchUiTest {
     }
 
     @Test
+    fun aRemovedSectionDoesNotReplaceTheShownSectionsRowsOrView() = withApp { app, file, tabId ->
+        app.setKw(tabId, "hci")
+        app.selectLogSection(tabId, L2CAP)
+        waitForSection(app, tabId, L2CAP)
+        app.setKw(tabId, "l2cap")
+        app.selectLogSection(tabId, HCI)
+        waitForSection(app, tabId, HCI)
+        val shown = assertNotNull(app.tab(tabId))
+
+        file.writeText("""{"$ROOT":{"HCI":[${packet("HCI.C", "replacement", 80)}]}}""")
+        app.selectLogSection(tabId, L2CAP)
+
+        rule.waitUntil(SWITCH_TIMEOUT_MS) { app.openError != null && app.pendingLogSection.isEmpty() }
+        val retained = assertNotNull(app.tab(tabId))
+        assertEquals(HCI, retained.selectedLogSectionId)
+        assertEquals(shown.filter, retained.filter)
+        assertEquals(listOf("hci one", "hci two"), retained.logData.map { it.msg })
+        assertTrue(app.openError!!.message.contains("no longer present"))
+    }
+
+    @Test
     fun aFailedLoadLeavesTheOldRowsAndReportsTheError() = withApp { app, file, tabId ->
         assertTrue(file.delete())
         app.selectLogSection(tabId, L2CAP)

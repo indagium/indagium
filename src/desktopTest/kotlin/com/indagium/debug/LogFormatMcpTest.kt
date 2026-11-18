@@ -4,7 +4,9 @@ import com.indagium.model.CapabilityAvailability
 import com.indagium.model.LogCapability
 import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatAttribute
+import com.indagium.model.LogFormatDetection
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
@@ -285,6 +287,79 @@ class LogFormatMcpTest {
             source.delete()
             splitDirectory.listFiles()?.forEach { it.delete() }
             splitDirectory.delete()
+        }
+    }
+
+    @Test
+    fun splitUsesTheOriginalProfileForCsvAndMultilineRegex() {
+        val csv = LogFormatProfile(
+            id = "mcp-split-csv",
+            name = "MCP split CSV",
+            engine = LogFormatEngine.CSV,
+            detection = LogFormatDetection(extensions = listOf("csv"), alwaysUseForExtensions = true),
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+        )
+        val regex = LogFormatProfile(
+            id = "mcp-split-regex",
+            name = "MCP split multiline regex",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "^(\\d+): (.*)$",
+            multilineStartPattern = "^\\d+: ",
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "2"),
+        )
+        assertTrue(state.saveLogFormatProfile(csv).isSuccess)
+        assertTrue(state.saveLogFormatProfile(regex).isSuccess)
+        val directory = kotlin.io.path.createTempDirectory("log-format-mcp-record-split").toFile()
+        try {
+            val csvFile = File(directory, "records.csv").apply { writeText("time,message\n1,\"first\n  continuation\"\n2,second\n") }
+            val regexFile = File(directory, "records.log").apply { writeText("1: first\n  continuation\n2: second\n") }
+            for ((file, profile) in listOf(csvFile to csv, regexFile to regex)) {
+                val args = mapOf("path" to file.absolutePath, "destinationDir" to directory.absolutePath, "partCount" to 2)
+                val requests = if (profile == csv) listOf(args, args + ("profileId" to profile.id)) else listOf(args + ("profileId" to profile.id))
+                for (request in requests) {
+                    val result = executeMap("split_log_file", request)
+                    assertEquals(true, result["ok"], result.toString())
+                    @Suppress("UNCHECKED_CAST")
+                    val tabs = result["tabs"] as List<Map<String, Any?>>
+                    assertEquals(2, tabs.size)
+                    assertTrue(tabs.all { it["logFormatProfileId"] == profile.id })
+                    val records = tabs.flatMap { assertNotNull(state.tab(it["tabId"] as String)).logData }
+                    assertEquals(2, records.size)
+                    assertTrue(records.first().rawRecord.orEmpty().contains("\n  continuation"))
+                }
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun automaticMetadataJsonSplitIsRefusedBeforeWritingParts() {
+        val directory = kotlin.io.path.createTempDirectory("log-format-mcp-json-split").toFile()
+        try {
+            val source = File(directory, "capture.json").apply {
+                writeText(
+                    """
+                    {"Group":{
+                      "A":[{"metadata":{"identity":"one","system_time":1000000}}],
+                      "B":[{"metadata":{"identity":"two","system_time":2000000}}]
+                    }}
+                    """.trimIndent(),
+                )
+            }
+            val destination = File(directory, "parts")
+            val opened = executeMap("open_log_file", mapOf("path" to source.absolutePath))
+            assertEquals("metadata-json", opened["logFormatProfileId"])
+            val result = executeMap(
+                "split_log_file",
+                mapOf("path" to source.absolutePath, "destinationDir" to destination.absolutePath, "partCount" to 2),
+            )
+            assertEquals(false, result["ok"])
+            assertEquals(LogCapability.RECORD_SPLIT.name, result["capability"])
+            assertTrue(result["error"].toString().contains("preserve its JSON sections"))
+            assertFalse(destination.exists())
+        } finally {
+            directory.deleteRecursively()
         }
     }
 

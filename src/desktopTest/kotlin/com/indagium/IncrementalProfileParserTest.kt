@@ -395,6 +395,19 @@ class IncrementalProfileParserTest {
     }
 
     @Test
+    fun jsonTailPreservesAllRecordsWhenSeveralStartOnOneLine() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
+        val lines = listOf(
+            """[{"message":"a"},{"message":"b"}]""",
+            """{"message":"c"} {"message":"d"}""",
+            """[{"message":"e"},{"message":"f","nested":""",
+            """  ["one", "two"]}]""",
+        )
+        assertEquals(listOf("a", "b", "c", "d", "e", "f"), whole(profile, lines).map { it.msg })
+        assertEverySplitMatchesTheWholeFile(profile, lines)
+    }
+
+    @Test
     fun jsonTailReplacesOpenPrettyObjectAndRootArrayElementInPlace() {
         val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }
         val directory = createTempDirectory("incremental-json-seed").toFile()

@@ -209,6 +209,7 @@ import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
 import com.indagium.utils.scanFolderForLogs
+import com.indagium.utils.selectLogContentProfile
 import com.indagium.utils.selectSection
 import com.indagium.utils.sharedLogLineContext
 import com.indagium.utils.splitDltStreamToFiles
@@ -1834,7 +1835,10 @@ internal data class SplitOpenResult(
     val written: List<File>,
     val openedTabIds: List<String>,
     val unopened: List<File>,
+    val failure: SplitOpenFailure? = null,
 )
+
+internal data class SplitOpenFailure(val title: String, val message: String, val capability: LogCapability? = null)
 
 /**
  * Free-heap budget shared by everything one confirmed prompt opens: [tryReserve] answers whether a
@@ -8150,7 +8154,11 @@ class AppState(
             restoredCapture = (result as? RestoredTabLoadResult.Loaded)?.captureArchive
             currentCoroutineContext().ensureActive()
             if (!isWantedLogSection(tabId, sectionId, generation)) return
-            val failure = restoredLoadFailureMessage(result)
+            val failure = if (result is RestoredTabLoadResult.Loaded && result.selectedLogSectionId != sectionId) {
+                "The section is no longer present in the source."
+            } else {
+                restoredLoadFailureMessage(result)
+            }
             if (failure != null) {
                 failLogSectionLoad(tabId, sectionId, generation, shell, failure)
                 return
@@ -14821,41 +14829,40 @@ class AppState(
             showDltSplittingUnavailable(file.absolutePath)
             return
         }
-        pendingSplitPrompt = PendingSplitPrompt(listOf(source))
+        raiseSplitPrompt(PendingSplitPrompt(listOf(source)))
     }
 
     fun requestSplitForTab(tabId: String): Boolean {
-        val current = tab(tabId) ?: return false
-        val sourcePath = current.sourcePath ?: return false
-        val source = splitSourceFromPath(sourcePath, entryPath = null) ?: return false
-        if (isUnsplittableSource(source)) {
-            showDltSplittingUnavailable(sourcePath)
-            return false
-        }
+        val sourcePath = tab(tabId)?.sourcePath ?: return false
         val profile = pinnedLogFormatProfileResult(tabId).getOrElse { failure ->
             showOpenError("Cannot split this log", sourcePath, failure.message ?: "The saved profile snapshot is invalid.")
             return false
         }
         val groupId = tabGroupIdForOrigin(TabRef.Log(tabId))
-        pendingSplitPrompt = PendingSplitPrompt(
-            sources = listOf(source),
-            originGroupIds = groupId?.let { mapOf(source.id to it) }.orEmpty(),
-            profileSnapshotsBySource = profile?.let { mapOf(source.id to logFormatProfileJson(it)) }.orEmpty(),
-        )
+        ioScope.launch {
+            val source = splitSourceFromPath(sourcePath, entryPath = null)
+            val unsupportedDlt = source?.let(::isUnsplittableSource) == true
+            if (tab(tabId)?.sourcePath != sourcePath) return@launch
+            when {
+                source == null -> showOpenError("Could not open source to split", sourcePath, "The source could not be read.")
+                unsupportedDlt -> showDltSplittingUnavailable(sourcePath)
+                else -> raiseSplitPrompt(
+                    PendingSplitPrompt(
+                        sources = listOf(source),
+                        originGroupIds = groupId?.let { mapOf(source.id to it) }.orEmpty(),
+                        profileSnapshotsBySource = profile?.let { mapOf(source.id to logFormatProfileJson(it)) }.orEmpty(),
+                    ),
+                )
+            }
+        }
         return true
     }
 
     fun splitSourceForPath(path: String, entryPath: String? = null): SplitSource? =
         splitSourceFromPath(path, entryPath)
 
-    /**
-     * Shared preflight for UI and MCP split routes. DLT v1 (storage-framed or raw) splits fine —
-     * see [splitDltStreamToFiles] — the only source that truly can't be byte-split is an
-     * identifiable DLT protocol v2 stream, which parsing also refuses outright. This sniffs the
-     * same bounded content sample [classifySplitSourceAndStream] uses for the real split, so the
-     * two can never disagree about which sources are refused.
-     */
-    fun isUnsplittableSource(source: SplitSource): Boolean {
+    /** Offers the same early DLT v2 refusal as the actual split before prompting for a destination. */
+    private fun isUnsplittableSource(source: SplitSource): Boolean {
         val classification = classifySplitSourceAndStream(source) ?: return false
         classification.stream.close()
         return classification.kind == LogContentKind.DLT_UNSUPPORTED_V2
@@ -14879,19 +14886,19 @@ class AppState(
     fun defaultSplitPartCount(source: SplitSource, memoryShortfall: MemoryShortfall? = null): Int =
         suggestedSplitPartCount(source.sizeBytes, memoryShortfall)
 
-    fun cancelSplitPrompt() {
+    fun cancelSplitPrompt() = synchronized(stateLock) {
         pendingSplitPrompt = null
     }
 
     // Posts a prompt without discarding one that is still pending (see mergeSplitPrompts).
-    private fun raiseSplitPrompt(prompt: PendingSplitPrompt) {
+    private fun raiseSplitPrompt(prompt: PendingSplitPrompt) = synchronized(stateLock) {
         pendingSplitPrompt = pendingSplitPrompt?.let { mergeSplitPrompts(it, prompt) } ?: prompt
     }
 
     // Hangs [video] on the pending prompt that holds the source [matches] selects, if any.
-    private fun attachVideoToPendingPrompt(video: File, matches: (SplitSource) -> Boolean) {
-        val pending = pendingSplitPrompt ?: return
-        if (pending.sources.none(matches)) return
+    private fun attachVideoToPendingPrompt(video: File, matches: (SplitSource) -> Boolean) = synchronized(stateLock) {
+        val pending = pendingSplitPrompt ?: return@synchronized
+        if (pending.sources.none(matches)) return@synchronized
         pendingSplitPrompt = pending.copy(video = pending.video ?: PendingPromptVideo.FromFile(video))
     }
 
@@ -14909,8 +14916,11 @@ class AppState(
         partCounts: Map<String, Int>,
         postfixes: Map<String, String> = emptyMap(),
     ) {
-        val pending = pendingSplitPrompt ?: return
-        pendingSplitPrompt = null
+        val pending = synchronized(stateLock) {
+            val prompt = pendingSplitPrompt ?: return
+            pendingSplitPrompt = null
+            prompt
+        }
         // Remembers where the user last split TO without silently changing the configured
         // "Analysis artifacts folder" — see AppSettings.lastSaveDialogDir's own doc.
         settings = settings.copy(lastSaveDialogDir = destinationDir.absolutePath)
@@ -14954,15 +14964,6 @@ class AppState(
                             openSplitSourceAsIs(source, pending.originGroupIds[source.id], selectedProfile)?.let(openedTabIds::add)
                         }
                         SplitMode.SPLIT -> {
-                            if (selectedProfile != null && !supportsProfileAwareSplit(selectedProfile)) {
-                                showOpenError(
-                                    title = "Record-aware splitting unavailable",
-                                    path = source.sourceFile.absolutePath,
-                                    message = "${selectedProfile.name} uses records that cannot yet be split safely. " +
-                                        "Choose Open as is or create a text-only copy first.",
-                                )
-                                return@forEach
-                            }
                             val result = splitSourceAndOpenParts(
                                 source = source,
                                 destinationDir = destinationDir,
@@ -15034,6 +15035,7 @@ class AppState(
         profile = profile,
     )
 
+    @Suppress("ReturnCount") // Report each source and format refusal before creating output files.
     private fun splitSourceAndOpenParts(
         source: SplitSource,
         destinationDir: File,
@@ -15043,37 +15045,22 @@ class AppState(
         originGroupId: String? = null,
         profile: LogFormatProfile? = null,
     ): SplitOpenResult {
-        if (profile != null && !supportsProfileAwareSplit(profile)) {
-            return SplitOpenResult(emptyList(), emptyList(), emptyList())
-        }
-        val classification = classifySplitSourceAndStream(source) ?: run {
-            showOpenError(
-                title = "Could not open source to split",
-                path = source.sourceFile.absolutePath,
-                message = "The source could not be read.",
-            )
-            return SplitOpenResult(emptyList(), emptyList(), emptyList())
-        }
-        val (kind, sample, stream) = classification
-        if (kind == LogContentKind.DLT_UNSUPPORTED_V2) {
-            stream.close()
-            showOpenError(
-                title = "DLT splitting unavailable",
-                path = source.sourceFile.absolutePath,
-                message = "DLT protocol v2 is not supported, so this capture can't be split.",
-            )
-            return SplitOpenResult(emptyList(), emptyList(), emptyList())
-        }
-        val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
-        val written = when {
-            kind == LogContentKind.DLT_STORAGE || kind == LogContentKind.DLT_RAW ->
-                splitDltStreamToFiles(stream, outputs, source.sizeBytes, kind)
-            profile != null && (profile.engine == LogFormatEngine.CSV || profile.engine == LogFormatEngine.JSON_LINES ||
-                profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank()) ->
-                splitProfileRecordsToFiles(stream, outputs, source.sizeBytes, profile)
-            kind == LogContentKind.DLT_VIEWER_CSV ->
-                splitStreamToFiles(stream, outputs, source.sizeBytes, partPreamble = leadingLineBytes(sample))
-            else -> splitStreamToFiles(stream, outputs, source.sizeBytes)
+        val (kind, sample, stream) = classifySplitSourceAndStream(source)
+            ?: return splitFailed(source, "Could not open source to split", "The source could not be read.")
+        val (written, effectiveProfile) = stream.use {
+            if (kind == LogContentKind.DLT_UNSUPPORTED_V2) {
+                return splitFailed(source, "DLT splitting unavailable", "DLT protocol v2 is not supported, so this capture can't be split.")
+            }
+            val selected = selectLogContentProfile(sample, kind, source.displayName, profile, availableLogFormatProfiles())
+            selected.profile.recordSplitUnavailableReason()?.let { reason ->
+                return splitFailed(
+                    source, "Record-aware splitting unavailable", "$reason Choose Open as is to open the original source.",
+                    LogCapability.RECORD_SPLIT,
+                )
+            }
+            val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
+            val written = writeSplitParts(stream, outputs, source.sizeBytes, kind, sample, selected.profile, selected.parseAsDlt)
+            written to selected.profile
         }
         val openedIds = mutableListOf<String>()
         val unopened = mutableListOf<File>()
@@ -15085,9 +15072,33 @@ class AppState(
             } else {
                 budget.tryReserve(part.length())
             }
-            if (fits) loadSplitPartAsTab(part, originGroupId, profile)?.let(openedIds::add) else unopened += part
+            if (fits) loadSplitPartAsTab(part, originGroupId, effectiveProfile)?.let(openedIds::add) else unopened += part
         }
         return SplitOpenResult(written, openedIds, unopened)
+    }
+
+    private fun writeSplitParts(
+        stream: InputStream,
+        outputs: List<File>,
+        sourceSizeBytes: Long,
+        kind: LogContentKind,
+        sample: ByteArray,
+        profile: LogFormatProfile,
+        parseAsDlt: Boolean,
+    ): List<File> = when {
+        kind == LogContentKind.DLT_STORAGE || kind == LogContentKind.DLT_RAW ->
+            splitDltStreamToFiles(stream, outputs, sourceSizeBytes, kind)
+        parseAsDlt && kind == LogContentKind.DLT_VIEWER_CSV ->
+            splitStreamToFiles(stream, outputs, sourceSizeBytes, partPreamble = leadingLineBytes(sample))
+        profile.engine == LogFormatEngine.CSV || profile.engine == LogFormatEngine.JSON_LINES ||
+            profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank() ->
+            splitProfileRecordsToFiles(stream, outputs, sourceSizeBytes, profile)
+        else -> splitStreamToFiles(stream, outputs, sourceSizeBytes)
+    }
+
+    private fun splitFailed(source: SplitSource, title: String, message: String, capability: LogCapability? = null): SplitOpenResult {
+        showOpenError(title, source.sourceFile.absolutePath, message)
+        return SplitOpenResult(emptyList(), emptyList(), emptyList(), SplitOpenFailure(title, message, capability))
     }
 
     /**
@@ -15203,12 +15214,6 @@ class AppState(
         is SplitSource.ArchiveEntry -> openZipEntry(
             source.archiveFile, source.candidate, bypassSplitPrompt = true, originGroupId = originGroupId, profile = profile,
         )
-    }
-
-    private fun supportsProfileAwareSplit(profile: LogFormatProfile): Boolean = when (profile.engine) {
-        LogFormatEngine.CRI, LogFormatEngine.METADATA_JSON -> false
-        LogFormatEngine.CSV, LogFormatEngine.REGEX -> true
-        else -> true
     }
 
     private fun splitSourceFromPath(sourcePath: String, entryPath: String?): SplitSource? {

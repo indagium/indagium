@@ -59,6 +59,7 @@ import com.indagium.ui.ManualCollapseAvailability
 import com.indagium.ui.SEQ_COLORS
 import com.indagium.ui.SettingsPage
 import com.indagium.ui.SplitMode
+import com.indagium.ui.SplitSource
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.b64
 import com.indagium.ui.blockOrderDuringDrag
@@ -5121,6 +5122,32 @@ class AppStateBehaviorTest {
         val source = requireNotNull(state.splitSourceForPath(capture.absolutePath))
         assertTrue(state.splitSourceAndOpen(source, output, "part", 2).isEmpty())
         assertFalse(output.exists())
+    }
+
+    @Test
+    fun archiveTabSplitPreflightKeepsTheEntryAndItsPinnedProfile() {
+        val dir = createTempDirectory("openlog-archive-tab-split").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        try {
+            val archive = buildZipBytesFixture(
+                dir, "capture.zip",
+                mapOf("capture.bin" to (dltStorageHeader(ecu = "ECU1") + dltTestFrame("archive DLT"))),
+            )
+            val candidate = listArchiveLogCandidates(archive).single()
+            val tabId = assertNotNull(state.openArchiveEntry(archive, candidate))
+            waitUntil { state.tab(tabId)?.logData?.size == 1 && !state.isLoading }
+
+            assertTrue(state.requestSplitForTab(tabId))
+
+            waitUntil { state.pendingSplitPrompt != null }
+            val prompt = assertNotNull(state.pendingSplitPrompt)
+            val source = prompt.sources.single()
+            assertEquals(SplitSource.ArchiveEntry(archive, candidate), source)
+            assertEquals(assertNotNull(state.tab(tabId)?.logFormatProfileSnapshot), prompt.profileSnapshotsBySource[source.id])
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
     }
 
     @Test

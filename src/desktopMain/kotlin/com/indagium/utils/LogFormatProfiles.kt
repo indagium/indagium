@@ -521,6 +521,7 @@ internal class JsonRecordMachine(
     private val profile: LogFormatProfile?,
     private val diagnostics: MutableList<String>,
     sourceLineOffset: Long,
+    private val onArrayBoundary: ((opening: Boolean) -> Unit)? = null,
 ) : ProfileRecordMachine {
     private val current = StringBuilder()
     private val stack = ArrayList<Char>(16)
@@ -535,17 +536,9 @@ internal class JsonRecordMachine(
     private var startLine = 0L
     private var rootIndent = 0
     private var scannedChars = 0
-    private var arrayTouchedThisLine = false
-    private var arrayClosedThisLine = false
     override var lineNumber: Long = sourceLineOffset
 
     override fun hasPendingRecord(): Boolean = current.isNotEmpty()
-
-    fun hasOpenArrayEnvelope(): Boolean = arrayMode
-
-    fun arrayTouchedOnLastLine(): Boolean = arrayTouchedThisLine
-
-    fun arrayClosedOnLastLine(): Boolean = arrayClosedThisLine
 
     override fun pendingReplacementStartLine(): Long? = startLine
 
@@ -553,28 +546,23 @@ internal class JsonRecordMachine(
     @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements", "ComplexCondition")
     override fun accept(line: String, out: MutableList<ProfileRecord>) {
         lineNumber++
-        arrayTouchedThisLine = arrayMode
-        arrayClosedThisLine = false
         if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
         if (current.isNotEmpty() && shouldRecoverAt(line)) emitMalformed(out, lineNumber - 1)
         if (current.isNotEmpty()) current.append('\n')
         var index = 0
         while (index < line.length) {
             if (current.isEmpty()) {
+                val fragmentStart = index
                 while (index < line.length && line[index].isWhitespace()) index++
                 if (index >= line.length) return
                 val first = line[index]
                 if (arrayMode && (first == ',' || first == ']')) {
-                    if (first == ']') {
-                        arrayMode = false
-                        arrayClosedThisLine = true
-                    }
+                    if (first == ']') setArrayMode(false)
                     index++
                     continue
                 }
                 if (first == '[' && !arrayMode) {
-                    arrayMode = true
-                    arrayTouchedThisLine = true
+                    setArrayMode(true)
                     index++
                     continue
                 }
@@ -585,8 +573,10 @@ internal class JsonRecordMachine(
                     continue
                 }
                 if (!arrayMode && first != '{') {
-                    // Preserve legacy malformed/ordinary JSON Lines rows as one raw physical row.
-                    out += ProfileRecord(line, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber)
+                    // Keep the unparsed fragment without repeating records already emitted on this line.
+                    out += ProfileRecord(
+                        line.substring(fragmentStart), parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber,
+                    )
                     diagnostics.addLimited("An invalid JSON record was kept as raw text.")
                     return
                 }
@@ -595,10 +585,7 @@ internal class JsonRecordMachine(
             val c = line[index]
             if (arrayMode && !inString && stack.isEmpty() && (c == ',' || c == ']')) {
                 emitCompleteElement(out, lineNumber)
-                if (c == ']') {
-                    arrayMode = false
-                    arrayClosedThisLine = true
-                }
+                if (c == ']') setArrayMode(false)
                 index++
                 continue
             }
@@ -623,6 +610,11 @@ internal class JsonRecordMachine(
                 scannedChars = 0
             }
         }
+    }
+
+    private fun setArrayMode(opening: Boolean) {
+        arrayMode = opening
+        onArrayBoundary?.invoke(opening)
     }
 
     override fun finish(out: MutableList<ProfileRecord>) = finish(out, includeIncomplete = true)

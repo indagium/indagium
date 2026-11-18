@@ -1293,7 +1293,9 @@ fun App(
                         val showTailAction = ttab.captureSessionId == null && (ttab.tailing || hasPlainFileSource)
                         val canUseTail = ttab.tailing || tailStatus?.availability != CapabilityAvailability.UNAVAILABLE
                         val splitStatus = tabCapabilities[LogCapability.RECORD_SPLIT]
-                        val hasSplitSource = ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
+                        val hasSplitSource = remember(ttab.sourcePath, ttab.archiveCandidate) {
+                            ttab.archiveCandidate != null || ttab.sourcePath?.let { File(it.substringBefore('!')).isFile } == true
+                        }
                         val showSplitAction = ttab.sourcePath != null && hasSplitSource
                         val canUseSplit = splitStatus?.availability != CapabilityAvailability.UNAVAILABLE
                         val groupRef = TabRef.Log(ttab.id)

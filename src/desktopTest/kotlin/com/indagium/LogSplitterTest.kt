@@ -5,6 +5,7 @@ import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
 import com.indagium.utils.SPLIT_PROMPT_BYTES
+import com.indagium.utils.parseLogContent
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseProfileLines
 import com.indagium.utils.planSplitOutputs
@@ -133,6 +134,56 @@ class LogSplitterTest {
         })
         val entries = outputs.flatMap { file -> parseProfileLines(file.readLines(), profile).entries }
         assertEquals((0 until 30).map { "event-$it ${"x".repeat(100)}" }, entries.map { it.msg })
+    }
+
+    @Test
+    fun jsonSplitPreservesRecordsAcrossRootArrayBoundariesOnTheSameLine() {
+        val profile = LogFormatProfile(
+            id = "split-json-mixed",
+            name = "Split mixed JSON",
+            engine = LogFormatEngine.JSON_LINES,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+        )
+        val source = """
+            {
+              "message": "before"
+            } [{"message":"array-one"}] [{"message":"array-two"}] {
+              "message": "after"
+            } unexpected text
+        """.trimIndent()
+        val directory = createTempDirectory("openlog-profile-json-mixed-split").toFile()
+        try {
+            val bytes = source.toByteArray()
+            val outputs = planSplitOutputs("events.json", directory, "part", 2)
+
+            splitProfileRecordsToFiles(ByteArrayInputStream(bytes), outputs, bytes.size.toLong(), profile)
+
+            val entries = outputs.flatMap { file -> parseProfileLines(file.readLines(), profile).entries }
+            assertEquals(listOf("before", "array-one", "array-two", "after", " unexpected text"), entries.map { it.msg })
+            assertEquals(parseProfileLines(source.lines(), profile).entries.map { it.rawRecord }, entries.map { it.rawRecord })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun splitJsonKeepsUnicodeHeavyUtf16PartsReadableIndependently() {
+        val profile = LogFormatProfile(id = "utf16-json", name = "UTF-16 JSON", engine = LogFormatEngine.JSON_LINES)
+        val record = """{"message":"${"漢".repeat(5000)}"}"""
+        val bytes = "\uFEFF$record\r\n$record\r\n".toByteArray(Charsets.UTF_16LE)
+        val directory = createTempDirectory("openlog-profile-json-encoding").toFile()
+        try {
+            val outputs = planSplitOutputs("events.json", directory, "part", 2)
+
+            splitProfileRecordsToFiles(ByteArrayInputStream(bytes), outputs, bytes.size.toLong(), profile)
+
+            val entries = outputs.flatMap { file ->
+                file.inputStream().use { parseLogContent(it, profile = profile).entries }
+            }
+            assertEquals(listOf(record, record), entries.map { it.rawRecord })
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test
