@@ -29,7 +29,7 @@ private fun AppState.noteText(record: IssueRecord, hasImage: Boolean): String {
 
 /** The tab to write into: the explicit [tabId], else the open tab that shows [logFile]. Null when there is none. */
 private fun AppState.targetTab(tabId: String?, logFile: File?): String? {
-    if (tabId != null) return tab(tabId)?.id
+    if (tabId != null) return noteTab(tabId)?.id
     if (logFile == null) return null
     return tabs.firstOrNull { tab -> tab.sourcePath?.let { sameFile(File(it), logFile) } == true }?.id
 }

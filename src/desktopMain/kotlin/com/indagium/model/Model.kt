@@ -1113,6 +1113,34 @@ data class LogTab(
      * Deliberately absent from AutosaveCodec; a restored tab never asks again.
      */
     val logFormatCandidateIds: List<String> = emptyList(),
+    /**
+     * Set only on a shared-note HOST: a note-only tab (no rows, no source file) that several ordinary tabs write into
+     * (see [SharedNoteInfo]). Hosts live in AppState.sharedNoteHosts, never in AppState.tabs. Persisted in the tab token
+     * (AutosaveCodec), appended last.
+     */
+    val sharedNote: SharedNoteInfo? = null,
+    /**
+     * On an ordinary tab: null shows the tab's own note in its Notes tile, otherwise the id of the shared-note host
+     * whose note it shows. Persisted in the tab token (AutosaveCodec), appended last; a restored id whose host no
+     * longer exists falls back to null.
+     */
+    val notesView: String? = null,
+)
+
+/** What a shared-note host knows about the note: its name, the tabs that write into it and the members that were closed. */
+data class SharedNoteInfo(
+    val id: String,
+    val name: String,
+    val memberTabIds: List<String> = emptyList(),
+    val closedMembers: List<SharedNoteClosedMember> = emptyList(),
+    val createdAtMs: Long = 0L,
+)
+
+/** A member tab that was closed: enough to recognise (and reopen) the same file later. */
+data class SharedNoteClosedMember(
+    val tabId: String,
+    val filename: String,
+    val sourcePath: String?,
 )
 
 /** Copy presentation preferences captured when a legacy note is opened/restored. */

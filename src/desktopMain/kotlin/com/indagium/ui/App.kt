@@ -343,6 +343,7 @@ fun App(
         // (tabs serialize in list order).
         LaunchedEffect(
             state.tabs.map { it.persistedSnapshot() },
+            state.sharedNoteHosts.map { it.persistedSnapshot() },
             state.savedFilters,
             state.savedFilterFolders,
             state.settings,

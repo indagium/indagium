@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import com.indagium.model.ErrorHighlightStyle
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
+import com.indagium.model.SharedNoteInfo
 import com.indagium.model.VideoAttachment
 import com.indagium.ui.AppState
 import com.indagium.ui.AutosaveScheduler
@@ -309,9 +310,11 @@ class AutosaveSchedulerTest {
             base.copy(logFormatProfileId = "plain-text"),
             base.copy(logFormatProfileSnapshot = "{}"),
             base.copy(selectedLogSectionId = "Tethered Bluetooth / L2CAP"),
+            base.copy(sharedNote = SharedNoteInfo("shared-1", "Pairing bug")),
+            base.copy(notesView = "shared-1"),
         )
 
-        assertEquals(22, base.persistedSnapshot().size)
+        assertEquals(24, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

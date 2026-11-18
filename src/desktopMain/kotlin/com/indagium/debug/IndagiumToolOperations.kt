@@ -370,7 +370,11 @@ internal class IndagiumToolOperations(
         "get_tags" to { a -> withLoadedRows(a.str("tabId") ?: "") { getTags(it.id) } },
         "get_packages" to { a -> withLoadedRows(a.str("tabId") ?: "") { getPackages(it.id) } },
         "get_crash_sites" to { a -> withLoadedRows(a.str("tabId") ?: "") { getCrashSites(it.id) } },
-        "get_issue_description" to { a -> withLoadedRows(a.str("tabId") ?: "") { getIssueDescription(it.id) } },
+        // A shared-note host has no rows to load (and nothing to pin), so it is answered directly.
+        "get_issue_description" to { a ->
+            val id = a.str("tabId") ?: ""
+            if (appState.sharedNoteHost(id) != null) getIssueDescription(id) else withLoadedRows(id) { getIssueDescription(it.id) }
+        },
         "add_log_note" to { a -> withLoadedRows(a.str("tabId") ?: "") {
             addLogNoteRoute(it.id, a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
         } },
@@ -1705,7 +1709,7 @@ internal class IndagiumToolOperations(
     // does not itself write a note (add_text_note is what does that).
     private fun setCaseMetadataRoute(tabId: String, appVersion: String?, decisiveTags: List<String>?): Map<String, Any?> {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (appState.noteTab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         if (appVersion == null && decisiveTags == null) {
             return mapOf("error" to "provide appVersion and/or decisiveTags")
         }
@@ -1717,7 +1721,7 @@ internal class IndagiumToolOperations(
                 ),
             )
         }
-        val updated = appState.tab(tabId)?.annotations
+        val updated = appState.noteTab(tabId)?.annotations
         return mapOf(
             "ok" to true,
             "tabId" to tabId,
@@ -2232,13 +2236,13 @@ internal class IndagiumToolOperations(
     }
 
     private fun addTextNoteRoute(tabId: String, text: String, afterId: String?): Map<String, Any?> {
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (appState.noteTab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         val id = appState.addNoteBlock(tabId, text, afterId) ?: return mapOf("error" to noteNotCreatedMessage(tabId, "note"))
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 
     private fun addLogNoteRoute(tabId: String, lineIds: List<Int>, caption: String): Map<String, Any?> {
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (appState.noteTab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         val id = appState.addLogRefBlock(tabId, lineIds, caption) ?: return mapOf("error" to noteNotCreatedMessage(tabId, "log note"))
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
@@ -2258,7 +2262,7 @@ internal class IndagiumToolOperations(
         afterId: String?,
     ): Map<String, Any?> {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         val sources = listOfNotNull(
             imageBase64?.takeIf { it.isNotBlank() }?.let { "imageBase64" },
             imagePath?.takeIf { it.isNotBlank() }?.let { "imagePath" },
@@ -2317,7 +2321,7 @@ internal class IndagiumToolOperations(
     // toSource/encodeSeq3Note) is unaffected, and so is every ordinary text/log note — only the
     // "structured diagram note -> non-diagram text" transition trips the guard.
     private fun updateAnnotationRoute(tabId: String, blockId: String, text: String, force: Boolean): Map<String, Any?> {
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         val existing = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note
         val existingIsDiagram = existing != null && parseSeq3Note(existing.text) != null
         val incomingIsDiagram = parseSeq3Note(text) != null
@@ -2340,7 +2344,7 @@ internal class IndagiumToolOperations(
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
         if (blockId.isBlank()) return mapOf("error" to "missing blockId")
         if (caption == null) return mapOf("error" to "missing caption (provide a string; blank is allowed)")
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         val block = tab.annotations.blocks.firstOrNull { it.id == blockId }
             ?: return mapOf("error" to "no such annotation block: $blockId")
         return when (block) {
@@ -2372,19 +2376,19 @@ internal class IndagiumToolOperations(
     }
 
     private fun moveAnnotationRoute(tabId: String, blockId: String, delta: Int): Map<String, Any?> {
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (appState.noteTab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         appState.moveBlock(tabId, blockId, delta)
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to blockId)
     }
 
     private fun deleteAnnotationRoute(tabId: String, blockId: String): Map<String, Any?> {
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (appState.noteTab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         appState.removeBlock(tabId, blockId)
         return mapOf("ok" to true)
     }
 
     private fun clearAllNotesRoute(tabId: String): Map<String, Any?> {
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         val removedBlockCount = tab.annotations.blocks.size
         val clearedPrefix = tab.annotations.prefix.isNotEmpty()
         val clearedSuffix = tab.annotations.suffix.isNotEmpty()
@@ -2441,12 +2445,12 @@ internal class IndagiumToolOperations(
     }
 
     private fun getIssueDescription(tabId: String): Map<String, Any?> {
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         return mapOf("issueDescription" to tab.annotations.issueDescription)
     }
 
     private fun getAnnotationSections(tabId: String): Map<String, Any?> {
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         return mapOf("tabId" to tabId, "prefix" to tab.annotations.prefix, "suffix" to tab.annotations.suffix)
     }
 
@@ -2456,12 +2460,12 @@ internal class IndagiumToolOperations(
      * update/move/delete without guessing an id.
      */
     private fun getAnnotationBlocks(tabId: String): Map<String, Any?> {
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         return mapOf("tabId" to tabId, "blocks" to tab.annotations.blocks.map(::annotationBlockToMap))
     }
 
     private fun appendAnnotationSection(tabId: String, section: String, text: String?): Map<String, Any?> {
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         if (text.isNullOrBlank()) return mapOf("error" to "missing or blank annotation text")
         when (section) {
             "prefix" -> appState.appendPrefix(tabId, text)
@@ -2469,14 +2473,14 @@ internal class IndagiumToolOperations(
             else -> return mapOf("error" to "unknown annotation section '$section'; valid: prefix,suffix")
         }
         val content = when (section) {
-            "prefix" -> appState.tab(tabId)?.annotations?.prefix
-            else -> appState.tab(tabId)?.annotations?.suffix
+            "prefix" -> appState.noteTab(tabId)?.annotations?.prefix
+            else -> appState.noteTab(tabId)?.annotations?.suffix
         } ?: tab.annotations.let { if (section == "prefix") it.prefix else it.suffix }
         return mapOf("ok" to true, "tabId" to tabId, "section" to section, "content" to content)
     }
 
     private fun setAnnotationSection(tabId: String, section: String, text: String?): Map<String, Any?> {
-        appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        appState.noteTab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         // Unlike append, blank is a valid input here — it's the clear path, not an error.
         val resolved = if (text.isNullOrBlank()) "" else text
         when (section) {
@@ -2485,8 +2489,8 @@ internal class IndagiumToolOperations(
             else -> return mapOf("error" to "unknown annotation section '$section'; valid: prefix,suffix")
         }
         val content = when (section) {
-            "prefix" -> appState.tab(tabId)?.annotations?.prefix
-            else -> appState.tab(tabId)?.annotations?.suffix
+            "prefix" -> appState.noteTab(tabId)?.annotations?.prefix
+            else -> appState.noteTab(tabId)?.annotations?.suffix
         }
         return mapOf("ok" to true, "tabId" to tabId, "section" to section, "content" to content)
     }

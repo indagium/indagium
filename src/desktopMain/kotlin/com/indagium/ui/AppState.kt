@@ -597,6 +597,13 @@ fun emptyWorkspaceTab() = LogTab(
 )
 
 /**
+ * The note-only [LogTab] that backs a shared note ([AppState.sharedNoteHosts]): no rows, no source file, nothing to load
+ * (LOADED and empty, like [emptyWorkspaceTab]), named after the shared note. Its id is [SharedNoteInfo.id].
+ */
+internal fun sharedNoteHostTab(info: SharedNoteInfo): LogTab =
+    emptyWorkspaceTab().copy(id = info.id, filename = info.name, sharedNote = info)
+
+/**
  * Attaches a finalized capture to the already-open streaming tab. This is intentionally a pure
  * tab transformation so the stop/finalization path cannot accidentally reconstruct a tab and
  * lose annotations, selection, filters, or the tab id.
@@ -6363,6 +6370,15 @@ class AppState(
 
     // ── Tabs ────────────────────────────────────────────────────────
     var tabs by mutableStateOf(emptyList<LogTab>())
+
+    /**
+     * Shared notes: note-only [LogTab]s (empty rows, [LogTab.sharedNote] set) that several tabs write into. They are
+     * deliberately NOT part of [tabs], so nothing that enumerates tabs (the strip, compare, close-all, residency, MCP
+     * list_tabs...) can ever see one. [noteTab], [upTab], [upFlt] and [upAnn] resolve their ids too. Every write goes
+     * through stateLock like [tabs].
+     */
+    var sharedNoteHosts by mutableStateOf(emptyList<LogTab>())
+        internal set
     private var activeTabIdState by mutableStateOf("")
     var activeTabId: String
         get() = activeTabIdState
@@ -7052,7 +7068,7 @@ class AppState(
     internal suspend fun awaitTabLoaded(tabId: String): LogTab? {
         var retriedFailure = false
         while (currentCoroutineContext().isActive) {
-            val current = tab(tabId) ?: return null
+            val current = noteTab(tabId) ?: return null
             if (current.contentState == TabContentState.LOADED) return current
             if (current.contentState == TabContentState.FAILED) {
                 if (retriedFailure) return null
@@ -7060,7 +7076,7 @@ class AppState(
             }
             val job = ensureTabLoaded(tabId, retryFailed = current.contentState == TabContentState.FAILED)
             if (job == null) {
-                if (tab(tabId)?.contentState == TabContentState.LOADING) {
+                if (noteTab(tabId)?.contentState == TabContentState.LOADING) {
                     yield()
                     continue
                 }
@@ -8828,7 +8844,7 @@ class AppState(
     // `tabs = tabs + t` racing one of those could lose either update (observed as a flaky
     // "restored tab counter" test once autosave restore became async).
     fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
-        val before = tab(tabId)
+        val before = noteTab(tabId)
         val candidate = before?.let(fn)?.freezeDeferredLegacyLogRefsIfResolvable()
         val compositionInputsChanged = before != null && candidate != null &&
             (before.logData !== candidate.logData ||
@@ -8841,7 +8857,12 @@ class AppState(
         } else {
             candidate
         }
-        tabs = tabs.map { if (it.id == tabId) after ?: it else it }
+        // A shared-note host is not in `tabs`: write it back to its own list (see sharedNoteHosts).
+        if (sharedNoteHosts.any { it.id == tabId } && tabs.none { it.id == tabId }) {
+            sharedNoteHosts = sharedNoteHosts.map { if (it.id == tabId) after ?: it else it }
+        } else {
+            tabs = tabs.map { if (it.id == tabId) after ?: it else it }
+        }
         if (before != null && after != null) {
             // A refresh, not an input change: the query is unchanged, so the current matches stay
             // visible and navigable until the recompute lands (see scheduleSearchRecompute).
@@ -8899,9 +8920,9 @@ class AppState(
     // below stale, mis-deciding whether this edit should demote an active saved preset to a draft.
     // upTab's own synchronized(stateLock) is safe to nest here (reentrant monitor).
     private fun upFlt(tabId: String, trackDraft: Boolean, fn: (Filter) -> Filter) = synchronized(stateLock) {
-        val before = tab(tabId)?.filter
+        val before = noteTab(tabId)?.filter
         upTab(tabId) { it.copy(filter = fn(it.filter)) }
-        val after = tab(tabId)?.filter
+        val after = noteTab(tabId)?.filter
         if (before != null && before != after) {
             upTab(tabId) { it.copy(filterNormalizationNotice = null) }
             val transientOnlyChange =
@@ -8916,6 +8937,23 @@ class AppState(
     fun activeTab() = tabs.find { it.id == activeTabId } ?: tabs.firstOrNull()
 
     fun tab(id: String) = tabs.find { it.id == id }
+
+    /**
+     * A tab by id for the NOTES pipeline only: an ordinary tab, else a shared-note host ([sharedNoteHosts]). [tab] never
+     * returns a host (it has no rows, source or content to load), so log features stay unaware of shared notes; code that
+     * reads or writes a note (upTab/upFlt/upAnn, note export, the overwrite prompt, AnnotationManager, Seq3 notes, the note
+     * MCP tools) must use this instead.
+     */
+    internal fun noteTab(id: String): LogTab? = tabs.find { it.id == id } ?: sharedNoteHosts.find { it.id == id }
+
+    internal fun sharedNoteHost(id: String): LogTab? = sharedNoteHosts.find { it.id == id }
+
+    /** Registers a shared-note host (never into [tabs]). An existing host with the same id is replaced. */
+    internal fun addSharedNoteHost(host: LogTab) = synchronized(stateLock) {
+        require(host.sharedNote != null) { "A shared-note host needs LogTab.sharedNote" }
+        require(tabs.none { it.id == host.id }) { "Id ${host.id} belongs to an ordinary tab" }
+        sharedNoteHosts = sharedNoteHosts.filterNot { it.id == host.id } + host
+    }
 
     // ── Filter ──────────────────────────────────────────────────────
     fun toggleLevel(tabId: String, lvl: LogLevel) = upFlt(tabId) { f ->
@@ -15301,7 +15339,7 @@ class AppState(
      * shared by the HTML and Markdown builders so a copy pays for it at most once.
      */
     internal fun buildAnnotationClipboardTransferable(tabId: String, format: AnnotationCopyFormat): Transferable? {
-        val t = tab(tabId) ?: return null
+        val t = noteTab(tabId) ?: return null
         val currentSettings = settings
         val lineContext = sharedLogLineContext(t, currentSettings)
         val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML || format == AnnotationCopyFormat.TEAMS) {
@@ -15399,7 +15437,7 @@ class AppState(
         // The in-process synchronous API is used by script/tool adapters. Resolve a shell on demand
         // before building row-backed output; UI entry points use the suspending path below so they
         // never block the event thread.
-        val t = tab(tabId)?.let { current ->
+        val t = noteTab(tabId)?.let { current ->
             if (current.contentState == TabContentState.LOADED) current
             else kotlinx.coroutines.runBlocking { awaitTabLoaded(tabId) }
         } ?: return false
@@ -15480,7 +15518,7 @@ class AppState(
     }
 
     fun saveAnnotationsTo(tabId: String, file: File): Boolean {
-        val t = tab(tabId)?.let { current ->
+        val t = noteTab(tabId)?.let { current ->
             if (current.contentState == TabContentState.LOADED) current
             else kotlinx.coroutines.runBlocking { awaitTabLoaded(tabId) }
         } ?: return false
@@ -15630,7 +15668,7 @@ class AppState(
     }
 
     fun saveAnalysis(tabId: String) {
-        val initial = tab(tabId) ?: return
+        val initial = noteTab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
             file = analysisNoteMarkdownName(initial.filename, initial.sourcePath)
             initialSaveDialogDir()?.let { directory = it.absolutePath }
@@ -15687,7 +15725,7 @@ class AppState(
      * blocks or the folder pick is cancelled.
      */
     fun exportAnnotationFrames(tabId: String) {
-        val t = tab(tabId) ?: return
+        val t = noteTab(tabId) ?: return
         val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
         val allDiagrams = t.seq3DiagramNotes()
         val imageDiagramCount = allDiagrams.count { (_, parsed) ->
@@ -15931,7 +15969,7 @@ class AppState(
     // I/O, the newly pinned name touches disk only once the user adds their first real note — a
     // click on this button alone creates nothing.
     fun newAnalysis(tabId: String) {
-        val t = tab(tabId) ?: return
+        val t = noteTab(tabId) ?: return
         val targetDir = activeNotesDir()
         val newName = nextFreeNoteTargetName(analysisNoteMarkdownName(t.filename, t.sourcePath), MAX_NOTE_TARGET_SUFFIX) { name ->
             File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
@@ -16218,7 +16256,7 @@ class AppState(
      *  seed, so an empty corpus shows its "Index my notes" prompt right away rather than waiting
      *  for the user to type something first. */
     fun openCaseLibrary(tabId: String) {
-        val tab = tab(tabId)
+        val tab = noteTab(tabId)
         caseLibraryTabId = tabId
         caseLibraryQuery = tab?.annotations?.issueDescription.orEmpty()
         caseLibraryTags = tab?.filter?.activeTags?.toList().orEmpty()
@@ -17046,7 +17084,7 @@ class AppState(
         // added) instead of silently throwing away the very thing the user was in the middle of
         // adding — losing typed work to a dialog that never warned about it is not a choice this
         // prompt is offering.
-        val beforeIds = tab(pending.tabId)?.annotations?.blocks?.map { it.id }?.toSet().orEmpty()
+        val beforeIds = noteTab(pending.tabId)?.annotations?.blocks?.map { it.id }?.toSet().orEmpty()
         val unsavedBlocks = pending.pendingTab.annotations.blocks.filterNot { it.id in beforeIds }
         openNoteFile(pending.tabId, File(pending.targetPath))
         if (unsavedBlocks.isEmpty()) return
@@ -17264,7 +17302,7 @@ class AppState(
             // written expecting anything to be stashed there). An unrelated edit arriving on this
             // same tab while that prompt is up therefore just commits normally, like any other tab.
             val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId && it.handEdit == null }
-            val current = pendingForThisTab?.pendingTab ?: tab(tabId) ?: return
+            val current = pendingForThisTab?.pendingTab ?: noteTab(tabId) ?: return
             val next = fn(current)
             if (pendingForThisTab != null) {
                 pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
@@ -17283,12 +17321,12 @@ class AppState(
                         // reservation (reserveExportTarget) is minted here too, for the same reason.
                         val pinned = next.copy(noteTargetName = decision.mdFile.name)
                         upTab(tabId) { pinned }
-                        val committedTab = tab(tabId) ?: pinned
+                        val committedTab = noteTab(tabId) ?: pinned
                         CommittedAnnotationEdit(committedTab, reserveExportTarget(decision.mdFile))
                     }
                     AutoExportDecision.Skip -> {
                         upTab(tabId) { next }
-                        val committedTab = tab(tabId) ?: next
+                        val committedTab = noteTab(tabId) ?: next
                         // Reserve a write lane whenever this commit will actually reach
                         // autoExportAnnotations' write path — i.e. it's already pinned and has
                         // blocks; auto-export being off or blocks being empty means no write is
@@ -18156,6 +18194,14 @@ class AppState(
                 val value = line.substringAfter('\t', "")
                 restoreAutosaveKey(key, value)
             }
+            // Hosts first: restoreTabsFromAutosave drops a tab's notesView that points at a host that is gone.
+            // A corrupt line loses the shared notes only, never the tabs after it.
+            restoreSharedNoteHosts(
+                runCatching {
+                    keyLines.firstOrNull { it.substringBefore('\t') == "sharedNotes" }
+                        ?.substringAfter('\t', "")?.unb64().orEmpty()
+                }.getOrDefault(""),
+            )
             restoreTabsFromAutosave(tabLines)
             pruneMissingRecentNotes()
             // Diagram workspace tabs (WP-diagram-restore): deliberately NOT handled inside the
@@ -18261,6 +18307,12 @@ class AppState(
         activeFilterDraftTabIds = filterDraftsByTab.keys.toSet()
     }
 
+    // Hosts are never loaded (no file behind them): they come back LOADED and are never put into `tabs`, so residency,
+    // tailing and the content-load queue (pendingRestoredLoads) never see them.
+    private fun restoreSharedNoteHosts(token: String) = synchronized(stateLock) {
+        sharedNoteHosts = if (token.isBlank()) emptyList() else runCatching { token.sharedNoteHostsFromToken() }.getOrDefault(emptyList())
+    }
+
     // Runs during init{}, before this instance is shared with any other thread — the stateLock
     // wrap here is defense-in-depth (A-01), not a fix for an observed race: it removes the one
     // exception to "every read-modify-write of tabs goes through stateLock" documented on upTab
@@ -18275,6 +18327,8 @@ class AppState(
             shell.tab.copy(
                 processNameMode = newTabProcessNameMode(),
                 pendingLegacyLogRefPreferences = migrationPreferences.takeIf { hasLegacyRefs },
+                // A shared note that no longer exists cannot be shown: fall back to the tab's own note.
+                notesView = shell.tab.notesView?.takeIf { view -> sharedNoteHosts.any { it.id == view } },
             ).freezeDeferredLegacyLogRefsIfResolvable()
         }
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
@@ -18795,6 +18849,10 @@ class AppState(
         appendLine("seq3View\t${seq3ViewToken().b64()}")
         appendLine("tabOrder\t${tabOrderToken().b64()}")
         appendLine("tabGroups\t${tabGroupsJson().b64()}")
+        // Keyed line BEFORE the "tabs" marker, on purpose: an older build skips an unknown key (restoreAutosaveKey has no
+        // else), whereas anything after "tabs" is parsed as a tab record. Omitted entirely when there are no shared notes,
+        // so a cache without any stays byte-identical to what the previous version wrote.
+        sharedNoteHosts.takeIf { it.isNotEmpty() }?.let { appendLine("sharedNotes\t${it.sharedNoteHostsToken().b64()}") }
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
     }

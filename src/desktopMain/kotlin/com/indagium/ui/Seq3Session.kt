@@ -487,7 +487,7 @@ class Seq3Session(
 
     internal fun beginFromNotes(tabId: String, origin: TabRef?): String? {
         val originGroupId = appState.tabGroupIdForOrigin(origin)
-        val tab = appState.tab(tabId) ?: return null
+        val tab = appState.noteTab(tabId) ?: return null
         val selection = seq3NotesSelection(tab)
         if (selection.entryIds.isEmpty()) return null
         val range = Seq3Range.Ids(selection.entryIds.min(), selection.entryIds.max(), selection.entryIds)
@@ -535,7 +535,7 @@ class Seq3Session(
 
     internal fun beginEdit(tabId: String, blockId: String, origin: TabRef?): String? {
         val originGroupId = appState.tabGroupIdForOrigin(origin)
-        val tab = appState.tab(tabId) ?: return null
+        val tab = appState.noteTab(tabId) ?: return null
         val block = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note ?: return null
         val parsed = parseSeq3Note(block.text) ?: return null
         // A document saved by an older build can hold fragment membership that disagrees with the box
@@ -1560,7 +1560,7 @@ class Seq3Session(
         val blockId = after?.confirmedBlockId
         val tabId = after?.sourceTabId
         if (blockId != null && tabId != null) {
-            val note = appState.tab(tabId)?.annotations?.blocks?.filterIsInstance<AnnBlock.Note>()?.firstOrNull { it.id == blockId }
+            val note = appState.noteTab(tabId)?.annotations?.blocks?.filterIsInstance<AnnBlock.Note>()?.firstOrNull { it.id == blockId }
             val parsed = note?.text?.let(::parseSeq3Note)
             if (parsed?.attachment?.mode == Seq3AttachmentMode.LINKED) {
                 appState.updateBlock(
@@ -1711,7 +1711,7 @@ class Seq3Session(
         // explicit note-writing action.
         flush(id)
         val existingBlock = current.confirmedBlockId
-            ?.let { blockId -> appState.tab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
+            ?.let { blockId -> appState.noteTab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
         // WP14: confirm() is an explicit user action (the note-strip "confirm" press), so it's the
         // one write path in this class that can afford to STOP and ask instead of silently
         // re-deriving the fence from `current.document` — see seq3NoteHasHandEdit's own doc for the
@@ -1727,7 +1727,7 @@ class Seq3Session(
                 tabId = tabId,
                 targetPath = "",
                 targetName = current.document.title.ifBlank { "Untitled diagram" },
-                pendingTab = appState.tab(tabId) ?: return null,
+                pendingTab = appState.noteTab(tabId) ?: return null,
                 handEdit = PendingHandEditOverwrite(sessionId = id, blockId = existingBlock.id),
             )
             return null
@@ -1788,7 +1788,7 @@ class Seq3Session(
         val current = session(id) ?: return null
         val tabId = current.sourceTabId ?: return null
         val existingBlock = current.confirmedBlockId
-            ?.let { blockId -> appState.tab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
+            ?.let { blockId -> appState.noteTab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
         return writeConfirmedNote(id, current, tabId, existingBlock)
     }
 
@@ -1989,7 +1989,7 @@ class Seq3Session(
         val current = session(id) ?: return
         val tabId = current.sourceTabId ?: return
         val libraryItemId = current.libraryItemId ?: return
-        val tab = appState.tab(tabId) ?: return
+        val tab = appState.noteTab(tabId) ?: return
         val linkedNotes = tab.annotations.blocks.mapNotNull { block ->
             val note = block as? AnnBlock.Note ?: return@mapNotNull null
             val parsed = parseSeq3Note(note.text) ?: return@mapNotNull null

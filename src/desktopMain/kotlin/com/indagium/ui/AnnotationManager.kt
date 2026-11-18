@@ -43,7 +43,7 @@ internal class AnnotationManager(private val appState: AppState) {
             sourceTabId = sourceTabId,
             logIds = logIds,
             sourceFilename = if (crossFile && sourceTab != null) {
-                appState.displaySourceLabel(sourceTab.sourcePath, sourceTab.filename, appState.tab(targetTabId)?.filename)
+                appState.displaySourceLabel(sourceTab.sourcePath, sourceTab.filename, appState.noteTab(targetTabId)?.filename)
             } else {
                 null
             },
@@ -103,7 +103,7 @@ internal class AnnotationManager(private val appState: AppState) {
             blocks.add(idx, note)
             t.copy(annotations = t.annotations.copy(blocks = blocks))
         }
-        return id.takeIf { appState.tab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
+        return id.takeIf { appState.noteTab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
     }
 
     fun addLogRefBlock(
@@ -121,7 +121,7 @@ internal class AnnotationManager(private val appState: AppState) {
         // tab's rmap are frozen into the new block with their presentation metadata.
         sourceEntries: List<LogEntry>? = null,
     ): String? {
-        val t = appState.tab(tabId) ?: return null
+        val t = appState.noteTab(tabId) ?: return null
         val cleanIds = logIds.distinct().sorted().let { ids -> if (sourceEntries != null) ids else ids.filter { it in t.rmap } }
         if (cleanIds.isEmpty() && sourceEntries.isNullOrEmpty()) return null
         val captured = captureAnnotationLogRef(
@@ -153,7 +153,7 @@ internal class AnnotationManager(private val appState: AppState) {
         // observable anywhere yet. Without this check, MCP's add_log_note would report `ok: true`
         // with an id nothing can find — "a returned block id means the block is observable" is the
         // invariant every add-a-block entry point here must hold.
-        return id.takeIf { appState.tab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
+        return id.takeIf { appState.noteTab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
     }
 
     fun updateBlock(tabId: String, blockId: String, newText: String) = appState.upAnn(tabId) { t ->

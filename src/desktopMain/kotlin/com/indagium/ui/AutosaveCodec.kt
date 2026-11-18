@@ -51,6 +51,8 @@ private const val ANN_ENTRY_LOCAL_WALL_MILLIS_INDEX = 23
 private const val ANN_ENTRY_USES_PROFILE_PRESENTATION_INDEX = 25
 private const val ANN_ENTRY_USES_LEGACY_CLOCK_INDEX = 26
 private const val TAB_TOKEN_LOG_FORMAT_PROFILE_ID_INDEX = 17
+internal const val TAB_TOKEN_SHARED_NOTE_INDEX = 22
+private const val TAB_TOKEN_NOTES_VIEW_INDEX = 23
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
 internal fun String.jsonStr(): String = buildString {
@@ -1431,7 +1433,7 @@ private fun SavedFilter.savedFilterToken(): String = tokenFields(
     favorite.toString(),
 )
 
-private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
+internal fun String.savedFilterFromToken(): SavedFilter? = runCatching {
     val p = tokenFields()
     if (p.size < 18) return@runCatching null
     SavedFilter(
@@ -1484,7 +1486,7 @@ internal fun SavedFilter.toFilter(): Filter = Filter(
     sequences = sequences,
 )
 
-private fun String.encodedList(): List<String> =
+internal fun String.encodedList(): List<String> =
     if (isBlank()) emptyList() else split(",").filter { it.isNotBlank() }.map { it.unb64() }
 
 private fun String.encodedSet(): Set<String> = encodedList().toSet()
@@ -1781,7 +1783,7 @@ internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
     logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
-    selectedLogSectionId,
+    selectedLogSectionId, sharedNote, notesView,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1947,6 +1949,11 @@ internal fun LogTab.tabToken(): String {
         // have no single profile snapshot from which their export schema could be rebuilt.
         profileDisplayColumns.joinToString(",") { tokenFields(it.id, it.label).b64() },
         selectedLogSectionId.orEmpty(),
+        // Trailing field (22): the shared-note descriptor of a shared-note HOST (empty on every ordinary tab). Nested token
+        // (sharedNoteToken) so its own separators stay inside this one field. Append-last, like every field above.
+        sharedNote?.sharedNoteToken().orEmpty(),
+        // Trailing field (23): which shared note this tab's Notes tile shows (a host id); empty = the tab's own note.
+        notesView.orEmpty(),
     )
 }
 
@@ -2057,6 +2064,10 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
                 }.getOrNull()
             }.orEmpty(),
             selectedLogSectionId = p.getOrNull(21)?.takeIf { it.isNotBlank() },
+            // Field 22 is the shared-note descriptor, only ever set on a host (see sharedNoteHostFromToken); an ordinary
+            // tab never carries it. Field 23 (append-only): the shared note this tab's Notes tile shows; AppState
+            // drops an id whose host no longer exists.
+            notesView = p.getOrNull(TAB_TOKEN_NOTES_VIEW_INDEX)?.takeIf { it.isNotBlank() },
         ),
         source,
     )
