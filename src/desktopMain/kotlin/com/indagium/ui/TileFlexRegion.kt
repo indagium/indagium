@@ -171,16 +171,18 @@ private fun Modifier.flexHeight(host: TileFlexHost, scroll: ScrollState, capDp: 
 
 /**
  * A [FlexRegion] around a plain scrolling column with the app scrollbar: the bounded list of the filter sections (what `BoundedScrollBoxDp`
- * was). The region is at most [capDp] tall by default and as tall as its content when that is less.
+ * was). The region is at most [capDp] tall by default and as tall as its content when that is less; with `capDp == null` it takes [fill] outside a
+ * scrolling column (see [FlexRegion]).
  */
 @Composable
 internal fun FlexScrollBox(
-    capDp: Int,
+    capDp: Int?,
     modifier: Modifier = Modifier,
     scrollState: ScrollState = rememberScrollState(),
+    fill: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    FlexRegion(scrollState, modifier, capDp) {
+    FlexRegion(scrollState, modifier, capDp, fill) {
         Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
         // In a matchParentSize box so the scrollbar's fillMaxHeight does not pin the region to its cap.
         Box(Modifier.matchParentSize()) {

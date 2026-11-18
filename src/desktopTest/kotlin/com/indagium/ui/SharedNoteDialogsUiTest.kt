@@ -2,13 +2,20 @@
 
 package com.indagium.ui
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import com.indagium.model.AnnBlock
@@ -16,6 +23,7 @@ import org.junit.Test
 import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -46,6 +54,57 @@ class SharedNoteDialogsUiTest : SharedNoteUiTestBase() {
             id to rule.onNodeWithTag(sharedNoteTabRowTag(id)).fetchSemanticsNode().boundsInRoot.top
         }
         assertEquals(listOf("b", "a", "c"), order.sortedBy { it.second }.map { it.first }, "this tab is listed first, the others keep their order")
+    }
+
+    @Test
+    fun aTabRowTogglesFromAnyPointOfItsWholeWidth() {
+        setup()
+        openShareDialog(existing = false)
+        val row = tag(sharedNoteTabRowTag("b"))
+        val bounds = row.fetchSemanticsNode().boundsInRoot
+        assertTrue(bounds.width > 300f, "the toggle is the whole row, not just the checkbox and the label")
+        row.performMouseInput { click(Offset(2f, center.y)) }
+        rule.waitForIdle()
+        row.assertIsOn()
+        row.performMouseInput { click(Offset(width - 2f, center.y)) }
+        rule.waitForIdle()
+        row.assertIsOff()
+    }
+
+    @Test
+    fun aRowShowsTheHoverTintAcrossItsWholeWidthAndLeavesNoBandAfterAClick() {
+        setup()
+        openShareDialog(existing = false)
+        val row = tag(sharedNoteTabRowTag("c"))
+
+        fun edge(): Color = row.captureToImage().toPixelMap().let { it[2, it.height / 2] }
+        val resting = edge()
+        row.performMouseInput { moveTo(Offset(width / 2f, center.y)) }
+        rule.waitForIdle()
+        assertNotEquals(resting, edge(), "the pointer over the row tints it from its left edge, not from the checkbox")
+        row.performMouseInput { click(center) }
+        rule.waitForIdle()
+        row.performMouseInput { exit() }
+        rule.waitForIdle()
+        row.assertIsOn()
+        assertEquals(resting, edge(), "a clicked row keeps no grey band once the pointer has left it")
+    }
+
+    @Test
+    fun twoTabsWithTheSameFileNameAreToldApartByTheirFolder() {
+        setup(
+            configure = { s ->
+                s.tabs = s.tabs.map {
+                    if (it.id == "b") it.copy(filename = "a.log", sourcePath = File(File(dir, "other"), "a.log").absolutePath) else it
+                }
+            },
+        )
+        openShareDialog(existing = false)
+
+        fun shown(id: String) = tag(sharedNoteTabRowTag(id)).fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+        assertTrue(shown("b").contains("a.log — other"), shown("b"))
+        assertTrue(shown("a").contains("a.log — ${dir.name}"), shown("a"))
+        assertFalse(shown("c").contains("—"), "a file name no other tab has needs no help: ${shown("c")}")
     }
 
     @Test

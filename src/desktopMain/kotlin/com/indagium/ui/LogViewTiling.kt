@@ -394,7 +394,9 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
             TileSlot(
                 icon = Icons.Outlined.FolderOpen, title = "Sections", collapsible = true, maximizable = true,
                 headerAction = { LogSectionsHeaderAction(tab, showEmptySections) { showEmptySections = !showEmptySections } },
-                body = { LogSections(state, tab, showEmptySections) },
+                // The section list is the flex part (LogSections).
+                sizing = TileBodySizing.FLEX,
+                body = { info -> LogSections(state, tab, showEmptySections, info) },
             ),
         )
     }
@@ -404,6 +406,8 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
             TileSlot(
                 icon = Icons.Outlined.DataObject, title = "Message details", collapsible = true, maximizable = true,
                 headerAction = { MessageDetailsHeaderAction(state, tab) },
+                // The field tree is the flex part (MessageDetailsTileBody).
+                sizing = TileBodySizing.FLEX,
                 // While a section switch loads, the record shown still belongs to the old rows; keep it, dimmed.
                 body = {
                     val stale = state.pendingLogSection[tab.id] != null

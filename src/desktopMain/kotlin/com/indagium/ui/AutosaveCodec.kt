@@ -1589,7 +1589,11 @@ private fun AnnBlock.annBlockToken(): String = when (this) {
         )
         // Appended — index 8, written only when set so a note without sections encodes exactly as before. A reader
         // that predates it never looks past index 7; a token without it decodes as no section.
-        sourceSectionId?.let { fields += it }
+        // Index 9 is the chosen record fields, written only for a fields reference; it needs index 8's slot, so a
+        // reference without a section writes an empty one (decoded as no section) before it.
+        val chosen = recordFields?.takeIf { it.isNotEmpty() }
+        if (sourceSectionId != null || chosen != null) fields += sourceSectionId.orEmpty()
+        chosen?.let { fields += it.recordFieldsToken() }
         fields.joinToString("|") { it.fieldToken() }
     }
     // bytes is base64'd with a plain java.util.Base64 call (NOT the .b64() field helper below,
@@ -1620,6 +1624,7 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
             presentation = p.getOrElse(7) { "" }.takeIf { it.isNotBlank() }
                 ?.let(AnnotationLogRefPresentationCodec::decode),
             sourceSectionId = p.getOrElse(8) { "" }.takeIf { it.isNotBlank() },
+            recordFields = p.getOrElse(9) { "" }.takeIf { it.isNotBlank() }?.recordFieldsFromToken(),
         )
         "I" -> AnnBlock.Image(
             id = p[1],

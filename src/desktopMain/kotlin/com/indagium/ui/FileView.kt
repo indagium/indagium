@@ -329,124 +329,131 @@ internal fun FileView(
         onPanelFocusConsumed()
     }
 
-    Column(
-        Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
-            if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
-                val frs = visiblePanelFrs()
-                if (frs.isNotEmpty()) {
-                    val delta = if (ev.isShiftPressed) -1 else 1
-                    val next = (focusedPanelIdx + delta).mod(frs.size)
-                    state.keyboardFocusVisible = true
-                    runCatching { frs[next].second.requestFocus() }
+    // The record field trees under rows and in Message details pick fields and add them to the notes through this; a closed field menu
+    // gives focus back to the log view.
+    val recordFieldActions = remember(state, logViewerFr) { state.recordFieldActions { runCatching { logViewerFr.requestFocus() } } }
+    CompositionLocalProvider(LocalRecordFieldActions provides recordFieldActions) {
+        Column(
+            // A plain click anywhere in the view, or Esc, clears the picked fields.
+            Modifier.fillMaxSize().clearRecordFieldSelectionOnPlainPress(state).onPreviewKeyEvent { ev ->
+                if (state.handleRecordFieldEscape(ev)) return@onPreviewKeyEvent true
+                if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
+                    val frs = visiblePanelFrs()
+                    if (frs.isNotEmpty()) {
+                        val delta = if (ev.isShiftPressed) -1 else 1
+                        val next = (focusedPanelIdx + delta).mod(frs.size)
+                        state.keyboardFocusVisible = true
+                        runCatching { frs[next].second.requestFocus() }
+                    }
+                    true
+                } else {
+                    false
                 }
-                true
-            } else {
-                false
-            }
-        },
-    ) {
-        // captureSourceSessionId keeps the strip mounted after a stop finishes and
-        // captureFinalizationStatus clears — otherwise Save ZIP/Open folder vanished the instant
-        // finalization succeeded, the exact moment a user is most likely to want to export.
-        if (tab.captureSessionId != null ||
-            state.captureFinalizationStatus(tab.id) != null ||
-            (tab.captureSourceSessionId != null && !archiveBackedCapture)
+            },
         ) {
-            CaptureStrip(
-                state = state,
-                tab = tab,
-                onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
-                deviceEvents = captureDeviceEvents,
-            )
-        }
-        if (tab.contentState == TabContentState.LOADED) {
-            LogFormatChooserStrip(state, tab, onReturnFocus = { runCatching { logViewerFr.requestFocus() } })
-        }
-        // The panels (filters, log, Notes, AI, Video) are tiles of one tiling surface; see LogViewTiling.kt. The horizontal filter bar
-        // (ui/FilterBar.kt) is part of the log tile's toolbar and independently gated by filterBarVisible.
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            // The viewer's LazyListState can clamp a restored nonzero scroll index when composed
-            // against an empty shell. Keep the entire row surface unmounted until its source is
-            // loaded; the loading/error layer below owns this space during that gap.
-            if (tab.contentState == TabContentState.LOADED) {
-                // A JSON section switch swaps the rows and that section's view in one update. Keying the host by the section rebuilds it
-                // with them (as unloading and reloading the tab used to), so a filter field's pending text commit or local state from
-                // the old section can never land in the new one.
-                key(tab.selectedLogSectionId) {
-                    LogViewTilingHost(
-                        state = state,
-                        tab = tab,
-                        focus = LogViewPanelFocus(
-                            filters = filterFr,
-                            log = logViewerFr,
-                            notes = annotationFr,
-                            ai = aiFr,
-                            onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
-                            returnToLog = { runCatching { logViewerFr.requestFocus() } },
-                        ),
-                        inputs = LogViewHostInputs(
-                            filterSearchRequest = filterSearchRequest,
-                            onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-                            captureDeviceEvents = captureDeviceEvents,
-                            onExportCaptureRange = if (archiveBackedCapture) {
-                                { importedRangeEditorOpen = true }
-                            } else {
-                                null
-                            },
-                        ),
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+            // captureSourceSessionId keeps the strip mounted after a stop finishes and
+            // captureFinalizationStatus clears — otherwise Save ZIP/Open folder vanished the instant
+            // finalization succeeded, the exact moment a user is most likely to want to export.
+            if (tab.captureSessionId != null ||
+                state.captureFinalizationStatus(tab.id) != null ||
+                (tab.captureSourceSessionId != null && !archiveBackedCapture)
+            ) {
+                CaptureStrip(
+                    state = state,
+                    tab = tab,
+                    onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+                    deviceEvents = captureDeviceEvents,
+                )
             }
-            if (tab.contentState != TabContentState.LOADED) {
-                Box(Modifier.fillMaxSize().background(tc.p.copy(alpha = .96f)), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        when (tab.contentState) {
-                            TabContentState.LOADING -> {
-                                AppText("Loading ${tab.filename}…", color = tc.ts, fontSize = 14.sp)
-                                IndeterminateLoadingLine(Modifier.width(180.dp))
+            if (tab.contentState == TabContentState.LOADED) {
+                LogFormatChooserStrip(state, tab, onReturnFocus = { runCatching { logViewerFr.requestFocus() } })
+            }
+            // The panels (filters, log, Notes, AI, Video) are tiles of one tiling surface; see LogViewTiling.kt. The horizontal filter bar
+            // (ui/FilterBar.kt) is part of the log tile's toolbar and independently gated by filterBarVisible.
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                // The viewer's LazyListState can clamp a restored nonzero scroll index when composed
+                // against an empty shell. Keep the entire row surface unmounted until its source is
+                // loaded; the loading/error layer below owns this space during that gap.
+                if (tab.contentState == TabContentState.LOADED) {
+                    // A JSON section switch swaps the rows and that section's view in one update. Keying the host by the section rebuilds it
+                    // with them (as unloading and reloading the tab used to), so a filter field's pending text commit or local state from
+                    // the old section can never land in the new one.
+                    key(tab.selectedLogSectionId) {
+                        LogViewTilingHost(
+                            state = state,
+                            tab = tab,
+                            focus = LogViewPanelFocus(
+                                filters = filterFr,
+                                log = logViewerFr,
+                                notes = annotationFr,
+                                ai = aiFr,
+                                onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
+                                returnToLog = { runCatching { logViewerFr.requestFocus() } },
+                            ),
+                            inputs = LogViewHostInputs(
+                                filterSearchRequest = filterSearchRequest,
+                                onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
+                                captureDeviceEvents = captureDeviceEvents,
+                                onExportCaptureRange = if (archiveBackedCapture) {
+                                    { importedRangeEditorOpen = true }
+                                } else {
+                                    null
+                                },
+                            ),
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+                if (tab.contentState != TabContentState.LOADED) {
+                    Box(Modifier.fillMaxSize().background(tc.p.copy(alpha = .96f)), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            when (tab.contentState) {
+                                TabContentState.LOADING -> {
+                                    AppText("Loading ${tab.filename}…", color = tc.ts, fontSize = 14.sp)
+                                    IndeterminateLoadingLine(Modifier.width(180.dp))
+                                }
+                                TabContentState.FAILED -> {
+                                    AppText("Could not load ${tab.filename}", color = tc.tx, fontSize = 14.sp)
+                                    AppText(tab.contentLoadError.orEmpty(), color = tc.ts, fontSize = 11.sp, maxLines = 4)
+                                    AppButton("Retry", onClick = { state.ensureTabLoaded(tab.id) })
+                                }
+                                TabContentState.UNLOADED -> {
+                                    AppText("${tab.filename} is unloaded", color = tc.tx, fontSize = 14.sp)
+                                    AppButton("Load log", onClick = { state.ensureTabLoaded(tab.id) })
+                                }
+                                TabContentState.LOADED -> Unit
                             }
-                            TabContentState.FAILED -> {
-                                AppText("Could not load ${tab.filename}", color = tc.tx, fontSize = 14.sp)
-                                AppText(tab.contentLoadError.orEmpty(), color = tc.ts, fontSize = 11.sp, maxLines = 4)
-                                AppButton("Retry", onClick = { state.ensureTabLoaded(tab.id) })
-                            }
-                            TabContentState.UNLOADED -> {
-                                AppText("${tab.filename} is unloaded", color = tc.tx, fontSize = 14.sp)
-                                AppButton("Load log", onClick = { state.ensureTabLoaded(tab.id) })
-                            }
-                            TabContentState.LOADED -> Unit
                         }
                     }
                 }
             }
-        }
-        val archiveSession = if (archiveBackedCapture) state.captureSnapshotSessionFor(tab.id) else null
-        if (importedRangeEditorOpen && archiveSession != null) {
-            CaptureSnapshotPopover(
-                state = state,
-                tab = tab,
-                snapshot = RecorderSnapshot(
-                    state = RecorderState.STOPPED,
-                    session = archiveSession,
-                    logBytes = archiveSession.logFile.length(),
-                    indexedRows = tab.logData.size,
-                ),
-                triggerBounds = null,
-                editorTitle = "Export capture range",
-                onDismiss = {
-                    importedRangeEditorOpen = false
-                    runCatching { logViewerFr.requestFocus() }
-                },
-                onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
-            )
-        }
-        if (archiveBackedCapture && !importedRangeEditorOpen) {
-            CaptureExportStatusLine(
-                state = state,
-                sessionId = archiveSession?.id ?: tab.captureSourceSessionId,
-                onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
-            )
+            val archiveSession = if (archiveBackedCapture) state.captureSnapshotSessionFor(tab.id) else null
+            if (importedRangeEditorOpen && archiveSession != null) {
+                CaptureSnapshotPopover(
+                    state = state,
+                    tab = tab,
+                    snapshot = RecorderSnapshot(
+                        state = RecorderState.STOPPED,
+                        session = archiveSession,
+                        logBytes = archiveSession.logFile.length(),
+                        indexedRows = tab.logData.size,
+                    ),
+                    triggerBounds = null,
+                    editorTitle = "Export capture range",
+                    onDismiss = {
+                        importedRangeEditorOpen = false
+                        runCatching { logViewerFr.requestFocus() }
+                    },
+                    onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+                )
+            }
+            if (archiveBackedCapture && !importedRangeEditorOpen) {
+                CaptureExportStatusLine(
+                    state = state,
+                    sessionId = archiveSession?.id ?: tab.captureSourceSessionId,
+                    onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+                )
+            }
         }
     }
 }

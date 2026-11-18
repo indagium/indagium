@@ -33,7 +33,13 @@ internal class AnnotationManager(private val appState: AppState) {
     // so it stays a plain mutableStateOf var rather than a callback-driven method.
     var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)
 
-    fun requestAddAnn(sourceTabId: String, logIds: List<Int>, capture: AnnBlock.LogRefCapture? = null) {
+    fun requestAddAnn(
+        sourceTabId: String,
+        logIds: List<Int>,
+        capture: AnnBlock.LogRefCapture? = null,
+        /** Chosen fields of the one record in [logIds] (see [AnnBlock.LogRef.recordFields]); null adds the rows themselves. */
+        recordFields: List<AnnBlock.RecordFieldRef>? = null,
+    ) {
         // Compare mode: lines from the other pane go into the ACTIVE tab's note; whichever tab owns the note, the note it shows
         // (its own, or a shared note) is the one that receives them.
         val noteOwnerTabId = if (appState.compareMode && sourceTabId != appState.activeTabId) appState.activeTabId else sourceTabId
@@ -52,6 +58,7 @@ internal class AnnotationManager(private val appState: AppState) {
             },
             capture = frozenCapture,
             sourceSectionId = sourceTab?.selectedLogSectionId,
+            recordFields = recordFields,
         )
         appState.ctx = null
     }
@@ -75,6 +82,7 @@ internal class AnnotationManager(private val appState: AppState) {
                 sourceEntries = rows,
                 presentation = capture?.presentation?.copy(options = options),
                 sourceSectionId = request.sourceSectionId,
+                recordFields = request.recordFields,
             )
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }

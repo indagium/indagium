@@ -1524,6 +1524,12 @@ private fun StringBuilder.appendLogRefBlock(
     }
     logRefSourceLabel(block, tab.logSections)?.let { appendLine("${sourcePrefixLabel(settings)} $it") }
     val rows = block.resolveRows(tab)
+    // Chosen fields of a record are exported as one JSON object of path -> value instead of the record's row.
+    block.recordFields?.let { fields ->
+        appendJsonCodeBlock(settings.annotationLogBlockStyle, recordFieldsExportLines(fields))
+        appendLine()
+        return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
+    }
     // Legacy recovered/cross-tab refs have no reliable current baseline or name map, so this
     // fallback uses numeric PIDs and omits Δt. Snapshot refs bypass it and use captured metadata.
     val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
@@ -1543,6 +1549,10 @@ private fun StringBuilder.appendLogRefBlock(
             rows.forEach { row -> appendLine(presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource)) }
             appendLine("```")
         }
+    }
+    // A row that carries a JSON record is followed by the record, pretty-printed (capped; the rest is counted).
+    rows.forEach { row ->
+        recordExportLines(row.rawRecord)?.let { appendJsonCodeBlock(settings.annotationLogBlockStyle, it) }
     }
     appendLine()
     return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber

@@ -2704,7 +2704,10 @@ internal class IndagiumToolOperations(
             "caption" to block.caption,
             "sourceTabId" to block.sourceTabId,
             "sourceFilename" to block.sourceFilename,
-        )
+        ) + block.recordFields.let { fields ->
+            // Only a reference made from chosen fields of a JSON record has them; other blocks report exactly what they did.
+            if (fields == null) emptyMap() else mapOf("recordFields" to fields.map { mapOf("path" to it.path, "json" to it.json) })
+        }
         is AnnBlock.Image -> mapOf(
             "id" to block.id,
             "type" to "image",

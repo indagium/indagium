@@ -99,8 +99,12 @@ import com.indagium.model.VideoFrameReference
 import com.indagium.model.hasSameRow
 import com.indagium.model.resolveRows
 import com.indagium.utils.LogLinePresentationContext
+import com.indagium.utils.displayRecordPath
 import com.indagium.utils.logRefSourceLabel
 import com.indagium.utils.presentAnnotationLogLine
+import com.indagium.utils.recordExportLines
+import com.indagium.utils.recordFieldTreeSource
+import com.indagium.utils.recordFieldsExportLines
 import com.indagium.utils.visibleEntries
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
@@ -2352,23 +2356,30 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                         logRefSourceLabel(block, tab.logSections)?.let { sourceLabel ->
                             AppText("$label $sourceLabel", color = tc.td, fontSize = 11.sp, fontFamily = mono)
                         }
-                        Column(
-                            Modifier.fillMaxWidth()
-                                .background(tc.bg, CORNER_SM)
-                                .border(1.dp, tc.br, CORNER_SM)
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            rows.forEach { row ->
-                                AppText(
-                                    presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource),
-                                    color = tc.ts,
-                                    fontSize = 12.sp,
-                                    fontFamily = mono,
-                                    maxLines = Int.MAX_VALUE,
-                                    overflow = TextOverflow.Clip,
-                                )
+                        val chosenFields = block.recordFields
+                        if (chosenFields != null) {
+                            // Chosen fields of a record: the one JSON object the export prints.
+                            PreviewJsonBox(recordFieldsExportLines(chosenFields), mono, tc)
+                        } else {
+                            Column(
+                                Modifier.fillMaxWidth()
+                                    .background(tc.bg, CORNER_SM)
+                                    .border(1.dp, tc.br, CORNER_SM)
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                rows.forEach { row ->
+                                    AppText(
+                                        presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource),
+                                        color = tc.ts,
+                                        fontSize = 12.sp,
+                                        fontFamily = mono,
+                                        maxLines = Int.MAX_VALUE,
+                                        overflow = TextOverflow.Clip,
+                                    )
+                                }
                             }
+                            rows.forEach { row -> recordExportLines(row.rawRecord)?.let { PreviewJsonBox(it, mono, tc) } }
                         }
                     }
                 }
@@ -2401,6 +2412,19 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
         if (tab.annotations.suffix.isNotBlank()) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
             AnnotationMarkdownText(tab.annotations.suffix, tc)
+        }
+    }
+}
+
+/** A JSON record, or the chosen fields of one, as the rendered Markdown preview shows it: the lines the export prints, in a code box. */
+@Composable
+private fun PreviewJsonBox(lines: List<String>, mono: FontFamily, tc: ThemeColors) {
+    Column(
+        Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        lines.forEach { line ->
+            AppText(line, color = tc.ts, fontSize = 11.sp, fontFamily = mono, maxLines = Int.MAX_VALUE, overflow = TextOverflow.Clip)
         }
     }
 }
@@ -3417,10 +3441,87 @@ private fun LogRefBlock(
             enabled = editingEnabled,
             proseTargetId = "${tab.id}:${block.id}:caption",
         )
-        LogExcerpt(
-            block = block, rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
-            mono = mono, tc = tc, expanded = excerptExpanded, onToggleExpanded = onToggleExcerpt,
-        )
+        if (block.recordFields != null) {
+            LogRefFieldsExcerpt(block = block, record = rows.firstOrNull(), mono = mono, tc = tc)
+        } else {
+            LogExcerpt(
+                block = block, rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
+                mono = mono, tc = tc, expanded = excerptExpanded, onToggleExpanded = onToggleExcerpt,
+            )
+        }
+    }
+}
+
+/** Test tags of a fields reference: its box, its record-time line, and the path line above field [index]. */
+internal fun logRefFieldsTag(blockId: String): String = "logref-fields-$blockId"
+
+internal fun logRefFieldsTimeTag(blockId: String): String = "logref-fields-time-$blockId"
+
+internal fun logRefFieldPathTag(blockId: String, index: Int): String = "logref-field-path-$blockId-$index"
+
+/** The tag of the field tree under a whole-record reference's row [rowId]. */
+internal fun logRefRecordTag(blockId: String, rowId: Int): String = "logref-record-$blockId-$rowId"
+
+/**
+ * A whole-record reference's row, followed by the record's field tree when the row carries a JSON object or array: the same tree as
+ * under a log row, top-level fields open and what they hold folded. A row of any other kind draws nothing here.
+ */
+@Composable
+private fun LogRefRecordTree(block: AnnBlock.LogRef, row: LogEntry, mono: FontFamily) {
+    val source = remember(row.rawRecord) { row.rawRecord?.takeIf(::isStructuredJsonRecord) } ?: return
+    StructuredRecordBody(
+        entryId = row.id,
+        source = source,
+        mono = mono,
+        startIndent = 4.dp,
+        rootPath = "${row.id}.n${block.id}",
+        bodyTag = logRefRecordTag(block.id, row.id),
+        openDepth = 1,
+    )
+}
+
+/**
+ * The body of a fields reference: the frozen record's time and tag, then each chosen field under the path it sits at (parents in
+ * secondary text) as one row of the field tree, so its value, hex dump or sub-fields behave as they do in the log view.
+ */
+@Composable
+private fun LogRefFieldsExcerpt(block: AnnBlock.LogRef, record: LogEntry?, mono: FontFamily, tc: ThemeColors) {
+    val fields = block.recordFields.orEmpty()
+    Column(
+        Modifier.fillMaxWidth()
+            .background(tc.bg, FIELD_CORNER)
+            .border(1.dp, tc.br, FIELD_CORNER)
+            .clip(FIELD_CORNER)
+            .testTag(logRefFieldsTag(block.id)),
+    ) {
+        record?.let { row ->
+            AppText(
+                listOf(row.ts, row.tag).filter { it.isNotBlank() }.joinToString("  "),
+                color = tc.ts, fontSize = 10.sp, fontFamily = mono, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).testTag(logRefFieldsTimeTag(block.id)),
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            fields.forEachIndexed { index, field ->
+                if (field.path.size > 1) {
+                    AppText(
+                        displayRecordPath(field.path.dropLast(1)) + " ›",
+                        color = tc.ts, fontSize = 10.sp, fontFamily = mono,
+                        modifier = Modifier.padding(start = 20.dp).testTag(logRefFieldPathTag(block.id, index)),
+                    )
+                }
+                StructuredRecordBody(
+                    entryId = record?.id ?: 0,
+                    source = remember(field) { recordFieldTreeSource(field) },
+                    mono = mono,
+                    startIndent = 0.dp,
+                    rootPath = "${record?.id ?: 0}.f${block.id}-$index",
+                    bodyTag = "logref-field-${block.id}-$index",
+                    openDepth = 1,
+                )
+            }
+        }
     }
 }
 
@@ -3495,6 +3596,7 @@ private fun LogExcerpt(
                         maxLines = Int.MAX_VALUE,
                         overflow = TextOverflow.Clip,
                     )
+                    LogRefRecordTree(block, r, mono)
                 }
                 if (canToggle) {
                     AppText(
@@ -3519,6 +3621,7 @@ private fun LogExcerpt(
                             modifier = Modifier.weight(1f),
                         )
                     }
+                    LogRefRecordTree(block, r, mono)
                 }
                 AppText(
                     "show ${rows.size - visibleCount} more",

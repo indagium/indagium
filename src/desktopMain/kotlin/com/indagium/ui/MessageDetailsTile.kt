@@ -69,7 +69,10 @@ private fun MessageDetailsHeader(entry: LogEntry) {
     }
 }
 
-/** Follows the selected message; each new message starts with its field tree expanded. */
+/**
+ * Follows the selected message; each new message starts with its field tree expanded. The tree is the tile's flex part (TileFlexRegion.kt): in a
+ * scrolling column the tile takes its share of the column (by weight, like Notes) up to what the tree needs, outside one it fills the tile.
+ */
 @Composable
 internal fun MessageDetailsTileBody(tab: LogTab) {
     val colors = tc()
@@ -80,9 +83,9 @@ internal fun MessageDetailsTileBody(tab: LogTab) {
     }
     key(entry.id, entry.rawRecord, entry.msg) {
         val scroll = rememberScrollState()
-        Box(Modifier.fillMaxSize()) {
+        FlexRegion(scroll, capDp = null, fill = Modifier.fillMaxSize()) {
             Column(
-                Modifier.fillMaxSize().verticalScroll(scroll).padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
+                Modifier.fillMaxWidth().verticalScroll(scroll).padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
                     .testTag("message-details-content-${entry.id}"),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -96,12 +99,16 @@ internal fun MessageDetailsTileBody(tab: LogTab) {
                     initiallyExpanded = true,
                     rootPath = "${entry.id}.details",
                     bodyTag = "message-details-record-${entry.id}",
+                    recordTabId = tab.id,
                 )
             }
-            ThinVerticalScrollbar(
-                scroll,
-                Modifier.align(Alignment.CenterEnd).fillMaxHeight().testTag("message-details-scrollbar-${entry.id}"),
-            )
+            // In a matchParentSize box so the scrollbar's fillMaxHeight does not claim the region's whole height.
+            Box(Modifier.matchParentSize()) {
+                ThinVerticalScrollbar(
+                    scroll,
+                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().testTag("message-details-scrollbar-${entry.id}"),
+                )
+            }
         }
     }
 }

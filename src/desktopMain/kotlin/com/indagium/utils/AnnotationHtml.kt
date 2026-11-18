@@ -145,6 +145,10 @@ private fun StringBuilder.appendLogRefHtml(
         append("<p><i>").append(escapeHtml(maskText("From $label"))).append("</i></p>")
     }
     val rows = block.resolveRows(tab)
+    block.recordFields?.let { fields ->
+        appendJsonHtml(recordFieldsExportLines(fields), maskText)
+        return num
+    }
     // Legacy persisted/cross-tab refs cannot safely inherit this tab's name map or Δt baseline.
     // Snapshot refs bypass this live context and use their captured metadata.
     val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
@@ -154,7 +158,15 @@ private fun StringBuilder.appendLogRefHtml(
         appendLine(escapeHtml(maskText(presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource))))
     }
     append("</code></pre>")
+    rows.forEach { row -> recordExportLines(row.rawRecord)?.let { appendJsonHtml(it, maskText) } }
     return num
+}
+
+/** A JSON record or the chosen fields of one, as a preformatted block. */
+private fun StringBuilder.appendJsonHtml(lines: List<String>, maskText: (String) -> String) {
+    append("<pre><code>")
+    lines.forEach { appendLine(escapeHtml(maskText(it))) }
+    append("</code></pre>")
 }
 
 // Mirrors RenderedMarkdownPreview's AnnBlock.Image branch, but where that composable decodes

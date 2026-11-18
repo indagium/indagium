@@ -552,7 +552,19 @@ sealed class AnnBlock {
          * the "R" token (AutosaveCodec), appended last.
          */
         val sourceSectionId: String? = null,
+        /**
+         * Set when the reference was made from chosen fields of a JSON record instead of the whole record (the field tree's
+         * "Add field to notes"): the one row in [sourceEntries] is the record, and these are the fields picked from it. Null
+         * for a whole-record or plain row reference. Persisted in the "R" token (AutosaveCodec), appended last.
+         */
+        val recordFields: List<RecordFieldRef>? = null,
     ) : AnnBlock()
+
+    /**
+     * One field chosen from a JSON record: [path] is the object keys and array indices ("[2]") from the record's root, [json] the
+     * chosen subtree's own JSON text, compact. Frozen with the reference, so the note keeps it when the record is gone.
+     */
+    data class RecordFieldRef(val path: List<String>, val json: String)
 
     /** A video frame or screenshot, captured via the video panel's "Add frame to notes" button
      *  (video/VideoPlayerController.grabCurrentFrame()) and downscaled/re-encoded (see
@@ -2233,6 +2245,8 @@ data class AddAnnRequest(
     val capture: AnnBlock.LogRefCapture? = null,
     /** The section the source tab showed when the dialog was requested (see [AnnBlock.LogRef.sourceSectionId]). */
     val sourceSectionId: String? = null,
+    /** The fields chosen from the one record (see [AnnBlock.LogRef.recordFields]); null for the rows themselves. */
+    val recordFields: List<AnnBlock.RecordFieldRef>? = null,
 )
 
 sealed class LogItem {

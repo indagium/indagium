@@ -409,7 +409,8 @@ fun App(
                 // NOT join the onPreviewKeyEvent chain below.
                 .onKeyEvent { ev -> handleGlobalImagePaste(ev, state) }
                 .onPreviewKeyEvent { ev ->
-                    handleGlobalKey(
+                    // Esc drops the fields picked in a record's tree (only when there are some, so every other Esc is untouched).
+                    state.handleRecordFieldEscape(ev) || handleGlobalKey(
                         ev = ev,
                         state = state,
                         onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },

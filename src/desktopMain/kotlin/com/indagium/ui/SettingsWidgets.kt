@@ -1276,14 +1276,7 @@ internal fun SettingsCheckbox(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(
-                Modifier.size(CHECKBOX_SIZE)
-                    .background(if (checked) tc.ac else Color.Transparent, CHECKBOX_SHAPE)
-                    .border(1.5.dp, if (checked) tc.ac else tc.td, CHECKBOX_SHAPE),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (checked) Icon(Icons.Outlined.Check, contentDescription = null, tint = tc.onAc, modifier = Modifier.size(12.dp))
-            }
+            CheckboxMark(checked)
             AppText(
                 label,
                 color = labelColor ?: tc.tx,
@@ -1293,6 +1286,20 @@ internal fun SettingsCheckbox(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+    }
+}
+
+/** The 16dp box of [SettingsCheckbox]: accent fill with a check when on, an outline when off. Not interactive; the row around it toggles. */
+@Composable
+internal fun CheckboxMark(checked: Boolean, modifier: Modifier = Modifier) {
+    val tc = tc()
+    Box(
+        modifier.size(CHECKBOX_SIZE)
+            .background(if (checked) tc.ac else Color.Transparent, CHECKBOX_SHAPE)
+            .border(1.5.dp, if (checked) tc.ac else tc.td, CHECKBOX_SHAPE),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (checked) Icon(Icons.Outlined.Check, contentDescription = null, tint = tc.onAc, modifier = Modifier.size(12.dp))
     }
 }
 

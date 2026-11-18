@@ -84,15 +84,15 @@ internal val LogViewSectionId.isLogTile: Boolean
     get() = this == LogViewSectionId.LOG || this == LogViewSectionId.LOG_A || this == LogViewSectionId.LOG_B
 
 /**
- * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections and Video, plus the toolbar tile (content-sized to its wrapped
- * rows of buttons). A column that holds the log or an Original always fits its window. Video keeps its per-device height in capture tabs and can
- * resize independently in the sidebar; only the whole column scrolls, so its body stays bounded by the tile. A column with the toolbar tile in it
- * scrolls like any other, so the toolbar may scroll out of view there; moving it somewhere else is the user's choice.
+ * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections (the JSON Sections and Message details tiles included) and
+ * Video, plus the toolbar tile (content-sized to its wrapped rows of buttons). A column that holds the log or an Original always fits its
+ * window. Video keeps its per-device height in capture tabs and can resize independently in the sidebar; only the whole column scrolls, so
+ * its body stays bounded by the tile. A column with the toolbar tile in it scrolls like any other, so the toolbar may scroll out of view
+ * there; moving it somewhere else is the user's choice.
  */
 internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
     LogViewSectionId.LOG, LogViewSectionId.ORIGINAL, LogViewSectionId.LOG_A, LogViewSectionId.LOG_B,
     LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B,
-    LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS,
     -> false
     else -> true
 }
@@ -100,10 +100,11 @@ internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
 /**
  * The tiles that are kept in a one-tile scrolling column of their own when they end up alone where a column would be (dropped beside the other
  * columns, say): the side sections, so such a tile is as tall as its content, can be resized and scrolls, like in a column of several. Not the
- * toolbar tile: alone it may be the tall narrow toolbar, which is not content sized.
+ * toolbar tile: alone it may be the tall narrow toolbar, which is not content sized. Nor the JSON Sections and Message details tiles: beside the
+ * log (Sections' default place) they fill the height of their row like the log does; they scroll with the others only once they share a column.
  */
 internal fun logViewLoneColumn(id: LogViewSectionId): Boolean =
-    id != LogViewSectionId.TOOLBAR && id != LogViewSectionId.VIDEO && logViewScrollsInColumn(id)
+    id != LogViewSectionId.TOOLBAR && id != LogViewSectionId.VIDEO && !id.isAuxiliaryLogTile && logViewScrollsInColumn(id)
 
 /** The log view's lone tiles (above) and its scrolling columns, as the normalizing, dropping and removing of tiles take them. */
 internal val LOG_VIEW_LONE_COLUMNS: TileLoneColumns<LogViewSectionId> = TileLoneColumns(::logViewLoneColumn, ::logViewScrollsInColumn)

@@ -4276,6 +4276,7 @@ private fun LogRow(
                     (if (showRowNumbers) rowNumberColumnWidth(fontSize.value, tab.logData.size.toString().length) + ROW_NUM_GAP else 0.dp) +
                     (if (showTimeDelta) timeDeltaColumnWidth(fontSize.value, timeDeltaChars) + ROW_NUM_GAP else 0.dp) +
                     (INDENT_STEP * item.indent) + 26.dp,
+                recordTabId = tab.id,
             )
         }
     }

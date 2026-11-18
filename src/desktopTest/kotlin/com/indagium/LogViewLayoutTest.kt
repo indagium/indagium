@@ -40,6 +40,8 @@ import com.indagium.ui.LogViewLegacySizes
 import com.indagium.ui.LogViewTileContext
 import com.indagium.ui.TOOLBAR_TILE_COLUMN_DP
 import com.indagium.ui.TOOLBAR_TILE_ROW_DP
+import com.indagium.ui.TileBodyMeasure
+import com.indagium.ui.TileBodySizing
 import com.indagium.ui.TileDropTarget
 import com.indagium.ui.TileEdge
 import com.indagium.ui.TileSizing
@@ -756,9 +758,86 @@ class LogViewLayoutTest {
 
     @Test
     fun onlyTheLogAndOriginalTilesKeepTheirColumnFromScrolling() {
-        // The toolbar tile is a content-sized tile of a scrolling column like any side section (it may scroll out of view there).
-        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B, LogViewSectionId.SECTIONS, LogViewSectionId.MESSAGE_DETAILS)
+        // The toolbar tile and the JSON Sections and Message details tiles are content-sized tiles of a scrolling column like any side section
+        // (the toolbar may scroll out of view there).
+        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B)
         LogViewSectionId.entries.forEach { assertEquals(it !in fixed, logViewScrollsInColumn(it), "scrolls($it)") }
+    }
+
+    private val jsonContext get() = ctx().copy(hasSections = true, hasMessageDetails = true)
+    private val oldJsonScrolls: (LogViewSectionId) -> Boolean =
+        { it != LogViewSectionId.SECTIONS && it != LogViewSectionId.MESSAGE_DETAILS && logViewScrollsInColumn(it) }
+    private val flexSizing = TileBodyMeasure(TileBodySizing.FLEX, chromeDp = 33f, flexNaturalDp = 400f, flexCapDp = 252f).toSizing(LOG_VIEW_PIN_MAX_DP)
+
+    @Test
+    fun theJsonTilesAreNotKeptInOneTileColumnsBesideOtherColumns() {
+        assertFalse(logViewLoneColumn(LogViewSectionId.SECTIONS))
+        assertFalse(logViewLoneColumn(LogViewSectionId.MESSAGE_DETAILS))
+        val full = withAuxiliaryLogTiles(classicLogViewLayout(sizes), jsonContext)
+        assertEquals(full, normalizeTileLayout(full, LOG_VIEW_LONE_COLUMNS), "the default layout is already normal: no wrapper columns appear")
+        val beside = dropTile(full, LogViewSectionId.SECTIONS, TileDropTarget.OnSection(LogViewSectionId.MESSAGE_DETAILS, TileEdge.LEFT), LOG_VIEW_LONE_COLUMNS)
+        assertTrue(LogViewSectionId.SECTIONS in leafIds(beside))
+    }
+
+    @Test
+    fun theDefaultMetadataJsonLayoutIsLaidOutExactlyAsBeforeWhenNoTileHasReportedItsContent() {
+        val full = withAuxiliaryLogTiles(classicLogViewLayout(sizes), jsonContext)
+        val projection = assertNotNull(projectTileLayout(full) { it != DIAGRAMS && it != VIDEO })
+        val before = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), oldJsonScrolls)
+        val now = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn)
+        assertEquals(before.cards.map { it.section }, now.cards.map { it.section })
+        before.cards.zip(now.cards).forEach { (a, b) ->
+            listOf(a.rect.x to b.rect.x, a.rect.y to b.rect.y, a.rect.w to b.rect.w, a.rect.h to b.rect.h).forEach { (x, y) ->
+                assertEquals(x, y, EPS, "${a.section}")
+            }
+        }
+        // Sections stand level with the log and as tall as it is.
+        assertEquals(assertNotNull(now.cardOf(LOG)).h, assertNotNull(now.cardOf(LogViewSectionId.SECTIONS)).h, EPS)
+    }
+
+    @Test
+    fun sectionsDroppedIntoTheFilterColumnKeepTheFilterTilesAtTheirContentHeights() {
+        val full = withAuxiliaryLogTiles(classicLogViewLayout(sizes), jsonContext)
+        val moved = dropTile(full, LogViewSectionId.SECTIONS, TileDropTarget.OnSection(MESSAGE_RULES, TileEdge.BOTTOM), LOG_VIEW_LONE_COLUMNS)
+        val shown = setOf(TAGS, MESSAGE_RULES, LogViewSectionId.SECTIONS, LOG, ORIGINAL, NOTES)
+        val projection = assertNotNull(projectTileLayout(moved) { it in shown })
+        val content = mapOf(
+            TAGS to TileSizing(80f, 400f, 150f, 150f),
+            MESSAGE_RULES to TileSizing(80f, 400f, 120f, 120f),
+            LogViewSectionId.SECTIONS to flexSizing,
+        )
+        val tall = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn) { content[it] }
+        assertEquals(150f, assertNotNull(tall.cardOf(TAGS)).h, EPS, "Tags stay at their content height")
+        assertEquals(120f, assertNotNull(tall.cardOf(MESSAGE_RULES)).h, EPS, "so does Message rules")
+        // The last tile of a column grows into the room left, as far as showing all its list (header + 400 dp), never as a share of the column.
+        assertEquals(33f + 400f, assertNotNull(tall.cardOf(LogViewSectionId.SECTIONS)).h, EPS, "Sections stretch only as far as their whole list")
+        assertTrue(tall.scrollRegions.none { it.scrolls }, "the column fits an 800 dp window")
+        val short = tileGeometry(projection.root, 1500f, 400f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn) { content[it] }
+        assertEquals(150f, assertNotNull(short.cardOf(TAGS)).h, EPS, "a shorter window scrolls the column instead of squeezing the tiles")
+        assertEquals(120f, assertNotNull(short.cardOf(MESSAGE_RULES)).h, EPS)
+        assertEquals(33f + 252f, assertNotNull(short.cardOf(LogViewSectionId.SECTIONS)).h, EPS, "without spare room Sections are their list at its cap")
+        assertTrue(short.scrollRegions.any { it.scrolls }, "the filter column scrolls")
+        // Without the tiles' sizes (before they report) the column is still a scrolling one, not a fitting split of the height.
+        assertTrue(tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn).scrollRegions.isNotEmpty())
+    }
+
+    @Test
+    fun messageDetailsDroppedIntoTheFilterColumnShareWhatTheContentTilesLeave() {
+        val full = withAuxiliaryLogTiles(classicLogViewLayout(sizes), jsonContext)
+        val moved = dropTile(full, LogViewSectionId.MESSAGE_DETAILS, TileDropTarget.OnSection(MESSAGE_RULES, TileEdge.BOTTOM), LOG_VIEW_LONE_COLUMNS)
+        val shown = setOf(TAGS, MESSAGE_RULES, LogViewSectionId.MESSAGE_DETAILS, LOG, ORIGINAL, NOTES)
+        val projection = assertNotNull(projectTileLayout(moved) { it in shown })
+        // The tree is a weight tile (no default height, like Notes): it takes what the others leave, up to the height that shows all of it.
+        val details = TileBodyMeasure(TileBodySizing.FLEX, chromeDp = 33f, flexNaturalDp = 200f, flexCapDp = null).toSizing(LOG_VIEW_PIN_MAX_DP)
+        val content = mapOf(
+            TAGS to TileSizing(80f, 400f, 150f, 150f),
+            MESSAGE_RULES to TileSizing(80f, 400f, 120f, 120f),
+            LogViewSectionId.MESSAGE_DETAILS to details,
+        )
+        val geometry = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn) { content[it] }
+        assertEquals(150f, assertNotNull(geometry.cardOf(TAGS)).h, EPS)
+        assertEquals(120f, assertNotNull(geometry.cardOf(MESSAGE_RULES)).h, EPS)
+        assertEquals(33f + 200f, assertNotNull(geometry.cardOf(LogViewSectionId.MESSAGE_DETAILS)).h, EPS)
     }
 
     // An existing layout (weights and a pinned Log level, no heights) must look exactly as it did: the old tree decodes unchanged and

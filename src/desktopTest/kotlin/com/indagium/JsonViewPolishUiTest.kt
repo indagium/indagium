@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -23,13 +24,20 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
+import com.indagium.model.LogViewSectionId
 import com.indagium.model.TabContentState
 import com.indagium.ui.AppState
 import com.indagium.ui.DARK_GITHUB
 import com.indagium.ui.FileView
+import com.indagium.ui.LOG_VIEW_LONE_COLUMNS
 import com.indagium.ui.LocalTheme
 import com.indagium.ui.RecordExpansion
+import com.indagium.ui.TileDropTarget
+import com.indagium.ui.TileEdge
+import com.indagium.ui.commitLogViewLayout
+import com.indagium.ui.dropTile
 import com.indagium.ui.logToolbarTag
+import com.indagium.ui.logViewLayoutForTab
 import com.indagium.ui.messageDetailsCopyText
 import org.junit.Assume.assumeFalse
 import org.junit.Rule
@@ -137,6 +145,65 @@ class JsonViewPolishUiTest {
             val sample = image.toPixelMap()[6, 4]
             assertNotEquals(colors.p2, sample, "no p2 fill behind the list")
             assertEquals(colors.p, sample, "the tile's own panel colour")
+        }
+    }
+
+    // The JSON tiles in the filter column ─────────────────────────────────
+
+    private fun heightOf(tag: String) = rule.onNodeWithTag(tag).getBoundsInRoot().let { it.bottom.value - it.top.value }
+
+    private fun moveIntoFilterColumn(app: AppState, id: String, tile: LogViewSectionId) {
+        val current = app.logViewLayoutForTab(app.tab(id)!!)
+        app.commitLogViewLayout(dropTile(current, tile, TileDropTarget.OnSection(LogViewSectionId.MESSAGE_RULES, TileEdge.BOTTOM), LOG_VIEW_LONE_COLUMNS))
+        rule.waitForIdle()
+    }
+
+    @Test
+    fun sectionsBesideTheLogFillTheLogsHeightAsTheyAlwaysDid() {
+        withApp { app, directory ->
+            open(app, sectionsFile(directory))
+            val sections = rule.onNodeWithTag("tile-card-sections").getBoundsInRoot()
+            val log = rule.onNodeWithTag("tile-card-log").getBoundsInRoot()
+            assertEquals(log.top.value, sections.top.value, 0.6f, "Sections sit level with the log")
+            val logHeight = log.bottom.value - log.top.value
+            assertEquals(logHeight, sections.bottom.value - sections.top.value, 0.6f, "and are as tall as it is, not as tall as their three rows")
+            rule.onNodeWithTag("json-section-Tethered Bluetooth / HCI").assertExists()
+        }
+    }
+
+    @Test
+    fun sectionsDroppedIntoTheFilterColumnAreContentSizedAndLeaveTheOtherTilesAlone() {
+        withApp { app, directory ->
+            val id = open(app, sectionsFile(directory))
+            val tagsBefore = heightOf("tile-card-tags")
+            val rulesBefore = heightOf("tile-card-message_rules")
+            moveIntoFilterColumn(app, id, LogViewSectionId.SECTIONS)
+            assertEquals(tagsBefore, heightOf("tile-card-tags"), 0.6f, "Tags keep the height their content asks for")
+            assertEquals(rulesBefore, heightOf("tile-card-message_rules"), 0.6f, "so do Message rules")
+            val sections = heightOf("tile-card-sections")
+            // Header and divider plus two group labels' worth of rows: far less than the window, and not the share of a fitting split.
+            assertTrue(sections < 140f, "Sections are as tall as their three rows, not stretched: $sections")
+            rule.onNodeWithTag("json-section-Tethered Bluetooth / HCI").assertExists()
+            rule.onNodeWithTag("json-section-Tethered Bluetooth / L2CAP").assertExists()
+        }
+    }
+
+    @Test
+    fun messageDetailsDroppedIntoTheFilterColumnLeaveTheOtherTilesAlone() {
+        withApp { app, directory ->
+            val id = open(app, sectionsFile(directory))
+            rule.onNodeWithTag("log-row-$id:main-1").performClick()
+            rule.waitForIdle()
+            val tagsBefore = heightOf("tile-card-tags")
+            val rulesBefore = heightOf("tile-card-message_rules")
+            moveIntoFilterColumn(app, id, LogViewSectionId.MESSAGE_DETAILS)
+            assertEquals(tagsBefore, heightOf("tile-card-tags"), 0.6f)
+            assertEquals(rulesBefore, heightOf("tile-card-message_rules"), 0.6f)
+            val details = heightOf("tile-card-message_details")
+            val column = rule.onNodeWithTag("tile-card-tags").getBoundsInRoot()
+            assertTrue(details > 60f && details < 900f, "the tile is as tall as its tree wants: $details")
+            assertTrue(column.bottom.value - column.top.value < 900f)
+            rule.onNodeWithTag("message-details-content-1").assertExists()
         }
     }
 

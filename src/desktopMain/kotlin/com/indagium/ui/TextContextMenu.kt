@@ -87,7 +87,7 @@ internal object IndagiumTextContextMenu : TextContextMenu {
     }
 }
 
-private class IndagiumContextMenuItem(
+internal class IndagiumContextMenuItem(
     label: String,
     enabled: Boolean,
     onClick: () -> Unit,

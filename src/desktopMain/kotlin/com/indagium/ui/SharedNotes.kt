@@ -484,6 +484,8 @@ internal suspend fun AppState.goToLogRefRows(block: AnnBlock.LogRef, viewingTabI
     val ids = withContext(Dispatchers.Default) { resolveLogRefRowIds(block, shown.logData, shown.rmap) }
     if (ids.isEmpty()) return GoToRowsResult.RowsNotFound
     requestAiLogNavigation(sourceTabId, ids)
+    // A fields reference also opens the record's tree at the chosen fields.
+    block.recordFields?.let { fields -> openRecordFields(sourceTabId, ids.first(), fields.map { it.path }.toSet()) }
     return GoToRowsResult.Navigated(sourceTabId, ids, missing = block.logIds.size - ids.size)
 }
 

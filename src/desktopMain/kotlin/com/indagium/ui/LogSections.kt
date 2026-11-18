@@ -9,11 +9,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -31,6 +29,9 @@ import com.indagium.model.TabContentState
 private val SECTION_GROUP_HEIGHT = 24.dp
 private val SECTION_ROW_HEIGHT = 28.dp
 private val SECTION_INSET = 12.dp
+
+/** The most the section list shows at the tile's default height in a scrolling column (about nine rows); a taller tile shows more. */
+internal const val SECTIONS_LIST_CAP_DP = 252
 
 /** The Sections tile's header button: how many empty sections it would show, or "Hide empty". */
 internal fun showEmptySectionsLabel(showEmpty: Boolean, emptyCount: Int): String =
@@ -51,34 +52,35 @@ internal fun RowScope.LogSectionsHeaderAction(tab: LogTab, showEmpty: Boolean, o
 
 /**
  * JSON sections are separate logs; selecting one loads only that section into the viewer. Sections that hold no records stay out of the
- * list unless [showEmpty] (the tile's header button) says otherwise; the selected section is always listed.
+ * list unless [showEmpty] (the tile's header button) says otherwise; the selected section is always listed. The list is the tile's flex part
+ * (TileFlexRegion.kt): in a scrolling column the tile is as tall as the list wants, up to [SECTIONS_LIST_CAP_DP], and resizing it changes the list's
+ * viewport; anywhere else (beside the log) the list fills the tile and scrolls.
  */
 @Composable
-internal fun LogSections(state: AppState, tab: LogTab, showEmpty: Boolean, modifier: Modifier = Modifier) {
+internal fun LogSections(state: AppState, tab: LogTab, showEmpty: Boolean, info: TileBodyInfo, modifier: Modifier = Modifier) {
     val colors = tc()
-    val scroll = rememberLazyListState()
     // The section being loaded counts as the selected one at once; the rows shown stay the old section's until it arrives.
     val selectedId = state.pendingLogSection[tab.id] ?: tab.selectedLogSectionId
     val visibleSections = tab.logSections.filter { showEmpty || !it.isEmptySection || it.id == selectedId }
-    Column(modifier.fillMaxWidth().fillMaxHeight().testTag("log-sections-${tab.id}")) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            LazyColumn(
-                Modifier.fillMaxWidth().padding(end = 8.dp).testTag("json-section-list-${tab.id}"),
-                state = scroll,
-            ) {
+    Column(
+        modifier.fillMaxWidth().then(if (info.contentSized) Modifier else Modifier.fillMaxHeight()).testTag("log-sections-${tab.id}"),
+    ) {
+        FlexScrollBox(
+            capDp = if (info.contentSized) SECTIONS_LIST_CAP_DP else null,
+            modifier = Modifier.testTag("json-section-list-${tab.id}"),
+            fill = Modifier.weight(1f).fillMaxWidth(),
+        ) {
+            Column(Modifier.fillMaxWidth().padding(end = 8.dp)) {
                 visibleSections.groupBy { it.group }.forEach { (group, sections) ->
-                    item(key = "group:$group") {
-                        Box(Modifier.fillMaxWidth().heightIn(min = SECTION_GROUP_HEIGHT), contentAlignment = Alignment.CenterStart) {
-                            AppText(
-                                group, modifier = Modifier.padding(start = SECTION_INSET), color = colors.ts, fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold, maxLines = 2,
-                            )
-                        }
+                    Box(Modifier.fillMaxWidth().heightIn(min = SECTION_GROUP_HEIGHT), contentAlignment = Alignment.CenterStart) {
+                        AppText(
+                            group, modifier = Modifier.padding(start = SECTION_INSET), color = colors.ts, fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold, maxLines = 2,
+                        )
                     }
-                    items(sections, key = { it.id }) { section -> LogSectionRow(state, tab, section, section.id == selectedId) }
+                    sections.forEach { section -> key(section.id) { LogSectionRow(state, tab, section, section.id == selectedId) } }
                 }
             }
-            ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }

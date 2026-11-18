@@ -6,13 +6,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.unit.dp
 import com.indagium.model.AnnBlock
 import com.indagium.model.TabStripStyle
@@ -62,6 +66,33 @@ class SharedNoteQaScreenshotsUiTest : SharedNoteUiTestBase() {
         state.sharedNoteDialog = SharedNoteDialogRequest.Share("logcat", shareExistingNote = true)
         rule.waitForIdle()
         shot("2-share-dialog")
+    }
+
+    @Test
+    fun shareDialogRowStates() {
+        qaSetup(width = 700, height = 560)
+        state.sharedNoteDialog = SharedNoteDialogRequest.Share("logcat", shareExistingNote = false)
+        rule.waitForIdle()
+        val row = rule.onNodeWithTag(sharedNoteTabRowTag("Untitled"))
+        row.performMouseInput { moveTo(Offset(width / 2f, center.y)) }
+        rule.waitForIdle()
+        shot("2-share-dialog-hover")
+        row.performMouseInput { click(center) }
+        rule.waitForIdle()
+        row.performMouseInput { exit() }
+        rule.waitForIdle()
+        shot("2-share-dialog-clicked")
+    }
+
+    @Test
+    fun shareDialogWithTwoTabsOfTheSameFileName() {
+        qaSetup(width = 700, height = 560)
+        state.tabs = state.tabs.map {
+            if (it.id == "Untitled") it.copy(filename = "logcat.log", sourcePath = File(File(dir, "device-2"), "logcat.log").absolutePath) else it
+        }
+        state.sharedNoteDialog = SharedNoteDialogRequest.Share("logcat", shareExistingNote = false)
+        rule.waitForIdle()
+        shot("2-share-dialog-duplicate-names")
     }
 
     @Test

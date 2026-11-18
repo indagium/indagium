@@ -2,18 +2,23 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -22,13 +27,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -209,35 +222,79 @@ private fun ShareNoteDialog(state: AppState, request: SharedNoteDialogRequest.Sh
     }
 }
 
-/** The bordered list of tabs with a checkbox each: "This tab · <format>" first when [thisTabId] is among them, then "<format>". */
+/**
+ * The bordered list of tabs with a checkbox each: "This tab · <format>" first when [thisTabId] is among them, then "<format>". A tab whose file
+ * name another open tab shares carries what tells them apart (the folder or archive, as the tab strip shows it). Each row is one toggle over its
+ * whole width: the app's hover tint while the pointer is over it, and a focus ring only while it holds keyboard focus (a click leaves no mark).
+ */
 @Composable
 private fun TabCheckList(state: AppState, tabs: List<LogTab>, thisTabId: String?, ticked: Set<String>, onToggle: (String) -> Unit) {
     val tc = tc()
     val shape = RoundedCornerShape(5.dp)
     Column(
-        Modifier.fillMaxWidth().heightIn(max = TAB_LIST_MAX_HEIGHT_DP.dp).border(1.dp, tc.br, shape)
+        Modifier.fillMaxWidth().heightIn(max = TAB_LIST_MAX_HEIGHT_DP.dp).border(1.dp, tc.br, shape).clip(shape)
             .verticalScroll(rememberScrollState()),
     ) {
         tabs.forEachIndexed { index, tab ->
-            val format = state.tabFormatLabel(tab)
-            Box(Modifier.fillMaxWidth().height(TAB_ROW_HEIGHT_DP.dp)) {
-                SettingsCheckbox(
-                    checked = tab.id in ticked,
-                    label = tab.filename,
-                    onChange = { onToggle(tab.id) },
-                    monospace = true,
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                    testTag = sharedNoteTabRowTag(tab.id),
-                )
-                AppText(
-                    if (tab.id == thisTabId) "This tab · $format" else format,
-                    color = tc.ts,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
-                )
-            }
+            TabCheckRow(
+                checked = tab.id in ticked,
+                name = tab.filename,
+                disambiguation = tabDisambiguation(tab, state.tabs),
+                trailing = state.tabFormatLabel(tab).let { if (tab.id == thisTabId) "This tab · $it" else it },
+                onToggle = { onToggle(tab.id) },
+                modifier = Modifier.testTag(sharedNoteTabRowTag(tab.id)),
+            )
             if (index < tabs.lastIndex) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br.copy(alpha = ROW_DIVIDER_ALPHA)))
+        }
+    }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun TabCheckRow(
+    checked: Boolean,
+    name: String,
+    disambiguation: String?,
+    trailing: String,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val focused by interaction.collectIsFocusedAsState()
+    // Focus also lands on a row by a click; the ring is for the keyboard, so a press hides it until the next key.
+    var pointerFocus by remember { mutableStateOf(false) }
+    DisableSelection {
+        Row(
+            modifier.fillMaxWidth().height(TAB_ROW_HEIGHT_DP.dp)
+                .background(if (hovered) tc.hv else Color.Transparent)
+                .onPointerEvent(PointerEventType.Press) { pointerFocus = true }
+                .onPreviewKeyEvent {
+                    pointerFocus = false
+                    false
+                }
+                .hoverable(interaction)
+                .toggleable(value = checked, interactionSource = interaction, indication = null, role = Role.Checkbox) { onToggle() }
+                .then(if (focused && !pointerFocus) Modifier.border(1.dp, tc.ac, RoundedCornerShape(3.dp)) else Modifier)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            CheckboxMark(checked)
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                AppText(
+                    name, color = tc.tx, fontSize = 12.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (disambiguation != null) {
+                    AppText(
+                        " — $disambiguation", color = tc.ts, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+            }
+            AppText(trailing, color = tc.ts, fontSize = 11.sp, maxLines = 1)
         }
     }
 }

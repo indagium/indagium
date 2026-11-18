@@ -18,11 +18,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
@@ -174,7 +176,34 @@ internal fun StructuredRecordDisclosure(
     )
 }
 
-/** Inline body used under the one logical parent row. The tree is parsed only after expansion. */
+/**
+ * Which containers of a tree start open, besides every one when it is [initiallyExpanded]: those within [depth] levels of the root
+ * (a note shows the first level of a record open), and each field of [paths] with the way down to it. [nonce] changes with every new
+ * request, so a tree that already composed applies it again.
+ */
+private class TreeOpen(val depth: Int, val paths: Set<List<String>>, val nonce: Int) {
+    /** [segments] is a chosen field or on the way to one. */
+    fun covers(segments: List<String>): Boolean =
+        paths.isNotEmpty() && paths.any { it.size >= segments.size && it.subList(0, segments.size) == segments }
+}
+
+/** What a tree's rows share: fonts and colours, how values are placed, what starts open and, in the log view, the field menu's wiring. */
+private class TreeEnv(
+    val mono: FontFamily,
+    val tc: ThemeColors,
+    val initiallyExpanded: Boolean,
+    val valueLayout: RecordValueLayout,
+    val open: TreeOpen,
+    val fieldContext: RecordFieldContext?,
+)
+
+/**
+ * Inline body used under the one logical parent row. The tree is parsed only after expansion.
+ *
+ * [openDepth], [openPaths] and [openNonce] say what starts open (see [TreeOpen]). With a [recordTabId] and the log view's
+ * [LocalRecordFieldActions] the rows can be picked (Ctrl/Cmd-click) and add fields to the notes (right-click menu), and a "Go to rows"
+ * request for this record opens its fields.
+ */
 @Composable
 internal fun StructuredRecordBody(
     entryId: Int,
@@ -185,6 +214,10 @@ internal fun StructuredRecordBody(
     initiallyExpanded: Boolean = false,
     rootPath: String = "$entryId.root",
     bodyTag: String = "structured-record-body-$entryId",
+    openDepth: Int = 0,
+    openPaths: Set<List<String>> = emptySet(),
+    openNonce: Int = 0,
+    recordTabId: String? = null,
 ) {
     val tc = tc()
     val tree = remember(source) { runCatching { BoundedJsonReader(source).parseRoot() }.getOrNull() }
@@ -194,6 +227,21 @@ internal fun StructuredRecordBody(
     }
     val gapPx = monoSpaceWidthPx(mono)
     val valueLayout = remember(alignment, keyColumn, gapPx) { RecordValueLayout(alignment, keyColumn, gapPx) }
+    val actions = LocalRecordFieldActions.current
+    val fieldContext = if (recordTabId != null && actions != null) {
+        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source)
+    } else {
+        null
+    }
+    val request = if (recordTabId != null) actions?.openRequest(recordTabId, entryId) else null
+    val env = TreeEnv(
+        mono = mono,
+        tc = tc,
+        initiallyExpanded = initiallyExpanded,
+        valueLayout = valueLayout,
+        open = TreeOpen(openDepth, request?.paths ?: openPaths, request?.nonce ?: openNonce),
+        fieldContext = fieldContext,
+    )
     SelectionContainer(
         modifier = modifier.fillMaxWidth()
             .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
@@ -201,15 +249,7 @@ internal fun StructuredRecordBody(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
             if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
-                StructuredContainerRows(
-                    tree,
-                    path = rootPath,
-                    depth = 0,
-                    mono = mono,
-                    tc = tc,
-                    initiallyExpanded = initiallyExpanded,
-                    valueLayout = valueLayout,
-                )
+                StructuredContainerRows(tree, path = rootPath, segments = emptyList(), depth = 0, env = env)
             } else {
                 RawRecordLines(entryId = entryId, source = source, mono = mono, tc = tc)
             }
@@ -217,16 +257,27 @@ internal fun StructuredRecordBody(
     }
 }
 
+/** Whether [source] is a JSON object or array the field tree can show (within its size and depth limits). */
+internal fun isStructuredJsonRecord(source: String): Boolean {
+    val first = source.firstOrNull { !it.isWhitespace() }
+    if (first != '{' && first != '[') return false
+    val tree = runCatching { BoundedJsonReader(source).parseRoot() }.getOrNull()
+    return tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue
+}
+
 @Composable
 private fun StructuredContainerRows(
     value: StructuredJsonValue,
     path: String,
+    segments: List<String>,
     depth: Int,
-    mono: FontFamily,
-    tc: ThemeColors,
-    initiallyExpanded: Boolean,
-    valueLayout: RecordValueLayout,
+    env: TreeEnv,
 ) {
+    val mono = env.mono
+    val tc = env.tc
+    val initiallyExpanded = env.initiallyExpanded
+    val valueLayout = env.valueLayout
+    val fieldContext = env.fieldContext
     val children = when (value) {
         is StructuredJsonValue.ObjectValue -> value.fields.map { it.first to it.second }
         is StructuredJsonValue.ArrayValue -> value.values.mapIndexed { index, child -> "[$index]" to child }
@@ -248,9 +299,26 @@ private fun StructuredContainerRows(
         // Bytes spelled in hex read as a dump, not one long wrapped run.
         val hexBytes = remember(childPath, child) { (child as? StructuredJsonValue.StringValue)?.let { parseHexBytes(it.value) } }
         val expandable = container || multilineText || hexBytes != null
-        var expanded by remember(childPath) { mutableStateOf(initiallyExpanded) }
+        val fieldPath = segments + label
+        val startsOpen = initiallyExpanded || (container && depth < env.open.depth) || env.open.covers(fieldPath)
+        var expanded by remember(childPath, env.open.nonce) { mutableStateOf(startsOpen) }
+        val picked = fieldContext != null && fieldPath in fieldContext.selected
+        var menuAt by remember(childPath) { mutableStateOf<Offset?>(null) }
+        val currentContext by rememberUpdatedState(fieldContext)
         Row(
             modifier = Modifier.fillMaxWidth()
+                .then(if (picked) Modifier.background(tc.sl) else Modifier)
+                .then(
+                    if (fieldContext != null) {
+                        Modifier.recordFieldGestures(
+                            key = childPath,
+                            onToggle = { currentContext?.let { it.actions.toggleSelected(it.tabId, it.entryId, fieldPath) } },
+                            onMenu = { menuAt = it },
+                        )
+                    } else {
+                        Modifier
+                    },
+                )
                 .padding(start = (depth * INDENT_PER_DEPTH_DP).dp, end = 3.dp)
                 // One node per field: a screen reader hears "key value" together.
                 .semantics(mergeDescendants = true) {}
@@ -308,10 +376,11 @@ private fun StructuredContainerRows(
                     }
                 },
             )
+            menuAt?.let { at -> if (fieldContext != null) RecordFieldMenu(fieldContext, fieldPath, at) { menuAt = null } }
         }
         if (expandable && expanded) {
             when {
-                container -> StructuredContainerRows(child, childPath, depth + 1, mono, tc, initiallyExpanded, valueLayout)
+                container -> StructuredContainerRows(child, childPath, fieldPath, depth + 1, env)
                 hexBytes != null -> StructuredHexDump(
                     entryId = path.substringBefore('.').toIntOrNull() ?: 0,
                     path = childPath,

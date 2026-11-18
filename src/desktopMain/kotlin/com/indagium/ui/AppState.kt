@@ -10368,6 +10368,12 @@ class AppState(
         }
     }
 
+    /** The fields picked in one record's tree (ui/RecordFieldActions.kt), or null. UI state only: not persisted, one record at a time. */
+    internal var recordFieldSelection by mutableStateOf<RecordFieldSelection?>(null)
+
+    /** The field paths the last "Go to rows" on a fields reference asks the record's tree to open; the tree reads it when it composes. */
+    internal var recordFieldOpenRequest by mutableStateOf<RecordFieldOpenRequest?>(null)
+
     private fun clearRecordExpansion(tabIds: Collection<String>) {
         synchronized(stateLock) {
             if (tabIds.any { it in recordExpansionByTab }) recordExpansionByTab = recordExpansionByTab - tabIds.toSet()
@@ -12058,8 +12064,12 @@ class AppState(
 
     // Annotation block-model mutations are owned by AnnotationManager (Task 12 slice 5) — see
     // its doc comment for the auto-export-on-change rationale these forward to unchanged.
-    fun requestAddAnn(sourceTabId: String, logIds: List<Int>, capture: AnnBlock.LogRefCapture? = null) =
-        annotationManager.requestAddAnn(sourceTabId, logIds, capture)
+    fun requestAddAnn(
+        sourceTabId: String,
+        logIds: List<Int>,
+        capture: AnnBlock.LogRefCapture? = null,
+        recordFields: List<AnnBlock.RecordFieldRef>? = null,
+    ) = annotationManager.requestAddAnn(sourceTabId, logIds, capture, recordFields)
 
     fun requestAddAnn(sourceTabId: String, capture: AnnBlock.LogRefCapture) =
         annotationManager.requestAddAnn(sourceTabId, capture.rows.map { it.id }, capture)
