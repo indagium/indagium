@@ -48,10 +48,8 @@ internal fun AppState.logViewTileContext(tab: LogTab): LogViewTileContext =
         groupOn = ::logViewGroupOn,
         hasSeverityFilter = tab.canUseProfileCapability(LogCapability.SEVERITY_FILTER, logCapabilitiesForTab(tab)),
         hasSections = tab.hasSectionNavigation(),
-        hasMessageDetails = tab.logData.firstOrNull()?.recordMetadata?.usesProfilePresentation == true ||
-            (tab.inspectedRecordId ?: tab.selected.firstOrNull())?.let { id ->
-                tab.rmap[id]?.let { expandableRecordSource(it, tab.logFormat) != null }
-            } == true,
+        // Decided for the tab's rows, never by the selection, so the tile does not come and go as rows are clicked.
+        hasMessageDetails = profileRecordsAddDetail(tab.id, tab.logData),
     )
 
 /** The tab-strip toggle behind [group]. */
