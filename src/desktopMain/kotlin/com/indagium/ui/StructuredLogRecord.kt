@@ -85,6 +85,9 @@ private const val RECORD_FONT_SP = 11
 private const val MAX_KEY_ROW_FRACTION = 0.45f
 private val NODE_ROW_HEIGHT = 16.dp
 
+/** The space under each field row, drawn inside the row's own fill so selected neighbours join up. */
+private val FIELD_ROW_GAP = 1.dp
+
 /** Width of a tree row's toggle slot (and of the empty slot of a leaf); the key column maths counts it as 20dp of indent. */
 private val TREE_TOGGLE_WIDTH = 20.dp
 private val HEX_SUMMARY_GAP = 8.dp
@@ -310,7 +313,8 @@ internal fun StructuredRecordBody(
                     },
                 ),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            // No spacing here: each field row carries its own FIELD_ROW_GAP inside its fill (see StructuredContainerRows).
+            Column {
                 if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
                     StructuredContainerRows(tree, path = rootPath, segments = emptyList(), depth = 0, env = env)
                 } else {
@@ -447,7 +451,8 @@ private fun StructuredContainerRows(
                         Modifier
                     },
                 )
-                .padding(start = (depth * INDENT_PER_DEPTH_DP).dp, end = 3.dp)
+                // The 1dp between rows is inside each row, under its fill, so neighbouring picked rows read as one block.
+                .padding(start = (depth * INDENT_PER_DEPTH_DP).dp, end = 3.dp, bottom = FIELD_ROW_GAP)
                 // One node per field: a screen reader hears "key value" together.
                 .semantics(mergeDescendants = true) {}
                 .then(if (expandable) Modifier.toggleOnDoubleClick(childPath) { expanded = !expanded } else Modifier)
