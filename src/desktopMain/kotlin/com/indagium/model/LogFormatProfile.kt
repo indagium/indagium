@@ -125,10 +125,23 @@ data class LogFormatProfile(
 
 /** Profile-level column headers for tab surfaces that need them before the first row exists. */
 fun logFormatDisplayColumnDefinitions(profile: LogFormatProfile): List<LogDisplayField> =
-    profile.visibleColumns.map { role ->
-        LogDisplayField(role.name.lowercase(), role.displayLabel(), "")
-    } + profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        LogDisplayField(attribute.id, attribute.label, "")
+    withAttributeColumns(
+        profile,
+        profile.visibleColumns.map { role -> LogDisplayField(role.name.lowercase(), role.displayLabel(), "") },
+        profile.attributes.filter { it.visibleByDefault }.map { attribute -> LogDisplayField(attribute.id, attribute.label, "") },
+    )
+
+/**
+ * A profile's display columns: its visible fields, then its visible attributes. When the profile ends
+ * with the message, the attributes go just before it instead. The message is free text of any length,
+ * so a column after it could not line up under its header. A profile that puts the message elsewhere
+ * keeps its own order. Rows, the tab's header and the Settings preview all order columns this way.
+ */
+fun <T> withAttributeColumns(profile: LogFormatProfile, visible: List<T>, attributes: List<T>): List<T> =
+    if (attributes.isNotEmpty() && visible.isNotEmpty() && profile.visibleColumns.lastOrNull() == LogFieldRole.MESSAGE) {
+        visible.dropLast(1) + attributes + visible.last()
+    } else {
+        visible + attributes
     }
 
 /** Snapshot JSON omits read-only origin; compare builtin definitions after restoring that flag. */

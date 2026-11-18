@@ -25,6 +25,7 @@ import com.indagium.model.LogTab
 import com.indagium.model.ProcessNameMode
 import com.indagium.model.UNKNOWN_SEVERITY_METADATA
 import com.indagium.model.usesCustomLogFormatProjection
+import com.indagium.model.withAttributeColumns
 import com.indagium.ui.UNKNOWN_SEVERITY_TEXT_COLOR_ARGB
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
@@ -145,13 +146,14 @@ class ProfileLogPresentationTest {
                 LogDisplayField("timestamp", "timestamp", "09:15:00.001"),
                 LogDisplayField("severity", "level", ""),
                 LogDisplayField("component", "tag", ""),
-                LogDisplayField("message", "message", "request completed"),
                 LogDisplayField("trace_extra", "Trace ID", "trace-17"),
+                LogDisplayField("message", "message", "request completed"),
             ),
         )
         val tab = profileTab(profile, entry)
         val settings = AppSettings()
-        val displayed = "09:15:00.001  request completed  Trace ID=trace-17"
+        // A visible attribute goes before the trailing message; it keeps its label where no header names it.
+        val displayed = "09:15:00.001  Trace ID=trace-17  request completed"
 
         assertEquals(displayed, visibleLogLineText(entry))
         assertEquals(displayed, presentLogLine(tab, entry, settings))
@@ -165,17 +167,17 @@ class ProfileLogPresentationTest {
 
         val context = LogLinePresentationContext(tab, settings, listOf(entry))
         assertEquals(
-            listOf("timestamp", "level", "tag", "message", "Trace ID"),
+            listOf("timestamp", "level", "tag", "Trace ID", "message"),
             filteredCsvHeader(tab, settings),
         )
         assertEquals(
-            listOf("09:15:00.001", "", "", "request completed", "trace-17"),
+            listOf("09:15:00.001", "", "", "trace-17", "request completed"),
             filteredCsvValues(tab, entry, settings, context),
         )
         assertEquals(
             listOf(
-                "timestamp,level,tag,message,Trace ID",
-                "09:15:00.001,,,request completed,trace-17",
+                "timestamp,level,tag,Trace ID,message",
+                "09:15:00.001,,,trace-17,request completed",
             ),
             buildFilteredCsv(tab, settings).trimEnd().lines(),
         )
@@ -417,8 +419,8 @@ class ProfileLogPresentationTest {
                 LogDisplayField("process_id", "pid", "42"),
                 LogDisplayField("thread_id", "tid", "43"),
                 LogDisplayField("component", "tag", "Worker"),
-                LogDisplayField("message", "message", "ready"),
                 LogDisplayField("trace_extra", "Trace ID", "trace-lc"),
+                LogDisplayField("message", "message", "ready"),
             ),
             pid = 42,
         ).copy(recordMetadata = profileEntryMetadata(
@@ -427,17 +429,17 @@ class ProfileLogPresentationTest {
                 LogDisplayField("process_id", "pid", "42"),
                 LogDisplayField("thread_id", "tid", "43"),
                 LogDisplayField("component", "tag", "Worker"),
-                LogDisplayField("message", "message", "ready"),
                 LogDisplayField("trace_extra", "Trace ID", "trace-lc"),
+                LogDisplayField("message", "message", "ready"),
             ),
             raw = "12-01 12:00:00.100 42 43 D Worker: ready",
             legacyClock = true,
         ))
         val logcatTab = profileTab(logcatProfile, logcat)
-        val logcatText = "42  43  Worker  ready  Trace ID=trace-lc"
+        val logcatText = "42  43  Worker  Trace ID=trace-lc  ready"
         val withIdentity = AppSettings(copyPidTid = true)
         assertEquals(logcatText, presentLogLine(logcatTab, logcat, withIdentity))
-        assertEquals(listOf("pid", "tid", "tag", "message", "Trace ID"), filteredCsvHeader(logcatTab, withIdentity))
+        assertEquals(listOf("pid", "tid", "tag", "Trace ID", "message"), filteredCsvHeader(logcatTab, withIdentity))
         assertEquals("kept", logcat.profileFields.getValue("hidden"))
         assertEquals("12-01 12:00:00.100 42 43 D Worker: ready", logcat.rawRecord)
 
@@ -741,6 +743,125 @@ class ProfileLogPresentationTest {
 
         // A Logcat tab has no profile layout.
         assertNull(computeProfileColumnLayout(header, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+    }
+
+    @Test
+    fun extraColumnsShowTheirValueUnderTheHeaderAndLineUpBeforeTheMessage() {
+        val header = listOf(
+            LogDisplayField("timestamp", "timestamp", ""),
+            LogDisplayField("process_id", "process id", ""),
+            LogDisplayField("request_id", "Request ID", ""),
+            LogDisplayField("duration_ms", "Duration (ms)", ""),
+            LogDisplayField("message", "message", ""),
+        )
+
+        fun row(id: Int, request: String, message: String, duration: String) = profileEntry(
+            ts = "10:00:0$id",
+            level = LogLevel.I,
+            tag = "",
+            msg = message,
+            fields = emptyMap(),
+            columns = listOf(
+                LogDisplayField("timestamp", "timestamp", "10:00:0$id"),
+                LogDisplayField("process_id", "process id", "41$id"),
+                LogDisplayField("request_id", "Request ID", request),
+                LogDisplayField("duration_ms", "Duration (ms)", duration),
+                LogDisplayField("message", "message", message),
+            ),
+        )
+        val rows = listOf(row(1, "req-1", "Configuration loaded", "20"), row(2, "req-0002", "slow", "1234"))
+        val layout = requireNotNull(computeProfileColumnLayout(header, rows))
+
+        // Every column but the last (the message) is padded to the longer of its label and its values.
+        assertEquals(mapOf("timestamp" to 9, "process_id" to 3, "request_id" to 10, "duration_ms" to 13), layout.widths)
+        assertEquals("TIMESTAMP  PID  REQUEST ID  DURATION (MS)  MESSAGE", layout.header)
+        val rendered = rows.map { profileDisplayTextProjection(profileDisplayColumns(it)!!, columnWidths = layout.widths).text }
+        assertEquals(
+            listOf(
+                "10:00:01   411  req-1       20             Configuration loaded",
+                "10:00:02   412  req-0002    1234           slow",
+            ),
+            rendered,
+        )
+        // Each value starts under its own header label: no "label=" in front of it.
+        val valuesUnder = mapOf(
+            "REQUEST ID" to listOf("req-1", "req-0002"),
+            "DURATION (MS)" to listOf("20", "1234"),
+            "MESSAGE" to listOf("Configuration", "slow"),
+        )
+        valuesUnder.forEach { (label, values) ->
+            val column = layout.header.indexOf(label)
+            assertEquals(listOf(column, column), rendered.zip(values).map { (line, value) -> line.indexOf(value) }, label)
+        }
+
+        // Copy, export, notes and filters have no header, so the extra fields keep their labels there.
+        assertEquals("10:00:01  411  Request ID=req-1  Duration (ms)=20  Configuration loaded", visibleLogLineText(rows[0]))
+        // A Find match on a labelled value lands on the value drawn under the header.
+        val projection = profileDisplayTextProjection(profileDisplayColumns(rows[0])!!, columnWidths = layout.widths)
+        val canonicalStart = visibleLogLineText(rows[0]).indexOf("req-1")
+        assertEquals(rendered[0].indexOf("req-1"), projection.remapOffset(canonicalStart))
+    }
+
+    @Test
+    fun visibleAttributesGoBeforeATrailingMessageAndAfterAnyOtherOrder() {
+        fun field(id: String) = LogDisplayField(id, id, id)
+
+        fun profile(vararg columns: LogFieldRole) =
+            LogFormatProfile(id = "order", name = "Order", engine = LogFormatEngine.CSV, visibleColumns = columns.toList())
+        val attributes = listOf(field("duration_ms"), field("region"))
+
+        assertEquals(
+            listOf("timestamp", "request_id", "duration_ms", "region", "message"),
+            withAttributeColumns(
+                profile(LogFieldRole.TIMESTAMP, LogFieldRole.REQUEST_ID, LogFieldRole.MESSAGE),
+                listOf(field("timestamp"), field("request_id"), field("message")),
+                attributes,
+            ).map { it.id },
+        )
+        // A profile that puts the message elsewhere keeps its own order.
+        assertEquals(
+            listOf("message", "timestamp", "duration_ms", "region"),
+            withAttributeColumns(
+                profile(LogFieldRole.MESSAGE, LogFieldRole.TIMESTAMP),
+                listOf(field("message"), field("timestamp")),
+                attributes,
+            ).map { it.id },
+        )
+    }
+
+    @Test
+    fun aNarrowTileDropsPidAndTidFromTheHeaderAsFromTheRows() {
+        val header = listOf(
+            LogDisplayField("timestamp", "timestamp", ""),
+            LogDisplayField("process_id", "process id", ""),
+            LogDisplayField("thread_id", "thread id", ""),
+            LogDisplayField("request_id", "Request ID", ""),
+            LogDisplayField("message", "message", ""),
+        )
+        val entry = profileEntry(
+            ts = "10:00:01",
+            level = LogLevel.I,
+            tag = "",
+            msg = "started",
+            fields = emptyMap(),
+            columns = listOf(
+                LogDisplayField("timestamp", "timestamp", "10:00:01"),
+                LogDisplayField("process_id", "process id", "4100"),
+                LogDisplayField("thread_id", "thread id", "4200"),
+                LogDisplayField("request_id", "Request ID", "req-001"),
+                LogDisplayField("message", "message", "started"),
+            ),
+        )
+        val layout = requireNotNull(computeProfileColumnLayout(header, listOf(entry)))
+        val narrow = profileDisplayTextProjection(profileDisplayColumns(entry)!!, includeProcessThread = false, columnWidths = layout.widths).text
+        val narrowHeader = layout.headerFor(includeProcessThread = false)
+
+        assertEquals("TIMESTAMP  REQUEST ID  MESSAGE", narrowHeader)
+        assertEquals("10:00:01   req-001     started", narrow)
+        assertEquals(narrowHeader.indexOf("REQUEST ID"), narrow.indexOf("req-001"))
+        assertEquals(narrowHeader.indexOf("MESSAGE"), narrow.indexOf("started"))
+        assertEquals(layout.header, layout.headerFor(includeProcessThread = true))
+        assertTrue("PID" in layout.header && "TID" in layout.header)
     }
 
     private fun profileEntry(

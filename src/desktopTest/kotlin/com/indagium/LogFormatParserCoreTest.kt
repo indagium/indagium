@@ -456,7 +456,8 @@ class LogFormatParserCoreTest {
         assertEquals("APP1", entry.profileFields["SERVICE"])
         assertEquals("CTX1", entry.profileFields["CONTAINER"])
         assertEquals("1234", entry.profileFields["uptime"])
-        assertEquals(listOf("host", "service", "container", "message", "uptime"), entry.recordMetadata?.displayColumns?.map { it.id })
+        // The visible attribute goes before the trailing message, so it lines up under its header.
+        assertEquals(listOf("host", "service", "container", "uptime", "message"), entry.recordMetadata?.displayColumns?.map { it.id })
     }
 
     @Test

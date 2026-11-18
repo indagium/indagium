@@ -1033,7 +1033,7 @@ internal fun recordToEntry(
     val profileFields = compactor.compact(fields)
     // Docker's `log` and similar fields end with the line break of the original output; a row does not.
     val messageText = (if (record.parseFields) role(LogFieldRole.MESSAGE) else null)?.withoutTrailingLineBreak()
-    val displayColumns = profile.visibleColumns.map { visibleRole ->
+    val visibleColumnFields = profile.visibleColumns.map { visibleRole ->
         val value = when (visibleRole) {
             LogFieldRole.TIMESTAMP -> timeText.orEmpty()
             LogFieldRole.SEVERITY -> severityText.orEmpty()
@@ -1043,12 +1043,13 @@ internal fun recordToEntry(
             else -> role(visibleRole).orEmpty()
         }
         compactor.column(visibleRole.name.lowercase(), profileDisplayLabel(visibleRole), value)
-    }.toMutableList()
-    profile.attributes.filter { it.visibleByDefault }.forEach { attribute ->
-        fields[attribute.id]?.let { value -> displayColumns += LogDisplayField(attribute.id, attribute.label, value) }
     }
-    // Rows live as long as the tab: drop the growth slack a mutable list carries.
-    val projectedColumns: List<LogDisplayField> = if (displayColumns.isEmpty()) emptyList() else displayColumns.toTypedArray().asList()
+    // A missing value stays as an empty column, so the columns after it keep their place under the header.
+    val attributeColumns = profile.attributes.filter { it.visibleByDefault }.map { attribute ->
+        LogDisplayField(attribute.id, attribute.label, fields[attribute.id].orEmpty())
+    }
+    val displayColumns = withAttributeColumns(profile, visibleColumnFields, attributeColumns)
+    val projectedColumns: List<LogDisplayField> = displayColumns.ifEmpty { emptyList() }
     val (startLine, endLine) = compactor.lineSpan(record.sourceStartLine, record.sourceEndLine)
     val metadata = LogRecordMetadata(
         profileFields = profileFields,

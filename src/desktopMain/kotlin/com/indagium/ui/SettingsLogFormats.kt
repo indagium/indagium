@@ -1211,7 +1211,11 @@ private fun BuiltInProfileSummary(profile: LogFormatProfile) {
             profile.attributes.joinToString(", ") { "${it.label} (${it.id})" }
                 .ifBlank { if (supportsProfileFields(engine)) "None" else NO_EXTRA_SOURCE_FIELDS },
         )
-        val columns = profile.visibleColumns.map(::roleLabel) + profile.attributes.filter { it.visibleByDefault }.map { it.label }
+        val columns = withAttributeColumns(
+            profile,
+            profile.visibleColumns.map(::roleLabel),
+            profile.attributes.filter { it.visibleByDefault }.map { it.label },
+        )
         ProfileSummaryRow("Default columns", columns.joinToString(", ").ifBlank { "None" })
         ProfileSummaryRow(
             "Compatible analyzers",

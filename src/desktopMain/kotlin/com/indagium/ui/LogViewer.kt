@@ -2843,7 +2843,7 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.header,
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
                     profileHeaderFont = mono,
                 )
                 ItemList(
@@ -2935,7 +2935,7 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.header,
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
                     profileHeaderFont = mono,
                 )
                 ItemList(
@@ -3201,7 +3201,7 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.header,
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
                     profileHeaderFont = mono,
                 )
                 ItemList(

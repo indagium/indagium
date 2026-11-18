@@ -11,6 +11,7 @@ import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ParsedTime
 import com.indagium.model.usesCustomLogFormatProjection
+import com.indagium.model.withAttributeColumns
 import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -279,12 +280,13 @@ private fun LogEntry.withLogcatProfile(profile: LogFormatProfile): LogEntry {
         "pid" to pid.takeIf { it != 0 }?.toString().orEmpty(),
         "tid" to tid.takeIf { it != 0 }?.toString().orEmpty(),
     )
-    val columns = profile.visibleColumns.map { role ->
-        val value = values[role.name].orEmpty()
-        LogDisplayField(role.name.lowercase(), role.profileLabel(), value)
-    } + profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        LogDisplayField(attribute.id, attribute.label, values[attribute.source].orEmpty())
-    }
+    val columns = withAttributeColumns(
+        profile,
+        profile.visibleColumns.map { role -> LogDisplayField(role.name.lowercase(), role.profileLabel(), values[role.name].orEmpty()) },
+        profile.attributes.filter { it.visibleByDefault }.map { attribute ->
+            LogDisplayField(attribute.id, attribute.label, values[attribute.source].orEmpty())
+        },
+    )
     val previous = recordMetadata ?: LogRecordMetadata()
     val metadata = previous.copy(
         profileFields = values.filterValues(String::isNotEmpty) + previous.profileFields,
@@ -342,11 +344,13 @@ private fun LogEntry.withDltProfile(profile: LogFormatProfile, sourceClockId: St
         }?.value.orEmpty())
     }
     val mappedValues = values.filterValues(String::isNotEmpty) + extras.filterValues(String::isNotEmpty)
-    val columns = profile.visibleColumns.map { role ->
-        LogDisplayField(role.name.lowercase(), role.profileLabel(), values[role.name].orEmpty())
-    } + profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        LogDisplayField(attribute.id, attribute.label, extras[attribute.id].orEmpty())
-    }
+    val columns = withAttributeColumns(
+        profile,
+        profile.visibleColumns.map { role -> LogDisplayField(role.name.lowercase(), role.profileLabel(), values[role.name].orEmpty()) },
+        profile.attributes.filter { it.visibleByDefault }.map { attribute ->
+            LogDisplayField(attribute.id, attribute.label, extras[attribute.id].orEmpty())
+        },
+    )
     val canonicalTime = canonicalDltParsedTime(this, sourceClockId)
     val parsedTime = canonicalTime?.let { time ->
         if (time.relativeMillis != null && profile.relativeClock.isNotBlank()) {
