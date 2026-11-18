@@ -867,7 +867,7 @@ class RecordFieldsQaScreenshotsUiTest : SharedNoteUiTestBase() {
         rule.onNodeWithTag("log-row-a:main-1").performClick()
         rule.waitForIdle()
 
-        rule.dragSelect(nodeTag("1.details", "metadata", "identity"), KEY_INSET, nodeTag("1.details", "metadata", "status"), KEY_INSET + 24f)
+        rule.selectTextAcross(nodeTag("1.details", "metadata", "identity"), nodeTag("1.details", "metadata", "status"), KEY_INSET + 24f)
         rule.onNodeWithTag(nodeTag("1.details", "metadata", "source")).performMouseInput { rightClick(Offset(width - 8f, center.y)) }
         rule.waitForIdle()
 

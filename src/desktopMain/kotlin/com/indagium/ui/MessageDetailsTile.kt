@@ -14,9 +14,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,24 +86,31 @@ internal fun MessageDetailsTileBody(tab: LogTab) {
     }
     key(entry.id, entry.rawRecord, entry.msg) {
         val scroll = rememberScrollState()
+        // A drag across the field rows scrolls the tile while the pointer is held above or below it.
+        val treeScroller = remember(scroll) { ScrollableRecordTreeScroller(scroll) }
         FlexRegion(scroll, capDp = null, fill = Modifier.fillMaxSize()) {
             Column(
-                Modifier.fillMaxWidth().verticalScroll(scroll).padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
+                Modifier.fillMaxWidth()
+                    .onGloballyPositioned { treeScroller.viewportCoordinates = it }
+                    .verticalScroll(scroll)
+                    .padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)
                     .testTag("message-details-content-${entry.id}"),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // The message is on the selected row and inside the record below, so the header is only when and who.
                 MessageDetailsHeader(entry)
-                StructuredRecordBody(
-                    entryId = entry.id,
-                    source = entry.rawRecord ?: entry.msg,
-                    mono = FontFamily.Monospace,
-                    startIndent = 0.dp,
-                    initiallyExpanded = true,
-                    rootPath = "${entry.id}.details",
-                    bodyTag = "message-details-record-${entry.id}",
-                    recordTabId = tab.id,
-                )
+                CompositionLocalProvider(LocalRecordTreeScroller provides treeScroller) {
+                    StructuredRecordBody(
+                        entryId = entry.id,
+                        source = entry.rawRecord ?: entry.msg,
+                        mono = FontFamily.Monospace,
+                        startIndent = 0.dp,
+                        initiallyExpanded = true,
+                        rootPath = "${entry.id}.details",
+                        bodyTag = "message-details-record-${entry.id}",
+                        recordTabId = tab.id,
+                    )
+                }
             }
             // In a matchParentSize box so the scrollbar's fillMaxHeight does not claim the region's whole height.
             Box(Modifier.matchParentSize()) {

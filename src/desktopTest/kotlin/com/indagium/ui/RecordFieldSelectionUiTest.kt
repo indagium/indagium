@@ -89,6 +89,48 @@ internal fun ComposeContentTestRule.modifiedClick(tag: String, ctrl: Boolean = f
     waitForIdle()
 }
 
+/**
+ * A text selection from inside the row [fromTag] to inside [toTag]: a drag within the first row, then a Shift-click in the second (a drag that
+ * leaves its row picks the rows instead of selecting text).
+ */
+@OptIn(ExperimentalTestApi::class)
+internal fun ComposeContentTestRule.selectTextAcross(fromTag: String, toTag: String, toInset: Float = KEY_INSET + 12f) {
+    dragSelect(fromTag, KEY_INSET, fromTag, KEY_INSET + 30f)
+    modifiedClick(toTag, shift = true, inset = toInset)
+}
+
+/** A point [inset] px into the field row [tag], at its middle. */
+internal fun ComposeContentTestRule.rowPoint(tag: String, inset: Float = KEY_INSET): Offset {
+    val bounds = onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+    return Offset(bounds.left + inset, bounds.center.y)
+}
+
+/** A mouse drag over field rows in steps, with the pointer pressed between [press] and [release] (Ctrl held for the whole drag when [ctrl]). */
+@OptIn(ExperimentalTestApi::class)
+internal class RowDragger(private val rule: ComposeContentTestRule, private val ctrl: Boolean = false) {
+    private val root get() = rule.onAllNodes(isRoot())[0]
+
+    fun press(at: Offset) {
+        if (ctrl) root.performKeyInput { keyDown(Key.CtrlLeft) }
+        root.performMouseInput {
+            moveTo(at)
+            press()
+        }
+        rule.waitForIdle()
+    }
+
+    fun moveTo(at: Offset) {
+        root.performMouseInput { moveTo(at) }
+        rule.waitForIdle()
+    }
+
+    fun release() {
+        root.performMouseInput { release() }
+        if (ctrl) root.performKeyInput { keyUp(Key.CtrlLeft) }
+        rule.waitForIdle()
+    }
+}
+
 /** The pure part: which of a tree's covered rows a selection adds. */
 class RecordFieldNormalizationTest {
     private val order = listOf(
@@ -216,7 +258,7 @@ class RecordFieldTextSelectionUiTest {
         rule.waitForIdle()
     }
 
-    private fun drag(from: String, to: String) = rule.dragSelect(from, KEY_INSET, to, KEY_INSET + 12f)
+    private fun drag(from: String, to: String) = rule.selectTextAcross(from, to)
 
     private fun chooseAndAdd(label: String) {
         rule.onNodeWithText(label).performClick()
@@ -279,7 +321,8 @@ class RecordFieldTextSelectionUiTest {
         show(RECORD_BLOB)
 
         val hexLine = "structured-record-hex-line-1-1-root-blob-0"
-        rule.dragSelect(hexLine, 4f, row("note"), KEY_INSET + 12f)
+        rule.dragSelect(hexLine, 4f, hexLine, 40f)
+        rule.modifiedClick(row("note"), shift = true, inset = KEY_INSET + 12f)
         rightClick(row("note"))
 
         rule.onNodeWithText("Add 2 selected fields to notes").assertExists()
@@ -291,7 +334,7 @@ class RecordFieldTextSelectionUiTest {
     fun theMenuOfAHexDumpInsideTheSelectionOffersTheSelectionToo() {
         show(RECORD_BLOB)
 
-        rule.dragSelect(row("id"), KEY_INSET, "structured-record-hex-line-1-1-root-blob-0", 40f)
+        rule.selectTextAcross(row("id"), "structured-record-hex-line-1-1-root-blob-0", 40f)
         rule.onNodeWithTag("structured-record-hex-line-1-1-root-blob-0").performMouseInput { rightClick(Offset(width - 6f, center.y)) }
         rule.waitForIdle()
 
@@ -525,7 +568,7 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         rule.onNodeWithTag("log-row-a:main-1").performClick()
         rule.waitForIdle()
 
-        rule.dragSelect(details("metadata", "identity"), KEY_INSET, details("metadata", "status"), KEY_INSET + 12f)
+        rule.selectTextAcross(details("metadata", "identity"), details("metadata", "status"))
         rightClickRow(details("metadata", "source"))
 
         rule.onNodeWithText("Add 3 selected fields to notes").assertExists()
@@ -550,9 +593,12 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         rule.onNodeWithTag("structured-record-disclosure-1").performClick()
         rule.waitForIdle()
 
-        rule.dragSelect(under("f1"), KEY_INSET, under("f9"), KEY_INSET + 12f)
+        val drag = RowDragger(rule)
+        drag.press(rule.rowPoint(under("f1")))
+        drag.moveTo(rule.rowPoint(under("f9")))
+        drag.release()
         rightClickRow(under("f5"))
-        rule.onNodeWithText("Add 9 selected fields to notes").performClick()
+        rule.onNodeWithText("Add 9 fields to notes").performClick()
         rule.waitForIdle()
 
         assertNull(state.addAnnRequest)
@@ -564,11 +610,15 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         setupJson()
         openRecordUnderRow()
 
-        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "status"), KEY_INSET + 12f)
+        // A drag across rows picks them (a text selection cannot run across rows under a log row: a press there gives the log view focus).
+        val drag = RowDragger(rule)
+        drag.press(rule.rowPoint(under("metadata", "identity")))
+        drag.moveTo(rule.rowPoint(under("metadata", "status")))
+        drag.release()
         rightClickRow(under("metadata", "source"))
         assertNull(state.ctx, "the log row's own menu does not open under the field menu")
 
-        rule.onNodeWithText("Add 3 selected fields to notes").performClick()
+        rule.onNodeWithText("Add 3 fields to notes").performClick()
         rule.waitForIdle()
         assertEquals(listOf(IDENTITY, SOURCE, STATUS), addedPaths())
     }
@@ -577,7 +627,7 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
     fun theLogRowsMenuOffersTheSelectedFieldsOfItsRecord() {
         setupJson()
         openRecordUnderRow()
-        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "status"), KEY_INSET + 12f)
+        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "identity"), KEY_INSET + 40f)
 
         // The row's own right-click (at its start, above the tree) takes focus, which drops the tree's selection; the menu has it anyway.
         rule.onNodeWithTag("log-row-a:main-1").performMouseInput { rightClick(Offset(120f, 8f)) }
@@ -585,12 +635,12 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         assertNotNull(state.ctx, "the log row's menu opened")
 
         val entry = assertNotNull(state.recordFieldsMenuEntry("a", 1))
-        assertEquals("Add 3 selected fields to notes", entry.label)
+        assertEquals("Add selected field to notes", entry.label)
         entry.onClick()
         rule.waitForIdle()
 
         assertNull(state.ctx)
-        assertEquals(listOf(IDENTITY, SOURCE, STATUS), addedPaths())
+        assertEquals(listOf(IDENTITY), addedPaths())
     }
 
     @Test
@@ -618,7 +668,7 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         rule.waitForIdle()
         assertNull(state.recordFieldsMenuEntry("a", 1))
 
-        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "status"), KEY_INSET + 12f)
+        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "identity"), KEY_INSET + 40f)
         rule.onNodeWithTag("log-row-a:main-1").performMouseInput { rightClick(Offset(120f, 8f)) }
         rule.waitForIdle()
         assertNotNull(state.recordFieldsMenuEntry("a", 1))
@@ -629,7 +679,7 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
     fun aPlainClickForgetsTheSelectionAThePreviousRightPressHeld() {
         setupJson()
         openRecordUnderRow()
-        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "status"), KEY_INSET + 12f)
+        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "identity"), KEY_INSET + 40f)
         rule.onNodeWithTag("log-row-a:main-1").performMouseInput { rightClick(Offset(120f, 8f)) }
         rule.waitForIdle()
         assertNotNull(state.recordFieldsMenuEntry("a", 1))
@@ -853,15 +903,15 @@ class RecordFieldRowSelectionUiTest {
     }
 
     @Test
-    fun aDragStillSelectsTextDropsThePickAndCopyCopiesTheText() {
+    fun aDragWithinOneRowStillSelectsTextDropsThePickAndCopyCopiesTheText() {
         show()
         rule.clickRow(row("metadata", "identity"))
         assertEquals(setOf(IDENTITY), recorder.picked)
 
-        rule.dragSelect(row("metadata", "source"), KEY_INSET, row("metadata", "owner"), KEY_INSET + 12f)
+        rule.dragSelect(row("metadata", "source"), KEY_INSET, row("metadata", "source"), KEY_INSET + 40f)
 
-        assertTrue(recorder.picked.isEmpty(), "a drag is text selection, not a row click")
-        rightClick(row("metadata", "status"))
+        assertTrue(recorder.picked.isEmpty(), "a drag inside a row is text selection, not a row click")
+        rightClick(row("metadata", "source"))
         rule.onNodeWithText("Copy").performClick()
         rule.waitForIdle()
         assertTrue(recorder.copied.single().isNotEmpty(), "the selected text is what Copy copies")
@@ -870,7 +920,7 @@ class RecordFieldRowSelectionUiTest {
     @Test
     fun aClickLeavesNoStrayTextSelectionBehind() {
         show()
-        rule.dragSelect(row("metadata", "identity"), KEY_INSET, row("metadata", "source"), KEY_INSET + 12f)
+        rule.selectTextAcross(row("metadata", "identity"), row("metadata", "source"))
 
         rule.clickRow(row("metadata", "status"))
         rightClick(row("metadata", "status"))
@@ -1009,6 +1059,215 @@ class RecordFieldRowSelectionUiTest {
         rule.onNodeWithText("Add 3 fields to notes").performClick()
         rule.waitForIdle()
         assertEquals(setOf(IDENTITY, SOURCE, listOf("tail")), recorder.added.single().toSet())
+    }
+}
+
+/** Pressing on a field row and dragging across others picks the rows between, live, on the field-actions stand-in. */
+@OptIn(ExperimentalTestApi::class)
+class RecordFieldRowDragUiTest {
+    @get:Rule
+    val rule = createComposeRule()
+
+    private val recorder = FieldActionsRecorder()
+
+    private fun show(record: String = RECORD_SELECT) {
+        rule.setContent {
+            CompositionLocalProvider(
+                LocalTheme provides LIGHT_THEME,
+                LocalRecordFieldActions provides recorder,
+                LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
+                LocalTextContextMenu provides IndagiumTextContextMenu,
+            ) {
+                Box(Modifier.size(620.dp, 360.dp)) {
+                    StructuredRecordBody(1, record, FontFamily.Monospace, startIndent = 4.dp, initiallyExpanded = true, recordTabId = "t")
+                }
+            }
+        }
+        rule.waitForIdle()
+    }
+
+    private fun row(vararg path: String) = nodeTag("1.root", *path)
+
+    private fun at(vararg path: String, inset: Float = KEY_INSET) = rule.rowPoint(row(*path), inset)
+
+    private fun rightClick(tag: String) {
+        rule.onNodeWithTag(tag).performMouseInput { rightClick(Offset(width - 8f, center.y)) }
+        rule.waitForIdle()
+    }
+
+    @Test
+    fun draggingDownFromOneRowPicksTheRowsBetweenLiveAndBackUpPastTheStartFollows() {
+        show()
+        val drag = RowDragger(rule)
+
+        drag.press(at("metadata", "identity"))
+        drag.moveTo(at("metadata", "source"))
+        assertEquals(setOf(IDENTITY, SOURCE), recorder.picked, "live, while the button is down")
+        drag.moveTo(at("metadata", "status"))
+        assertEquals(listOf(IDENTITY, SOURCE, STATUS), recorder.picked.toList())
+        drag.moveTo(at("metadata", "identity"))
+        assertEquals(setOf(IDENTITY), recorder.picked, "back on the pressed row it is just that row")
+        drag.moveTo(at("id"))
+        assertEquals(setOf(listOf("id"), IDENTITY), recorder.picked, "past the start, upwards (the container above is only partly covered)")
+        drag.moveTo(at("metadata", "status"))
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS), recorder.picked)
+        drag.release()
+
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS), recorder.picked)
+        assertEquals(IDENTITY, recorder.anchor, "the pressed row is the anchor")
+    }
+
+    @Test
+    fun shiftDownAfterADragExtendsFromTheAnchorAndTheTreeHasKeyboardFocus() {
+        show()
+        val drag = RowDragger(rule)
+        drag.press(at("metadata", "identity"))
+        drag.moveTo(at("metadata", "status"))
+        drag.release()
+
+        rule.pressKey(Key.DirectionDown, shift = true)
+
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS, OWNER), recorder.picked)
+        rule.pressKey(Key.DirectionUp, shift = true)
+        rule.pressKey(Key.DirectionUp, shift = true)
+        rule.pressKey(Key.DirectionUp, shift = true)
+        assertEquals(setOf(IDENTITY), recorder.picked, "Shift+Up shrinks back to the anchor")
+    }
+
+    @Test
+    fun aShiftClickAfterADragRangesFromThePressedRow() {
+        show()
+        val drag = RowDragger(rule)
+        drag.press(at("metadata", "source"))
+        drag.moveTo(at("metadata", "status"))
+        drag.release()
+
+        rule.modifiedClick(row("metadata", "rank"), shift = true)
+
+        assertEquals(setOf(SOURCE, STATUS, OWNER, RANK), recorder.picked)
+    }
+
+    @Test
+    fun aDragWithinOneRowIsTextSelectionAndPicksNothing() {
+        show()
+        rule.clickRow(row("tail"))
+        assertEquals(setOf(listOf("tail")), recorder.picked)
+
+        val drag = RowDragger(rule)
+        drag.press(at("metadata", "identity"))
+        drag.moveTo(at("metadata", "identity", inset = KEY_INSET + 24f))
+        drag.moveTo(at("metadata", "identity", inset = KEY_INSET + 60f))
+        assertTrue(recorder.picked.isEmpty(), "the earlier pick makes way for the text")
+        drag.release()
+
+        assertTrue(recorder.picked.isEmpty())
+        rightClick(row("metadata", "identity"))
+        rule.onNodeWithText("Copy").performClick()
+        rule.waitForIdle()
+        val copied = recorder.copied.single()
+        assertTrue(copied.isNotEmpty() && copied.length < "identity: abc".length, "just the part that was dragged over: '$copied'")
+    }
+
+    @Test
+    fun enteringAnotherRowDropsTheTextTheDragHadStartedToSelect() {
+        show()
+        val drag = RowDragger(rule)
+        drag.press(at("metadata", "identity"))
+        drag.moveTo(at("metadata", "identity", inset = KEY_INSET + 40f))
+        drag.moveTo(at("metadata", "source"))
+        drag.release()
+
+        assertEquals(setOf(IDENTITY, SOURCE), recorder.picked)
+        rightClick(row("metadata", "owner"))
+        rule.onNodeWithText("Copy").assertDoesNotExist()
+        rule.onNodeWithText("Copy value").assertExists()
+    }
+
+    @Test
+    fun aDragFromAHexDumpLineToTheNextFieldPicksBothFields() {
+        show(RECORD_BLOB)
+        val drag = RowDragger(rule)
+
+        drag.press(rule.rowPoint("structured-record-hex-line-1-1-root-blob-0", inset = 4f))
+        drag.moveTo(rule.rowPoint("structured-record-hex-line-1-1-root-blob-1", inset = 40f))
+        assertTrue(recorder.picked.isEmpty(), "still the dump's own field: text selection")
+        drag.moveTo(at("note"))
+        drag.release()
+
+        assertEquals(setOf(listOf("blob"), listOf("note")), recorder.picked)
+        assertEquals(listOf("blob"), recorder.anchor)
+    }
+
+    @Test
+    fun aDragFromTheNextFieldUpIntoAHexDumpAlsoPicksBoth() {
+        show(RECORD_BLOB)
+        val drag = RowDragger(rule)
+
+        drag.press(at("note"))
+        drag.moveTo(rule.rowPoint("structured-record-hex-line-1-1-root-blob-0", inset = 40f))
+        drag.release()
+
+        assertEquals(setOf(listOf("blob"), listOf("note")), recorder.picked)
+    }
+
+    @Test
+    fun aCtrlDragAddsTheRangeToTheExistingPickAndAPlainOneReplacesIt() {
+        show()
+        rule.modifiedClick(row("tail"), ctrl = true)
+        assertEquals(setOf(listOf("tail")), recorder.picked)
+
+        val ctrlDrag = RowDragger(rule, ctrl = true)
+        ctrlDrag.press(at("metadata", "identity"))
+        ctrlDrag.moveTo(at("metadata", "status"))
+        assertEquals(setOf(listOf("tail"), IDENTITY, SOURCE, STATUS), recorder.picked)
+        ctrlDrag.moveTo(at("metadata", "source"))
+        assertEquals(setOf(listOf("tail"), IDENTITY, SOURCE), recorder.picked, "the range follows the pointer, the old pick stays")
+        ctrlDrag.release()
+        assertEquals(setOf(listOf("tail"), IDENTITY, SOURCE), recorder.picked)
+
+        val plain = RowDragger(rule)
+        plain.press(at("metadata", "owner"))
+        plain.moveTo(at("metadata", "rank"))
+        plain.release()
+        assertEquals(setOf(OWNER, RANK), recorder.picked, "a plain drag starts a new pick")
+    }
+
+    @Test
+    fun aDragThatStartsOnTheChevronIsNoRowDrag() {
+        show()
+        val drag = RowDragger(rule)
+
+        drag.press(at("metadata", "identity", inset = 6f))
+        drag.moveTo(at("metadata", "status"))
+        drag.release()
+
+        assertTrue(recorder.picked.isEmpty(), "picked: ${recorder.picked}")
+    }
+
+    @Test
+    fun rowsHiddenInAClosedContainerAreNotPicked() {
+        show()
+        rule.onNodeWithTag(nodeTag("1.root", "metadata", toggle = true)).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag(row("metadata", "identity")).assertDoesNotExist()
+
+        val drag = RowDragger(rule)
+        drag.press(at("id"))
+        drag.moveTo(at("tail"))
+        drag.release()
+
+        assertEquals(listOf(listOf("id"), METADATA, listOf("tail")), recorder.picked.toList())
+    }
+
+    @Test
+    fun aDragEndingOutsideTheTreePicksUpToItsLastRow() {
+        show()
+        val drag = RowDragger(rule)
+        drag.press(at("metadata", "owner"))
+        drag.moveTo(Offset(100f, 340f))
+        drag.release()
+
+        assertEquals(setOf(OWNER, RANK, listOf("tail")), recorder.picked)
     }
 }
 
@@ -1236,6 +1495,202 @@ class RecordFieldRowSelectionLogViewUiTest : SharedNoteUiTestBase() {
         assertEquals(listOf(OWNER), addedPaths())
     }
 
+    // ── Dragging across field rows ───────────────────────────────────────────────────────────────
+
+    private fun drag(from: String, to: String, ctrl: Boolean = false, release: Boolean = true): RowDragger {
+        val dragger = RowDragger(rule, ctrl)
+        dragger.press(rule.rowPoint(from))
+        dragger.moveTo(rule.rowPoint(to))
+        if (release) dragger.release()
+        return dragger
+    }
+
+    @Test
+    fun aDragAcrossFieldRowsUnderARowPicksThemAndLeavesTheLogRowSelectionAlone() {
+        setupJson()
+        rule.onNodeWithTag("log-row-a:main-2").performClick()
+        rule.waitForIdle()
+        openRecordUnderRow()
+        val selectedBefore = state.tab("a")!!.selected
+
+        drag(under("metadata", "identity"), under("metadata", "status"))
+
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS), picked())
+        assertEquals(selectedBefore, state.tab("a")!!.selected, "the log row selection is untouched")
+        rule.pressKey(Key.DirectionDown, shift = true)
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS, OWNER), picked(), "Shift+Down extends from the pressed row")
+        assertEquals(selectedBefore, state.tab("a")!!.selected)
+    }
+
+    @Test
+    fun aDragFromAFieldPastTheEndOfItsRecordOntoTheNextLogRowSelectsNoLogRows() {
+        setupJson()
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+        openRecordUnderRow()
+        val selectedBefore = state.tab("a")!!.selected
+
+        drag(under("metadata", "rank"), "log-row-a:main-2")
+
+        assertEquals(setOf(RANK, listOf("tail")), picked(), "the range runs to the record's last row")
+        assertEquals(selectedBefore, state.tab("a")!!.selected, "the log list did not read the drag as a row selection")
+    }
+
+    @Test
+    fun aDragWithinOneValueUnderARowIsTextSelectionAndPicksNothing() {
+        setupJson()
+        openRecordUnderRow()
+        clickField(under("tail"))
+        later()
+
+        rule.dragSelect(under("metadata", "identity"), KEY_INSET, under("metadata", "identity"), KEY_INSET + 40f)
+
+        assertNull(picked())
+    }
+
+    @Test
+    fun aCtrlDragUnderARowAddsToThePick() {
+        setupJson()
+        openRecordUnderRow()
+        rule.modifiedClick(under("tail"), ctrl = true)
+
+        drag(under("metadata", "identity"), under("metadata", "source"), ctrl = true)
+
+        assertEquals(setOf(listOf("tail"), IDENTITY, SOURCE), picked())
+    }
+
+    @Test
+    fun aDragAcrossFieldRowsInMessageDetailsPicksThemAndShiftDownExtends() {
+        setupJson()
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+        val selectedBefore = state.tab("a")!!.selected
+
+        val dragger = drag(details("metadata", "identity"), details("metadata", "status"), release = false)
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS), picked(), "live")
+        dragger.moveTo(rule.rowPoint(details("metadata", "source")))
+        assertEquals(setOf(IDENTITY, SOURCE), picked())
+        dragger.moveTo(rule.rowPoint(details("metadata", "status")))
+        dragger.release()
+
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS), picked())
+        rule.pressKey(Key.DirectionDown, shift = true)
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS, OWNER), picked())
+        assertEquals(selectedBefore, state.tab("a")!!.selected)
+    }
+
+    @Test
+    fun aDragFromAHexDumpLineToTheNextFieldInMessageDetailsPicksBoth() {
+        setup(1100, 760) { s ->
+            s.tabs = s.tabs.map { tab ->
+                if (tab.id == "a") mkTab("a", "a.log", listOf(jsonRow(1, RECORD_BLOB), jsonRow(2, RECORD_ONE))).copy(sourcePath = tab.sourcePath) else tab
+            }
+        }
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+
+        val dragger = RowDragger(rule)
+        dragger.press(rule.rowPoint("structured-record-hex-line-1-1-details-blob-0", inset = 4f))
+        dragger.moveTo(rule.rowPoint(details("note")))
+        dragger.release()
+
+        assertEquals(setOf(listOf("blob"), listOf("note")), picked())
+    }
+
+    /** A record of [count] short fields, so tall that only a part of it shows in a tile or in the log list. */
+    private fun tallRecord(count: Int) = (1..count).joinToString(",", "{", "}") { """"f$it":$it""" }
+
+    private fun field(index: Int) = listOf("f$index")
+
+    private fun setupTall(count: Int) = setup(1100, 760) { s ->
+        s.tabs = s.tabs.map { tab ->
+            if (tab.id == "a") mkTab("a", "a.log", listOf(jsonRow(1, tallRecord(count)), jsonRow(2, RECORD_ONE))).copy(sourcePath = tab.sourcePath) else tab
+        }
+    }
+
+    @Test
+    fun draggingBelowTheVisibleAreaOfMessageDetailsScrollsItAndExtendsThePick() {
+        setupTall(120)
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+        // The scrollbar spans the tile's visible part (the content column is as tall as the whole record).
+        val viewport = rule.onNodeWithTag("message-details-scrollbar-1").fetchSemanticsNode().boundsInRoot
+        val content = rule.onNodeWithTag("message-details-content-1").fetchSemanticsNode().boundsInRoot
+        val first = details("f3")
+        // Rows scrolled out of the tile report empty bounds.
+        val lastVisible = (1..120).last { !rule.onNodeWithTag(details("f$it")).fetchSemanticsNode().boundsInRoot.isEmpty }
+        assertTrue(lastVisible in 5..100, "only a part of the record shows: $lastVisible")
+
+        rule.mainClock.autoAdvance = false
+        val dragger = RowDragger(rule)
+        dragger.press(rule.rowPoint(first))
+        dragger.moveTo(Offset(content.left + 60f, minOf(viewport.bottom + 24f, 755f)))
+        val before = picked()!!
+        assertTrue(field(lastVisible) in before, "the visible rows are picked at once")
+        rule.mainClock.advanceTimeBy(1_500)
+        val after = picked()!!
+        dragger.release()
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+
+        assertTrue(field(lastVisible + 6) in after, "rows scrolled in below were picked too: ${after.size} vs ${before.size}")
+        assertTrue(after.size > before.size + 6)
+        assertEquals(field(3), state.recordFieldAnchor!!.paths.single(), "the pressed row stays the anchor")
+    }
+
+    @Test
+    fun draggingAboveTheVisibleAreaOfMessageDetailsScrollsBackUpAndExtendsThePick() {
+        setupTall(120)
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+        val viewport = rule.onNodeWithTag("message-details-scrollbar-1").fetchSemanticsNode().boundsInRoot
+        rule.onAllNodes(isRoot())[0].performMouseInput {
+            moveTo(Offset(viewport.left - 100f, viewport.top + 100f))
+            scroll(600f)
+        }
+        rule.waitForIdle()
+        val visible = (1..120).filter { !rule.onNodeWithTag(details("f$it")).fetchSemanticsNode().boundsInRoot.isEmpty }
+        assertTrue(visible.first() > 10, "scrolled down: ${visible.first()}")
+        val pressed = visible.first() + 4
+
+        rule.mainClock.autoAdvance = false
+        val dragger = RowDragger(rule)
+        dragger.press(rule.rowPoint(details("f$pressed")))
+        dragger.moveTo(Offset(viewport.left - 300f, viewport.top - 6f))
+        val before = picked()!!
+        rule.mainClock.advanceTimeBy(1_500)
+        val after = picked()!!
+        dragger.release()
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+
+        assertTrue(field(pressed) in after)
+        assertTrue(field(visible.first() - 6) in after, "rows scrolled in above were picked: ${before.size} -> ${after.size}")
+    }
+
+    @Test
+    fun draggingBelowTheListUnderARowScrollsTheListAndExtendsThePick() {
+        setupTall(120)
+        rule.onNodeWithTag("structured-record-disclosure-1").performClick()
+        rule.waitForIdle()
+        val rowBounds = rule.onNodeWithTag("log-row-a:main-1").fetchSemanticsNode().boundsInRoot
+        val root = rule.onAllNodes(isRoot())[0].fetchSemanticsNode().boundsInRoot
+        val list = rule.onNodeWithTag(under("f2")).fetchSemanticsNode().boundsInRoot
+
+        rule.mainClock.autoAdvance = false
+        val dragger = RowDragger(rule)
+        dragger.press(rule.rowPoint(under("f2")))
+        dragger.moveTo(Offset(list.left + 60f, root.bottom - 2f))
+        val before = picked()!!
+        rule.mainClock.advanceTimeBy(1_500)
+        val after = picked()!!
+        dragger.release()
+        rule.mainClock.autoAdvance = true
+        rule.waitForIdle()
+
+        assertTrue(after.size > before.size + 6, "the list scrolled and the range grew: ${before.size} -> ${after.size} (row at ${rowBounds.top})")
+    }
+
     @Test
     fun aClickInMessageDetailsAndTheTreeUnderTheRowShareTheOnePick() {
         setupJson()
@@ -1252,7 +1707,7 @@ class RecordFieldRowSelectionLogViewUiTest : SharedNoteUiTestBase() {
     }
 }
 
-/** Writes the selected field rows to build/shared-notes-qa (11-field-rows-selected-light/dark.png) so they can be looked at. */
+/** Writes the selected field rows to build/shared-notes-qa (11-field-rows-selected-light/dark.png, 12-field-rows-drag.png) so they can be looked at. */
 @OptIn(ExperimentalTestApi::class)
 class RecordFieldRowsQaScreenshotsUiTest : SharedNoteUiTestBase() {
     private fun jsonRow(id: Int, json: String) = LogEntry(
@@ -1298,6 +1753,24 @@ class RecordFieldRowsQaScreenshotsUiTest : SharedNoteUiTestBase() {
 
         val roots = rule.onAllNodes(isRoot())
         for (i in 0 until roots.fetchSemanticsNodes().size) saveScreenshot(roots[i], if (i == 0) name else "$name-layer$i")
+    }
+
+    @Test
+    fun aDragOverFourFieldRowsInTheLightTheme() {
+        setupShot(LIGHT_THEME)
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+
+        // The button is still down: the range follows the pointer, as it does on screen while the user drags.
+        val drag = RowDragger(rule)
+        drag.press(rule.rowPoint(nodeTag("1.details", "metadata", "identity")))
+        drag.moveTo(rule.rowPoint(nodeTag("1.details", "metadata", "status")))
+        drag.moveTo(rule.rowPoint(nodeTag("1.details", "metadata", "owner"), inset = KEY_INSET + 50f))
+        assertEquals(setOf(IDENTITY, SOURCE, STATUS, OWNER), state.recordFieldSelection!!.paths)
+
+        val roots = rule.onAllNodes(isRoot())
+        for (i in 0 until roots.fetchSemanticsNodes().size) saveScreenshot(roots[i], if (i == 0) "12-field-rows-drag" else "12-field-rows-drag-layer$i")
+        drag.release()
     }
 
     @Test

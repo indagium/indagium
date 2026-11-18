@@ -8,6 +8,7 @@ package com.indagium.ui
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.ContextMenuState
 import androidx.compose.foundation.LocalContextMenuRepresentation
+import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.text.LocalTextContextMenu
 import androidx.compose.foundation.text.TextContextMenu
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -40,6 +41,8 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.indagium.utils.RECORD_FIELDS_MAX_JSON_CHARS
@@ -106,7 +109,41 @@ internal interface RecordFieldActions {
 
     /** A primary press landed in a tree, so the view's plain-press clearing of the pick must leave it to the tree. */
     fun noteTreePress() = Unit
+
+    /** A press in a tree is dragging across its field rows (picking them): the log list must not read the same drag as a row selection. */
+    fun setRowDragActive(active: Boolean) = Unit
+
+    fun rowDragActive(): Boolean = false
 }
+
+/**
+ * A scrolling viewport that holds record trees (the log list, or Message details), which a row drag scrolls while the pointer is held
+ * above or below it.
+ */
+internal interface RecordTreeScroller {
+    /** The top and bottom of what is visible, in window coordinates; null while it is not placed. */
+    fun viewport(): Pair<Float, Float>?
+
+    /** Scrolls the content by [deltaPx] pixels (positive towards its end). */
+    fun scrollBy(deltaPx: Float)
+}
+
+/** A [RecordTreeScroller] over a [ScrollableState] whose visible part is the layout that [viewport] was last given. */
+internal class ScrollableRecordTreeScroller(private val state: ScrollableState) : RecordTreeScroller {
+    var viewportCoordinates: LayoutCoordinates? = null
+
+    override fun viewport(): Pair<Float, Float>? {
+        val coordinates = viewportCoordinates?.takeIf { it.isAttached } ?: return null
+        val top = coordinates.positionInRoot().y
+        return top to top + coordinates.size.height
+    }
+
+    override fun scrollBy(deltaPx: Float) {
+        state.dispatchRawDelta(deltaPx)
+    }
+}
+
+internal val LocalRecordTreeScroller = staticCompositionLocalOf<RecordTreeScroller?> { null }
 
 internal val LocalRecordFieldActions = staticCompositionLocalOf<RecordFieldActions?> { null }
 
@@ -151,6 +188,8 @@ internal class RecordFieldContext(
     val geometry: RecordTreeGeometry = RecordTreeGeometry(),
     /** Gives keyboard focus to the tree (a click on a row, a closed menu): the arrow keys and Copy then act on its picked rows. */
     val focusTree: () -> Unit = {},
+    /** Drops the text selected in the tree (a row drag takes over from it). */
+    val clearTextSelection: () -> Unit = {},
 ) {
     /**
      * Whether a Shift-press would pick a range of fields: there is an anchor and no text is selected (with text selected it extends
@@ -167,6 +206,7 @@ internal class RecordFieldContext(
      * behind); the second click of a double-click keeps focus where it is, so the word it selects stays selected.
      */
     fun clickSelect(path: List<String>, takeFocus: Boolean) {
+        if (geometry.rowDragged) return
         moveSelectionTo(path)
         if (takeFocus) focusTree()
     }
@@ -200,6 +240,34 @@ internal class RecordFieldContext(
         actions.pickFields(tabId, entryId, picked, additive)
         geometry.cursor = path
         return true
+    }
+
+    /** A press on [start] was dragged into another row: the text selection makes way and the rows between become the pick. */
+    fun beginRowDrag(start: List<String>) {
+        geometry.rowDragged = true
+        geometry.forgetSelection()
+        clearTextSelection()
+        actions.setRowDragActive(true)
+        actions.setRangeAnchor(tabId, entryId, start)
+    }
+
+    /**
+     * The row drag from [start] is at [current]: the pick is the rows between them, normalised like a Shift-click range, together with
+     * [kept] (the pick a Ctrl/Cmd drag adds to). The anchor stays at [start] and the keyboard continues from [current].
+     */
+    fun pickDragRange(start: List<String>, current: List<String>, kept: Set<List<String>>?) {
+        val order = geometry.order()
+        val covered = geometry.between(start, current) ?: setOf(current)
+        val range = normalizeFieldPaths(order, covered).ifEmpty { listOf(current) }
+        val all = if (kept == null) range.toSet() else kept + range
+        actions.pickFields(tabId, entryId, order.filter { it in all } + all.filter { it !in order }, additive = false)
+        geometry.cursor = current
+    }
+
+    /** The mouse was released after a row drag: the tree takes keyboard focus, as after a click. */
+    fun endRowDrag() {
+        actions.setRowDragActive(false)
+        focusTree()
     }
 
     /** A Ctrl/Cmd-click on [path]: adds it to the pick or takes it out, and the keyboard continues from it. */
@@ -293,6 +361,12 @@ private class AppRecordFieldActions(private val state: AppState, private val rec
     override fun noteTreePress() {
         state.recordFieldTrees.pressInTree = true
     }
+
+    override fun setRowDragActive(active: Boolean) {
+        state.recordFieldTrees.rowDragActive = active
+    }
+
+    override fun rowDragActive(): Boolean = state.recordFieldTrees.rowDragActive
 }
 
 /** The actions for a log view; [reclaimFocus] returns keyboard focus to the view after a field menu closes. */

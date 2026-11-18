@@ -45,6 +45,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -247,8 +248,19 @@ internal fun StructuredRecordBody(
     val treeFocus = remember { FocusRequester() }
     var treeHasFocus by remember { mutableStateOf(false) }
     val focusTree = remember(treeFocus) { { runCatching { treeFocus.requestFocus() }; Unit } }
+    // A row drag clears the text selection the press began: leaving the container's focus releases it, and the focus comes straight back.
+    val focusManager = LocalFocusManager.current
+    val clearTextSelection = remember(treeFocus, focusManager) {
+        {
+            focusManager.clearFocus(force = true)
+            runCatching { treeFocus.requestFocus() }
+            Unit
+        }
+    }
+    val scroller = LocalRecordTreeScroller.current
+    val currentScroller by rememberUpdatedState(scroller)
     val fieldContext = if (recordTabId != null && actions != null) {
-        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry, focusTree)
+        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry, focusTree, clearTextSelection)
     } else {
         null
     }
@@ -292,7 +304,7 @@ internal fun StructuredRecordBody(
                             // Reached when a host with no key handling of its own above the tree holds focus here; the log view's
                             // FileView hands keys to the tree before its own row navigation sees them.
                             .onPreviewKeyEvent { event -> currentFieldContext?.let { handleRecordTreeKey(it, event) } == true }
-                            .trackTextSelection(geometry) { currentFieldContext }
+                            .trackTextSelection(geometry, scroller = { currentScroller }) { currentFieldContext }
                     } else {
                         Modifier
                     },
@@ -379,7 +391,9 @@ private fun StructuredContainerRows(
         val currentContext by rememberUpdatedState(fieldContext)
         if (fieldContext != null) {
             // The keyboard opens and closes the row through this (Left/Right).
-            val control = remember(expandedState, expandable) { RowControl(expandable, expandedState) }
+            val control = remember(expandedState, expandable, depth) {
+                RowControl(expandable, expandedState, (depth * INDENT_PER_DEPTH_DP).dp + TREE_TOGGLE_WIDTH)
+            }
             DisposableEffect(fieldContext.geometry, fieldPath, control) {
                 fieldContext.geometry.setControl(fieldPath, control)
                 onDispose { fieldContext.geometry.clearControl(fieldPath, control) }

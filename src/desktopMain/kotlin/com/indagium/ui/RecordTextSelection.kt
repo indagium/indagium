@@ -6,9 +6,11 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -20,7 +22,16 @@ import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.math.abs
+import kotlin.math.sign
 
 // Which fields of a record's tree a text selection (or a Shift-click range) covers. The tree is one SelectionContainer whose rows are
 // plain texts, so Compose can say what text is selected but not where; the tree records where its field rows are and which rows the last
@@ -59,7 +70,15 @@ internal fun normalizeFieldPaths(order: List<List<String>>, covered: Set<List<St
 internal class TextSelectionFields(val covered: Set<List<String>>, val fields: List<List<String>>)
 
 /** What a field row lets the keyboard do to it: whether it opens and closes, and the open state itself (the row's own). */
-internal class RowControl(val expandable: Boolean, val expanded: MutableState<Boolean>)
+internal class RowControl(
+    val expandable: Boolean,
+    val expanded: MutableState<Boolean>,
+    /** How far into the row a press is on the field itself: left of it are the indent and the disclosure chevron, which are no row drag's start. */
+    val clickStart: Dp = 0.dp,
+)
+
+/** The row under a position of the tree: its field, and whether the position is in its expanded value area rather than its own row. */
+internal class RowHit(val path: List<String>, val inArea: Boolean)
 
 /** The row the keyboard just moved to, to scroll into view; [nonce] tells a repeated move to the same row from the last one. */
 internal class RowReveal(val path: List<String>, val nonce: Int)
@@ -72,7 +91,7 @@ internal class RowReveal(val path: List<String>, val nonce: Int)
 internal class RecordTreeGeometry {
     private class Slot(var header: LayoutCoordinates? = null, var area: LayoutCoordinates? = null)
 
-    private class Span(val path: List<String>, val top: Float, val bottom: Float)
+    private class Span(val path: List<String>, val top: Float, val bottom: Float, val areaTop: Float?)
 
     private val slots = LinkedHashMap<List<String>, Slot>()
     private val controls = HashMap<List<String>, RowControl>()
@@ -123,10 +142,12 @@ internal class RecordTreeGeometry {
             val header = slot.header?.takeIf { it.isAttached } ?: return@mapNotNull null
             val top = root.localPositionOf(header, Offset.Zero).y
             var bottom = top + header.size.height
+            var areaTop: Float? = null
             slot.area?.takeIf { it.isAttached }?.let { area ->
-                bottom = maxOf(bottom, root.localPositionOf(area, Offset.Zero).y + area.size.height)
+                areaTop = root.localPositionOf(area, Offset.Zero).y
+                bottom = maxOf(bottom, areaTop!! + area.size.height)
             }
-            Span(path, top, bottom)
+            Span(path, top, bottom, areaTop)
         }.sortedBy { it.top }
     }
 
@@ -136,6 +157,28 @@ internal class RecordTreeGeometry {
     /** The field whose rows are nearest to [y] (a position in the tree), or null for a tree with no rows. */
     fun pathAt(y: Float): List<String>? =
         spans().minByOrNull { if (y < it.top) it.top - y else if (y > it.bottom) y - it.bottom else 0f }?.path
+
+    /** The row (or value area) that contains the position [y] of the tree itself, or null when it is between rows or outside them. */
+    fun hitAt(y: Float): RowHit? =
+        spans().firstOrNull { y >= it.top && y <= it.bottom }?.let { RowHit(it.path, it.areaTop != null && y >= it.areaTop) }
+
+    /** A position [localY] of the tree as a position in the window (null while the tree is not placed). */
+    fun rootY(localY: Float): Float? = container?.takeIf { it.isAttached }?.let { it.positionInRoot().y + localY }
+
+    /** A position [rootY] in the window as a position of the tree (null while the tree is not placed). */
+    fun localY(rootY: Float): Float? = container?.takeIf { it.isAttached }?.let { rootY - it.positionInRoot().y }
+
+    /**
+     * The press now held (or just released) was dragged across rows. The release of such a press lands within touch slop of the press when
+     * the rows are close, and the row it ends on must not take it for a click.
+     */
+    var rowDragged = false
+
+    /** Forgets which rows the last text selection ran between (it was cleared, so it covers nothing). */
+    fun forgetSelection() {
+        selectionStart = null
+        selectionEnd = null
+    }
 
     /** The visible fields from [from] to [to], either way round, or null when one of them is not visible. */
     fun between(from: List<String>, to: List<String>): Set<List<String>>? {
@@ -182,49 +225,185 @@ internal fun Modifier.trackFieldRow(geometry: RecordTreeGeometry?, path: List<St
     return this.onGloballyPositioned { geometry.place(path, area, it) }
 }
 
+/** A primary press on a field row that may become a row drag: where it began and the pick a Ctrl/Cmd press adds the dragged range to. */
+private class RowDrag(val start: List<String>, val additive: Boolean, val baseline: Set<List<String>>) {
+    /** The pointer has entered another row: this is a row drag now, and no text selection. */
+    var active = false
+
+    /** The row the range was last picked up to, so a move inside a row does not pick again. */
+    var last: List<String>? = null
+}
+
 /**
  * Follows the pointer over a tree to know which rows its text selection runs between, and takes the presses that are not text selection.
  * It sees a press before the tree's selection container does, and the container ignores a consumed press, so a Shift-press that picks
  * a range of fields ([RecordFieldContext.shiftClickPicksRange]; with Ctrl/Cmd also, the range is added to the pick) is consumed here and
  * does not extend the text selection. Any other plain press starts a text selection at its row, a drag moves its end, and a Shift-press
  * with text selected extends it from the old start. A Ctrl/Cmd-press is the row's (it toggles its field); right presses are left alone.
+ *
+ * A press on a field row (past its chevron) that is dragged into another row stops being a text selection: the text selection is cleared and
+ * the pick becomes the rows from the pressed one to the one under the pointer, live, as in the log list (Ctrl/Cmd keeps the old pick and adds
+ * the range to it). While the pointer stays inside the pressed row the drag is text selection as before. A pointer above or below the
+ * [scroller]'s viewport scrolls it, a modest speed that grows with the distance, and the range follows what scrolls under the pointer.
  */
-internal fun Modifier.trackTextSelection(geometry: RecordTreeGeometry, context: () -> RecordFieldContext?): Modifier =
+internal fun Modifier.trackTextSelection(
+    geometry: RecordTreeGeometry,
+    scroller: () -> RecordTreeScroller? = { null },
+    context: () -> RecordFieldContext?,
+): Modifier =
     onGloballyPositioned { geometry.attach(it) }.pointerInput(geometry) {
-        awaitPointerEventScope {
-            var dragging = false
-            var pressAt = Offset.Zero
-            var pickDropped = false
-            while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                val change = event.changes.firstOrNull() ?: continue
-                val y = change.position.y
-                when (event.type) {
-                    PointerEventType.Press -> {
-                        dragging = false
-                        if (event.buttons.isPrimaryPressed) {
-                            pressAt = change.position
-                            pickDropped = false
-                            context()?.actions?.noteTreePress()
-                            dragging = onPrimaryPress(geometry, context(), change, event.keyboardModifiers)
-                        }
-                    }
-                    PointerEventType.Move -> if (dragging) {
-                        geometry.extendSelection(y)
-                        // A press that moves is a text drag, not a click on a row: the rows picked so far make way for the text.
-                        if (!pickDropped && (change.position - pressAt).getDistance() > viewConfiguration.touchSlop) {
-                            pickDropped = true
-                            context()?.dropPick()
-                        }
-                    }
-                    PointerEventType.Release -> {
-                        if (dragging) geometry.extendSelection(y)
-                        dragging = false
+        coroutineScope {
+            val tracker = TreePointerTracker(geometry, scroller, context, this)
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull() ?: continue
+                    when (event.type) {
+                        PointerEventType.Press -> tracker.press(event, change, viewConfiguration.touchSlop) { it.toPx() }
+                        // A pointer that leaves the tree while pressed arrives as Exit (and comes back as Enter), not as Move.
+                        PointerEventType.Move, PointerEventType.Exit, PointerEventType.Enter ->
+                            tracker.move(event, change, density)
+                        PointerEventType.Release -> tracker.release(change)
                     }
                 }
             }
         }
     }
+
+/** The pointer state of one tree between its presses and releases (see [trackTextSelection]); everything runs on the UI thread. */
+private class TreePointerTracker(
+    private val geometry: RecordTreeGeometry,
+    private val scroller: () -> RecordTreeScroller?,
+    private val context: () -> RecordFieldContext?,
+    private val scope: CoroutineScope,
+) {
+    private var dragging = false
+    private var pressAt = Offset.Zero
+    private var touchSlop = 0f
+    private var pickDropped = false
+    private var rowDrag: RowDrag? = null
+    private var pointerRootY: Float? = null
+    private var autoScroll: Job? = null
+
+    fun press(event: PointerEvent, change: PointerInputChange, slop: Float, toPx: (Dp) -> Float) {
+        finishRowDrag()
+        geometry.rowDragged = false
+        dragging = false
+        if (!event.buttons.isPrimaryPressed) return
+        touchSlop = slop
+        pressAt = change.position
+        pickDropped = false
+        context()?.actions?.noteTreePress()
+        dragging = onPrimaryPress(geometry, context(), change, event.keyboardModifiers)
+        rowDrag = rowDragStart(geometry, context(), change.position, event.keyboardModifiers, toPx)
+    }
+
+    fun move(event: PointerEvent, change: PointerInputChange, density: Float) {
+        val y = change.position.y
+        val drag = rowDrag
+        if (drag != null && !event.buttons.isPrimaryPressed) {
+            finishRowDrag()
+        } else if (drag != null) {
+            moveRowDrag(drag, change, density)
+        }
+        if (dragging && rowDrag?.active != true && event.type == PointerEventType.Move) {
+            geometry.extendSelection(y)
+            // A press that moves is a text drag, not a click on a row: the rows picked so far make way for the text.
+            if (!pickDropped && (change.position - pressAt).getDistance() > touchSlop) {
+                pickDropped = true
+                context()?.dropPick()
+            }
+        }
+    }
+
+    fun release(change: PointerInputChange) {
+        val y = change.position.y
+        val drag = rowDrag
+        if (drag?.active == true) pickTo(drag, y)
+        if (dragging && drag?.active != true) geometry.extendSelection(y)
+        dragging = false
+        finishRowDrag()
+    }
+
+    private fun moveRowDrag(drag: RowDrag, change: PointerInputChange, density: Float) {
+        val y = change.position.y
+        pointerRootY = geometry.rootY(y)
+        if (!drag.active && geometry.pathAt(y).let { it != null && it != drag.start }) {
+            drag.active = true
+            context()?.beginRowDrag(drag.start)
+        }
+        if (!drag.active) return
+        change.consume()
+        pickTo(drag, y)
+        val rootY = pointerRootY
+        val viewport = scroller()?.viewport()
+        if (rootY != null && viewport != null && (rootY < viewport.first || rootY > viewport.second)) startAutoScroll(drag, density)
+    }
+
+    private fun pickTo(drag: RowDrag, localY: Float) {
+        val current = geometry.pathAt(localY) ?: return
+        if (current == drag.last) return
+        drag.last = current
+        context()?.pickDragRange(drag.start, current, drag.baseline.takeIf { drag.additive })
+    }
+
+    private fun finishRowDrag() {
+        autoScroll?.cancel()
+        autoScroll = null
+        if (rowDrag?.active == true) context()?.endRowDrag()
+        rowDrag = null
+    }
+
+    /** While the pointer is held above or below the viewport, scrolls it a frame at a time and keeps the range up to what is under the pointer. */
+    private fun startAutoScroll(drag: RowDrag, density: Float) {
+        val source = scroller() ?: return
+        if (autoScroll?.isActive == true) return
+        autoScroll = scope.launch {
+            var last = withFrameNanos { it }
+            while (rowDrag === drag) {
+                val now = withFrameNanos { it }
+                val seconds = ((now - last) / NANOS_PER_SECOND).coerceAtMost(MAX_AUTO_SCROLL_STEP_SECONDS)
+                last = now
+                val rootY = pointerRootY ?: return@launch
+                val viewport = source.viewport() ?: return@launch
+                val over = when {
+                    rootY < viewport.first -> rootY - viewport.first
+                    rootY > viewport.second -> rootY - viewport.second
+                    else -> return@launch
+                }
+                val dp = (AUTO_SCROLL_BASE_DP + abs(over) / density * AUTO_SCROLL_DP_PER_DP).coerceAtMost(AUTO_SCROLL_MAX_DP)
+                source.scrollBy(sign(over) * dp * density * seconds)
+                geometry.localY(rootY)?.let { pickTo(drag, it) }
+            }
+        }
+    }
+}
+
+/**
+ * The press that may turn into a row drag: a plain or Ctrl/Cmd primary press (not Shift's, which is a range) on a field's own row past its
+ * chevron, or in its value area. [toPx] converts a dp to pixels. Null for any other press.
+ */
+private fun rowDragStart(
+    geometry: RecordTreeGeometry,
+    context: RecordFieldContext?,
+    position: Offset,
+    keys: PointerKeyboardModifiers,
+    toPx: (Dp) -> Float,
+): RowDrag? {
+    if (context == null || keys.isShiftPressed) return null
+    val hit = geometry.hitAt(position.y) ?: return null
+    if (!hit.inArea && position.x < toPx(geometry.control(hit.path)?.clickStart ?: 0.dp)) return null
+    val additive = keys.isCtrlPressed || keys.isMetaPressed
+    return RowDrag(hit.path, additive, if (additive) context.actions.selectedPaths(context.tabId, context.entryId) else emptySet())
+}
+
+private const val NANOS_PER_SECOND = 1_000_000_000f
+private const val MAX_AUTO_SCROLL_STEP_SECONDS = 0.1f
+
+/** Scrolling a viewport while a row drag is held outside it: this much (dp per second) at its edge, more per dp farther out, up to a cap. */
+private const val AUTO_SCROLL_BASE_DP = 60f
+private const val AUTO_SCROLL_DP_PER_DP = 6f
+private const val AUTO_SCROLL_MAX_DP = 700f
 
 /** One primary press as [trackTextSelection] sees it; true when it starts or extends a text selection (so a drag follows). */
 private fun onPrimaryPress(
@@ -288,6 +467,10 @@ internal class RecordFieldTrees {
 
     /** Whether the primary press being dispatched landed in a tree (so the view's plain-press clearing leaves the pick to the tree). */
     var pressInTree = false
+
+    /** Whether a drag across a tree's field rows is under way (the log list's own drag must leave it alone). */
+    @Volatile
+    var rowDragActive = false
 
     /** Gives [event] to the tree that holds keyboard focus; true when it handled it. */
     fun handleKey(event: KeyEvent): Boolean = handles.any { it.handleKey(event) }

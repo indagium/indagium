@@ -1899,12 +1899,13 @@ internal fun LogViewer(
             val fr = externalFr ?: remember { FocusRequester() }
             var isFocused by remember { mutableStateOf(false) }
             val navScope = rememberCoroutineScope()
+            val recordFieldActions = LocalRecordFieldActions.current
             var anchorId by remember(effectiveTab.id) { mutableStateOf<Int?>(null) }
             var cursorId by remember(effectiveTab.id) { mutableStateOf<Int?>(null) }
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { posY[0] = it.positionInRoot().y }
-                    .pointerInput("drag", effectiveTab.id, visibleIds) {
+                    .pointerInput("drag", effectiveTab.id, visibleIds, recordFieldActions) {
                         awaitPointerEventScope {
                             var startId: Int? = null
                             var lastId: Int? = null
@@ -1938,7 +1939,8 @@ internal fun LogViewer(
                                         if (dragSelecting) ch.consume()
                                         val absY = posY[0] + ch.position.y
                                         val id   = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
-                                        if (id != null && id != lastId) {
+                                        // A drag across a record's field rows picks those rows; it is not a log row selection.
+                                        if (id != null && id != lastId && recordFieldActions?.rowDragActive() != true) {
                                             val rangeIds = visibleRowRangeIds(startId, id, visibleIds)
                                             if (rangeIds.isNotEmpty()) {
                                                 lastId = id
@@ -2135,134 +2137,143 @@ internal fun LogViewer(
                         // content starts exactly TID_MAP_HIT_WIDTH later, the same guarantee the
                         // row-number and Δt gutters already rely on.
                         val tidMapSpineX = ROW_START_PAD
-                        Box(contentModifier.onGloballyPositioned { contentTopY = it.positionInRoot().y }) {
-                            LazyColumn(
-                                state = lazyState,
-                                modifier = Modifier.width(rowContentWidth).fillMaxHeight(),
-                            ) {
-                                itemsIndexed(
-                                    items = listItems,
-                                    key = { _, item -> logItemStableKey(effectiveTab.id, item) }
-                                ) { index, item ->
-                                    // O(log n) per row via the same ascending-id IntArray lookup
-                                    // ItemsSummary.rowIds uses (indexOfId) — matchIds is built in
-                                    // display order by computeSearchMatches, so it's sorted too.
-                                    // Only rows that ARE matches pay for a SearchHighlight/regex
-                                    // pass at all; everything else passes null and skips it.
-                                    val search = effectiveTab.search
-                                    val matchIdx = if (search.active && search.matchIds.isNotEmpty()) {
-                                        search.matchIds.indexOfId(logItemEntryId(item))
-                                    } else {
-                                        -1
-                                    }
-                                    val isSearchMatch = matchIdx >= 0
-                                    val isCurrentSearchMatch = isSearchMatch && matchIdx == search.currentIdx
-                                    // Δt baseline: a selection anchors every row's delta to the
-                                    // SIGNED offset from the selected line (deltaAnchorId picks the
-                                    // lowest selected id — see its own doc comment for why); with no
-                                    // selection this falls back to the plain gap-to-previous-VISIBLE-
-                                    // row behavior. Computed once per row here (not inside LogRow)
-                                    // because it needs listItems[index - 1], which only this lambda
-                                    // (via itemsIndexed) has.
-                                    val deltaAnchorEntryId = if (effectiveTab.showTimeDelta) deltaAnchorId(effectiveTab.selected) else null
-                                    val deltaMs = when {
-                                        !effectiveTab.showTimeDelta -> null
-                                        deltaAnchorEntryId != null ->
-                                            effectiveTab.rmap[deltaAnchorEntryId]?.let { anchor -> deltaMillis(anchor, item.entry) }
-                                        index > 0 -> deltaMillis(listItems[index - 1].entry, item.entry)
-                                        else -> null
-                                    }
-                                    when (item) {
-                                        is LogItem.Row -> LogRow(
-                                            item = item,
-                                            tab = effectiveTab,
-                                            panelKey = panelKey,
-                                            mono = mono,
-                                            tc = tc,
-                                            wrapLimitChars = effectiveWrapLimitChars,
-                                            onSelRow = itemOnSelRow,
-                                            onCtxMenu = itemOnCtxMenu,
-                                            onSelectedTextChange = { selectedTextForCopy = it },
-                                            // AppState owns the link-local gate. Keep the handler
-                                            // installed so an anchor/link choice changed elsewhere
-                                            // is reflected without coupling LogViewer to settings.
-                                            onLogRowDoubleClick = onLogRowDoubleClick,
-                                            onLogRowDoubleClickGestureStarted = onLogRowDoubleClickGestureStarted,
-                                            onLogRowDoubleClickGestureExpired = onLogRowDoubleClickGestureExpired,
-                                            rowBoundsAbs = boundsMap,
-                                            regexContext = highlightRegexContext,
-                                            highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
-                                            errorHighlightStyle = effectiveTab.effectiveErrorHighlightStyle(settings.errorHighlightStyle),
-                                            autoWrap = settings.autoLogRowWrap,
-                                            showRowNumbers = settings.showRowNumbers,
-                                            showTimeDelta = effectiveTab.showTimeDelta,
-                                            deltaMs = deltaMs,
-                                            deltaSelectionAnchored = deltaAnchorEntryId != null,
-                                            timeDeltaChars = timeDeltaChars,
-                                            hasTidMap = effectiveTab.tidMap != null,
-                                            processNameMode = renderedProcessNameMode,
-                                            pidFieldChars = pidFieldChars,
-                                            showPidTid = showPidTid,
-                                            recordExpanded = records.isExpanded(item.entry.id),
-                                            onToggleRecord = toggleRecord,
-                                            searchHighlight = if (isSearchMatch) {
-                                                SearchHighlight(
-                                                    search.query, search.caseSensitive, isCurrentSearchMatch,
-                                                    matchBg = tc.searchMatchBg, currentBg = tc.searchCurrentBg,
+                        // A drag across a record tree's field rows scrolls the list while the pointer is held above or below it.
+                        val recordTreeScroller = remember(lazyState) { ScrollableRecordTreeScroller(lazyState) }
+                        Box(
+                            contentModifier.onGloballyPositioned {
+                                contentTopY = it.positionInRoot().y
+                                recordTreeScroller.viewportCoordinates = it
+                            },
+                        ) {
+                            CompositionLocalProvider(LocalRecordTreeScroller provides recordTreeScroller) {
+                                LazyColumn(
+                                    state = lazyState,
+                                    modifier = Modifier.width(rowContentWidth).fillMaxHeight(),
+                                ) {
+                                    itemsIndexed(
+                                        items = listItems,
+                                        key = { _, item -> logItemStableKey(effectiveTab.id, item) }
+                                    ) { index, item ->
+                                        // O(log n) per row via the same ascending-id IntArray lookup
+                                        // ItemsSummary.rowIds uses (indexOfId) — matchIds is built in
+                                        // display order by computeSearchMatches, so it's sorted too.
+                                        // Only rows that ARE matches pay for a SearchHighlight/regex
+                                        // pass at all; everything else passes null and skips it.
+                                        val search = effectiveTab.search
+                                        val matchIdx = if (search.active && search.matchIds.isNotEmpty()) {
+                                            search.matchIds.indexOfId(logItemEntryId(item))
+                                        } else {
+                                            -1
+                                        }
+                                        val isSearchMatch = matchIdx >= 0
+                                        val isCurrentSearchMatch = isSearchMatch && matchIdx == search.currentIdx
+                                        // Δt baseline: a selection anchors every row's delta to the
+                                        // SIGNED offset from the selected line (deltaAnchorId picks the
+                                        // lowest selected id — see its own doc comment for why); with no
+                                        // selection this falls back to the plain gap-to-previous-VISIBLE-
+                                        // row behavior. Computed once per row here (not inside LogRow)
+                                        // because it needs listItems[index - 1], which only this lambda
+                                        // (via itemsIndexed) has.
+                                        val deltaAnchorEntryId = if (effectiveTab.showTimeDelta) deltaAnchorId(effectiveTab.selected) else null
+                                        val deltaMs = when {
+                                            !effectiveTab.showTimeDelta -> null
+                                            deltaAnchorEntryId != null ->
+                                                effectiveTab.rmap[deltaAnchorEntryId]?.let { anchor -> deltaMillis(anchor, item.entry) }
+                                            index > 0 -> deltaMillis(listItems[index - 1].entry, item.entry)
+                                            else -> null
+                                        }
+                                        when (item) {
+                                            is LogItem.Row -> LogRow(
+                                                item = item,
+                                                tab = effectiveTab,
+                                                panelKey = panelKey,
+                                                mono = mono,
+                                                tc = tc,
+                                                wrapLimitChars = effectiveWrapLimitChars,
+                                                onSelRow = itemOnSelRow,
+                                                onCtxMenu = itemOnCtxMenu,
+                                                onSelectedTextChange = { selectedTextForCopy = it },
+                                                // AppState owns the link-local gate. Keep the handler
+                                                // installed so an anchor/link choice changed elsewhere
+                                                // is reflected without coupling LogViewer to settings.
+                                                onLogRowDoubleClick = onLogRowDoubleClick,
+                                                onLogRowDoubleClickGestureStarted = onLogRowDoubleClickGestureStarted,
+                                                onLogRowDoubleClickGestureExpired = onLogRowDoubleClickGestureExpired,
+                                                rowBoundsAbs = boundsMap,
+                                                regexContext = highlightRegexContext,
+                                                highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
+                                                errorHighlightStyle = effectiveTab.effectiveErrorHighlightStyle(settings.errorHighlightStyle),
+                                                autoWrap = settings.autoLogRowWrap,
+                                                showRowNumbers = settings.showRowNumbers,
+                                                showTimeDelta = effectiveTab.showTimeDelta,
+                                                deltaMs = deltaMs,
+                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                timeDeltaChars = timeDeltaChars,
+                                                hasTidMap = effectiveTab.tidMap != null,
+                                                processNameMode = renderedProcessNameMode,
+                                                pidFieldChars = pidFieldChars,
+                                                showPidTid = showPidTid,
+                                                recordExpanded = records.isExpanded(item.entry.id),
+                                                onToggleRecord = toggleRecord,
+                                                searchHighlight = if (isSearchMatch) {
+                                                    SearchHighlight(
+                                                        search.query, search.caseSensitive, isCurrentSearchMatch,
+                                                        matchBg = tc.searchMatchBg, currentBg = tc.searchCurrentBg,
+                                                    )
+                                                } else {
+                                                    null
+                                                },
+                                            )
+                                            is LogItem.SeqHeader ->
+                                                SeqHeaderRow(
+                                                    item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
+                                                    isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                    showRowNumbers = settings.showRowNumbers,
+                                                    showTimeDelta = effectiveTab.showTimeDelta,
+                                                    deltaMs = deltaMs,
+                                                    deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                    timeDeltaChars = timeDeltaChars,
+                                                    hasTidMap = effectiveTab.tidMap != null,
+                                                    autoWrap = settings.autoLogRowWrap,
+                                                    wrapLimitChars = effectiveWrapLimitChars,
+                                                    pidFieldChars = pidFieldChars,
+                                                    showPidTid = showPidTid,
                                                 )
-                                            } else {
-                                                null
-                                            },
-                                        )
-                                        is LogItem.SeqHeader ->
-                                            SeqHeaderRow(
-                                                item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
-                                                isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
-                                                showRowNumbers = settings.showRowNumbers,
-                                                showTimeDelta = effectiveTab.showTimeDelta,
-                                                deltaMs = deltaMs,
-                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
-                                                timeDeltaChars = timeDeltaChars,
-                                                hasTidMap = effectiveTab.tidMap != null,
-                                                autoWrap = settings.autoLogRowWrap,
-                                                wrapLimitChars = effectiveWrapLimitChars,
-                                                pidFieldChars = pidFieldChars,
-                                                showPidTid = showPidTid,
-                                            )
-                                        is LogItem.ManualHeader ->
-                                            ManualHeaderRow(
-                                                item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
-                                                isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
-                                                showRowNumbers = settings.showRowNumbers,
-                                                showTimeDelta = effectiveTab.showTimeDelta,
-                                                deltaMs = deltaMs,
-                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
-                                                timeDeltaChars = timeDeltaChars,
-                                                hasTidMap = effectiveTab.tidMap != null,
-                                                autoWrap = settings.autoLogRowWrap,
-                                                wrapLimitChars = effectiveWrapLimitChars,
-                                                pidFieldChars = pidFieldChars,
-                                                showPidTid = showPidTid,
-                                            )
-                                        is LogItem.StackTraceHeader ->
-                                            StackTraceHeaderRow(
-                                                item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
-                                                isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
-                                                showRowNumbers = settings.showRowNumbers,
-                                                showTimeDelta = effectiveTab.showTimeDelta,
-                                                deltaMs = deltaMs,
-                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
-                                                timeDeltaChars = timeDeltaChars,
-                                                hasTidMap = effectiveTab.tidMap != null,
-                                                autoWrap = settings.autoLogRowWrap,
-                                                wrapLimitChars = effectiveWrapLimitChars,
-                                                pidFieldChars = pidFieldChars,
-                                                showPidTid = showPidTid,
-                                            )
+                                            is LogItem.ManualHeader ->
+                                                ManualHeaderRow(
+                                                    item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
+                                                    isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                    showRowNumbers = settings.showRowNumbers,
+                                                    showTimeDelta = effectiveTab.showTimeDelta,
+                                                    deltaMs = deltaMs,
+                                                    deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                    timeDeltaChars = timeDeltaChars,
+                                                    hasTidMap = effectiveTab.tidMap != null,
+                                                    autoWrap = settings.autoLogRowWrap,
+                                                    wrapLimitChars = effectiveWrapLimitChars,
+                                                    pidFieldChars = pidFieldChars,
+                                                    showPidTid = showPidTid,
+                                                )
+                                            is LogItem.StackTraceHeader ->
+                                                StackTraceHeaderRow(
+                                                    item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
+                                                    isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                    showRowNumbers = settings.showRowNumbers,
+                                                    showTimeDelta = effectiveTab.showTimeDelta,
+                                                    deltaMs = deltaMs,
+                                                    deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                    timeDeltaChars = timeDeltaChars,
+                                                    hasTidMap = effectiveTab.tidMap != null,
+                                                    autoWrap = settings.autoLogRowWrap,
+                                                    wrapLimitChars = effectiveWrapLimitChars,
+                                                    pidFieldChars = pidFieldChars,
+                                                    showPidTid = showPidTid,
+                                                )
+                                        }
                                     }
-                                }
-                                item(key = "tail-space") {
-                                    Spacer(Modifier.height(tailSpaceHeight))
+                                    item(key = "tail-space") {
+                                        Spacer(Modifier.height(tailSpaceHeight))
+                                    }
                                 }
                             }
                             // Drawn AFTER (on top of) the LazyColumn, as a second child of the same
