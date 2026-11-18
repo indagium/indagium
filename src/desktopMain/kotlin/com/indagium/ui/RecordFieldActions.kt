@@ -37,6 +37,7 @@ import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.isMetaPressed
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import com.indagium.utils.RECORD_FIELDS_MAX_JSON_CHARS
@@ -89,6 +90,17 @@ internal interface RecordFieldActions {
 
     /** Gives keyboard focus back to the log view after a menu closed (a closed popup leaves it nowhere). */
     fun reclaimFocus()
+
+    /** The field a Shift-click range starts from in record [entryId]: the last one plain-clicked or Ctrl/Cmd-clicked, or null. Reads snapshot state. */
+    fun rangeAnchor(tabId: String, entryId: Int): List<String>? = null
+
+    fun setRangeAnchor(tabId: String, entryId: Int, path: List<String>) = Unit
+
+    /** Makes [paths] the pick of the record (or adds them to it when [additive]); the range anchor stays where it is. */
+    fun pickFields(tabId: String, entryId: Int, paths: List<List<String>>, additive: Boolean) = Unit
+
+    /** Lets the log view look at a mounted tree (for the log row's menu); the returned function takes it out again. */
+    fun registerTree(handle: RecordTreeHandle): () -> Unit = {}
 }
 
 internal val LocalRecordFieldActions = staticCompositionLocalOf<RecordFieldActions?> { null }
@@ -131,14 +143,62 @@ internal class RecordFieldContext(
     val selected: Set<List<String>>,
     val source: String,
     val probe: TreeSelectionProbe = TreeSelectionProbe(),
-)
+    val geometry: RecordTreeGeometry = RecordTreeGeometry(),
+) {
+    /**
+     * Whether a Shift-press would pick a range of fields: there is an anchor and no text is selected (with text selected it extends
+     * that selection instead). Read as the press arrives, before the text selection reacts to it.
+     */
+    fun shiftClickPicksRange(): Boolean = actions.rangeAnchor(tabId, entryId) != null && probe.selectedText().isEmpty()
 
-/** Whether [paths] of [selected] picks more than one field, so a menu on one of them offers all of them. */
-internal fun fieldsForMenu(selected: Set<List<String>>, clicked: List<String>): List<List<String>> =
-    if (clicked in selected && selected.size > 1) selected.toList() else listOf(clicked)
+    /** A plain press on [path] is where a later Shift-click range starts. */
+    fun anchorAt(path: List<String>) = actions.setRangeAnchor(tabId, entryId, path)
+
+    /**
+     * Picks the fields from the anchor to [path]: what lies between them, normalised like a text selection (just [path] when the
+     * anchor is not in the tree any more). [additive] (Shift with Ctrl/Cmd) keeps the rest of the pick. False when there is no anchor.
+     */
+    fun pickRangeTo(path: List<String>, additive: Boolean): Boolean {
+        val anchor = actions.rangeAnchor(tabId, entryId) ?: return false
+        val covered = geometry.between(anchor, path) ?: setOf(path)
+        val picked = normalizeFieldPaths(geometry.order(), covered).ifEmpty { listOf(path) }
+        actions.pickFields(tabId, entryId, picked, additive)
+        return true
+    }
+}
+
+/** What a field's menu acts on, and so which items it offers. */
+internal sealed interface FieldMenuTargets {
+    val paths: List<List<String>>
+
+    /** Just the field under the pointer: add it, copy its value, copy its path. */
+    data class One(val path: List<String>) : FieldMenuTargets {
+        override val paths get() = listOf(path)
+    }
+
+    /** The Ctrl/Cmd-click pick the pointer is on. */
+    data class Pick(override val paths: List<List<String>>) : FieldMenuTargets
+
+    /** The fields a text selection covers, which the pointer is inside. */
+    data class Selection(override val paths: List<List<String>>) : FieldMenuTargets
+}
+
+/**
+ * What the menu of [clicked] acts on: the pick when the pointer is on a picked row (more than one is picked), else the fields of the text
+ * selection when the pointer is inside it and it covers something other than just that field, else the field itself.
+ */
+internal fun fieldMenuTargets(selected: Set<List<String>>, clicked: List<String>, selection: TextSelectionFields?): FieldMenuTargets = when {
+    clicked in selected && selected.size > 1 -> FieldMenuTargets.Pick(selected.toList())
+    selection != null && clicked in selection.covered && selection.fields != listOf(clicked) -> FieldMenuTargets.Selection(selection.fields)
+    else -> FieldMenuTargets.One(clicked)
+}
 
 /** The menu's "Add" label: "Add field to notes", or "Add 3 fields to notes". */
 internal fun addFieldsLabel(count: Int): String = if (count == 1) "Add field to notes" else "Add $count fields to notes"
+
+/** The label for fields chosen by a text selection or a pick, as the log row's menu has it: "Add selected field to notes", "Add 3 selected fields to notes". */
+internal fun addSelectedFieldsLabel(count: Int): String =
+    if (count == 1) "Add selected field to notes" else "Add $count selected fields to notes"
 
 internal fun recordFieldTooLargeNotice(chars: Int): DiagramNotice = DiagramNotice(
     "Too much to add",
@@ -157,7 +217,25 @@ private class AppRecordFieldActions(private val state: AppState, private val rec
         val current = selectedPaths(tabId, entryId)
         val next = if (path in current) current.minusElement(path) else current.plusElement(path)
         state.recordFieldSelection = next.takeIf { it.isNotEmpty() }?.let { RecordFieldSelection(tabId, sectionOf(tabId), entryId, it) }
+        setRangeAnchor(tabId, entryId, path)
     }
+
+    override fun rangeAnchor(tabId: String, entryId: Int): List<String>? {
+        val anchor = state.recordFieldAnchor ?: return null
+        val here = anchor.tabId == tabId && anchor.entryId == entryId && anchor.sectionId == sectionOf(tabId)
+        return if (here) anchor.paths.firstOrNull() else null
+    }
+
+    override fun setRangeAnchor(tabId: String, entryId: Int, path: List<String>) {
+        state.recordFieldAnchor = RecordFieldSelection(tabId, sectionOf(tabId), entryId, setOf(path))
+    }
+
+    override fun pickFields(tabId: String, entryId: Int, paths: List<List<String>>, additive: Boolean) {
+        val next = if (additive) selectedPaths(tabId, entryId) + paths else paths.toSet()
+        state.recordFieldSelection = next.takeIf { it.isNotEmpty() }?.let { RecordFieldSelection(tabId, sectionOf(tabId), entryId, it) }
+    }
+
+    override fun registerTree(handle: RecordTreeHandle): () -> Unit = state.recordFieldTrees.register(handle)
 
     override fun addToNotes(tabId: String, entryId: Int, paths: List<List<String>>) {
         state.requestAddRecordFields(tabId, entryId, paths)
@@ -182,6 +260,27 @@ internal fun AppState.clearRecordFieldSelection(): Boolean {
 }
 
 /**
+ * What "Add selected fields to notes" on the log row of record [entryId] in [tabId] adds: the fields picked with Ctrl/Cmd-click, else
+ * the fields the record's tree had text-selected when the menu's right press began. Empty when there are none.
+ */
+internal fun AppState.recordFieldsForRowMenu(tabId: String, entryId: Int): List<List<String>> {
+    val pick = recordFieldSelection
+    if (pick != null && pick.tabId == tabId && pick.entryId == entryId && pick.sectionId == tab(tabId)?.selectedLogSectionId) {
+        return pick.paths.toList()
+    }
+    return recordFieldTrees.selectedAtRightPress(tabId, entryId)
+}
+
+/** The log row menu's "Add N selected fields to notes" for record [entryId] of [tabId], or null when no fields are picked or text-selected. */
+internal fun AppState.recordFieldsMenuEntry(tabId: String, entryId: Int): CtxMenuEntry.Action? {
+    val fields = recordFieldsForRowMenu(tabId, entryId).takeIf { it.isNotEmpty() } ?: return null
+    return CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.PlaylistAdd, addSelectedFieldsLabel(fields.size)) {
+        ctx = null
+        requestAddRecordFields(tabId, entryId, fields)
+    }
+}
+
+/**
  * Freezes [paths] of row [entryId] in [tabId] and opens the add-annotation dialog for them, aimed at the note the tab shows (its own,
  * or a shared one) exactly like a row reference. A selection with too much JSON, or a record that is gone, shows a notice instead.
  */
@@ -190,6 +289,7 @@ internal fun AppState.requestAddRecordFields(tabId: String, entryId: Int, paths:
     when (val result = recordFieldRefs(entry.rawRecord, paths)) {
         is RecordFieldsResult.Ok -> {
             recordFieldSelection = null
+            recordFieldAnchor = null
             requestAddAnn(tabId, listOf(entryId), recordFields = result.fields)
         }
         is RecordFieldsResult.TooLarge -> pendingDiagramNotice = recordFieldTooLargeNotice(result.chars)
@@ -216,26 +316,35 @@ internal fun AppState.openRecordFields(tabId: String, entryId: Int, paths: Set<L
 }
 
 /**
- * Watches a field row's presses without taking part in the ones it does not use: a right press asks for the menu at the pointer, a
- * Ctrl/Cmd-press toggles the field in the pick (both consumed, so the text selection around the tree does not start or open its own
- * menu). Double-click toggling and plain presses are left alone.
+ * Watches a field row's presses without taking part in the ones it does not use: a right press asks for the menu at the pointer (consumed,
+ * so the text selection around the tree does not open its own menu), a Ctrl/Cmd-press toggles the field in the pick, a plain press only
+ * tells [onPlainPress] (the anchor of a later Shift-click range) and goes on to the text selection. A press with Shift is the
+ * tree's ([trackTextSelection] picks the range or extends the selection), so it is left alone here.
  */
-internal fun Modifier.recordFieldGestures(key: Any, onToggle: () -> Unit, onMenu: (Offset) -> Unit): Modifier =
+internal fun Modifier.recordFieldGestures(
+    key: Any,
+    onToggle: () -> Unit,
+    onMenu: (Offset) -> Unit,
+    onPlainPress: () -> Unit = {},
+): Modifier =
     pointerInput(key) {
         awaitPointerEventScope {
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.firstOrNull() ?: continue
                 if (event.type != PointerEventType.Press) continue
+                val keys = event.keyboardModifiers
                 when {
                     event.buttons.isSecondaryPressed -> {
                         change.consume()
                         onMenu(change.position)
                     }
-                    event.buttons.isPrimaryPressed && (event.keyboardModifiers.isCtrlPressed || event.keyboardModifiers.isMetaPressed) -> {
+                    !event.buttons.isPrimaryPressed || keys.isShiftPressed -> Unit
+                    keys.isCtrlPressed || keys.isMetaPressed -> {
                         change.consume()
                         onToggle()
                     }
+                    else -> onPlainPress()
                 }
             }
         }
@@ -245,7 +354,17 @@ internal fun Modifier.recordFieldGestures(key: Any, onToggle: () -> Unit, onMenu
 internal fun Modifier.clearRecordFieldSelectionOnPlainPress(state: AppState): Modifier =
     onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
         val keys = event.keyboardModifiers
+        if (event.buttons.isPrimaryPressed) state.recordFieldTrees.clearCaptured()
         if (event.buttons.isPrimaryPressed && !keys.isCtrlPressed && !keys.isMetaPressed) state.clearRecordFieldSelection()
+    }
+
+/**
+ * A right press anywhere in the view first notes what each record tree's text selection covers, before anything reacts to the press
+ * (a right-click on a log row takes keyboard focus, and the tree then drops its selection), for the log row's menu.
+ */
+internal fun Modifier.captureRecordFieldSelectionOnRightPress(state: AppState): Modifier =
+    onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
+        if (event.buttons.isSecondaryPressed) state.recordFieldTrees.captureAtRightPress()
     }
 
 /** Esc clears the pick when there is one. */
@@ -254,21 +373,25 @@ internal fun AppState.handleRecordFieldEscape(event: KeyEvent): Boolean =
 
 /**
  * What the menu of the field at [path] offers: "Copy" for the text selected in the tree when there is some ([selectedText]), then add
- * the field (or the whole pick) to the notes, copy its value, copy its path.
+ * what the menu acts on ([targets]: the field, the pick or the text selection's fields) to the notes and, for a lone field, copy its
+ * value and its path.
  */
-private fun recordFieldMenuItems(context: RecordFieldContext, path: List<String>, selectedText: String): List<ContextMenuItem> {
-    val targets = fieldsForMenu(context.selected, path)
+private fun recordFieldMenuItems(context: RecordFieldContext, path: List<String>, selectedText: String, targets: FieldMenuTargets): List<ContextMenuItem> {
     val items = mutableListOf<ContextMenuItem>()
     if (selectedText.isNotEmpty()) {
         items += IndagiumContextMenuItem("Copy", true, { context.actions.copyText(selectedText) }, Icons.Outlined.ContentCopy)
     }
+    val label = when (targets) {
+        is FieldMenuTargets.Selection -> addSelectedFieldsLabel(targets.paths.size)
+        else -> addFieldsLabel(targets.paths.size)
+    }
     items += IndagiumContextMenuItem(
-        addFieldsLabel(targets.size),
+        label,
         true,
-        { context.actions.addToNotes(context.tabId, context.entryId, targets) },
+        { context.actions.addToNotes(context.tabId, context.entryId, targets.paths) },
         Icons.AutoMirrored.Outlined.PlaylistAdd,
     )
-    if (targets.size == 1) {
+    if (targets is FieldMenuTargets.One) {
         items += IndagiumContextMenuItem(
             "Copy value",
             true,
@@ -290,8 +413,11 @@ private fun recordFieldMenuItems(context: RecordFieldContext, path: List<String>
 @Composable
 internal fun RecordFieldMenu(context: RecordFieldContext, path: List<String>, at: Offset, onClosed: () -> Unit) {
     val state = remember(at) { ContextMenuState().also { it.status = ContextMenuState.Status.Open(Rect(at, at)) } }
-    // Read once, as the menu opens: the text selected in the tree is what "Copy" copies.
+    // Read once, as the menu opens: the text selected in the tree is what "Copy" copies, and the fields it covers what it can add.
     val selectedText = remember(at) { context.probe.selectedText() }
+    val targets = remember(at) {
+        fieldMenuTargets(context.selected, path, context.geometry.textSelectionFields(selectedText))
+    }
     val closed by rememberUpdatedState(onClosed)
     LaunchedEffect(state.status) {
         if (state.status is ContextMenuState.Status.Closed) {
@@ -300,5 +426,5 @@ internal fun RecordFieldMenu(context: RecordFieldContext, path: List<String>, at
         }
     }
     // The menu opens inside the tree's SelectionContainer; its texts must not register as selectable text there.
-    DisableSelection { LocalContextMenuRepresentation.current.Representation(state) { recordFieldMenuItems(context, path, selectedText) } }
+    DisableSelection { LocalContextMenuRepresentation.current.Representation(state) { recordFieldMenuItems(context, path, selectedText, targets) } }
 }

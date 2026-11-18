@@ -52,12 +52,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-private const val RECORD_ONE = """{"timestamp":"2026-11-16T10:00:00Z",""" +
+internal const val RECORD_ONE = """{"timestamp":"2026-11-16T10:00:00Z",""" +
     """"metadata":{"bluetooth":{"accessory_address":"AA:BB:CC:DD","rssi":-61},"tags":["a","b"]},"id":7}"""
 private const val RECORD_TWO = """{"timestamp":"2026-11-16T10:00:03Z",""" +
     """"metadata":{"bluetooth":{"accessory_address":"11:22:33:44","rssi":-70}},"id":8}"""
 
-private const val RECORD_BLOB = """{"id":7,"blob":"00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 01 02",""" +
+internal const val RECORD_BLOB = """{"id":7,"blob":"00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff 01 02",""" +
     """"note":"first line of text\nsecond line of text\nthird line"}"""
 
 private val ADDRESS = listOf("metadata", "bluetooth", "accessory_address")
@@ -65,7 +65,7 @@ private val RSSI = listOf("metadata", "bluetooth", "rssi")
 
 /** A click on the node with [modifier] held: Ctrl, or Cmd on a Mac. */
 @OptIn(ExperimentalTestApi::class)
-private fun ComposeContentTestRule.ctrlClickNode(tag: String, modifier: Key) {
+internal fun ComposeContentTestRule.ctrlClickNode(tag: String, modifier: Key) {
     onNodeWithTag(tag).performKeyInput { keyDown(modifier) }
     onNodeWithTag(tag).performMouseInput { click(center) }
     onNodeWithTag(tag).performKeyInput { keyUp(modifier) }
@@ -73,7 +73,7 @@ private fun ComposeContentTestRule.ctrlClickNode(tag: String, modifier: Key) {
 }
 
 /** The tag of a field node of a tree rooted at [root] (StructuredLogRecord.kt's pathTag of "root/segment/segment"). */
-private fun nodeTag(root: String, vararg path: String, toggle: Boolean = false): String {
+internal fun nodeTag(root: String, vararg path: String, toggle: Boolean = false): String {
     val tag = (listOf(root) + path).joinToString("/").map { if (it.isLetterOrDigit()) it else '-' }
         .joinToString("").replace(Regex("-+"), "-").trim('-')
     return (if (toggle) "structured-record-node-toggle-" else "structured-record-node-") + tag
@@ -842,6 +842,20 @@ class RecordFieldsQaScreenshotsUiTest : SharedNoteUiTestBase() {
         assertEquals(2, rule.onAllNodesWithText("Copy").fetchSemanticsNodes().size)
         rule.onNodeWithText("Add field to notes").assertExists()
         shot("9-hex-dump-field-menu-with-selection")
+    }
+
+    @Test
+    fun aTextSelectionOverThreeFieldsWithItsAddMenuOpen() {
+        setupShot(records = listOf(RECORD_SELECT, RECORD_TWO))
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+
+        rule.dragSelect(nodeTag("1.details", "metadata", "identity"), KEY_INSET, nodeTag("1.details", "metadata", "status"), KEY_INSET + 24f)
+        rule.onNodeWithTag(nodeTag("1.details", "metadata", "source")).performMouseInput { rightClick(Offset(width - 8f, center.y)) }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("Add 3 selected fields to notes").assertExists()
+        shot("10-selection-add-menu")
     }
 
     @Test

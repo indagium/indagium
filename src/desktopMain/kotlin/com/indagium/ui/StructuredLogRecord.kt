@@ -17,6 +17,7 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -233,10 +234,18 @@ internal fun StructuredRecordBody(
     val valueLayout = remember(alignment, keyColumn, gapPx) { RecordValueLayout(alignment, keyColumn, gapPx) }
     val actions = LocalRecordFieldActions.current
     val probe = remember { TreeSelectionProbe() }
+    val geometry = remember { RecordTreeGeometry() }
     val fieldContext = if (recordTabId != null && actions != null) {
-        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe)
+        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry)
     } else {
         null
+    }
+    val currentFieldContext by rememberUpdatedState(fieldContext)
+    if (fieldContext != null) {
+        DisposableEffect(actions, recordTabId, entryId) {
+            val unregister = actions?.registerTree(RecordTreeHandle(recordTabId.orEmpty(), entryId, geometry, probe))
+            onDispose { unregister?.invoke() }
+        }
     }
     val request = if (recordTabId != null) actions?.openRequest(recordTabId, entryId) else null
     val scrollTo = remember(tree, request?.nonce) { if (request != null && tree != null) firstFieldOf(tree, request.paths) else null }
@@ -252,7 +261,8 @@ internal fun StructuredRecordBody(
         SelectionContainer(
             modifier = modifier.fillMaxWidth()
                 .padding(start = startIndent, end = 12.dp, bottom = 5.dp)
-                .testTag(bodyTag),
+                .testTag(bodyTag)
+                .then(if (fieldContext != null) Modifier.trackTextSelection(geometry) { currentFieldContext } else Modifier),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 if (tree is StructuredJsonValue.ObjectValue || tree is StructuredJsonValue.ArrayValue) {
@@ -344,12 +354,14 @@ private fun StructuredContainerRows(
             modifier = Modifier.fillMaxWidth()
                 .then(if (scrollTarget) Modifier.bringIntoViewRequester(bringIntoView) else Modifier)
                 .then(if (picked) Modifier.background(tc.sl) else Modifier)
+                .trackFieldRow(fieldContext?.geometry, fieldPath)
                 .then(
                     if (fieldContext != null) {
                         Modifier.recordFieldGestures(
                             key = childPath,
                             onToggle = { currentContext?.let { it.actions.toggleSelected(it.tabId, it.entryId, fieldPath) } },
                             onMenu = { menuAt = it },
+                            onPlainPress = { currentContext?.anchorAt(fieldPath) },
                         )
                     } else {
                         Modifier
@@ -474,10 +486,12 @@ private fun FieldValueArea(
     Box(
         Modifier.fillMaxWidth()
             .then(if (picked) Modifier.background(tc().sl) else Modifier)
+            .trackFieldRow(fieldContext.geometry, fieldPath, area = true)
             .recordFieldGestures(
                 key = key,
                 onToggle = { currentContext.let { it.actions.toggleSelected(it.tabId, it.entryId, fieldPath) } },
                 onMenu = { menuAt = it },
+                onPlainPress = { currentContext.anchorAt(fieldPath) },
             ),
     ) {
         content()

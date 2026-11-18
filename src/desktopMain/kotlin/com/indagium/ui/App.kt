@@ -728,6 +728,8 @@ fun App(
                         // enabled/disabled — the block renders the same three buttons and the same
                         // height either way, so (unlike hasProcessBlock/hasProcessSecondRow) no
                         // separate pendingSequenceStart term is needed here.
+                        // Fields picked (or text-selected) in this row's record tree: the menu can add them too.
+                        val fieldsEntry = state.recordFieldsMenuEntry(ctx.tabId, ctx.entryId)
                         val estimatedMenuHeight = (490 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (hasProcessBlock) 73 else 0) +
@@ -735,6 +737,7 @@ fun App(
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
                             (if (entry.hasRecordDetails()) 32 else 0) +
+                            (if (fieldsEntry != null) 32 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 76 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
@@ -766,6 +769,7 @@ fun App(
                                     )
                                 },
                             )
+                            fieldsEntry?.let { add(it) }
                             add(CtxMenuEntry.Divider)
                             add(CtxMenuEntry.Preview)
                             // Block order: selection, hide/show, tags, sequence, collapse.

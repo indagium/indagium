@@ -335,7 +335,7 @@ internal fun FileView(
     CompositionLocalProvider(LocalRecordFieldActions provides recordFieldActions) {
         Column(
             // A plain click anywhere in the view, or Esc, clears the picked fields.
-            Modifier.fillMaxSize().clearRecordFieldSelectionOnPlainPress(state).onPreviewKeyEvent { ev ->
+            Modifier.fillMaxSize().clearRecordFieldSelectionOnPlainPress(state).captureRecordFieldSelectionOnRightPress(state).onPreviewKeyEvent { ev ->
                 if (state.handleRecordFieldEscape(ev)) return@onPreviewKeyEvent true
                 if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
                     val frs = visiblePanelFrs()

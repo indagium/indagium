@@ -10371,6 +10371,12 @@ class AppState(
     /** The fields picked in one record's tree (ui/RecordFieldActions.kt), or null. UI state only: not persisted, one record at a time. */
     internal var recordFieldSelection by mutableStateOf<RecordFieldSelection?>(null)
 
+    /** The field a Shift-click range in a record's tree starts from (one path, ui/RecordFieldActions.kt), or null. UI state only. */
+    internal var recordFieldAnchor by mutableStateOf<RecordFieldSelection?>(null)
+
+    /** The mounted record trees of the log view, and what their text selections held at the last right press (ui/RecordTextSelection.kt). */
+    internal val recordFieldTrees = RecordFieldTrees()
+
     /** The field paths the last "Go to rows" on a fields reference asks the record's tree to open; the tree reads it when it composes. */
     internal var recordFieldOpenRequest by mutableStateOf<RecordFieldOpenRequest?>(null)
 
