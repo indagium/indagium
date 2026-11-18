@@ -281,7 +281,7 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // Loop safety cap for resolveNoteTarget's "_2", "_3", ... disambiguation walk — effectively
 // unreachable in practice (that many genuinely distinct files sharing one display name), just a
 // hard stop against an unbounded loop.
-private const val MAX_NOTE_TARGET_SUFFIX = 1000
+internal const val MAX_NOTE_TARGET_SUFFIX = 1000
 private const val MAX_CUSTOM_LOG_FORMAT_PROFILES = 200
 private const val PROFILE_PREVIEW_SAMPLE_CHARS = 512 * 1024
 private const val PROFILE_PREVIEW_SAMPLE_LINES = 2000
@@ -5953,6 +5953,7 @@ class AppState(
         if (published && tabId != null) {
             runCatching { tailCoordinator.cancelTailingFor(tabId) }
             synchronized(stateLock) {
+                detachSharedNoteMembersLocked(tabs.filter { it.id == tabId })
                 tabs = tabs.filterNot { it.id == tabId }
                 stripTabClosed(TabRef.Log(tabId))
                 if (activeTabId == tabId) activeTabId = tabs.lastOrNull()?.id.orEmpty()
@@ -13036,11 +13037,14 @@ class AppState(
      * before. Sync callers rely on the default, which reads the launcher at the moment of publishing.
      */
     private fun publishOpenedTab(
-        tab: LogTab,
+        opened: LogTab,
         originLauncherId: String? = activeLauncherTabId(),
         originGroupId: String? = null,
     ) {
         synchronized(stateLock) {
+            // The one place every newly opened tab passes through: a file that was a closed member of a shared note
+            // comes back as a member of it (SharedNotes.kt).
+            val tab = attachReopenedTabToSharedNotesLocked(opened)
             val launcherIndex = originLauncherId?.takeIf { it == activeLauncherTabId() }
                 ?.let { id -> tabs.indexOfFirst { it.id == id } } ?: -1
             if (launcherIndex < 0) {
@@ -13218,6 +13222,7 @@ class AppState(
             // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
             // counting only; the GC request itself is issued after the lock is released.
             val closing = tabs.filter { it.id in tabIds }
+            detachSharedNoteMembersLocked(closing) // shared notes keep each closed member's file (SharedNotes.kt)
             trimHeapAfterClose = closing.any(::tabForcesHeapTrim)
             // Taken in the same critical section as cancelTailingFor below, and appendTailedLines
             // also needs stateLock, so no tail batch can extend these lists once we are past here.
@@ -14434,7 +14439,7 @@ class AppState(
         openError = null
     }
 
-    private fun showOpenError(title: String, path: String?, message: String) {
+    internal fun showOpenError(title: String, path: String?, message: String) {
         AppLogger.error("open", "$title: $message (path=$path)")
         openError = OpenFileError(title = title, path = path, message = message)
     }
@@ -16163,7 +16168,7 @@ class AppState(
     internal fun initialSaveDialogDir(): File? =
         initialDirectoryForPicker(settings.lastSaveDialogDir?.let(::File) ?: effectiveAnalysisDir())
 
-    private fun activeNotesDir(): File = effectiveAnalysisDir()
+    internal fun activeNotesDir(): File = effectiveAnalysisDir()
 
     // internal (not private): the caseSearch instance below (com.indagium.cases) and
     // IndagiumToolOperations' identical one reuse this exact directory set for
