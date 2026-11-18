@@ -16,6 +16,7 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -1035,8 +1036,8 @@ internal fun recordToEntry(
     val messageText = (if (record.parseFields) role(LogFieldRole.MESSAGE) else null)?.withoutTrailingLineBreak()
     val visibleColumnFields = profile.visibleColumns.map { visibleRole ->
         val value = when (visibleRole) {
-            LogFieldRole.TIMESTAMP -> timeText.orEmpty()
-            LogFieldRole.SEVERITY -> severityText.orEmpty()
+            LogFieldRole.TIMESTAMP -> parsedTime?.let { epochDisplayTime(it, profile) } ?: timeText.orEmpty()
+            LogFieldRole.SEVERITY -> severityText?.let { numericSeverityName(profile, it) } ?: severityText.orEmpty()
             LogFieldRole.COMPONENT -> role(visibleRole).orEmpty()
             LogFieldRole.MESSAGE -> messageText ?: role(visibleRole)?.withoutTrailingLineBreak() ?: record.raw
             LogFieldRole.PROCESS_ID, LogFieldRole.THREAD_ID -> role(visibleRole).orEmpty()
@@ -1076,6 +1077,41 @@ internal fun recordToEntry(
         dayOfYear = record.dayOfYear,
     )
 }
+
+/**
+ * The timestamp column's text for an epoch value: ISO date and time in the profile's zone, or UTC,
+ * with the offset (Z for UTC) naming the clock. Null for any other kind of time, which shows as written.
+ * The raw number stays in the record.
+ */
+internal fun epochDisplayTime(time: ParsedTime, profile: LogFormatProfile): String? {
+    if (profile.timestampKind != ProfileTimestampKind.EPOCH) return null
+    val millis = time.epochMillis ?: return null
+    val zone = profile.timezone.takeIf(String::isNotBlank)?.let { runCatching { ZoneId.of(it) }.getOrNull() } ?: ZoneOffset.UTC
+    return runCatching { Instant.ofEpochMilli(millis).atZone(zone).format(EPOCH_DISPLAY_FORMAT) }.getOrNull()
+}
+
+/**
+ * The level column's text for a numeric level on a known scale: Pino's 10 … 60 or the syslog and
+ * journald priorities 0 … 7, recognised by the profile's level mapping covering exactly that scale.
+ * The source's own names, not the app's buckets, which join several levels (CRIT and ERROR stay apart).
+ * Null for anything else, which shows as written.
+ */
+internal fun numericSeverityName(profile: LogFormatProfile, raw: String): String? {
+    val keys = profile.severityMapping.keys
+    val names = when (keys) {
+        PINO_LEVEL_NAMES.keys -> PINO_LEVEL_NAMES
+        SYSLOG_PRIORITY_NAMES.keys -> SYSLOG_PRIORITY_NAMES
+        else -> return null
+    }
+    return names[raw.trim()]
+}
+
+private val PINO_LEVEL_NAMES = mapOf("10" to "TRACE", "20" to "DEBUG", "30" to "INFO", "40" to "WARN", "50" to "ERROR", "60" to "FATAL")
+
+// Lazy: SYSLOG_SEVERITY is declared further down this file, so it is not set yet when this line would run.
+private val SYSLOG_PRIORITY_NAMES by lazy { SYSLOG_SEVERITY.indices.associate { it.toString() to SYSLOG_SEVERITY[it] } }
+
+private val EPOCH_DISPLAY_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.ROOT)
 
 private fun String.withoutTrailingLineBreak(): String =
     if (endsWith('\n') || endsWith('\r')) trimEnd('\n', '\r') else this
@@ -1224,8 +1260,10 @@ private fun parseEpochTime(
         require(wholeMillis >= LONG_MIN_DECIMAL && wholeMillis <= LONG_MAX_DECIMAL) { "Epoch timestamp is outside the supported range." }
         wholeMillis.longValueExact()
     }.getOrNull() ?: return ParsedTime(value, clockIdentity = clockIdentity)
+    // An epoch value is UTC by definition: read it there (or in the profile's zone), as an ISO time
+    // ending in Z reads, so the same instant shows the same clock in every tab.
     val localTime = runCatching {
-        Instant.ofEpochMilli(millis).atZone(zone ?: ZoneId.systemDefault()).format(TIME_OUTPUT)
+        Instant.ofEpochMilli(millis).atZone(zone ?: ZoneOffset.UTC).format(TIME_OUTPUT)
     }.getOrNull()
     return ParsedTime(value, millis, localTime, "absolute-epoch")
 }

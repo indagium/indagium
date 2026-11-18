@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.model.ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.LogEntry
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
 import com.indagium.utils.detectAdditionalLogProfile
@@ -19,6 +20,8 @@ import kotlin.test.assertTrue
 
 class AdditionalLogFormatProfilesTest {
     private fun profile(id: String): LogFormatProfile = ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES.single { it.id == id }
+
+    private fun LogEntry.column(id: String): String? = recordMetadata?.displayColumns?.firstOrNull { it.id == id }?.value
 
     private fun parseJson(text: String, profile: LogFormatProfile) =
         parseLogContent(ByteArrayInputStream(text.toByteArray()), profile = profile)
@@ -50,6 +53,10 @@ class AdditionalLogFormatProfilesTest {
         assertEquals(1_700_000_000_123L, entry.parsedTime?.epochMillis)
         assertEquals(row, entry.rawRecord)
         assertEquals(1L, entry.sourceStartLine)
+        // The row shows the instant as an ISO time in UTC and the level by its Pino name; the record keeps both numbers.
+        assertEquals("2023-11-14T22:13:20.123Z", entry.column("timestamp"))
+        assertEquals("ERROR", entry.column("severity"))
+        assertEquals("22:13:20.123", entry.ts)
     }
 
     @Test
@@ -92,6 +99,12 @@ class AdditionalLogFormatProfilesTest {
         val unknown = parseJson("""{"level":15,"time":1700000000000,"pid":5,"msg":"custom"}""", profile("pino-json")).entries.single()
         assertFalse(unknown.severityKnown)
         assertEquals("15", unknown.originalSeverity)
+        assertEquals("15", unknown.column("severity"), "a value off the scale shows as written")
+        val names = listOf("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL")
+        expected.keys.zip(names).forEach { (numeric, name) ->
+            val row = """{"level":$numeric,"time":1700000000000,"pid":5,"msg":"level"}"""
+            assertEquals(name, parseJson(row, profile("pino-json")).entries.single().column("severity"))
+        }
     }
 
     @Test
@@ -125,6 +138,9 @@ class AdditionalLogFormatProfilesTest {
         assertEquals(1_700_000_000_123L, entry.parsedTime?.epochMillis)
         assertEquals("boot-1", entry.profileFields["boot_id"])
         assertEquals("9212345", entry.profileFields["monotonic_timestamp"])
+        // Microseconds read as UTC like Pino's milliseconds; priority 2 is CRIT, not the bucket it shares with 0 and 1.
+        assertEquals("2023-11-14T22:13:20.123Z", entry.column("timestamp"))
+        assertEquals("CRIT", entry.column("severity"))
     }
 
     @Test
