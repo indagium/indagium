@@ -7,7 +7,11 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 
 ![Folding a repeating region into a collapsible sequence](docs/images/gif-05-sequences.gif)
 
-[Full user guide](docs/USER_GUIDE.md)
+[User guide for this branch](docs/USER_GUIDE.md) · [Published releases](https://github.com/indagium/indagium/releases)
+
+The development branch adds [log format profiles](docs/USER_GUIDE.md#log-formats) for structured and text
+logs, including guided CSV/TSV setup, and [shared notes](docs/USER_GUIDE.md#shared-notes) that can cite
+rows and individual fields across tabs.
 
 ## Features
 

@@ -89,7 +89,7 @@ A few worth calling out:
   fence, and hash; ordinary text Notes are rejected with guidance to use `update_note_block`.
 - `list_shared_notes`, `create_shared_note`, and `set_shared_note_members` manage shared notes: Notes
   that several open tabs write into. A shared note's `hostId` is accepted as `tabId` by every Notes
-  tool; `add_log_note` on a `hostId` also takes `sourceTabId` (the open tab whose rows `lineIds`
+  tool; `add_log_note` on a `hostId` also takes `sourceTabId` (the open member tab whose rows `lineIds`
   cite), and `get_annotation_blocks` reports each log block's `sourceTabId`, `sourceFilename`, and
   `sourceSectionId`.
 

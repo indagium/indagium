@@ -4,7 +4,9 @@ Indagium turns a logcat capture into an answer. You open a log — or a whole An
 filter it down, fold away the noise, mark what matters, and export a write-up you can paste straight
 into a ticket.
 
-This guide is task-oriented. If you want the architecture instead, see [SAAD.md](SAAD.md).
+This guide follows the current source. For the published 1.9.2 installer, see the
+[1.9.2 User Guide](https://github.com/indagium/indagium/blob/v1.9.2/docs/USER_GUIDE.md).
+For the architecture, see [SAAD.md](SAAD.md).
 
 ---
 
@@ -209,7 +211,7 @@ Text that matches none of them opens as before, one row per line.
   Tags remain available for filtering and in record details. Other formats keep their column defaults.
   This format imports JSON only. Status codes do not create a Log level filter, and sectioned documents
   cannot be tailed or split.
-- **Message details** is a tile on the right of structured logs. Click a message to inspect its fields, initially expanded,
+- **Message details** is a tile on the right of logs with expandable records. Click a message to inspect its fields, initially expanded,
   and collapse individual objects or arrays as needed. Selecting another message replaces the inspector contents.
   Double-click a message row to expand or collapse its inline details. Both inline messages and folded log groups use
   the same disclosure button. The inspector can be moved, resized, collapsed or hidden like the other log-view tiles.
@@ -224,24 +226,24 @@ Text that matches none of them opens as before, one row per line.
   compact summary; expand it to inspect nested fields, array elements, or the message's original
   lines. A multiline JSON string can be expanded into its decoded lines too. These child rows keep
   the parent log record's identity; they do not become separate search results or note references.
-- **Settings › Log formats** is where you make your own. A built-in format shows its definition as a read-only
-  summary; press **Duplicate to edit** to get an editable copy. For a plain text log, press **New profile**, paste one
-  typical line under **Set up from a sample line**, and say what each column is (level, message, timestamp, tag,
-  process id, thread id, an extra field, or skip). Choose Message for every word of the text; lines with more or fewer
-  words still match. **Use these columns** writes the parsing rule for you, **Preview sample** shows the result, and
-  **Save profile** at the top of the profile keeps it (a badge says **Unsaved changes** until you do, and **Revert**
-  goes back to the saved version; **Duplicate** and **Delete…** are in the profile's **⋯** menu). Level names other than the usual ones (TRACE, DEBUG, INFO, WARN, ERROR, FATAL) go under **Severity
-  mapping**; an unusual date format goes under **Timestamp pattern**. For JSON Lines or CSV, choose that engine and
-  type the key or column name next to each field. The record regex stays editable for unusual layouts. Turn on **Always open these extensions with this format** to tie it to a file
-  extension. Formats can be exported and imported as JSON to share with a team: **Import…**, **Export current…** and
-  **Export bundle…** are in the **⋯** menu next to **New profile**.
+- **Settings › Reading logs › Log formats** is where you make your own. Choose **New profile** or select a built-in
+  format and choose **Duplicate to edit**. For delimited text, choose **Set up CSV / TSV**. Select **Current tab**
+  to read the original file, or **Paste source** to enter its original text. Pick the delimiter and indicate whether
+  the first row contains field names. Choose **Read columns**, assign roles and extra fields, and use **Preview mapping**
+  to check the parsed rows and any records kept as raw text. Use the original file text when copying a sample.
+- For a custom regex-based text log, paste a representative line in the sample-line builder and assign roles to its
+  pieces. **Use these columns** writes an editable record regex. For JSON Lines, enter the source keys alongside
+  their roles. Use **Severity mapping** for custom level names and **Timestamp pattern** for custom time formats.
+- **Save profile** keeps the draft. Leaving Settings or switching away from a draft offers **Save**, **Discard**
+  and **Cancel**. Use **Revert** to restore an edited profile, or **Profile actions › Delete profile…** to remove a
+  saved custom profile. Turn on **Always open these extensions with this format** to associate a file extension.
+  **Import…**, **Export current…** and **Export bundle…** are in the menu next to **New profile**.
 
 **How a format reads in the log view.**
 
 - Each column sits under its header. A field the format adds (an access log's status and bytes, a CSV's
   duration) shows its value alone under its name; when you copy, export or add rows to a note, where there
-  is no header, it keeps its label (`Status=200`). Extra fields go before the message, which is always
-  last; a column no row has a value for is left out.
+  is no header, it keeps its label (`Status=200`). A column no row has a value for is left out.
 - Times written as epoch numbers (Pino, systemd journal) show as ISO date and time with the clock named:
   `Z` for UTC, or the format's own time zone if it sets one, so the same moment reads the same in every
   tab. Seconds since boot (dmesg) carry their unit, `1.500000 s`. The number as written stays in the record.
@@ -249,16 +251,17 @@ Text that matches none of them opens as before, one row per line.
   EMERG … DEBUG, so CRIT and ERROR stay apart.
 - A record of several lines (a stack trace under a log line) shows its first line and how many follow,
   `(+2 lines)`; expand it to read them.
-- Wrapped lines hang under the message column, or just after the first column when the message starts
-  far to the right; in a narrow tile they step in a few characters. They never start under TIMESTAMP.
-  A narrow tile hides PID and TID from the rows and the header alike, and the header wraps rather than
-  losing the names of the right-most columns.
+- When the message is the last column, wrapped lines align under it. In a narrow pane, the header and rows
+  scroll horizontally together, keeping columns such as PID and TID accessible. Original and Filtered panes
+  each keep their own horizontal position.
 - **Message details** for a format read from text (syslog, logfmt, CSV, access logs, CRI) lists the fields
   the parser found, each once and named as in the source line, with the source line under them. Its copy
-  button says what it copies: **Copy JSON**, **Copy line** or **Copy record**. The tile appears only for a
-  log whose records hold something the row does not show; a dmesg or DLT row is its whole record.
-- **DLT** rows put the session ID under **SID**, leave the empty thread field blank and head the tag
-  **ECU/APP/CTX**. Hover a row's time to see the stored date and the ECU uptime the row has no room for.
+  button says what it copies: **Copy JSON**, **Copy line** or **Copy record**. The tile appears when a log has
+  expandable records with information beyond the row. A compact dmesg row can already show the whole record.
+- **DLT** rows show the session ID under **SID** when present and put the context in **ECU/APID/CTID** by default.
+  Right-click the log toolbar and choose **Separate DLT identifiers** to show **ECU**, **APID** and **CTID**
+  in separate columns. The choice is saved for that tab. Hover a row's time or inspect its record for the
+  available storage time and ECU uptime.
 
 In syslog, dmesg and your own text formats, a line that does not fit the format belongs to the record
 above it, so a stack trace printed under a log line is one record with a disclosure arrow, not twenty
@@ -373,6 +376,9 @@ and in a DLT log **Contexts** (ECU/APP/CTX; **Ctx** when narrow). There a dotted
 `checkout.service` is matched exactly, never as a package prefix. Indagium also groups tags by package
 prefix, so you can include or exclude `com.example.network.*` in one action. The panel shows the most
 frequent tags first; the count is configurable in Settings → Search & filters.
+
+The log row menu uses **Tag**, **Component** or **Context** as appropriate. It offers identity-based
+actions for rows with a usable identifier.
 
 In either Tags search dropdown (the sidebar or filter bar), hover a tag or package result and click
 **pid** to choose its processes. A package lists processes that logged any tag under that package
@@ -664,8 +670,8 @@ all of them.
   **Rename…**, **Stop sharing…** (the note goes back to being one tab's private note) or **Delete shared note…**.
   A tab can switch between its private note and the shared notes it belongs to from **Open ▾ › Shared notes**.
 - A log reference from another tab names its file (and section) in a badge. Its **log ↗** chip takes you
-  to those rows in their tab and section; if that file is closed, the note offers **Reopen** first, and if
-  the rows are gone it says so.
+  to those rows in their tab and section. For a closed standalone log file, the note offers **Reopen** and uses
+  the saved format profile. This also works for a cited Compare tab outside the note's membership.
 - In a structured log, right-click a field in the record tree or Message details for **Add field to
   notes**, **Copy value** and **Copy path**. Click, Shift-click, Cmd/Ctrl-click or drag across field lines to
   select several, then **Add selected fields to notes**: the note keeps those fields as a small tree under
@@ -1070,10 +1076,10 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 
 ## 24. Settings
 
-Settings has **18 pages in 7 groups**. The left list shows the groups, the right side shows the selected
-page, and a footer keeps **Keyboard shortcuts**, **Setup assistant…**, the version and author (a link to
-About) and **Done** in view on every page. Each setting is a row: its name and a one-line description on
-the left, its control on the right, in a bordered card with the other settings of the same topic. Every
+Settings has **19 main pages in 7 groups**, plus four Capture & video sub-pages. The left list shows the
+groups and the right side shows the selected page. The footer keeps **Keyboard shortcuts**, **Setup assistant…**,
+the version and author (a link to About) and **Done** in view on every page. Each setting has its name and
+a short description on the left and its control on the right. Related settings share a card. Every
 on/off setting is a switch; settings that depend on another one (for example Pid copy as name, which needs
 PID and TID copying) sit indented under it and dim while it is off.
 
@@ -1085,6 +1091,7 @@ PID and TID copying) sit indented under it and dim while it is off.
 | **Reading logs** | **Log view** | Row numbers, row wrapping, process names in new tabs, the colour of field names and where values start (after the name or in a column) in expanded JSON records and Message details, Crash and Error row highlights, opening files with Original, the minimap, following live logs |
 | | **Search & filters** | Search scope behavior, what `⌘F` opens, whether it also shows Original, split selection/Find linking, most-used tags, filter list height, the regex summary, navigation scroll margin |
 | | **Issue categories** | Custom issue rules (name + regex) |
+| | **Log formats** | Built-in format profiles, custom field mapping, guided CSV/TSV setup, previews, import and export |
 | | **Source code** | Source folders, the editor that opens code, log wrapper rules, auto-discovery, index status and reindex |
 | **Notes** | **Notes & writing** | Block numbering, Markdown vs Jira log blocks, inline Markdown, the diagram note action, English proofreading and the personal vocabulary |
 | | **Copy & export** | Copy default, PID and TID, row number and time delta, copy-masking rules, diagram export format, the annotation file prefix |
@@ -1109,6 +1116,10 @@ Indagium uses the corresponding default while retaining the selected name.
 **Same as tiles** (Appearance › Corners › Toolbar) makes the toolbar's button groups follow the Tiles
 shape; choosing one of the five shapes there gives the toolbar its own. An existing setup whose toolbar
 already differed from its tiles keeps that look.
+
+Under **Appearance › Theme › Special themes**, you can choose **Ready prompt**, **Tulips** or **Coffee bear**
+at any time. **Día de Muertos** and **Thanksgiving** also have automatic dates. Use **My tab style** in a pack's
+tab settings to keep your usual tabs while its other effects are active.
 
 Use the Settings search field to find a setting by name or task; results are grouped by page and show
 "Group › Page", and activating one jumps to its page and control. `⌘F` / `Ctrl+F` focuses the Settings

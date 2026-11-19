@@ -1141,7 +1141,7 @@ strip's edge, its order (Before tabs / After tabs), and "Lock tabs and toolbar" 
 
 ### 6.7 The Settings dialog
 
-Settings is 19 pages in 7 groups (`SettingsGroupKind`: Workspace, Reading logs, Notes, Devices, AI, Testing, System), modelled by the `SettingsPage` enum
+Settings has 19 main pages in 7 groups (`SettingsGroupKind`: Workspace, Reading logs, Notes, Devices, AI, Testing, System), modelled by the `SettingsPage` enum
 (`ui/SettingsPages.kt`; it replaced the old flat `SettingsSection`). A page has a title, icon, group, one-line description and an optional `parent`: the four
 Capture sub-pages (`CaptureTools`, `CaptureLimits`, `CaptureMarkIssue`, `CaptureVideoPlayback`) have no nav item, the nav highlights their parent
 (`navPage`), they show a "‹ Capture & video" back link, and `breadcrumb` reads `Group › Parent › Sub-page`. The pages are, in nav order: General, Appearance,
@@ -1151,8 +1151,9 @@ Voice input | Test runs, Issue tracker | Storage & files, Integrations, About.
 - **Shell.** `SettingsDialog` (`ui/SettingsDialog.kt`, 960 x 812 dp clamped to the window with a 24 dp margin) is a header, a 216 dp nav with the search field, the
   scrolling page on the `bg` ground and a 52 dp footer (Keyboard shortcuts, Setup assistant..., "Version [v] · [author]" that opens About, Done).
   `SettingsPageBody` is the one `when` that maps a page to its body composable. State lives in the dialog: the selected page, the query and the
-  `AiProviderGuard`. Switching page, Done, Esc and "Setup assistant..." go through `requestPageSwitch` / `requestClose`, which ask before dropping unsaved
-  AI-provider edits; the Providers body keeps its own `pendingNavigation` guard. While searching, the pages stay composed but hidden (`composedButHidden`)
+  `SettingsDraftGuard` values for Providers and Log formats. Switching page, Done, Esc and "Setup assistant..." go through
+  `requestPageSwitch` / `requestClose`, which offer Save, Discard, and Cancel for a dirty draft. Each editor also guards navigation between its profiles.
+  While searching, the pages stay composed but hidden (`composedButHidden`)
   so a result's anchor can register; Esc clears the query first. `AppState.requestedSettingsPage` is the deep-link request (`openAiProviderSettings()` opens
   Providers, `openCaptureSettings()` Capture & video); the default page is General.
 - **Page bodies and widgets.** One file per page area (`SettingsGeneralPage.kt`, `SettingsAppearancePage.kt`, `SettingsLogPages.kt`, `SettingsSourcePages.kt`,
@@ -1880,7 +1881,7 @@ stays local to the text editor; Ctrl+Z/Cmd+Z elsewhere restores the active sessi
 | `ControlServerManager.kt` | Control-server lifecycle with a generation-counter race guard |
 | `TailCoordinator.kt` | Per-tab live tailing and debounced re-analysis |
 | `Components.kt` / `Theme.kt` / `Shortcuts.kt` | Shared widgets, 20 theme palettes, the keyboard-shortcut catalogue |
-| `SettingsDialog.kt` / `SettingsPages.kt` | The Settings dialog shell and its model (§6.7): `SettingsDialog` owns the selected page, the search query and the unsaved-AI-provider guard; `SettingsPages.kt` holds the `SettingsPage` / `SettingsGroupKind` enums (18 nav pages in 7 groups plus four Capture sub-pages), the grouped nav list, the footer and the dialog size. `AppState.requestedSettingsPage` is the deep-link request |
+| `SettingsDialog.kt` / `SettingsPages.kt` | The Settings dialog shell and its model (§6.7). `SettingsDialog` owns the current page, search query and draft guards. `SettingsPages.kt` holds the page and group enums, grouped navigation, footer and dialog size. `AppState.requestedSettingsPage` is the deep-link request. |
 | `SettingsWidgets.kt` | The row vocabulary every page is built from: `SettingsSwitch` (the one on/off control), `SettingsRow` (name + one-line description left, control right, registers the search anchor), `SettingsGroup` (bordered card; draws the dividers between its rows), `SettingsStackedRow`, `SettingsOverflowMenu`, `SettingsNoteRow`, `SettingsBadge`, `SettingsPageHeader`, `SettingsDropdown` (the shared field-plus-popup selector), `SettingsDrillRow` |
 | `SettingsGeneralPage.kt` / `SettingsAppearancePage.kt` | Settings › General (profile cards, inactive-tab memory, update check) and Appearance (theme block, text and scale, Corners); `AppearanceBasicsRow` is shared with the setup assistant's Look step. Tabs & toolbar is `TabsAppearanceSettings.kt` + `ChromePlacementSettings.kt` |
 | `SettingsLogPages.kt` / `SettingsSourcePages.kt` / `SettingsNotesPages.kt` | Settings › Log view, Search & filters; Issue categories, Source code; Notes & writing, Copy & export |
@@ -2840,7 +2841,7 @@ it returns `NeedsReopen` (the UI offers Reopen), `RowsNotFound` or `NoSource`.
 (`TAB_TOKEN_SHARED_NOTE_INDEX`) is the `SharedNoteInfo` token (`ui/SharedNoteCodec.kt`). The `LogRef` token appends, last and
 only when set, field 8 `sourceSectionId`, field 9 the record fields and field 10 the record fingerprint, so older tokens decode
 unchanged. Each host is auto-exported like any note to its own `<name>_analysis.md` / `.ann` pair, whose name is chosen free of
-existing note files when the note is created.
+existing note files and private or shared reservations when the note is created.
 
 **MCP.** `list_shared_notes`, `create_shared_note` and `set_shared_note_members` (§ debug files table); every Notes tool accepts a
 host id as `tabId`, and `add_log_note` on a host takes `sourceTabId`, which must be a member.
@@ -6050,7 +6051,7 @@ with workspace profiles, which hold appearance and layout.
 |---|---|---|
 | `LogFormatEngine` | `model/LogFormatProfile.kt` | The parsing mechanics: `LOGCAT`, `DLT`, `PLAIN_TEXT`, `REGEX`, `JSON_LINES`, `CSV`, `SYSLOG_RFC5424`, `SYSLOG_RFC3164`, `LOGFMT`, `CRI`, `METADATA_JSON`. Names are serialized; never rename one. |
 | `LogFormatProfile` | same | Identity (`id`, `name`, `revision`, `schemaVersion`), engine, `LogFormatDetection`, field mappings by `LogFieldRole`, extra `LogFormatAttribute`s, time and severity rules, visible columns, compatible analyzers, profile-only issue rules. |
-| Built-ins | `BUILTIN_LOG_FORMAT_PROFILES` + `model/AdditionalBuiltinLogFormats.kt` | Read-only: Android Logcat, Automotive DLT, Plain text, JSON Lines, Syslog 5424/3164, Pino, Docker json-file, systemd journal JSON, dmesg, HTTP Common/Combined, logfmt, Kubernetes CRI. A user duplicates one to change it. |
+| Built-ins | `BUILTIN_LOG_FORMAT_PROFILES` + `model/AdditionalBuiltinLogFormats.kt` | Read-only: Android Logcat, Automotive DLT, JSON with metadata, Plain text, JSON Lines, Syslog 5424/3164, Pino, Docker json-file, systemd journal JSON, dmesg, HTTP Common/Combined, logfmt, Kubernetes CRI. A user duplicates one to change it. |
 | Custom | `AppSettings.customLogFormatProfiles` (JSON settings only) | At most 200. Edited in Settings › Log formats (`ui/SettingsLogFormats.kt`). |
 | Codec | `utils/LogFormatProfileCodec.kt` | Strict JSON read/write and `validateLogFormatProfile`. Every decode or validation failure is an `IllegalArgumentException`. |
 | Parsers | `utils/LogFormatProfiles.kt`, `utils/AdditionalLogFormatEngines.kt` | The generic engines. Logcat and DLT keep their own optimized parsers (`LogParser`, `DltParser`) and are only wrapped. |
@@ -6058,6 +6059,8 @@ with workspace profiles, which hold appearance and layout.
 The editor's "Set up from a sample line" panel (`ui/LogFormatColumnBuilderPanel.kt`, logic in `utils/LogFormatColumnBuilder.kt`)
 cuts one pasted line into pieces, guesses what each is, and writes the `REGEX` engine's pattern, capture numbers and
 timestamp kind from the user's choice per column, so a text format needs no hand-written regex.
+The CSV/TSV guide (`ui/CsvProfileGuide.kt`) uses the CSV parser to read source columns, derives suggested mappings
+from headers, and previews the current mapping. It can read the original file behind the current tab or pasted source text.
 
 The `METADATA_JSON` engine (`utils/MetadataJson.kt`, profile `metadata-json`, displayed as **JSON with metadata**)
 reads record arrays and nested groups of section arrays. It imports exported JSON fields directly, with no
@@ -6114,8 +6117,10 @@ A profile holds no code. An imported profile can name engines and analyzers; thi
 The inspector follows selection (with a transient `inspectedRecordId` for a repeated click), reuses the bounded record tree
 with expanded children and separate semantic paths, and has its own scroll state per message. Inline disclosure and log
 fold headers share `CollapseChevron`. Double-click consumes a click pair once, toggles structured inline details, and keeps
-the existing video-seek callback. Format details is opened from the tab context menu via `logFormatDetailsTabId`; no
-format/status banner is mounted above the log tiles. Drag/drop uses the standard text and archive openability checks.
+the existing video-seek callback. Format details opens from the tab context menu via `logFormatDetailsTabId`.
+`LogFormatChooserStrip` offers format choices above the log tiles when detection is ambiguous.
+Profile headers and their rows share the pane's horizontal offset. The log pane preserves that offset when visible
+content wider than the viewport takes focus. Drag and drop uses the standard text and archive openability checks.
 
 ### 28.2 Choosing a profile
 
