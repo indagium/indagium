@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import com.indagium.model.ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.LogFormat
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
@@ -73,10 +74,21 @@ fun combinedTagCandidates(
 
 /**
  * Whether [this] tab's tags are Logcat tags, whose dotted names are Android packages a prefix can
- * group. A profile's components (a systemd unit like checkout.service, a logger name) are names to
- * match exactly: a dotted one is not a package.
+ * group. A profile's components (a systemd unit like checkout.service, a logger name) and DLT's
+ * ECU/APP/CTX contexts are names to match exactly: a dotted one is not a package.
  */
-internal fun LogTab.componentsArePackages(): Boolean = logData.firstOrNull()?.recordMetadata?.usesProfilePresentation != true
+internal fun LogTab.componentsArePackages(): Boolean = !hasProfileRecords() && logFormat != LogFormat.DLT
+
+private fun LogTab.hasProfileRecords(): Boolean = logData.firstOrNull()?.recordMetadata?.usesProfilePresentation == true
+
+/** A DLT tab drawn natively: its tags are ECU/APID/CTID contexts. */
+private fun LogTab.isNativeDlt(): Boolean = logFormat == LogFormat.DLT && !hasProfileRecords()
+
+/** The tag filter's name for [this] tab: Tags in Logcat, Contexts in DLT (ECU/APP/CTX), Components in a profile tab. */
+internal fun LogTab.componentFilterLabel(): String = if (isNativeDlt()) "Contexts" else componentFilterLabel(componentsArePackages())
+
+/** The tag field's hint for [this] tab. */
+internal fun LogTab.tagInputPlaceholder(): String = if (isNativeDlt()) "ECU/APP/CTX…" else tagInputPlaceholder(componentsArePackages())
 
 /** The tag filter's name: Logcat calls its components tags; a profile tab's are components (a logger, a unit, an app). */
 internal fun componentFilterLabel(packages: Boolean): String = if (packages) "Tags" else "Components"
@@ -104,7 +116,7 @@ private val PINO_LEVEL_KEYS = setOf("10", "20", "30", "40", "50", "60")
  * journald (C for CRIT, ALERT and EMERG). Each tooltip names the levels the pill covers.
  */
 internal fun LogTab.levelPills(): List<LevelPill> {
-    if (componentsArePackages()) return LogLevel.entries.map { LevelPill(it.key.toString(), it.label) }
+    if (!hasProfileRecords()) return LogLevel.entries.map { LevelPill(it.key.toString(), it.label) }
     val profile = logFormatProfileSnapshot?.let(::logFormatProfileFromJson)
         ?: (BUILTIN_LOG_FORMAT_PROFILES + ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES).firstOrNull { it.id == logFormatProfileId }
     val keys = profile?.severityMapping?.keys.orEmpty()

@@ -7,6 +7,7 @@ import com.indagium.model.LogCapability
 import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.combinedTagCandidates
@@ -45,6 +46,21 @@ class ComponentTagInputTest {
         assertFalse(journal.componentsArePackages())
         assertEquals("pkg prefix or tag…", tagInputPlaceholder(packages = true))
         assertEquals("component…", tagInputPlaceholder(packages = false))
+    }
+
+    @Test
+    fun aDltTabFiltersItsContextsInItsOwnWords() {
+        val dlt = mkTab(
+            "dlt", "a.dlt",
+            listOf(LogEntry(1, "12:00:00.000", LogLevel.I, "ECU1/APP1/CTX1", "hi", dltEcuId = "ECU1")),
+            logFormat = LogFormat.DLT,
+        )
+        assertFalse(dlt.componentsArePackages())
+        assertEquals("Contexts", dlt.componentFilterLabel())
+        assertEquals("ECU/APP/CTX…", dlt.tagInputPlaceholder())
+        assertEquals(listOf("V", "D", "I", "W", "E", "A"), dlt.levelPills().map { it.letter })
+        assertEquals("Tags", logcat.componentFilterLabel())
+        assertEquals("Components", journal.componentFilterLabel())
     }
 
     @Test

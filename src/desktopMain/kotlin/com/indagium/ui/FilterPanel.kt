@@ -1325,7 +1325,7 @@ internal fun FilterPanel(
             val pkgColor = PKG_CYAN
             val exNeg = DANGER_RED
             val totalActive = filter.pkgPrefixes.size + filter.excludePkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
-            val componentLabel = componentFilterLabel(componentsArePackages)
+            val componentLabel = remember(tab.id, tab.logData) { tab.componentFilterLabel() }
             sectionHost.Section(
                 LogViewSectionId.TAGS,
                 SectionChrome(
@@ -1437,7 +1437,7 @@ internal fun FilterPanel(
                         InlineField(
                             tagInput,
                             { tagInput = it; tagSelectedIdx = -1 },
-                            tagInputPlaceholder(componentsArePackages),
+                            remember(tab.id, tab.logData) { tab.tagInputPlaceholder() },
                             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
                                 .testTag("filter-panel-tags-input")
                                 .focusRequester(tagFr)
