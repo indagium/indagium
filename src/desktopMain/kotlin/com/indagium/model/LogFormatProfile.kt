@@ -1,5 +1,7 @@
 package com.indagium.model
 
+import com.indagium.utils.computeProcessNames
+
 /** Parser selected for a log-format profile. IDs are serialized and must remain stable. */
 enum class LogFormatEngine {
     LOGCAT,
@@ -192,16 +194,43 @@ fun deriveLogCapabilities(
     // Every text engine tails: the ones that span lines keep their state in IncrementalProfileParser.
     incremental: Boolean = profile.engine !in setOf(LogFormatEngine.DLT, LogFormatEngine.METADATA_JSON),
     sourceLookupSupported: Boolean = false,
-): Map<LogCapability, LogCapabilityStatus> {
-    val withTime = countTimedEntries(profile, entries, sourceClockId)
-    val withSeverity = entries.count { it.severityKnown }
-    val withComponent = entries.count { it.tag.isNotBlank() && it.tag != "RAW" }
-    val withPid = entries.count { it.hasProcessOrThreadIdentity() }
-    val withProcessAndThread = entries.count { it.pid > 0 && it.tid > 0 }
-    val processNamePids = com.indagium.utils.computeProcessNames(entries).keys
-    val withResolvedProcessName = entries.count { entry -> entry.pid > 0 && entry.pid in processNamePids }
+): Map<LogCapability, LogCapabilityStatus> =
+    deriveLogProfileSummary(profile, entries, sourceClockId, incremental, sourceLookupSupported).capabilities
+
+internal data class LogProfileSummary(
+    val capabilities: Map<LogCapability, LogCapabilityStatus>,
+    val fieldNames: Set<String>,
+    val clockSignature: String?,
+)
+
+internal fun deriveLogProfileSummary(
+    profile: LogFormatProfile,
+    entries: List<LogEntry>,
+    sourceClockId: String? = null,
+    incremental: Boolean = profile.engine != LogFormatEngine.DLT && profile.engine != LogFormatEngine.METADATA_JSON,
+    sourceLookupSupported: Boolean = false,
+    processNames: Map<Int, String> = computeProcessNames(entries),
+): LogProfileSummary {
+    val clocks = LogClockCoverage(profile, sourceClockId)
+    val fieldNames = linkedSetOf<String>()
+    val hasProcessNames = processNames.isNotEmpty()
+    var withSeverity = 0
+    var withComponent = 0
+    var withPid = 0
+    var withProcessAndThread = 0
+    var withResolvedProcessName = 0
+    for (entry in entries) {
+        clocks.add(entry)
+        if (entry.severityKnown) withSeverity++
+        if (entry.tag.isNotBlank() && entry.tag != "RAW") withComponent++
+        if (entry.hasProcessOrThreadIdentity()) withPid++
+        if (entry.pid > 0 && entry.tid > 0) withProcessAndThread++
+        if (hasProcessNames && entry.pid > 0 && entry.pid in processNames) withResolvedProcessName++
+        entry.recordMetadata?.let { fieldNames.addAll(it.profileFields.keys) }
+    }
+    val withTime = clocks.timedRows
     val total = entries.size
-    val clockCompatibility = clockCompatibility(profile, entries, withTime, sourceClockId)
+    val clockCompatibility = clocks.compatibility()
     val timeCoverage = coverage(withTime, total, "timestamp")
     val comparableTime = if (clockCompatibility.comparable) timeCoverage else unavailable(clockCompatibility.reason)
     val deltaTime = if (withTime < 2) unavailable("At least two comparable timestamps are needed for deltas.") else comparableTime
@@ -234,7 +263,7 @@ fun deriveLogCapabilities(
             ?: available("The splitter preserves this engine's complete record boundaries.")),
         LogCapability.EXPORT to LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "Parsed record text can be exported."),
     )
-    return result
+    return LogProfileSummary(result, fieldNames, clockCompatibility.signature)
 }
 
 internal fun LogFormatProfile.recordSplitUnavailableReason(): String? = when (engine) {
@@ -257,40 +286,50 @@ private fun incrementalTailStatus(profile: LogFormatProfile, incremental: Boolea
     else -> unavailable("This engine needs the complete input before parsing.")
 }
 
-private fun countTimedEntries(profile: LogFormatProfile, entries: List<LogEntry>, sourceClockId: String?): Int =
-    entries.count { entry ->
-        when (profile.engine) {
-            LogFormatEngine.LOGCAT -> entry.ts.isNotBlank() && entry.tag != "RAW"
-            LogFormatEngine.DLT -> entry.profileTime(profile, sourceClockId).hasUsableTime()
-            else -> entry.parsedTime.hasUsableTime()
-        }
-    }
-
 private data class ClockCompatibility(val comparable: Boolean, val signature: String?, val reason: String)
 
-private fun clockCompatibility(
-    profile: LogFormatProfile,
-    entries: List<LogEntry>,
-    withTime: Int,
-    sourceClockId: String? = null,
-): ClockCompatibility {
-    if (profile.engine == LogFormatEngine.LOGCAT && withTime > 0) return ClockCompatibility(true, "legacy-logcat", "")
-    val parsed = entries.mapNotNull { it.profileTime(profile, sourceClockId)?.takeIf(ParsedTime::hasUsableTime) }
-    if (parsed.isEmpty()) return ClockCompatibility(false, null, "No parseable timestamp values were found.")
-    val domains = parsed.mapNotNull(ParsedTime::domain).distinct()
-    if (domains.size != 1) return ClockCompatibility(false, null, "Records mix absolute, local, or relative timestamp kinds.")
-    val domain = domains.single()
-    val identities = parsed.map { it.clockIdentity }.distinct()
-    if (domain != "absolute" && (identities.size != 1 || identities.single().isNullOrBlank())) {
-        return ClockCompatibility(false, null, "Local and relative timestamps need one source clock.")
+/** Count usable timestamps and check their clock compatibility without retaining a list of timestamps. */
+private class LogClockCoverage(private val profile: LogFormatProfile, private val sourceClockId: String?) {
+    private val logcat = profile.engine == LogFormatEngine.LOGCAT
+    private var legacyTimed = 0
+    private var parsedTimed = 0
+    private var firstDomain: String? = null
+    private var firstIdentity: String? = null
+    private var mixedDomains = false
+    private var mixedIdentities = false
+
+    val timedRows: Int get() = if (logcat) legacyTimed else parsedTimed
+
+    fun add(entry: LogEntry) {
+        if (logcat && entry.ts.isNotBlank() && entry.tag != "RAW") legacyTimed++
+        if (legacyTimed > 0) return
+        val time = entry.profileTime(profile, sourceClockId) ?: return
+        val domain = time.domain() ?: return
+        if (parsedTimed == 0) {
+            firstDomain = domain
+            firstIdentity = time.clockIdentity
+        } else {
+            mixedDomains = mixedDomains || domain != firstDomain
+            mixedIdentities = mixedIdentities || time.clockIdentity != firstIdentity
+        }
+        parsedTimed++
     }
-    val signature = if (domain == "absolute") "absolute" else "$domain:${identities.single()}"
-    return ClockCompatibility(true, signature, "")
+
+    fun compatibility(): ClockCompatibility = when {
+        legacyTimed > 0 -> ClockCompatibility(true, "legacy-logcat", "")
+        parsedTimed == 0 -> ClockCompatibility(false, null, "No parseable timestamp values were found.")
+        mixedDomains -> ClockCompatibility(false, null, "Records mix absolute, local, or relative timestamp kinds.")
+        firstDomain == "absolute" -> ClockCompatibility(true, "absolute", "")
+        mixedIdentities || firstIdentity.isNullOrBlank() ->
+            ClockCompatibility(false, null, "Local and relative timestamps need one source clock.")
+        else -> ClockCompatibility(true, "$firstDomain:$firstIdentity", "")
+    }
 }
 
 internal fun logFormatClockSignature(profile: LogFormatProfile, entries: List<LogEntry>, sourceClockId: String? = null): String? {
-    val timed = countTimedEntries(profile, entries, sourceClockId)
-    return clockCompatibility(profile, entries, timed, sourceClockId).takeIf { it.comparable }?.signature
+    val clocks = LogClockCoverage(profile, sourceClockId)
+    entries.forEach(clocks::add)
+    return clocks.compatibility().signature
 }
 
 private fun LogEntry.profileTime(profile: LogFormatProfile, sourceClockId: String?): ParsedTime? {
@@ -327,8 +366,6 @@ private fun LogEntry.hasProcessOrThreadIdentity(): Boolean =
     pid > 0 || tid > 0 ||
         !processIdentity.isNullOrBlank() || !threadIdentity.isNullOrBlank() ||
         profileFields.any { (key, value) -> value.isNotBlank() && key.lowercase() in PROCESS_IDENTITY_KEYS }
-
-private fun ParsedTime?.hasUsableTime(): Boolean = this?.domain() != null
 
 private fun ParsedTime.domain(): String? = when {
     epochMillis != null -> "absolute"

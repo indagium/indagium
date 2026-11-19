@@ -14,6 +14,7 @@ import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ParsedTime
 import com.indagium.model.UNKNOWN_SEVERITY_METADATA
 import com.indagium.model.deriveLogCapabilities
+import com.indagium.model.deriveLogProfileSummary
 import com.indagium.model.usesCustomLogFormatProjection
 import com.indagium.ui.buildLogAnalysis
 import com.indagium.ui.normalizeFilterForCapabilities
@@ -188,6 +189,59 @@ class LogFormatProfileCoreTest {
         assertNull(timeline.byId[2])
         assertNull(deltaMillis(rows[0], rows[1]))
         assertEquals(2_000L, deltaMillis(rows[0], rows[2]))
+    }
+
+    @Test
+    fun profileSummaryReadsEachRowOnceWhenProcessNamesAreKnown() {
+        val rows = listOf(
+            LogEntry(
+                1, "10:00:00", LogLevel.I, "worker", "ready", pid = 77,
+                recordMetadata = LogRecordMetadata(
+                    profileFields = mapOf("request_id" to "123"),
+                    parsedTime = ParsedTime("10:00:00", localTime = "10:00:00", clockIdentity = "source-a"),
+                ),
+            ),
+            LogEntry(2, "", LogLevel.I, "RAW", "unmatched", recordMetadata = UNKNOWN_SEVERITY_METADATA),
+        )
+        var reads = 0
+        val countedRows = object : AbstractList<LogEntry>() {
+            override val size = rows.size
+
+            override fun get(index: Int): LogEntry {
+                reads++
+                return rows[index]
+            }
+        }
+
+        val summary = deriveLogProfileSummary(jsonProfile, countedRows, processNames = mapOf(77 to "worker"))
+
+        assertEquals(rows.size, reads)
+        assertEquals(setOf("request_id"), summary.fieldNames)
+        assertEquals("local-time:source-a", summary.clockSignature)
+        assertEquals(CapabilityAvailability.PARTIAL, summary.capabilities.getValue(LogCapability.TIMELINE).availability)
+        assertEquals(CapabilityAvailability.PARTIAL, summary.capabilities.getValue(LogCapability.PROCESS_NAMES).availability)
+    }
+
+    @Test
+    fun dltClockSummaryPreservesSharedAndMixedClockBehavior() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.DLT }
+        val first = LogEntry(
+            1, "00:00:01.000", LogLevel.I, "ECU1", "first", dltEcuId = "ECU1",
+            dltTimestamp = 10_000L, dltTimestampSource = "relative",
+        )
+        val second = first.copy(id = 2, dltEcuId = "ECU2")
+        val relativeRows = listOf(first, second)
+
+        val separate = deriveLogProfileSummary(profile, relativeRows, sourceClockId = "capture")
+        assertNull(separate.clockSignature)
+        assertEquals("Local and relative timestamps need one source clock.", separate.capabilities.getValue(LogCapability.TIMELINE).reason)
+
+        val sharedProfile = profile.copy(relativeClock = "bench")
+        assertEquals("relative:relative:bench", deriveLogProfileSummary(sharedProfile, relativeRows).clockSignature)
+
+        val mixed = deriveLogProfileSummary(sharedProfile, listOf(first, second.copy(dltTimestampSource = "storage")))
+        assertNull(mixed.clockSignature)
+        assertEquals("Records mix absolute, local, or relative timestamp kinds.", mixed.capabilities.getValue(LogCapability.TIMELINE).reason)
     }
 
     @Test

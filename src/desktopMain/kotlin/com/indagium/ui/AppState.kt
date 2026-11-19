@@ -553,6 +553,10 @@ private fun pendingAnalysis(data: List<LogEntry>, logFormat: LogFormat = LogForm
 internal fun logEntryMarkdownLine(entry: LogEntry): String =
     "**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}"
 
+private fun builtinProfileFor(format: LogFormat): LogFormatProfile = BUILTIN_LOG_FORMAT_PROFILES.first {
+    it.engine == if (format == LogFormat.DLT) LogFormatEngine.DLT else LogFormatEngine.LOGCAT
+}
+
 fun mkTab(
     id: String,
     filename: String,
@@ -565,13 +569,18 @@ fun mkTab(
     logFormat: LogFormat = LogFormat.LOGCAT,
     profile: LogFormatProfile? = null,
     profileCapabilities: Map<LogCapability, LogCapabilityStatus>? = null,
+    parsedLog: ParsedLog? = null,
+    sourceLookupSupported: Boolean = false,
 ): LogTab {
     val (publishedRows, publishedRmap) = releasableLogRows(logData, mkRmap(logData))
-    val inferredProfile = profile ?: BUILTIN_LOG_FORMAT_PROFILES.first {
-        it.engine == if (logFormat == LogFormat.DLT) LogFormatEngine.DLT else LogFormatEngine.LOGCAT
-    }
-    val capabilities = profileCapabilities?.takeIf { it.isNotEmpty() }
-        ?: deriveLogCapabilities(inferredProfile, publishedRows)
+    val inferredProfile = profile ?: builtinProfileFor(logFormat)
+    val summaryProfile = parsedLog?.let { it.profile ?: builtinProfileFor(it.format) } ?: inferredProfile
+    val summary = deriveLogProfileSummary(
+        summaryProfile, logData,
+        sourceClockId = parsedLog?.sourceClockId,
+        sourceLookupSupported = sourceLookupSupported,
+        processNames = if (parsedLog != null) analysis.processNames else computeProcessNames(logData),
+    )
     return LogTab(
         id = id, filename = filename, logData = publishedRows, rmap = publishedRmap,
         annotations = Annotations(prefix = "From $filename"),
@@ -580,11 +589,10 @@ fun mkTab(
         logFormat = logFormat,
         logFormatProfileId = profile?.id,
         logFormatProfileSnapshot = profile?.let(::logFormatProfileJson),
-        logCapabilities = capabilities,
-        profileFieldNames = publishedRows.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet(),
-        profileClockSignature = profile?.let { logFormatClockSignature(it, publishedRows) }
-            ?: logFormatClockSignature(inferredProfile, publishedRows),
-        profileDisplayColumns = logFormatDisplayColumnDefinitions(profile ?: inferredProfile),
+        logCapabilities = profileCapabilities?.takeIf { it.isNotEmpty() } ?: summary.capabilities,
+        profileFieldNames = summary.fieldNames,
+        profileClockSignature = summary.clockSignature.takeIf { parsedLog == null || parsedLog.profile != null },
+        profileDisplayColumns = logFormatDisplayColumnDefinitions(inferredProfile),
         profileProjectionSchemaPresent = profile?.let(::usesCustomLogFormatProjection) == true,
     )
 }
@@ -7883,21 +7891,7 @@ class AppState(
         return parseLogFileResultWithProfiles(file, profiles = availableLogFormatProfiles(), profile = profile).selectSection(sectionId)
     }
 
-    private fun effectiveLogCapabilities(parsed: ParsedLog): Map<LogCapability, LogCapabilityStatus> {
-        val profile = parsed.profile ?: builtinProfileFor(parsed.format)
-        return deriveLogCapabilities(
-            profile,
-            parsed.entries,
-            sourceClockId = parsed.sourceClockId,
-            sourceLookupSupported = sourceLookupConfigured(),
-        )
-    }
-
     private fun sourceLookupConfigured(): Boolean = sourceResolver != null && registeredSourceRoots().isNotEmpty()
-
-    private fun builtinProfileFor(format: LogFormat): LogFormatProfile = BUILTIN_LOG_FORMAT_PROFILES.first {
-        it.engine == if (format == LogFormat.DLT) LogFormatEngine.DLT else LogFormatEngine.LOGCAT
-    }
 
     internal fun defaultLogFormatProfile(format: LogFormat): LogFormatProfile = builtinProfileFor(format)
 
@@ -8384,18 +8378,14 @@ class AppState(
             processNameMode = sourceTab.processNameMode,
             logFormat = result.format,
             profile = profile,
-            profileCapabilities = effectiveLogCapabilities(result),
+            parsedLog = result,
+            sourceLookupSupported = sourceLookupConfigured(),
         ).copy(
             sourcePath = sourceTab.sourcePath,
             largeFileMode = sourceTab.largeFileMode,
             archiveCandidate = sourceTab.archiveCandidate,
             annotations = Annotations(prefix = "From ${sourceTab.filename}"),
-            logFormatProfileId = profile.id,
-            logFormatProfileSnapshot = logFormatProfileJson(profile),
             logFormatDiagnostics = result.diagnostics,
-            logCapabilities = effectiveLogCapabilities(result),
-            profileFieldNames = result.profileFieldNames,
-            profileClockSignature = result.profileClockSignature,
             profileSourceLineCount = result.sourceLineCount,
         )
         publishOpenedTab(newTab, originLauncherId = null)
@@ -13942,22 +13932,18 @@ class AppState(
                     processNameMode = newTabProcessNameMode(),
                     logFormat = logFormat,
                     profile = parsed.profile,
-                    profileCapabilities = effectiveLogCapabilities(parsed),
+                    parsedLog = parsed,
+                    sourceLookupSupported = sourceLookupConfigured(),
                 )
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
                         largeFileMode = largeFile,
                         showUnfiltered = settings.openNewFilesWithUnfiltered,
-                        logFormatProfileId = parsed.profile?.id,
-                        logFormatProfileSnapshot = parsed.profile?.let(::logFormatProfileJson),
                         logFormatDiagnostics = parsed.diagnostics,
                         logSections = parsed.sections.map { it.description() },
                         selectedLogSectionId = parsed.selectedSectionId,
                         logFormatCandidateIds = parsed.candidateProfileIds,
-                        logCapabilities = effectiveLogCapabilities(parsed),
-                        profileFieldNames = parsed.profileFieldNames,
-                        profileClockSignature = parsed.profileClockSignature,
                         profileSourceLineCount = parsed.sourceLineCount,
                     )
                 synchronized(stateLock) {
@@ -14877,7 +14863,8 @@ class AppState(
                     processNameMode = newTabProcessNameMode(),
                     logFormat = logFormat,
                     profile = parsed.profile,
-                    profileCapabilities = effectiveLogCapabilities(parsed),
+                    parsedLog = parsed,
+                    sourceLookupSupported = sourceLookupConfigured(),
                 )
                     .copy(
                         sourcePath = path,
@@ -14885,15 +14872,10 @@ class AppState(
                         largeFileMode = largeFile,
                         showUnfiltered = settings.openNewFilesWithUnfiltered,
                         archiveCandidate = candidate,
-                        logFormatProfileId = parsed.profile?.id,
-                        logFormatProfileSnapshot = parsed.profile?.let(::logFormatProfileJson),
                         logFormatDiagnostics = parsed.diagnostics,
                         logSections = parsed.sections.map { it.description() },
                         selectedLogSectionId = parsed.selectedSectionId,
                         logFormatCandidateIds = parsed.candidateProfileIds,
-                        logCapabilities = effectiveLogCapabilities(parsed),
-                        profileFieldNames = parsed.profileFieldNames,
-                        profileClockSignature = parsed.profileClockSignature,
                         profileSourceLineCount = parsed.sourceLineCount,
                     )
                 synchronized(stateLock) {
@@ -15283,22 +15265,18 @@ class AppState(
             processNameMode = newTabProcessNameMode(),
             logFormat = logFormat,
             profile = parsed.profile,
-            profileCapabilities = effectiveLogCapabilities(parsed),
+            parsedLog = parsed,
+            sourceLookupSupported = sourceLookupConfigured(),
         )
             .copy(
                 sourcePath = path,
                 annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
                 largeFileMode = file.length() >= LARGE_FILE_MODE_BYTES,
                 showUnfiltered = settings.openNewFilesWithUnfiltered,
-                logFormatProfileId = parsed.profile?.id,
-                logFormatProfileSnapshot = parsed.profile?.let(::logFormatProfileJson),
                 logFormatDiagnostics = parsed.diagnostics,
                 logSections = parsed.sections.map { it.description() },
                 selectedLogSectionId = parsed.selectedSectionId,
                 logFormatCandidateIds = parsed.candidateProfileIds,
-                logCapabilities = effectiveLogCapabilities(parsed),
-                profileFieldNames = parsed.profileFieldNames,
-                profileClockSignature = parsed.profileClockSignature,
                 profileSourceLineCount = parsed.sourceLineCount,
             )
         publishOpenedTab(t, originLauncherId = null, originGroupId = originGroupId)
