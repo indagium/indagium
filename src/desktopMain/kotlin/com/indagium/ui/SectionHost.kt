@@ -20,7 +20,24 @@ internal class SectionModeTabs(
     val labels: List<String>,
     val selectedIndex: Int,
     val onSelect: (Int) -> Unit,
+    // Shorter labels for a tile header too narrow for [labels] beside its own buttons; the full label is then the tooltip.
+    val compactLabels: List<String>? = null,
 )
+
+/** The tab labels a tile header [headerWidthDp] wide can show beside its buttons: [SectionModeTabs.labels], or the compact ones. */
+internal fun SectionModeTabs.labelsFor(headerWidthDp: Float): List<String> {
+    val compact = compactLabels ?: return labels
+    if (headerWidthDp <= 0f) return labels
+    val needed = labels.sumOf { it.length * MODE_TAB_CHAR_DP + 2 * MODE_TAB_PADDING_DP.toDouble() }
+    return if (headerWidthDp - TILE_HEADER_FIXED_PARTS_DP >= needed) labels else compact
+}
+
+/** Approximate width of one 11sp UI character in a mode tab, and the tab's side padding (TiledSectionHost). */
+private const val MODE_TAB_CHAR_DP = 6.6
+internal const val MODE_TAB_PADDING_DP = 8f
+
+/** What a filter tile header needs besides its mode tabs: grip, icon, collapse and hide buttons and their gaps. */
+private const val TILE_HEADER_FIXED_PARTS_DP = 130f
 
 /**
  * What only the column host needs to reproduce the legacy panel exactly: [headerShown] false skips the SectionHeader row (Regex

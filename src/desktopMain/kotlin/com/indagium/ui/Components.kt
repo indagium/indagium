@@ -1669,7 +1669,10 @@ fun SegmentedControl(
             if (tooltip == null) {
                 segment(sizeModifier)
             } else {
-                TooltipArea(tooltip = { ToolbarTooltip(tooltip) }, modifier = sizeModifier) { segment(Modifier.fillMaxWidth()) }
+                // The tooltip wrapper takes the segment's size; inside it the segment fills only a weighted (fillWidth) slot.
+                TooltipArea(tooltip = { ToolbarTooltip(tooltip) }, modifier = sizeModifier) {
+                    segment(if (fillWidth) Modifier.fillMaxWidth() else Modifier.defaultMinSize(minWidth = 36.dp))
+                }
             }
             if (index < options.lastIndex) {
                 Box(Modifier.width(borderWidth).height(segmentHeight).background(tc.br))

@@ -91,13 +91,18 @@ internal class TiledSectionHost(
         return {
             trailing?.invoke(this)
             if (tabs != null) {
+                // A header too narrow for the full labels beside its own buttons (a profile tab's "Components | Regex" is longer
+                // than Logcat's "Tags | Regex") shows the compact ones, with the full label as the tooltip, rather than pushing
+                // the collapse and hide buttons out of the header.
+                val labels = tabs.labelsFor(LocalTileHeaderWidthDp.current)
                 SegmentedControl(
-                    options = tabs.labels,
+                    options = labels,
                     selectedIndices = setOf(tabs.selectedIndex),
                     onToggle = tabs.onSelect,
                     segmentHeight = 22.dp,
                     segmentFontSize = 11.sp,
-                    segmentHorizontalPadding = 8.dp,
+                    segmentHorizontalPadding = MODE_TAB_PADDING_DP.dp,
+                    segmentTooltip = { index -> tabs.labels.getOrNull(index)?.takeIf { it != labels.getOrNull(index) } },
                     modifier = Modifier.testTag("tile-mode-tabs"),
                 )
             }

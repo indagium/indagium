@@ -1357,6 +1357,7 @@ internal fun FilterPanel(
                         listOf(componentLabel, "Regex"),
                         if (filter.mode == FilterMode.KEYWORD) 1 else 0,
                         { index -> if (index == 1) onStartRegexSearch() else onSetFilterMode(FilterMode.TAGS) },
+                        compactLabels = listOf(remember(tab.id, tab.logData) { tab.compactComponentFilterLabel() }, "Regex"),
                     ),
                     // Regex mode has never had a section header, only the mode strip above the pattern field.
                     column = ColumnSectionOptions(headerShown = filter.mode == FilterMode.TAGS),

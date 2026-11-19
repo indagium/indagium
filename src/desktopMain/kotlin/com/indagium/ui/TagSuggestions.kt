@@ -87,6 +87,13 @@ private fun LogTab.isNativeDlt(): Boolean = logFormat == LogFormat.DLT && !hasPr
 /** The tag filter's name for [this] tab: Tags in Logcat, Contexts in DLT (ECU/APP/CTX), Components in a profile tab. */
 internal fun LogTab.componentFilterLabel(): String = if (isNativeDlt()) "Contexts" else componentFilterLabel(componentsArePackages())
 
+/** [componentFilterLabel] short enough for a narrow filter tile header: Logcat's Tags is already short. */
+internal fun LogTab.compactComponentFilterLabel(): String = when {
+    isNativeDlt() -> "Ctx"
+    componentsArePackages() -> "Tags"
+    else -> "Comp."
+}
+
 /** The tag field's hint for [this] tab. */
 internal fun LogTab.tagInputPlaceholder(): String = if (isNativeDlt()) "ECU/APP/CTX…" else tagInputPlaceholder(componentsArePackages())
 
