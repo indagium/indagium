@@ -63,6 +63,9 @@ data class LogEntry(
     // Exactly one nullable reference for optional profile data; legacy Logcat rows avoid a map or
     // metadata object allocation. See LogRecordMetadata for profile-only fields.
     val recordMetadata: LogRecordMetadata? = null,
+    // A binary DLT frame's ECU uptime (TMSP, 0.1 ms units) when it also has a storage time, which is
+    // what dltTimestamp then holds. Null for every other row; appended last like the fields above.
+    val dltUptime: Long? = null,
 ) {
     val profileFields: Map<String, String> get() = recordMetadata?.profileFields.orEmpty()
     val originalSeverity: String? get() = recordMetadata?.originalSeverity

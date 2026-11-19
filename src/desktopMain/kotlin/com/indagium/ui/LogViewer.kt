@@ -3816,6 +3816,12 @@ private fun LogRow(
     var popupAnchorHeightPx by remember { mutableStateOf(0) }
     val showProcessNamePopup = hov && showsElidedName &&
         pidFieldXRange?.let { (start, end) -> pointerInsidePidFieldX(hoverPointerX, start, end) } == true
+    // A DLT row's time cell: hovering it shows the storage date and the ECU uptime the row has no room for.
+    val timeHint = remember(entry) { dltTimeHint(entry) }
+    val latestTimeHint by rememberUpdatedState(timeHint)
+    var timeFieldXRange by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    val showTimeHint = hov && timeHint != null &&
+        timeFieldXRange?.let { (start, end) -> pointerInsidePidFieldX(hoverPointerX, start, end) } == true
 
     val isCrashGroupRow = isCrashGroupRow(item.groupColor, highlightEntireCrashGroup)
     // Toned exactly like the sequence header's own ts/pid-tid cells (HeaderPidTidCell's call site
@@ -4091,7 +4097,7 @@ private fun LogRow(
                                 // Only recorded when this row can actually show the popup — every other
                                 // row's Move events fall through to the else branch below, no state
                                 // write, no recomposition triggered by hovering it.
-                                PointerEventType.Move -> if (latestShowsElidedName) {
+                                PointerEventType.Move -> if (latestShowsElidedName || latestTimeHint != null) {
                                     ev.changes.firstOrNull()?.let { hoverPointerX = it.position.x }
                                 }
                                 else -> {}
@@ -4255,13 +4261,16 @@ private fun LogRow(
                     selectionColor = tc.ac.copy(alpha = SELECTION_OVERLAY_ALPHA),
                     handleColor = tc.ac,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
-                        .onSizeChanged { if (showsElidedName) popupAnchorHeightPx = it.height },
+                        .onSizeChanged { if (showsElidedName || timeHint != null) popupAnchorHeightPx = it.height },
                     // Measuring bounding boxes only runs for a row that can actually show the popup —
                     // every other row (OFF, no name, or a name that already fits) skips this entirely,
                     // same as the pointer-tracking guard above. pidFieldStart mirrors
                     // buildFullLineAnnotation's own "entry.ts.length + 2" — the same formula against the
                     // same rendered text, since the field starts at the same offset in both.
                     onTextLayout = { layout ->
+                        if (timeHint != null && entry.ts.isNotEmpty() && entry.ts.length <= layout.layoutInput.text.length) {
+                            timeFieldXRange = layout.getBoundingBox(0).left to layout.getBoundingBox(entry.ts.length - 1).right
+                        }
                         if (showsElidedName) {
                             val pidFieldStart = entry.ts.length + 2
                             val pidFieldEnd = (pidFieldStart + pidFieldChars).coerceAtMost(layout.layoutInput.text.length)
@@ -4273,6 +4282,10 @@ private fun LogRow(
                         }
                     },
                 )
+                val timeRange = timeFieldXRange
+                if (showTimeHint && timeRange != null && timeHint != null) {
+                    RowFieldHintPopup(timeHint, timeRange.first, popupAnchorHeightPx, mono)
+                }
                 val fieldRange = pidFieldXRange
                 if (showProcessNamePopup && fieldRange != null && processDisplay != null) {
                     // Same visual treatment and TopStart+measured-offset positioning as FilterPanel.kt's
@@ -5145,6 +5158,22 @@ private fun ToolbarOptionsPopup(
             } else {
                 processNameAction()
             }
+        }
+    }
+}
+
+/** A small hint under a row field: the same look and placement as the process-name popup above it in LogRow. */
+@Composable
+private fun RowFieldHintPopup(text: String, fieldLeftPx: Float, anchorHeightPx: Int, mono: FontFamily) {
+    val tc = tc()
+    val gapPx = (4f * LocalDensity.current.density).roundToInt()
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(fieldLeftPx.roundToInt(), anchorHeightPx + gapPx),
+        properties = PopupProperties(focusable = false),
+    ) {
+        Box(Modifier.background(tc.p, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(horizontal = 8.dp, vertical = 5.dp)) {
+            AppText(text, color = tc.tx, fontSize = 11.sp, fontFamily = mono, maxLines = 1, overflow = TextOverflow.Clip)
         }
     }
 }

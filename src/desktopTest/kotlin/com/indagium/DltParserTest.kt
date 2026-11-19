@@ -10,6 +10,8 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DltParserTest {
@@ -35,6 +37,23 @@ class DltParserTest {
             assertEquals(LogFormat.DLT, raw.format)
             assertEquals(if (msbf) "big" else "little", raw.entries.single().msg)
         }
+    }
+
+    @Test fun aStoredFrameKeepsItsEcuUptimeForTheTimeCellHint() {
+        val payload = verboseString("up", true)
+        val stored = storageHeader("ECU1") + frame(ecu = "ECU1", timestamp = 1_234_567L, payload = payload)
+        val entry = parseLogContent(ByteArrayInputStream(stored)).entries.single()
+
+        assertEquals("storage", entry.dltTimestampSource)
+        assertEquals(1_234_567L, entry.dltUptime)
+        val hint = assertNotNull(com.indagium.ui.dltTimeHint(entry, java.time.ZoneOffset.UTC))
+        assertTrue(hint.startsWith("Stored 1970-01-01 00:00:01"), hint)
+        assertTrue(hint.endsWith("ECU uptime 123.4567 s"), hint)
+
+        // A frame without a storage header shows its uptime as the row time: nothing more is kept.
+        val raw = parseDltContent(ByteArrayInputStream(frame(ecu = "ECU1", timestamp = 1_234_567L, payload = payload))).entries.single()
+        assertNull(raw.dltUptime)
+        assertEquals("ECU uptime 123.4567 s", com.indagium.ui.dltTimeHint(raw))
     }
 
     @Test fun parsesEveryOptionalStandardHeaderCombinationInSpecifiedOrder() {

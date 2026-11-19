@@ -718,6 +718,8 @@ private fun decodeFrameBody(
         dltEcuId = ecu?.takeIf { it.isNotBlank() }, dltAppId = apid?.takeIf { it.isNotBlank() },
         dltContextId = ctid?.takeIf { it.isNotBlank() }, dltMessageType = msin?.let(::dltMessageTypeName),
         dltTimestamp = dltTs, dltTimestampSource = source,
+        // The row's time is the storage time when there is one; the ECU uptime is kept beside it for the time cell's hint.
+        dltUptime = relativeTimestamp.takeIf { storageSeconds != null },
     )
 }
 
