@@ -236,6 +236,30 @@ Text that matches none of them opens as before, one row per line.
   extension. Formats can be exported and imported as JSON to share with a team: **Import…**, **Export current…** and
   **Export bundle…** are in the **⋯** menu next to **New profile**.
 
+**How a format reads in the log view.**
+
+- Each column sits under its header. A field the format adds (an access log's status and bytes, a CSV's
+  duration) shows its value alone under its name; when you copy, export or add rows to a note, where there
+  is no header, it keeps its label (`Status=200`). Extra fields go before the message, which is always
+  last; a column no row has a value for is left out.
+- Times written as epoch numbers (Pino, systemd journal) show as ISO date and time with the clock named:
+  `Z` for UTC, or the format's own time zone if it sets one, so the same moment reads the same in every
+  tab. Seconds since boot (dmesg) carry their unit, `1.500000 s`. The number as written stays in the record.
+- Levels show by the format's own names: Pino's 10 … 60 as TRACE … FATAL, journald priorities as
+  EMERG … DEBUG, so CRIT and ERROR stay apart.
+- A record of several lines (a stack trace under a log line) shows its first line and how many follow,
+  `(+2 lines)`; expand it to read them.
+- Wrapped lines hang under the message column, or just after the first column when the message starts
+  far to the right; in a narrow tile they step in a few characters. They never start under TIMESTAMP.
+  A narrow tile hides PID and TID from the rows and the header alike, and the header wraps rather than
+  losing the names of the right-most columns.
+- **Message details** for a format read from text (syslog, logfmt, CSV, access logs, CRI) lists the fields
+  the parser found, each once and named as in the source line, with the source line under them. Its copy
+  button says what it copies: **Copy JSON**, **Copy line** or **Copy record**. The tile appears only for a
+  log whose records hold something the row does not show; a dmesg or DLT row is its whole record.
+- **DLT** rows put the session ID under **SID**, leave the empty thread field blank and head the tag
+  **ECU/APP/CTX**. Hover a row's time to see the stored date and the ECU uptime the row has no room for.
+
 In syslog, dmesg and your own text formats, a line that does not fit the format belongs to the record
 above it, so a stack trace printed under a log line is one record with a disclosure arrow, not twenty
 rows. Turn this off per format with **Lines that do not match** in Settings › Log formats. Logcat
@@ -244,7 +268,9 @@ binary DLT frames keep the boundaries their formats define.
 
 Some features depend on what the format contains: level filtering needs a level, time deltas and merging need
 comparable timestamps, crash and ANR detection is for Android logs. A feature that cannot work for a file is hidden
-or shown disabled with the reason.
+or shown disabled with the reason. Format details lists the Android crash checks only for formats they apply
+to, and gives one reason when the process filter, process map and process names are all off for want of
+process IDs.
 
 ### Bug-report archives
 
@@ -335,9 +361,16 @@ in the panel also has a right-click shortcut on a log row.
 
 Toggle **V / D / I / W / E / A** individually. (`A` is Assert — Android's highest level.)
 
+A log read through another format names the pills after that format's levels: **T D I W E F** for
+TRACE … FATAL (including Pino's numeric levels), **T D I W E C** for syslog and journald, where C covers
+CRIT, ALERT and EMERG. Hover a pill to see which levels it covers.
+
 ### Tags and packages
 
-Click a tag to include it; there is a separate exclude list. Indagium also groups tags by package
+Click a tag to include it; there is a separate exclude list. In a log read through another format the
+same filter is called **Components** (a logger, a systemd unit, an app; **Comp.** in a narrow column),
+and in a DLT log **Contexts** (ECU/APP/CTX; **Ctx** when narrow). There a dotted name such as
+`checkout.service` is matched exactly, never as a package prefix. Indagium also groups tags by package
 prefix, so you can include or exclude `com.example.network.*` in one action. The panel shows the most
 frequent tags first; the count is configurable in Settings → Search & filters.
 
@@ -618,6 +651,27 @@ The Notes panel is where an investigation becomes a document.
 | **Video frame** | Grab the current frame from an attached video ([§20](#20-video-sync)) |
 
 Blocks can be reordered with `Alt+↑` / `Alt+↓`, edited in place, and deleted.
+
+### Shared notes
+
+When one investigation spans several logs (a phone's logcat and a watch's JSON log, say), keep one note for
+all of them.
+
+- **New ▾ › New shared note…** starts an empty note and asks which open tabs write into it; **Share this
+  note…** turns the current tab's note into a shared one. Lines you add from any member tab go into that
+  one note.
+- A shared note shows **Shared · N tabs** in its header. Click it to see the member tabs, **Add tab…**,
+  **Rename…**, **Stop sharing…** (the note goes back to being one tab's private note) or **Delete shared note…**.
+  A tab can switch between its private note and the shared notes it belongs to from **Open ▾ › Shared notes**.
+- A log reference from another tab names its file (and section) in a badge. Its **log ↗** chip takes you
+  to those rows in their tab and section; if that file is closed, the note offers **Reopen** first, and if
+  the rows are gone it says so.
+- In a structured log, right-click a field in the record tree or Message details for **Add field to
+  notes**, **Copy value** and **Copy path**. Click, Shift-click, Cmd/Ctrl-click or drag across field lines to
+  select several, then **Add selected fields to notes**: the note keeps those fields as a small tree under
+  the row, and going back to the rows marks them again.
+- Closing a member tab keeps the note; reopening the file brings the tab back into it. Shared notes are
+  saved with the session and auto-exported like any note, each to its own file.
 
 ### Document structure
 

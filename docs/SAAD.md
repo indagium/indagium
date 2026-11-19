@@ -2811,6 +2811,40 @@ from the rows' saved-filter actions, so flipping modes loses neither) to `active
 file name) and a log tab is active; the mode is unavailable without an active tab or any row that has
 highlighters.
 
+### 13.8 Shared notes
+
+One analysis note can be written from several tabs (`ui/SharedNotes.kt`, model in `model/Model.kt`).
+
+**State.** A shared note is a note-only *host* `LogTab` with no rows, kept in `AppState.sharedNoteHosts` and never in
+`tabs`, so nothing that walks the open logs (filters, search, autosave of rows, tab strip) sees it. Its
+`LogTab.sharedNote: SharedNoteInfo` holds the id, name, `memberTabIds` (the open tabs that write into it), `closedMembers`
+(members whose tab was closed: tab id, file name, source path and the pinned format profile snapshot, so reopening parses
+the file the same way), `createdAtMs`, and `closedReferenceSources` (files cited by the note's row references that are not
+members, kept for the same reopen). `tab(id)` stays tabs-only; `noteTab(id)` resolves a host too and is used only on note
+paths. A member tab's `LogTab.notesView` names the note its Notes tile shows (its own, or a host); `notesTargetFor` and
+`shownNoteOf` route new blocks and the panel to it. Every mutation (`createSharedNote`, `shareTabNote`,
+`setSharedNoteMembers`, `renameSharedNote`, `stopSharing`, `deleteSharedNote`) runs under `stateLock`.
+
+**Lifecycle.** Closing a member records it in `closedMembers` (`detachSharedNoteMembersLocked`); if another open tab shows
+the same file it takes over the membership instead, so a reparse into a new tab keeps the note. Opening a file that matches a
+closed member or a closed reference source rebinds the references to the new tab and, for a member, restores the membership
+(`attachReopenedTabToSharedNotesLocked`). Stopping sharing hands the blocks to one tab's private note; deleting removes the host.
+
+**Row references.** `AnnBlock.LogRef` carries `sourceTabId`, `sourceFilename`, `sourceSectionId` (the metadata-JSON section) and,
+for a reference made from chosen fields of a JSON record, `recordFields` (each a path and its JSON, at most 64 KiB in all,
+`utils/RecordFields.kt`) plus `sourceRecordFingerprint`. Go to rows (`goToLogRefRows`, suspend) switches to the source tab and
+section and finds rows that moved by content, matching timestamp, message and tag and, where present, the record fingerprint;
+it returns `NeedsReopen` (the UI offers Reopen), `RowsNotFound` or `NoSource`.
+
+**Persistence.** Hosts are saved as one `sharedNotes` key line before the `tabs` marker, each a full tab token whose field 22
+(`TAB_TOKEN_SHARED_NOTE_INDEX`) is the `SharedNoteInfo` token (`ui/SharedNoteCodec.kt`). The `LogRef` token appends, last and
+only when set, field 8 `sourceSectionId`, field 9 the record fields and field 10 the record fingerprint, so older tokens decode
+unchanged. Each host is auto-exported like any note to its own `<name>_analysis.md` / `.ann` pair, whose name is chosen free of
+existing note files when the note is created.
+
+**MCP.** `list_shared_notes`, `create_shared_note` and `set_shared_note_members` (§ debug files table); every Notes tool accepts a
+host id as `tabId`, and `add_log_note` on a host takes `sourceTabId`, which must be a member.
+
 ## 14. External integrations
 
 ### 14.1 Control server: MCP and REST
@@ -6128,6 +6162,25 @@ rule; merging anything else needs equal clock signatures; DLT never merges with 
 
 Severity is normalized to `LogLevel` for filtering, and the source value is kept. A row whose severity is absent or unknown has
 `severityKnown = false`: it shows its original text (or nothing) and passes every level filter instead of posing as Info.
+
+Display rules (`recordToEntry`, `utils/LogFormatProfiles.kt`): an epoch timestamp shows in the TIMESTAMP column as ISO date and
+time in the profile's zone or UTC, with its offset (`epochDisplayTime`), and its `ParsedTime.localTime` is read in the same zone,
+not the machine's, so one instant reads alike in every tab. A bare number on a relative clock shows with its unit
+(`relativeDisplayTime`, dmesg's `1.500000 s`). A numeric level on Pino's 10 … 60 or the syslog/journald 0 … 7 scale, recognised
+from the profile's severity mapping, shows the source's own name (`numericSeverityName`); the raw values stay in the fields.
+The level filter's pill letters and tooltips come from the pinned profile, not the rows (`LogTab.levelPills`).
+
+Columns (`utils/TextMatch.kt`): visible attributes are placed before a trailing message (`withAttributeColumns`, shared by rows,
+`logFormatDisplayColumnDefinitions` and the Settings preview). `computeProfileColumnLayout` pads every column but the last to the
+longer of its label and its sampled values, leaves out a column no sampled row fills, and keeps a `compactHeader` without PID and
+TID for narrow tiles (`headerFor`). Under the header an extra field's cell is its value alone; the canonical text that filters,
+Find, copy, export and notes use keeps `label=value`, and `ProfileTextOffsetSegment` maps match offsets between the two. Wrapped
+profile rows hang at the message column, else after the first column, else a short fixed step (`chooseHangingIndentChars`).
+
+Message details for a text record shows its parsed fields as a JSON tree, each value once under its source name
+(`distinctRecordFields`), with the source line under it; the tile is offered only for a tab whose sampled records hold something the
+row does not show (`profileRecordsAddDetail`). Binary DLT keeps the ECU uptime beside the storage time (`LogEntry.dltUptime`) for
+the time cell's hover hint (`ui/DltTimeHint.kt`), and draws its header in the row font (`dltColumnHeader`).
 
 ### 28.5 Capabilities
 
