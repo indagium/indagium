@@ -686,6 +686,7 @@ internal fun FilterPanel(
     val pidUnavailableReason = tab.profileCapabilityUnavailableReason(LogCapability.PID_THREAD_FILTER, profileCapabilities)
     val pidPartialReason = tab.profileCapabilityPartialReason(LogCapability.PID_THREAD_FILTER, profileCapabilities)
     val canFilterByProcess = tab.canUseProfileCapability(LogCapability.PID_THREAD_FILTER, profileCapabilities)
+    val canUseAndroidIssues = tab.canUseProfileCapability(LogCapability.ANDROID_ISSUES, profileCapabilities)
 
     // While the background analysis is pending this must NOT fall through to the synchronous
     // computation — that's a multi-second full-file scan and this runs during composition.
@@ -2731,7 +2732,9 @@ internal fun FilterPanel(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
                     )
                 }
-                if (!showingDeviceEventsCategory) Row(
+                // The ProGuard/R8 mapping only deobfuscates Android stack traces: a tab without an Android crash analyzer
+                // (syslog, Docker, a custom CSV) keeps the Issues tile for its own rules but has no mapping to choose.
+                if (!showingDeviceEventsCategory && canUseAndroidIssues) Row(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),

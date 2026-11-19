@@ -1399,11 +1399,20 @@ internal fun LogFormatPreviewRecord(entry: LogEntry, modifier: Modifier = Modifi
 private val PREVIEW_LOG_FONT_SIZE = 12.sp
 private val PREVIEW_FIELD_FONT_SIZE = 11.sp
 
+/**
+ * The capabilities worth listing: an Android-only one (crash issues) is left out where it is unavailable, since for a
+ * syslog or Docker log it is not missing, it just does not apply. Where it is available it is listed like the rest.
+ */
+internal fun shownLogCapabilities(capabilities: Map<LogCapability, LogCapabilityStatus>): Map<LogCapability, LogCapabilityStatus> =
+    capabilities.filterNot { (capability, status) ->
+        capability == LogCapability.ANDROID_ISSUES && status.availability == CapabilityAvailability.UNAVAILABLE
+    }
+
 /** A tinted chip per capability in words, "Text search · available". The reason for one that is partial or unavailable follows its chip. */
 @Composable
 internal fun LogFormatCapabilityList(capabilities: Map<LogCapability, LogCapabilityStatus>) {
     val tc = tc()
-    val ordered = capabilities.toSortedMap(compareBy { it.ordinal })
+    val ordered = shownLogCapabilities(capabilities).toSortedMap(compareBy { it.ordinal })
     val (available, limited) = ordered.entries.partition { it.value.availability == CapabilityAvailability.AVAILABLE }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (available.isNotEmpty()) {

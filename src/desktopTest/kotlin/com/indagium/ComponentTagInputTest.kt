@@ -1,5 +1,8 @@
 package com.indagium
 
+import com.indagium.model.CapabilityAvailability
+import com.indagium.model.LogCapability
+import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -7,6 +10,7 @@ import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.combinedTagCandidates
 import com.indagium.ui.componentsArePackages
 import com.indagium.ui.mkTab
+import com.indagium.ui.shownLogCapabilities
 import com.indagium.ui.tagInputPlaceholder
 import com.indagium.ui.typedTagIsPackagePrefix
 import kotlin.test.Test
@@ -54,5 +58,20 @@ class ComponentTagInputTest {
         assertTrue(withPackages.any { it.second })
         assertTrue(withoutPackages.none { it.second })
         assertTrue(withoutPackages.any { it.first == "checkout.service" })
+    }
+}
+
+/** An Android-only capability is listed only where it applies. */
+class ShownLogCapabilitiesTest {
+    @Test
+    fun androidIssuesAreLeftOutWhereTheyDoNotApply() {
+        val search = LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "ok")
+        val off = LogCapabilityStatus(CapabilityAvailability.UNAVAILABLE, "No Android crash analyzer.")
+        val on = LogCapabilityStatus(CapabilityAvailability.AVAILABLE, "An Android crash analyzer is compatible.")
+        val syslog = mapOf(LogCapability.TEXT_SEARCH to search, LogCapability.ANDROID_ISSUES to off)
+        val logcat = mapOf(LogCapability.TEXT_SEARCH to search, LogCapability.ANDROID_ISSUES to on)
+
+        assertEquals(setOf(LogCapability.TEXT_SEARCH), shownLogCapabilities(syslog).keys)
+        assertEquals(logcat, shownLogCapabilities(logcat))
     }
 }
