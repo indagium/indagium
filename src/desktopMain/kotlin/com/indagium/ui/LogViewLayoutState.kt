@@ -4,7 +4,6 @@ import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
 import com.indagium.model.LogCapability
 import com.indagium.model.LogTab
-import com.indagium.utils.hasRecordDetails
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
@@ -14,6 +13,7 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
 import com.indagium.model.ToolbarPlacement
+import com.indagium.utils.hasRecordDetails
 
 // The single log view's tiling state as AppState extensions (AppState.kt is far too big to grow): the legacy sizes and tile
 // context the pure LogViewLayout.kt functions read, and the commit / hide / show / preset / reset / lock / collapse / reveal

@@ -60,7 +60,7 @@ private inline fun scanRecordAvailability(
     val extendsPrevious = previous != null && rows.isAppendOnlyExtensionOf(previous.rows)
     val start = if (extendsPrevious) requireNotNull(previous).rows.size else 0
     val found = (extendsPrevious && previous.available) || (start until rows.size).any { index ->
-        if (index % 256 == 0) checkCancellation()
+        if (index % RECORD_SCAN_CANCELLATION_ROWS == 0) checkCancellation()
         canExpandRecord(rows[index], format)
     }
     synchronized(recordAvailability) { recordAvailability[tabId] = RecordAvailability(rows, found) }
@@ -81,3 +81,6 @@ internal fun rememberRecordAvailability(tab: LogTab): Boolean = key(tab.id, tab.
     }
     cached ?: available
 }
+
+/** How many rows the expandable-record scan reads between cancellation checks. */
+private const val RECORD_SCAN_CANCELLATION_ROWS = 256

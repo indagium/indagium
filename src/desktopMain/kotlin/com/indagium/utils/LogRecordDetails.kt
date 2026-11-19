@@ -87,7 +87,7 @@ internal fun LogEntry.hasRecordDetails(): Boolean {
     val metadata = recordMetadata?.takeIf { it.usesProfilePresentation } ?: return false
     val raw = rawRecord ?: msg
     if (metadata.displayColumns.any { it.id != "message" && it.value.length > MAX_PROFILE_COLUMN_CHARS }) return true
-    if (raw.length > 180 || raw.trimEnd().any { it == '\n' || it == '\r' } || isJsonRecord(raw)) return true
+    if (raw.length > LONG_RECORD_CHARS || raw.trimEnd().any { it == '\n' || it == '\r' } || isJsonRecord(raw)) return true
     val fields = distinctRecordFields(profileFields, metadata.fieldAliases)
     if (fields.isEmpty()) return false
     val aliases = metadata.fieldAliases
@@ -142,3 +142,6 @@ private fun describeParsedTime(time: ParsedTime): String? {
 
 private val WALL_CLOCK: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
 private val PRETTY_JSON = Json { prettyPrint = true }
+
+/** A record longer than this is cut in its collapsed row (the row's preview cap), so its details add something. */
+private const val LONG_RECORD_CHARS = 180

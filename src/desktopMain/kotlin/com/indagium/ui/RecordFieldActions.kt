@@ -50,8 +50,8 @@ import com.indagium.utils.RecordFieldsResult
 import com.indagium.utils.joinRecordPath
 import com.indagium.utils.jsonSubtreeAt
 import com.indagium.utils.parseRecordJson
-import com.indagium.utils.recordInspectionSource
 import com.indagium.utils.recordFieldRefs
+import com.indagium.utils.recordInspectionSource
 import com.indagium.utils.recordValueText
 
 // Choosing fields of a JSON record in its field tree and adding them to the notes: the pick (a multi-selection of one record),

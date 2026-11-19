@@ -4,11 +4,11 @@ import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
-import com.indagium.utils.distinctRecordFields
 import com.indagium.ui.messageDetailsCopyLabel
 import com.indagium.ui.messageDetailsShowsParsedFields
 import com.indagium.ui.messageDetailsTreeSource
 import com.indagium.ui.profileRecordsAddDetail
+import com.indagium.utils.distinctRecordFields
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

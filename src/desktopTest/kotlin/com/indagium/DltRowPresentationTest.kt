@@ -2,14 +2,14 @@ package com.indagium
 
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.LogEntry
-import com.indagium.model.LogLevel
 import com.indagium.model.LogFormat
-import com.indagium.ui.mkTab
-import com.indagium.ui.tabToken
-import com.indagium.ui.tabShellFromToken
+import com.indagium.model.LogLevel
 import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.dltGridLayout
 import com.indagium.ui.dltGridProjection
+import com.indagium.ui.mkTab
+import com.indagium.ui.tabShellFromToken
+import com.indagium.ui.tabToken
 import com.indagium.utils.RegexEvaluationContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -58,11 +58,11 @@ class DltRowPresentationTest {
         assertEquals(splitRow.indexOf("WRK1"), split.header.indexOf("CTID"))
         assertEquals(splitRow.indexOf("Request accepted"), split.header.indexOf("MESSAGE"))
     }
+
     @Test
     fun theSplitDltColumnChoiceSurvivesTabRestore() {
         val tab = mkTab("dlt", "capture.dlt", emptyList(), logFormat = LogFormat.DLT)
             .copy(sourcePath = "/tmp/capture.dlt", dltSplitIdentifiers = true)
         assertEquals(true, tab.tabToken().tabShellFromToken()?.tab?.dltSplitIdentifiers)
     }
-
 }

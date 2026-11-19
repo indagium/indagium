@@ -213,8 +213,7 @@ internal fun profileDisplayTextProjection(
     }
 
     columns.forEach { column ->
-        val includeColumn = (shownColumnIds == null || column.id in shownColumnIds) &&
-            (includeProcessThread || !isProfileProcessThreadColumn(column.id))
+        val includeColumn = profileColumnShown(column.id, shownColumnIds, includeProcessThread)
         val width = columnWidths?.get(column.id)?.takeIf { includeColumn }
         if (column.value.isBlank()) {
             if (width != null) owedPadding += width + PROFILE_FIELD_SEPARATOR.length
@@ -240,13 +239,11 @@ internal fun profileDisplayTextProjection(
         val renderedFieldStart = text.length
         if (prefix.isNotEmpty()) appendSource(prefix, prefix.takeUnless { underHeader })
         val renderedValueStart = text.length
-        val replacement = processDisplayName?.takeIf {
-            isProfileProcessIdColumn(column.id) && it.isNotBlank() && it != column.value
-        }
+        val replacement = processNameReplacement(column, processDisplayName)
         val value = replacement ?: column.value
         val rendered = if (width != null) boundedProfileCell(value, width) else value
-        if (replacement == null && rendered.endsWith("…") && value.startsWith(rendered.dropLast(1))) {
-            val head = rendered.dropLast(1)
+        val head = if (replacement == null) truncatedCellHead(value, rendered) else null
+        if (head != null) {
             appendSource(head, head)
             appendSource(value.substring(head.length), "…")
         } else {
@@ -267,6 +264,21 @@ internal fun profileDisplayTextProjection(
         sourceSegments = sourceSegments,
         renderedFields = renderedFields,
     )
+}
+
+/** Whether a profile column is drawn: listed in [shownColumnIds] (when given), and not a PID/TID column a narrow tile leaves out. */
+private fun profileColumnShown(id: String, shownColumnIds: Set<String>?, includeProcessThread: Boolean): Boolean =
+    (shownColumnIds == null || id in shownColumnIds) && (includeProcessThread || !isProfileProcessThreadColumn(id))
+
+/** The process name drawn over a PID cell, when one is known and differs from the number. */
+private fun processNameReplacement(column: LogDisplayField, processDisplayName: String?): String? =
+    processDisplayName?.takeIf { isProfileProcessIdColumn(column.id) && it.isNotBlank() && it != column.value }
+
+/** For a cell cut short with "…", the part of [value] that is still drawn; null when [rendered] is the whole value. */
+private fun truncatedCellHead(value: String, rendered: String): String? {
+    if (!rendered.endsWith("…")) return null
+    val head = rendered.dropLast(1)
+    return head.takeIf { value.startsWith(it) }
 }
 
 /**
@@ -291,6 +303,9 @@ internal fun profileDisplayText(
 ): String = profileDisplayTextProjection(columns, processDisplayName, includeProcessThread).text
 
 private const val PROFILE_FIELD_SEPARATOR = "  "
+
+/** How many rows a width scan reads between cancellation checks. */
+private const val CANCELLATION_CHECK_ROWS = 256
 internal const val MAX_PROFILE_COLUMN_CHARS = 40
 private const val MIN_MESSAGE_COLUMN_CHARS = 24
 private const val MAX_CACHED_PROFILE_LAYOUTS = 16
@@ -364,7 +379,7 @@ private fun measureProfileColumns(
     checkCancellation: () -> Unit,
 ) {
     for (index in start until rows.size) {
-        if (index % 256 == 0) checkCancellation()
+        if (index % CANCELLATION_CHECK_ROWS == 0) checkCancellation()
         rows[index].recordMetadata?.displayColumns?.forEach { column ->
             val previous = widths[column.id] ?: 0
             if (previous < MAX_PROFILE_COLUMN_CHARS && column.value.isNotBlank()) {

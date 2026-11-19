@@ -12,8 +12,8 @@ import com.indagium.ui.PendingNoteOverwrite
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.deleteSharedNote
 import com.indagium.ui.mkTab
-import com.indagium.ui.nextDefaultSharedNoteName
 import com.indagium.ui.newPrivateNote
+import com.indagium.ui.nextDefaultSharedNoteName
 import com.indagium.ui.noteOverwriteMessage
 import com.indagium.ui.otherSharedNotes
 import com.indagium.ui.renameSharedNote

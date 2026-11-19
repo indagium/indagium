@@ -1,7 +1,6 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
@@ -36,6 +35,7 @@ private val CSV_ROLE_HINTS = mapOf(
 )
 
 private data class CsvColumnUse(val label: String, val role: LogFieldRole? = null)
+
 private val DETAILS_ONLY = CsvColumnUse("Details only")
 private val EXTRA_COLUMN = CsvColumnUse("Extra column")
 private val CSV_USES = listOf(DETAILS_ONLY, EXTRA_COLUMN) +
@@ -77,6 +77,7 @@ internal fun CsvProfileGuide(
         val requested = ++request
         busy = true
         error = null
+
         fun finish(result: Result<ParsedLog>) {
             if (request != requested) return
             busy = false
@@ -216,7 +217,7 @@ private fun assignCsvColumn(profile: LogFormatProfile, source: String, use: CsvC
     use.role?.let { mappings[it] = source }
     val attribute = if (use == EXTRA_COLUMN) {
         previous ?: run {
-            val base = ("csv_" + source.lowercase(Locale.ROOT).replace(Regex("[^a-zA-Z0-9_]"), "_")).take(90)
+            val base = ("csv_" + source.lowercase(Locale.ROOT).replace(Regex("[^a-zA-Z0-9_]"), "_")).take(MAX_CSV_ATTRIBUTE_ID_CHARS)
             val id = generateSequence(1) { it + 1 }.map { if (it == 1) base else "${base}_$it" }
                 .first { candidate -> retained.none { it.id == candidate } }
             val type = if (source.endsWith("_ms", ignoreCase = true)) LogProfileValueType.NUMBER else LogProfileValueType.TEXT
@@ -231,3 +232,6 @@ private fun assignCsvColumn(profile: LogFormatProfile, source: String, use: CsvC
         visibleColumns = csvColumns(profile, mappings.keys),
     )
 }
+
+/** The longest attribute id made from a CSV column name, before a numeric suffix keeps it unique. */
+private const val MAX_CSV_ATTRIBUTE_ID_CHARS = 90

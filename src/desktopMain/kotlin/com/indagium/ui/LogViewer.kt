@@ -1624,6 +1624,7 @@ internal fun LogViewer(
     val gridCharWidth = remember(gridMeasurer, gridDensity, gridFontSize, mono) {
         monoAdvancePx(gridMeasurer, mono, gridFontSize) / gridDensity.density
     }
+
     fun gridWidth(minimum: Dp, timeDeltaChars: Int): Dp {
         val layout = grid ?: return minimum
         val left = ROW_START_PAD + STRUCTURED_DISCLOSURE_SLOT +

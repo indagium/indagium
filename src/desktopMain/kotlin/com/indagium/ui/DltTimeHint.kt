@@ -1,7 +1,7 @@
 package com.indagium.ui
 
-import com.indagium.model.LogEntry
 import com.indagium.model.LogDisplayField
+import com.indagium.model.LogEntry
 import com.indagium.model.displaySeverityText
 import com.indagium.utils.ProfileColumnLayout
 import com.indagium.utils.ProfileDisplayTextProjection

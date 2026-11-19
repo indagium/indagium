@@ -135,6 +135,7 @@ class LogProfileFeatureAvailabilityUiTest {
             hasTestTag("colheader-profile-text") and hasAnyAncestor(hasTestTag("log-column-header-$tabId:$pane")),
             useUnmergedTree = true,
         ).getUnclippedBoundsInRoot().left.value
+
         fun rowLeft(pane: String): Float =
             rule.onNodeWithTag("log-row-$tabId:$pane-$entryId").getUnclippedBoundsInRoot().left.value
 

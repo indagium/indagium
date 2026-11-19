@@ -126,6 +126,7 @@ class SettingsLogFormatsUiTest {
         var dismissed = false
         state.requestedSettingsPage = SettingsPage.LogFormats
         rule.setContent { SettingsDialog(state, onDismiss = { dismissed = true }) }
+
         fun newDraft(name: String) {
             rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
             rule.onNodeWithTag("settings-log-format-name").performScrollTo().performTextReplacement(name)

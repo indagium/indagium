@@ -93,6 +93,7 @@ internal fun SettingsDialog(
     }
     var aiProviderGuard by remember { mutableStateOf<SettingsDraftGuard?>(null) }
     var logFormatGuard by remember { mutableStateOf<SettingsDraftGuard?>(null) }
+
     fun currentDraftGuard(): SettingsDraftGuard? = when (selectedPage) {
         SettingsPage.AiProviders -> aiProviderGuard
         SettingsPage.LogFormats -> logFormatGuard

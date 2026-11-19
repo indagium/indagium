@@ -10,8 +10,8 @@ import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 import com.indagium.model.TabContentState
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
-import com.indagium.ui.TAB_TOKEN_SHARED_NOTE_INDEX
 import com.indagium.ui.AppState
+import com.indagium.ui.TAB_TOKEN_SHARED_NOTE_INDEX
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.mkTab
 import com.indagium.ui.sharedNoteHostTab

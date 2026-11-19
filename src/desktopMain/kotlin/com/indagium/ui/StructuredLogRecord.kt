@@ -61,12 +61,12 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.AppSettings
-import com.indagium.utils.hasRecordDetails
-import com.indagium.utils.recordInspectionSource
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
 import com.indagium.model.RecordFieldNameColor
 import com.indagium.model.RecordValueAlignment
+import com.indagium.utils.hasRecordDetails
+import com.indagium.utils.recordInspectionSource
 
 private const val MAX_JSON_CHARS = 256 * 1024
 private const val MAX_JSON_DEPTH = 32
