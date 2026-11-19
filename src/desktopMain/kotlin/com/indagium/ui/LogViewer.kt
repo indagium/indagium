@@ -792,7 +792,8 @@ private fun AnnotatedString.Builder.appendTsPidTid(
                 append(entry.pid.toString().padStart(pidFieldWidth))
             }
             append(" ")
-            append(entry.tid.toString().padStart(5))
+            // A DLT frame has a session ID (shown as the pid) but no thread ID: leave the field blank rather than print 0.
+            append(if (entry.tid == 0 && entry.dltEcuId != null) "     " else entry.tid.toString().padStart(5))
         }
     }
 }
@@ -2858,6 +2859,7 @@ internal fun LogViewer(
                     contentFontSizeSp = settings.fontSize,
                     profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
                     profileHeaderFont = mono,
+                    dlt = tab.logFormat == LogFormat.DLT,
                 )
                 ItemList(
                     listItems = allItems,
@@ -2950,6 +2952,7 @@ internal fun LogViewer(
                     contentFontSizeSp = settings.fontSize,
                     profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
                     profileHeaderFont = mono,
+                    dlt = tab.logFormat == LogFormat.DLT,
                 )
                 ItemList(
                     listItems = items,
@@ -3216,6 +3219,7 @@ internal fun LogViewer(
                     contentFontSizeSp = settings.fontSize,
                     profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
                     profileHeaderFont = mono,
+                    dlt = tab.logFormat == LogFormat.DLT,
                 )
                 ItemList(
                     items, computedItems.summary, rowBoundsAbs, boxPosY,

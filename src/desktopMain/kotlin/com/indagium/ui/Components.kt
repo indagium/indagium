@@ -659,6 +659,8 @@ fun ColHeader(
     // the widths the rows use. The header is then drawn in the rows' own font so the two line up.
     profileHeader: String? = null,
     profileHeaderFont: FontFamily? = null,
+    // A DLT tab: its PID column holds the session ID, it has no thread ID, and its tag is ECU/APID/CTID.
+    dlt: Boolean = false,
 ) {
     val tc = tc()
     if (profileHeader != null) {
@@ -705,7 +707,7 @@ fun ColHeader(
             // headerPidColumnWidth/pidFieldColumnWidth's own docs for why.
             val pidColWidth = headerPidColumnWidth(pidFieldChars, contentFontSizeSp.toFloat())
             AppText(
-                "PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                if (dlt) "SID" else "PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.width(pidColWidth).testTag("colheader-pid"),
             )
             // TID is the same class of drift as PID above: entry.tid.toString().padStart(5) is a
@@ -714,10 +716,17 @@ fun ColHeader(
             // safe across the whole font-size range (Settings caps it at 10..24sp; even at the
             // floor, 5 content-font chars comfortably fit the 3-char "TID" label).
             val tidColWidth = pidFieldColumnWidth(contentFontSizeSp.toFloat(), 5)
-            AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(tidColWidth))
+            // A DLT frame has no thread ID: its rows leave the field blank, and so does the header.
+            AppText(
+                if (dlt) "" else "TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(tidColWidth),
+            )
         }
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
-        AppText("TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(100.dp))
+        AppText(
+            if (dlt) "ECU/APP/CTX" else "TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(100.dp),
+        )
         AppText("MESSAGE", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
     }
 }
