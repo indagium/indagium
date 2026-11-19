@@ -133,23 +133,33 @@ internal fun expandableRecordSource(entry: LogEntry, logFormat: LogFormat): Stri
     return null
 }
 
-/** Normalizes embedded physical breaks and keeps collapsed profile/DLT summaries compact. */
+/**
+ * The collapsed row of a record that spans lines or runs long: its first line (cut at the preview cap
+ * with " …"), then how many lines follow, " (+2 lines)". A stack trace is not joined into one line of
+ * frames; expanding the row shows the lines as they are.
+ */
 internal fun compactRecordSummary(text: androidx.compose.ui.text.AnnotatedString): androidx.compose.ui.text.AnnotatedString {
-    if (text.text.length <= MAX_RECORD_PREVIEW_CHARS && '\n' !in text.text && '\r' !in text.text) return text
-    val source = text.subSequence(0, minOf(text.length, MAX_RECORD_PREVIEW_CHARS))
-    val normalizedText = source.text.map { if (it == '\n' || it == '\r') ' ' else it }.joinToString("")
+    val raw = text.text
+    val breakAt = raw.indexOfFirst { it == '\n' || it == '\r' }
+    if (breakAt < 0 && raw.length <= MAX_RECORD_PREVIEW_CHARS) return text
+    val firstLineEnd = if (breakAt < 0) raw.length else breakAt
+    val headEnd = minOf(firstLineEnd, MAX_RECORD_PREVIEW_CHARS)
+    val source = text.subSequence(0, headEnd)
+    val following = if (breakAt < 0) 0 else recordLines(raw.substring(breakAt).trimStart('\r', '\n')).count { it.isNotEmpty() }
+    val suffix = buildString {
+        if (headEnd < firstLineEnd) append(" …")
+        if (following > 0) append(if (following == 1) " (+1 line)" else " (+$following lines)")
+    }
     return androidx.compose.ui.text.buildAnnotatedString {
-        append(normalizedText)
+        append(source.text)
         source.spanStyles.forEach { addStyle(it.item, it.start, it.end) }
-        val truncated = text.length > MAX_RECORD_PREVIEW_CHARS
-        // A paragraph style that ran to the end of the preview must also cover the " …" after it, or
+        // A paragraph style that ran to the end of the preview must also cover the suffix after it, or
         // that suffix would become a paragraph of its own and drop to a new line.
-        val suffix = " …"
-        val paragraphEnd = normalizedText.length + if (truncated) suffix.length else 0
+        val paragraphEnd = source.length + suffix.length
         source.paragraphStyles.forEach {
-            addStyle(it.item, it.start, if (it.end >= normalizedText.length) paragraphEnd else it.end)
+            addStyle(it.item, it.start, if (it.end >= source.length) paragraphEnd else it.end)
         }
-        if (truncated) {
+        if (suffix.isNotEmpty()) {
             pushStyle(androidx.compose.ui.text.SpanStyle(color = Color.Unspecified))
             append(suffix)
             pop()

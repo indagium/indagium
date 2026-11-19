@@ -164,11 +164,13 @@ class ProfileRowHangingIndentTest {
         // A short row passes through as it was.
         val short = AnnotatedString("short").withHangingIndent(50.sp)
         assertTrue(compactRecordSummary(short) === short)
-        // An embedded break is flattened to a space and the paragraph still covers every character.
+        // A record of several lines shows its first line and how many follow; the paragraph still covers every character.
         val twoLines = AnnotatedString("one\ntwo").withHangingIndent(50.sp)
         val flattened = compactRecordSummary(twoLines)
-        assertEquals("one two", flattened.text)
+        assertEquals("one (+1 line)", flattened.text)
         assertEquals(flattened.length, flattened.paragraphStyles.single().end)
+        val trace = compactRecordSummary(AnnotatedString("ERROR boom\n  at a.b(C.kt:1)\n  at c.d(E.kt:2)\n"))
+        assertEquals("ERROR boom (+2 lines)", trace.text)
     }
 
     @Test
