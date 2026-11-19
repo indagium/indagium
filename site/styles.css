@@ -81,6 +81,13 @@ footer { align-items:center; border-top:1px solid var(--line); display:flex; jus
 .step-number { color:var(--green); font-family:var(--mono); font-size:.8rem; }
 .guide-steps h3 { font-size:1.32rem; margin:0 0 10px; }
 .guide-steps p { color:var(--copy); font-family:var(--mono); font-size:.8rem; line-height:1.75; margin:0; max-width:680px; }
+.log-example { min-width:0; }
+.log-example figcaption { margin:0 0 12px; }
+.log-example pre { background:#efeee9; border:1px solid var(--line); color:var(--deep-green); font: .78rem/1.65 var(--mono); margin:0; overflow-x:auto; padding:20px; }
+.log-example pre code { background:none; border:0; color:inherit; font:inherit; padding:0; }
+.log-format-steps { color:var(--copy); font-family:var(--mono); font-size:.8rem; line-height:1.75; margin:0; padding-left:1.25rem; }
+.log-format-steps li + li { margin-top:12px; }
+#custom-profiles .feature-matrix { margin-top:36px; }
 .comparison-table-wrap { overflow-x:auto; }
 .comparison-table { border-collapse:collapse; font-family:var(--mono); font-size:.76rem; line-height:1.6; min-width:720px; width:100%; }
 .comparison-table th, .comparison-table td { border-bottom:1px solid var(--line); padding:20px 18px; text-align:left; vertical-align:top; }
@@ -152,6 +159,7 @@ video { background:var(--paper); }
   .guide-links { display:block; }
   .guide-links a, .guide-links a + a { border-left:0; padding:24px 0; }
   .guide-steps li { gap:15px; grid-template-columns:52px 1fr; padding:25px 16px 25px 24px; }
+  .log-example { margin-top:32px; }
 }
 
 /* Readable legal documents share the site typography without hero-sized headings. */

@@ -1,10 +1,12 @@
-# Indagium (version 1.8.10)
+# Indagium
 
-> Indagium is an analysis-first Android log viewer and logcat analyzer for macOS, Windows, and Linux. It opens saved logcat files and adb bugreports, and can also capture live Android logcat with screen video over USB or Android 11+ wireless debugging. It filters, folds, compares, annotates, and investigates evidence, then exports notes and logs. Capture snapshots default to compatible ZIP archives, with experimental Indagium Compact (.ind) for opening in Indagium; it losslessly compresses logs and can use lossy AV1 video when smaller, while synchronization metadata links available video to its log. Indagium is source-available under the PolyForm Perimeter License, not open source.
+> Indagium is a free, offline Android log viewer and logcat analyzer for macOS, Windows, and Linux. It opens saved logcat files and adb bug reports and captures live Android logcat with screen video over USB or Android 11+ wireless debugging. Its multi-format viewer also opens JSON and JSON Lines (NDJSON), CSV and TSV, syslog, automotive DLT, and other system and application logs. Custom profiles map fields from JSON, delimited logs, and regex-based text logs. Indagium filters, folds, compares, and annotates logs, with shared notes that link back to evidence across tabs. Capture snapshots default to compatible ZIP archives, with optional Indagium Compact (.ind) snapshots. Indagium is source-available under the PolyForm Perimeter License.
 
 ## Pages
 
-- [Home](https://indagium.com/): Analysis-focused overview, application metadata for version 1.8.10, features, and downloads.
+- [Home](https://indagium.com/): Application overview, features, and downloads.
+- [Supported log formats](https://indagium.com/#log-formats): Built-in profiles for JSON Lines, metadata JSON, Pino, Docker json-file, Kubernetes CRI, systemd journal JSON, syslog, dmesg, Apache and Nginx access logs, logfmt, Go slog text, and plain text. Set up CSV/TSV or define your own profiles, and expand structured records to inspect their fields.
+- [Multi-format Log Viewer and Custom Profiles](https://indagium.com/log-formats/): Inspect JSON logs, check how a file was parsed, and create custom CSV, JSON Lines, or regex-based profiles.
 - [Android Logcat Viewer](https://indagium.com/android-logcat-viewer/): Open and read large logcat text files, use the minimap and thread map, and compare tabs.
 - [Android Logcat Analyzer](https://indagium.com/logcat-analyzer/): Filter, highlight, search, fold sequences, and export findings.
 - [Sequence Diagrams](https://indagium.com/sequence-diagrams/): Create editable interaction diagrams from selected Android log rows or a filtered view, retain source evidence, and export an image snapshot or Mermaid/PlantUML source.
@@ -22,7 +24,8 @@
 ## Documentation
 
 - [README](https://github.com/indagium/indagium/blob/master/README.md): Features, installation, live capture, and limitations.
-- [User Guide](https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md): Setup, log analysis, capture, shortcuts, storage, and troubleshooting.
+- [User Guide](https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md): Setup, log analysis, capture, shortcuts, storage, and troubleshooting for the current source.
+- [Latest published release](https://github.com/indagium/indagium/releases/latest): Installers and version information.
 - [Release 1.8.10](https://github.com/indagium/indagium/blob/master/docs/releases/1.8.10.md): AI test suites, configurable Find behavior, setup migration, and walkthrough documentation.
 - [Release 1.8.7](https://github.com/indagium/indagium/blob/master/docs/releases/1.8.7.md): Concise summary of device capture and other user-facing changes.
 - [MCP Guide](https://github.com/indagium/indagium/blob/master/docs/mcp/README.md): Connect an external MCP client and understand device-capture approvals.

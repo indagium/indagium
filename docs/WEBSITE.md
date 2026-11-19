@@ -25,7 +25,12 @@ certificate. Once it does, `www.indagium.com` will redirect to
 `indagium.com`.
 
 The page links its download buttons to the repository's latest GitHub Release,
-so each new release is available immediately without a website update.
+so each new release is available immediately. Publish the multi-format website
+copy after the desktop release that includes log format profiles and shared
+notes is available. Before publishing the site, set the homepage's
+`SoftwareApplication.softwareVersion` to that release's version. A push that
+changes `site/` on `master` deploys automatically, so land the website changes
+after the release is published.
 
 ## Manual discovery handoff
 
@@ -40,24 +45,24 @@ Set the repository homepage to:
 https://indagium.com/
 ```
 
-Set the repository description to this exact text:
+After the log format profiles and shared notes ship, update the repository
+description:
 
 ```
-Android log viewer & logcat analyzer for Windows, macOS and Linux — capture synchronized Android logcat and screen video, analyze crashes and ANRs, open adb bugreports and DLT.
+Android logcat analyzer and multi-format log viewer for JSON, NDJSON, CSV, syslog, and DLT. Capture Android logs and video, create custom log profiles, and keep shared notes.
 ```
 
-Set exactly these topics (and remove unrelated topics):
+Include `json-log-viewer`, `csv-viewer`, and `structured-logging` in the GitHub
+topics when the release ships:
 
 ```
 android
 logcat
 android-logcat
-logcat-capture
 logcat-viewer
+log-viewer
 log-analysis
 android-debugging
-wireless-logcat
-wireless-debugging
 adb
 anr
 bugreport
@@ -69,6 +74,9 @@ kotlin
 compose-multiplatform
 source-available
 developer-tools
+structured-logging
+csv-viewer
+json-log-viewer
 ```
 
 ### Search Console and Bing baseline

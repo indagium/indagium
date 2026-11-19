@@ -3,21 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Capture Android logcat and screen video over USB or Wi-Fi, analyze offline, and export evidence." />
+    <meta name="description" content="Free Android log viewer and logcat analyzer for macOS, Windows, and Linux. Open JSON Lines (NDJSON), CSV, syslog, DLT, and custom log formats offline." />
     <meta name="theme-color" content="#faf9f6" />
     <link rel="canonical" href="https://indagium.com/" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Indagium – Android Log &amp; Logcat Viewer for Mac, Windows, Linux" />
-    <meta property="og:description" content="Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Capture Android logcat and screen video over USB or Wi-Fi, analyze offline, and export evidence." />
+    <meta property="og:title" content="Android Logcat Analyzer &amp; Multi-format Log Viewer | Indagium" />
+    <meta property="og:description" content="Analyze Android logcat and bug reports, and open JSON, CSV, syslog, DLT, and custom log formats in one offline desktop app." />
     <meta property="og:url" content="https://indagium.com/" />
     <meta property="og:image" content="https://indagium.com/assets/media/posters/homepage-workspace.webp" />
     <meta property="og:image:alt" content="Indagium showing grouped USB device events, log filters, and evidence notes." />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Indagium – Android Log &amp; Logcat Viewer for Mac, Windows, Linux" />
-    <meta name="twitter:description" content="Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Capture Android logcat and screen video over USB or Wi-Fi, analyze offline, and export evidence." />
+    <meta name="twitter:title" content="Android Logcat Analyzer &amp; Multi-format Log Viewer | Indagium" />
+    <meta name="twitter:description" content="Analyze Android logcat and bug reports, and open JSON, CSV, syslog, DLT, and custom log formats in one offline desktop app." />
     <meta name="twitter:image" content="https://indagium.com/assets/media/posters/homepage-workspace.webp" />
     <meta name="twitter:image:alt" content="Indagium showing grouped USB device events, log filters, and evidence notes." />
-    <title>Indagium – Android Log &amp; Logcat Viewer for Mac, Windows, Linux</title>
+    <title>Android Logcat Analyzer &amp; Multi-format Log Viewer | Indagium</title>
     <link rel="stylesheet" href="/styles.css" />
     <script src="/zoom.js" defer></script>
     <script type="application/ld+json">
@@ -28,8 +28,8 @@
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS, Windows, Linux",
         "url": "https://indagium.com/",
-        "description": "Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Capture Android logcat and screen video over USB or Wi-Fi, analyze offline, and export evidence.",
-        "softwareVersion": "1.8.10",
+        "description": "Free, offline Android log viewer and logcat analyzer for desktop, with support for JSON, NDJSON, CSV, syslog, DLT, custom format profiles, and shared investigation notes.",
+        "softwareVersion": "1.9.2",
         "downloadUrl": "https://github.com/indagium/indagium/releases/latest",
         "screenshot": "https://indagium.com/assets/media/posters/homepage-workspace.webp",
         "isAccessibleForFree": true,
@@ -63,7 +63,7 @@
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header">
       <a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a>
-      <nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav>
+      <nav aria-label="Primary navigation"><a href="/log-formats/">Log formats</a><a href="#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav>
       <a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a>
     </header>
 
@@ -73,7 +73,7 @@
           <p class="eyebrow">The Log Analysis Studio</p>
           <h1 id="hero-title">Android logcat analysis, from noise <em>to evidence.</em></h1>
           <p class="supporting-line">Every incident has a story.</p>
-          <p class="lede">Indagium is a free, offline Android log viewer and logcat analyzer for investigating adb logcat files, bugreports, and DLT captures — from the first strange line to a clear, shareable explanation.</p>
+          <p class="lede">Indagium is a free, offline Android log viewer and logcat analyzer for investigating adb logcat files and bug reports. Its <a class="inline-link" href="#log-formats">multi-format log viewer</a> also opens JSON, CSV, syslog, automotive DLT, and custom log formats.</p>
           <div class="hero-actions">
             <a class="button" href="https://github.com/indagium/indagium/releases/latest">Get Indagium <span aria-hidden="true">↗</span></a>
             <a class="text-link" href="/guides/analyze-android-logcat/">Read the analysis guide <span aria-hidden="true">→</span></a>
@@ -111,9 +111,40 @@
         <h2 id="studio-title">A log viewer and log analyzer in one. <em>Indagium helps it speak.</em></h2>
         <p class="section-lede">Work through the real sequence of events without flattening it into an endless stream of text. Filter, compare, fold recurring behavior, connect source and video, and leave an explanation the next person can follow.</p>
         <div class="case-index" aria-label="Investigation workflow">
-          <article><span>01</span><h3>Read the log</h3><p>Open logcat .txt/.log files, Android bugreports, large traces, and supported <a class="inline-link" href="/dlt-viewer/">DLT captures</a> in a calm, native workspace — no Android Studio required.</p></article>
+          <article><span>01</span><h3>Read the log</h3><p>Open a structured log, a plain-text trace, or an Android bug report. Check which profile parsed it and choose another profile for a new tab when needed.</p><a class="text-link" href="#log-formats">Browse log formats <span aria-hidden="true">→</span></a></article>
           <article><span>02</span><h3>Connect the clues</h3><p>Follow the timing, repetition, thread activity, source, and video around an incident.</p></article>
           <article><span>03</span><h3>Explain the finding</h3><p>Annotate the proof and export a record that is useful outside the app.</p></article>
+        </div>
+      </section>
+
+      <section class="section guide-band" id="log-formats" aria-labelledby="log-formats-title">
+        <h2 id="log-formats-title">Supported log formats</h2>
+        <p class="section-lede">Indagium detects formats from file contents. Use a built-in profile or define how your own logs turn into columns and records. <a class="inline-link" href="/log-formats/">Explore the multi-format viewer and profile setup</a>.</p>
+        <div class="feature-matrix">
+          <article class="evidence-card" id="json-log-viewer">
+            <h3>JSON log viewer</h3>
+            <p>Read newline-delimited JSON (JSON Lines, NDJSON, or JSONL), JSON arrays and objects, and supported documents with metadata. Expand nested fields and multiline messages. Built-in profiles read Pino logs, Docker <code>json-file</code> logs, and systemd journal JSON exports.</p>
+          </article>
+          <article class="evidence-card" id="csv-log-viewer">
+            <h3>CSV log viewer</h3>
+            <p>Open CSV or TSV logs and choose the delimiter and whether the file has a header. Map columns to timestamps, levels, and messages, and display extra fields such as request ID or duration. Preview the mapping against the original file and save it for reuse.</p>
+          </article>
+          <article class="evidence-card" id="syslog-viewer">
+            <h3>Syslog viewer and Linux logs</h3>
+            <p>Open RFC 5424 and RFC 3164 syslog files, Kubernetes CRI container logs, and Linux <code>dmesg</code> output. <code>dmesg</code> timestamps retain their seconds-since-boot meaning.</p>
+          </article>
+          <article class="evidence-card" id="access-logs">
+            <h3>Apache, Nginx, and text logs</h3>
+            <p>Read Apache or Nginx access logs in Common or Combined format with fields such as HTTP status and response size. Open logfmt and Go <code>slog</code> text as structured records, or read plain-text logs one line at a time.</p>
+          </article>
+          <article class="evidence-card" id="android-dlt-logs">
+            <h3>Android logcat and automotive DLT</h3>
+            <p>Open <a class="inline-link" href="/android-logcat-viewer/">Android logcat</a> files and <a class="inline-link" href="/android-bug-report-viewer/">adb bug reports</a>, or inspect <a class="inline-link" href="/dlt-viewer/">DLT captures and exports</a> with separate ECU, APID, and CTID columns.</p>
+          </article>
+          <article class="evidence-card" id="custom-log-profiles">
+            <h3>Custom log format profiles</h3>
+            <p>In <strong>Settings › Reading logs › Log formats</strong>, map your JSON keys or CSV columns, or build a regex parser from a sample line. Choose which fields appear as columns, then save the profile and export it to share. <a class="inline-link" href="/log-formats/#custom-profiles">See the custom profile walkthrough</a>.</p>
+          </article>
         </div>
       </section>
 
@@ -131,7 +162,7 @@
           </article>
           <article class="exhibit">
             <video controls muted playsinline preload="metadata" poster="/assets/media/posters/demo-notes-export.webp" aria-label="Indagium annotating and exporting findings"><source src="/assets/media/web/demo-notes-export.mp4" type="video/mp4" /></video>
-            <div><p class="exhibit-label">EXHIBIT C <span>/</span> THE RECORD</p><h3>Leave a defensible record.</h3><p>Add notes and context, then export evidence others can understand without reopening the whole log.</p><a class="text-link" href="/android-bug-report-viewer/">Work with bug reports <span aria-hidden="true">→</span></a></div>
+            <div><p class="exhibit-label">EXHIBIT C <span>/</span> THE RECORD</p><h3>Keep shared notes across logs.</h3><p>Add whole rows or selected fields from several tabs to one investigation note. Jump back to the original rows or export the evidence.</p><a class="text-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#shared-notes">Read about shared notes <span aria-hidden="true">→</span></a></div>
           </article>
           <article class="exhibit reversed">
             <video controls muted playsinline preload="metadata" poster="/assets/media/posters/sequence-diagram-workspace.webp" aria-label="Indagium turning selected log rows into an editable sequence diagram with linked queue and canvas"><source src="/assets/media/web/sequence-diagram-workspace.mp4" type="video/mp4" /></video>
@@ -178,8 +209,8 @@
     </main>
 
     <footer>
-      <div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div>
-      <nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/eula/">Binary EULA</a><a href="/licenses/">Third-party licences</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav>
+      <div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>Android logcat analyzer and multi-format log viewer.</p></div>
+      <nav aria-label="Footer navigation"><a href="#log-formats">Log formats</a><a href="/android-logcat-viewer/">Android logcat viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/eula/">Binary EULA</a><a href="/licenses/">Third-party licences</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav>
     </footer>
   </body>
 </html>

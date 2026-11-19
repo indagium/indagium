@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Open JSON, JSON Lines (NDJSON), CSV, TSV, and syslog on macOS, Windows, and Linux. Learn to create custom log format profiles with field mapping and regex." />
+    <link rel="canonical" href="https://indagium.com/log-formats/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Multi-format Log Viewer &amp; Custom Log Formats | Indagium" />
+    <meta property="og:description" content="Read structured logs offline on macOS, Windows, and Linux. Open JSON Lines, map CSV columns, and build reusable profiles for your own logs." />
+    <meta property="og:url" content="https://indagium.com/log-formats/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/homepage-workspace.webp" />
+    <meta property="og:image:alt" content="Indagium showing log rows, filters, and evidence notes." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>Multi-format Log Viewer &amp; Custom Log Formats | Indagium</title>
+    <link rel="stylesheet" href="/styles.css?v=log-formats" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Log Formats", "item": "https://indagium.com/log-formats/" }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a>
+      <nav aria-label="Primary navigation"><a href="/log-formats/" aria-current="page">Log formats</a><a href="/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav>
+      <a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main id="main">
+      <section class="page-hero" aria-labelledby="page-title">
+        <div>
+          <h1 id="page-title">Multi-format log viewer with <em>custom profiles</em></h1>
+          <p class="page-lede">Open JSON, CSV, syslog, Android logcat, and automotive DLT in a free desktop app for macOS, Windows, and Linux. Browse the <a class="inline-link" href="#supported-formats">supported log formats</a> or choose how your own logs turn into columns and records.</p>
+          <div class="hero-actions">
+            <a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a>
+            <a class="text-link" href="#custom-profiles">Create a custom profile <span aria-hidden="true">↓</span></a>
+          </div>
+        </div>
+        <figure class="page-hero-figure log-example">
+          <figcaption id="json-example-label">Example JSON log event</figcaption>
+          <pre tabindex="0" aria-labelledby="json-example-label"><code>{
+  "timestamp": "2026-11-16T12:00:00Z",
+  "level": "INFO",
+  "message": "Request completed",
+  "request": {
+    "id": "req-001",
+    "duration_ms": 20
+  }
+}</code></pre>
+        </figure>
+      </section>
+
+      <section class="section guide-band" id="supported-formats" aria-labelledby="supported-formats-title">
+        <h2 id="supported-formats-title">Supported log formats</h2>
+        <div class="feature-matrix">
+          <article class="evidence-card">
+            <h3>JSON and application logs</h3>
+            <p>JSON Lines (NDJSON or JSONL), pretty-printed JSON objects, arrays of events, JSON with metadata and nested sections, and Pino JSON. The logfmt profile also reads Go <code>slog</code> text.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>System and container logs</h3>
+            <p>Syslog RFC 5424 and RFC 3164, systemd journal JSON exports, Linux <code>dmesg</code> with boot-relative timestamps, Docker <code>json-file</code>, and Kubernetes CRI container logs.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>HTTP access logs and plain text</h3>
+            <p>Apache and Nginx HTTP access logs in Common or Combined format. Plain-text logs can be read one non-empty line at a time.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>Android logcat and automotive DLT</h3>
+            <p><a class="inline-link" href="/android-logcat-viewer/">Android logcat</a> in threadtime, time, brief, and bare formats. The <a class="inline-link" href="/dlt-viewer/">DLT viewer</a> opens binary <code>.dlt</code> captures and raw DLT v1 streams, along with DLT Viewer text and CSV exports.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>CSV, TSV, and custom text formats</h3>
+            <p>Use a <a class="inline-link" href="#custom-profiles">custom profile</a> to map CSV or TSV columns, assign your own JSON keys, or parse a text layout with a regex.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>Bug reports and capture archives</h3>
+            <p>Open <a class="inline-link" href="/android-bug-report-viewer/">Android bug report archives</a> (<code>.zip</code> and <code>.7z</code>) and reopen Indagium captures saved as <a class="inline-link" href="/ind-format/">ZIP or Compact (<code>.ind</code>)</a>.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section guide-band" id="json-logs" aria-labelledby="json-title">
+        <h2 id="json-title">Open and inspect JSON logs</h2>
+        <p class="section-lede">Open a JSON, JSON Lines, or NDJSON file and Indagium detects its format from the contents. The JSON Lines profile reads one event per line, pretty-printed objects, and arrays of events. Built-in profiles also recognize Pino, Docker <code>json-file</code>, and systemd journal JSON.</p>
+        <div class="feature-matrix">
+          <article class="evidence-card">
+            <h3>Inspect one event at a time</h3>
+            <p>Select a row to see nested fields in <strong>Message details</strong>, or expand the row in the log. In the example above, the request ID and duration stay together under <code>request</code>.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>Check how a file was parsed</h3>
+            <p>Right-click the tab and choose <strong>Format details</strong> to see which profile parsed the file and how many records it read. Pick a different profile and choose <strong>Reparse as new tab</strong> to keep the original tab available.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section guide-band" id="custom-profiles" aria-labelledby="profiles-title">
+        <h2 id="profiles-title">Create a custom log format profile</h2>
+        <p class="section-lede">Open <strong>Settings › Reading logs › Log formats</strong>. Choose <strong>New profile</strong> or select a built-in profile and choose <strong>Duplicate to edit</strong>.</p>
+        <div class="split-callout">
+          <div>
+            <h3>Map a CSV or TSV file</h3>
+            <ol class="log-format-steps">
+              <li>Choose <strong>Set up CSV / TSV</strong>. Use <strong>Current tab</strong> or paste the original file contents under <strong>Paste source</strong>.</li>
+              <li>Pick the delimiter and indicate whether the first row contains field names. Choose <strong>Read columns</strong>.</li>
+              <li>Map <code>time</code>, <code>level</code>, and <code>message</code> to their roles. Add <code>request_id</code> and <code>duration_ms</code> as extra columns.</li>
+              <li>Choose <strong>Preview mapping</strong> to check the parsed rows, then <strong>Save profile</strong>. Apply it to an open file from <strong>Format details</strong>.</li>
+            </ol>
+          </div>
+          <figure class="page-hero-figure log-example">
+            <figcaption id="csv-example-label">Example CSV source with a header</figcaption>
+            <pre tabindex="0" aria-labelledby="csv-example-label"><code>time,level,message,request_id,duration_ms
+2026-11-16T12:00:00Z,INFO,Request completed,req-001,20
+2026-11-16T12:00:01Z,WARN,"Retrying, attempt 2",req-002,45</code></pre>
+          </figure>
+        </div>
+        <div class="feature-matrix">
+          <article class="evidence-card">
+            <h3>Map custom JSON fields</h3>
+            <p>With a JSON Lines profile, assign your source keys to roles such as timestamp, severity, and message. Add fields you want to see as columns and use <strong>Severity mapping</strong> if your logger uses its own level names.</p>
+          </article>
+          <article class="evidence-card">
+            <h3>Build a parser from a sample line</h3>
+            <p>For custom text logs, paste a representative line and assign roles to its pieces. <strong>Use these columns</strong> generates a record regex you can edit. Save it and use <strong>Export current…</strong> to share the profile.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section guide-band" aria-labelledby="related-title">
+        <h2 id="related-title">Related guides</h2>
+        <nav class="guide-links" aria-label="Related log format resources">
+          <a href="/dlt-viewer/"><span>Automotive logs</span><b>Open and analyze a DLT capture →</b></a>
+          <a href="/android-logcat-viewer/"><span>Android logs</span><b>Explore the Android logcat viewer →</b></a>
+          <a href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#log-formats"><span>User guide</span><b>Read about format detection and profile settings →</b></a>
+        </nav>
+      </section>
+    </main>
+    <footer>
+      <div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>Android logcat analyzer and multi-format log viewer.</p></div>
+      <nav aria-label="Footer navigation"><a href="/">Home</a><a href="/guides/">Guides</a><a href="/android-logcat-viewer/">Android logcat viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/eula/">Binary EULA</a><a href="/licenses/">Third-party licences</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav>
+    </footer>
+  </body>
+</html>
