@@ -493,7 +493,8 @@ private fun StructuredContainerRows(
                         StructuredHexSummary(hexBytes, mono, tc, wrap = initiallyExpanded, modifier = valueModifier)
                     } else {
                         val valueText = if (initiallyExpanded && child is StructuredJsonValue.StringValue && !multilineText) {
-                            child.value
+                            // A one-line value that ends in its line break (Docker's `log`) shows without an empty line under it.
+                            recordLines(child.value).single()
                         } else {
                             scalarOrContainerSummary(child)
                         }
