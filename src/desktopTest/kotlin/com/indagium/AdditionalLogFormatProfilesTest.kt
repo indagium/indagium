@@ -3,8 +3,10 @@ package com.indagium
 import com.indagium.model.ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
+import com.indagium.ui.expandableRecordSource
 import com.indagium.utils.detectAdditionalLogProfile
 import com.indagium.utils.detectAdditionalLogProfileResult
 import com.indagium.utils.parseCriProfile
@@ -157,6 +159,10 @@ class AdditionalLogFormatProfilesTest {
         assertEquals("relative:kernel-capture-a", entry.parsedTime?.clockIdentity)
         assertNull(entry.parsedTime?.epochMillis)
         assertEquals("[    1.250000] usb 1-1: device attached", entry.rawRecord)
+        // Seconds since boot carry their unit, so the column does not read as a time of day.
+        assertEquals("1.250000 s", entry.column("timestamp"))
+        // The leading "[" is text, not a JSON array: the row has nothing to expand.
+        assertNull(expandableRecordSource(entry, LogFormat.LOGCAT))
     }
 
     @Test

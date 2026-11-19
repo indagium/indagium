@@ -1036,7 +1036,7 @@ internal fun recordToEntry(
     val messageText = (if (record.parseFields) role(LogFieldRole.MESSAGE) else null)?.withoutTrailingLineBreak()
     val visibleColumnFields = profile.visibleColumns.map { visibleRole ->
         val value = when (visibleRole) {
-            LogFieldRole.TIMESTAMP -> parsedTime?.let { epochDisplayTime(it, profile) } ?: timeText.orEmpty()
+            LogFieldRole.TIMESTAMP -> parsedTime?.let { epochDisplayTime(it, profile) } ?: timeText?.let { relativeDisplayTime(it, profile) }.orEmpty()
             LogFieldRole.SEVERITY -> severityText?.let { numericSeverityName(profile, it) } ?: severityText.orEmpty()
             LogFieldRole.COMPONENT -> role(visibleRole).orEmpty()
             LogFieldRole.MESSAGE -> messageText ?: role(visibleRole)?.withoutTrailingLineBreak() ?: record.raw
@@ -1088,6 +1088,21 @@ internal fun epochDisplayTime(time: ParsedTime, profile: LogFormatProfile): Stri
     val millis = time.epochMillis ?: return null
     val zone = profile.timezone.takeIf(String::isNotBlank)?.let { runCatching { ZoneId.of(it) }.getOrNull() } ?: ZoneOffset.UTC
     return runCatching { Instant.ofEpochMilli(millis).atZone(zone).format(EPOCH_DISPLAY_FORMAT) }.getOrNull()
+}
+
+/**
+ * The timestamp column's text for a bare number on a relative clock (dmesg's seconds since boot): the
+ * number with its unit, "1.500000 s", so it does not read as a time of day. Anything else as written.
+ */
+internal fun relativeDisplayTime(text: String, profile: LogFormatProfile): String {
+    if (profile.timestampKind != ProfileTimestampKind.RELATIVE || text.trim().toDoubleOrNull() == null) return text
+    val unit = when (profile.epochUnit) {
+        ProfileEpochUnit.SECONDS -> "s"
+        ProfileEpochUnit.MILLIS -> "ms"
+        ProfileEpochUnit.MICROS -> "µs"
+        ProfileEpochUnit.NANOS -> "ns"
+    }
+    return "${text.trim()} $unit"
 }
 
 /**

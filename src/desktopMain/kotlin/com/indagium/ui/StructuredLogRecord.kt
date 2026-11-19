@@ -124,8 +124,8 @@ private class RecordValueLayout(val alignment: RecordValueAlignment, val keyColu
 internal fun expandableRecordSource(entry: LogEntry, logFormat: LogFormat): String? {
     val raw = entry.rawRecord
     if (raw != null && entry.recordMetadata?.usesProfilePresentation == true) {
-        val first = raw.dropWhile(Char::isWhitespace).firstOrNull()
-        if (raw.contains('\n') || raw.contains('\r') || first == '{' || first == '[') return raw
+        // A line that only starts with "[" (dmesg's "[    1.500000] …") is text, not a JSON array: isJsonRecord parses it.
+        if (raw.contains('\n') || raw.contains('\r') || isJsonRecord(raw)) return raw
     }
     if (logFormat == LogFormat.DLT && (entry.msg.contains('\n') || entry.msg.contains('\r'))) {
         return raw ?: entry.msg
@@ -768,8 +768,9 @@ private fun StructuredHexDump(entryId: Int, path: String, bytes: ByteArray, dept
     }
 }
 
+// One trailing line break ends the last line rather than starting an empty one: Docker's `log` field is "text\n".
 private fun recordLines(value: String): List<String> =
-    value.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+    value.replace("\r\n", "\n").replace('\r', '\n').removeSuffix("\n").split('\n')
 
 private fun scalarOrContainerSummary(value: StructuredJsonValue): String = when (value) {
     is StructuredJsonValue.ObjectValue -> "{${value.fields.size} fields}"
