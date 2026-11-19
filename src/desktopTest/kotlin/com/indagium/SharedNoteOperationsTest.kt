@@ -5,7 +5,7 @@ import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
-import com.indagium.model.SharedNoteClosedMember
+import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 import com.indagium.ui.AppState
 import com.indagium.ui.PendingNoteOverwrite
@@ -13,6 +13,7 @@ import com.indagium.ui.createSharedNote
 import com.indagium.ui.deleteSharedNote
 import com.indagium.ui.mkTab
 import com.indagium.ui.nextDefaultSharedNoteName
+import com.indagium.ui.newPrivateNote
 import com.indagium.ui.noteOverwriteMessage
 import com.indagium.ui.otherSharedNotes
 import com.indagium.ui.renameSharedNote
@@ -313,6 +314,81 @@ class SharedNoteOperationsTest {
     }
 
     @Test
+    fun newPrivateNoteSkipsAnUnwrittenSharedExportTarget() {
+        val dir = createTempDirectory("shared-ops-new-private").toFile()
+        val state = withTabs(dir, autoExport = true)
+        try {
+            val id = assertNotNull(state.createSharedNote("a", listOf("a")))
+            val shared = File(dir, "notes/a_analysis.md")
+            val own = File(dir, "notes/a_analysis_2.md")
+            assertEquals(shared.name, state.host(id).noteTargetName)
+            assertFalse(shared.exists())
+
+            state.newPrivateNote("a")
+            assertNull(state.tab("a")?.notesView)
+            assertEquals(own.name, state.tab("a")?.noteTargetName)
+            state.addNoteBlock("a", "private finding")
+            waitUntil { own.exists() && own.readText().contains("private finding") }
+            state.addNoteBlock(id, "shared finding")
+            waitUntil { shared.exists() && shared.readText().contains("shared finding") }
+
+            assertFalse(own.readText().contains("shared finding"))
+            assertFalse(shared.readText().contains("private finding"))
+            assertNull(state.pendingNoteOverwrite)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun firstPrivateEditSkipsAnUnwrittenSharedExportTarget() {
+        val dir = createTempDirectory("shared-ops-first-private-edit").toFile()
+        val state = withTabs(dir, autoExport = true)
+        try {
+            val id = assertNotNull(state.createSharedNote("a", listOf("a")))
+            assertEquals("a_analysis.md", state.host(id).noteTargetName)
+            assertFalse(File(dir, "notes/a_analysis.md").exists())
+            assertNull(state.tab("a")?.noteTargetName)
+
+            state.setNotesView("a", null)
+            state.addNoteBlock("a", "private finding")
+
+            assertEquals("a_analysis_2.md", state.tab("a")?.noteTargetName)
+            val own = File(dir, "notes/a_analysis_2.md")
+            waitUntil { own.exists() && own.readText().contains("private finding") }
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun editingAnOlderDuplicatePinKeepsTheExistingExportIntact() {
+        val dir = createTempDirectory("shared-ops-duplicate-pin").toFile()
+        val state = withTabs(dir, autoExport = true)
+        try {
+            val id = assertNotNull(state.createSharedNote("a", listOf("a")))
+            val shared = File(dir, "notes/a_analysis.md")
+            state.addNoteBlock(id, "original shared export")
+            waitUntil { shared.exists() && shared.readText().contains("original shared export") }
+            state.upTab("a") { it.copy(noteTargetName = shared.name) }
+
+            state.addNoteBlock("a", "private finding")
+
+            val own = File(dir, "notes/a_analysis_2.md")
+            assertEquals(own.name, state.tab("a")?.noteTargetName)
+            waitUntil { own.exists() && own.readText().contains("private finding") }
+            assertEquals(shared.name, state.host(id).noteTargetName)
+            assertTrue(shared.readText().contains("original shared export"))
+            assertFalse(shared.readText().contains("private finding"))
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun shareTabNoteRefusesWhileAnOverwritePromptIsPendingForTheTab() {
         val dir = createTempDirectory("shared-ops-share-pending").toFile()
         val state = withTabs(dir)
@@ -351,7 +427,7 @@ class SharedNoteOperationsTest {
         val state = withTabs(dir)
         val other = assertNotNull(state.createSharedNote("Other", listOf("c")))
         val id = assertNotNull(state.createSharedNote("Main", listOf("a", "b")))
-        val closed = SharedNoteClosedMember("z", "z.log", "/tmp/z.log")
+        val closed = SharedNoteClosedSource("z", "z.log", "/tmp/z.log")
         state.addSharedNoteHost(state.host(id).let { it.copy(sharedNote = it.sharedNote!!.copy(closedMembers = listOf(closed))) })
 
         assertTrue(state.setSharedNoteMembers(id, listOf("b", "c", "nope")))
@@ -630,7 +706,7 @@ class SharedNoteOperationsTest {
         state.closeTab("a")
         assertEquals(listOf("b", "c", "d", "e"), state.host(id).sharedNote!!.memberTabIds)
         assertEquals(
-            listOf(SharedNoteClosedMember("a", "a.log", File(dir, "a.log").absolutePath)),
+            listOf(SharedNoteClosedSource("a", "a.log", File(dir, "a.log").absolutePath)),
             state.host(id).sharedNote!!.closedMembers,
         )
 
@@ -815,7 +891,7 @@ class SharedNoteOperationsTest {
         val state = withTabs(dir)
         val id = assertNotNull(state.createSharedNote("Main", listOf("a")))
         state.addSharedNoteHost(
-            state.host(id).let { it.copy(sharedNote = it.sharedNote!!.copy(closedMembers = listOf(SharedNoteClosedMember("x", "x.log", null)))) },
+            state.host(id).let { it.copy(sharedNote = it.sharedNote!!.copy(closedMembers = listOf(SharedNoteClosedSource("x", "x.log", null)))) },
         )
 
         assertFalse(state.reopenSharedNoteMember(id, "x"))
@@ -830,7 +906,7 @@ class SharedNoteOperationsTest {
         logFile(dir, "b.log")
         val id = assertNotNull(state.createSharedNote("Main", listOf("a")))
         state.putBlocks(id, logRef("r1", "gone", 1))
-        val closed = SharedNoteClosedMember("gone", "b.log", File(dir, "b.log").absolutePath)
+        val closed = SharedNoteClosedSource("gone", "b.log", File(dir, "b.log").absolutePath)
         state.addSharedNoteHost(state.host(id).let { it.copy(sharedNote = it.sharedNote!!.copy(closedMembers = listOf(closed))) })
 
         assertTrue(state.reopenSharedNoteMember(id, "gone"))

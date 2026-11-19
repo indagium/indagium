@@ -230,13 +230,14 @@ class IncrementalProfileParserTest {
             assertFalse(initial.last().severityKnown, "the initial whole-file parse flushes an unterminated row as raw")
 
             val parser = assertNotNull(IncrementalProfileParser.forFile(csvProfile, CLOCK, file, initial))
-            val appended = listOf("after\"", "2024-01-01T00:00:02Z,ERROR,third,trace-c")
+            val appended = listOf("after\",trace-b", "2024-01-01T00:00:02Z,ERROR,third,trace-c")
             val updated = parser.append(appended, 3, initialLines.size.toLong())
             assertEquals(setOf(initial.last().id), parser.replacedEntryIds)
             assertEquals(listOf(2, 3), updated.entries.map { it.id })
             assertEquals(listOf(3L, 5L), updated.entries.map { it.sourceStartLine })
             assertEquals(listOf(4L, 5L), updated.entries.map { it.sourceEndLine })
             assertEquals("before\nafter", updated.entries.first().msg)
+            assertEquals("trace-b", updated.entries.first().profileFields["trace"])
 
             val combined = initial.dropLast(1) + updated.entries
             assertSameRows(whole(csvProfile, initialLines + appended), combined, "seeded CSV continuation")

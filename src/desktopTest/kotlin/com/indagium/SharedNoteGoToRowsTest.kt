@@ -2,6 +2,9 @@ package com.indagium
 
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFieldRole
+import com.indagium.model.LogFormatEngine
+import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.TabContentState
@@ -386,6 +389,59 @@ class SharedNoteGoToRowsTest {
             app.closeTab("a")
 
             assertEquals(GoToRowsResult.NoSource, go { app.goToLogRefRowsAfterReopen(host, "a", block, "b") })
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aNonMemberCompareSourceReopensWithItsProfileAndRemainsOutsideTheNote() {
+        val dir = createTempDirectory("goto-compare-source").toFile()
+        val app = twoTabs(dir)
+        try {
+            val file = File(dir, "source.log").apply { writeText("Worker: request timed out\n") }
+            val profile = LogFormatProfile(
+                id = "compare-source-profile",
+                name = "Compare source profile",
+                engine = LogFormatEngine.REGEX,
+                regexPattern = "^(\\w+): (.*)$",
+                fieldMappings = mapOf(LogFieldRole.COMPONENT to "1", LogFieldRole.MESSAGE to "2"),
+            )
+            val sourceId = assertNotNull(app.openFileWithLogFormatProfile(file, profile))
+            waitUntil("the source loads") { app.tab(sourceId)?.contentState == TabContentState.LOADED }
+            val originalSnapshot = assertNotNull(app.tab(sourceId)?.logFormatProfileSnapshot)
+            app.activeTabId = "a"
+            val host = assertNotNull(app.createSharedNote("Compare review", listOf("a")))
+            app.compareTabId = sourceId
+            app.compareMode = true
+            app.requestAddAnn(sourceId, listOf(1))
+            val request = assertNotNull(app.addAnnRequest)
+            assertEquals(host, request.targetTabId)
+            app.confirmAddAnn(request, "Compare excerpt", AnnBlock.LogRefPresentationOptions())
+            val block = assertNotNull(app.sharedNoteHost(host)).annotations.blocks.single() as AnnBlock.LogRef
+
+            app.closeTab(sourceId)
+            val closed = assertNotNull(app.sharedNoteHost(host)?.sharedNote)
+            assertTrue(closed.closedMembers.isEmpty())
+            assertEquals(originalSnapshot, closed.closedReferenceSources.single().logFormatProfileSnapshot)
+            assertEquals(GoToRowsResult.NeedsReopen(host, sourceId), go { app.goToLogRefRows(block, "a") })
+
+            // An open tab on a different profile for the same file cannot satisfy the recorded source.
+            val other = assertNotNull(app.openFileWithLogFormatProfile(file, "plain-text"))
+            waitUntil("the alternate view loads") { app.tab(other)?.contentState == TabContentState.LOADED }
+            assertEquals(GoToRowsResult.NeedsReopen(host, sourceId), go { app.goToLogRefRows(block, "a") })
+
+            val navigated = assertIs<GoToRowsResult.Navigated>(go { app.goToLogRefRowsAfterReopen(host, sourceId, block, "a") })
+            val reopened = assertNotNull(app.tab(navigated.tabId))
+            assertEquals(originalSnapshot, reopened.logFormatProfileSnapshot)
+            assertEquals(listOf(1), navigated.rowIds)
+            assertEquals(setOf(1), reopened.selected)
+            assertNull(reopened.notesView)
+            val updated = assertNotNull(app.sharedNoteHost(host))
+            assertEquals(listOf("a"), updated.sharedNote?.memberTabIds)
+            assertTrue(updated.sharedNote?.closedReferenceSources.orEmpty().isEmpty())
+            assertEquals(reopened.id, (updated.annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
         } finally {
             app.close()
             dir.deleteRecursively()

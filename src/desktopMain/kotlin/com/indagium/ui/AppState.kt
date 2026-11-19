@@ -13095,8 +13095,7 @@ class AppState(
         originGroupId: String? = null,
     ) {
         synchronized(stateLock) {
-            // The one place every newly opened tab passes through: a file that was a closed member of a shared note
-            // comes back as a member of it (SharedNotes.kt).
+            // Rebind shared-note references to this file and restore any former membership.
             val tab = attachReopenedTabToSharedNotesLocked(opened)
             val launcherIndex = originLauncherId?.takeIf { it == activeLauncherTabId() }
                 ?.let { id -> tabs.indexOfFirst { it.id == id } } ?: -1
@@ -16012,29 +16011,11 @@ class AppState(
     // then seeds a fresh From prefix from this tab's current source and the configured label. The
     // old prefix belongs to the previous analysis and must not leak into the new one.
     //
-    // Pins noteTargetName to the next genuinely-free "_N" slot via the SAME nextFreeNoteTargetName
-    // walk, and the SAME "conflict means either .md OR .ann exists" predicate, saveNotesToNewNoteFile
-    // uses — one naming scheme for "give me an unused note file," not two. The clear and the pin are
-    // one upTab call for the reason loadAnnotationsFrom/confirmNoteOverwrite both document: a second,
-    // later call pinning the name would leave a window where a zero-block, not-yet-pinned tab could
-    // be read as "still the old file" by anything racing this one (autosave, an MCP tool call).
-    //
-    // Uses upTab, not upAnn: like openNoteFile, starting fresh is not itself an edit to react to —
-    // and since nextFreeNoteTargetName-by-construction only ever returns a name nothing on disk owns
-    // yet, upAnn's autoExportDecision could never return Conflict on it anyway (it requires blocks to be
-    // non-empty, and this tab has none). Going through plain upTab makes that guarantee visible at
-    // the call site instead of relying on a downstream check to happen to agree: pendingNoteOverwrite
-    // is untouched by this function, full stop. The previous file is never read, moved, or written —
-    // it simply stops being this tab's export target, exactly as if the user had never opened it.
-    // And since autoExportAnnotations' own `blocks.isEmpty()` guard short-circuits before any file
-    // I/O, the newly pinned name touches disk only once the user adds their first real note — a
-    // click on this button alone creates nothing.
-    fun newAnalysis(tabId: String) {
+    // Selects and pins the name in the same state transaction. The fresh note writes to disk
+    // when its first block is added.
+    fun newAnalysis(tabId: String): Unit = synchronized(stateLock) {
         val t = noteTab(tabId) ?: return
-        val targetDir = activeNotesDir()
-        val newName = nextFreeNoteTargetName(analysisNoteMarkdownName(t.filename, t.sourcePath), MAX_NOTE_TARGET_SUFFIX) { name ->
-            File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
-        }
+        val newName = freeNoteTargetName(analysisNoteMarkdownName(t.filename, t.sourcePath), exceptNoteId = tabId)
         val sourceName = archiveQualifiedLabel(t.sourcePath) ?: t.filename
         val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
         upTab(tabId) {
@@ -16043,6 +16024,22 @@ class AppState(
                 noteTargetName = newName,
                 recoveredNoteRows = emptyMap(),
             )
+        }
+    }
+
+    private fun reservedNoteTargetNames(exceptNoteId: String? = null): Set<String> =
+        (tabs.asSequence() + sharedNoteHosts.asSequence())
+            .filter { it.id != exceptNoteId }
+            .mapNotNull { it.noteTargetName?.lowercase() }
+            .toSet()
+
+    /** Finds a target free in memory and on disk. Callers hold [stateLock] through assignment. */
+    internal fun freeNoteTargetName(baseName: String, exceptNoteId: String? = null): String {
+        val directory = activeNotesDir()
+        val reserved = reservedNoteTargetNames(exceptNoteId)
+        return nextFreeNoteTargetName(baseName, MAX_NOTE_TARGET_SUFFIX) { name ->
+            name.lowercase() in reserved || File(directory, name).exists() ||
+                File(directory, "${name.removeSuffix(".md")}.ann").exists()
         }
     }
 
@@ -17073,8 +17070,8 @@ class AppState(
     // fingerprint logic below runs: that's the whole point of the pin, and it also fixes an
     // adjacent latent bug where opening "foo_analysis_2.md" and editing it re-exported to the
     // plain "foo_analysis.md" instead. Otherwise, reuses the plain "<name>_analysis.md" whenever
-    // there's no evidence of a different owner (no fingerprint recorded yet — a legacy or
-    // first-time save — or it already matches this tab's sourcePath, or this tab has no sourcePath
+    // the target has no in-memory reservation and there's no evidence of a different owner
+    // (no fingerprint recorded yet, it already matches the source path, or the tab has no source path
     // to compare); otherwise walks "_2", "_3", ... until it finds a slot with no conflicting
     // fingerprint, so a genuine collision no longer silently overwrites an unrelated file's saved
     // notes.
@@ -17088,19 +17085,13 @@ class AppState(
         tab.noteTargetName?.let { return File(targetDir, it) }
         val baseName = analysisNoteMarkdownName(tab.filename, tab.sourcePath)
         val sourcePath = tab.sourcePath
-        if (sourcePath == null) return File(targetDir, baseName)
-        var candidateName = baseName
-        var suffix = 2
-        while (suffix < MAX_NOTE_TARGET_SUFFIX) {
-            val candidate = File(targetDir, candidateName)
-            val ownedByThisTabOrFree = when (val recorded = readSourceFingerprint(candidate)) {
-                is SourceFingerprint.NotRecorded -> true
-                is SourceFingerprint.Recorded -> recorded.path == sourcePath
-                SourceFingerprint.Unreadable -> false
-            }
-            if (ownedByThisTabOrFree) return candidate
-            candidateName = "${baseName.removeSuffix(".md")}_$suffix.md"
-            suffix++
+        val reserved = reservedNoteTargetNames(exceptNoteId = tab.id)
+        val candidateName = nextFreeNoteTargetName(baseName, MAX_NOTE_TARGET_SUFFIX) { name ->
+            name.lowercase() in reserved || (sourcePath != null && when (val recorded = readSourceFingerprint(File(targetDir, name))) {
+                SourceFingerprint.NotRecorded -> false
+                is SourceFingerprint.Recorded -> recorded.path != sourcePath
+                SourceFingerprint.Unreadable -> true
+            })
         }
         return File(targetDir, candidateName)
     }
@@ -17161,18 +17152,13 @@ class AppState(
     }
 
     /** "Save to a new file": pick the next free "_2"/"_3"/... name and pin to that instead. */
-    fun saveNotesToNewNoteFile() {
+    fun saveNotesToNewNoteFile(): Unit = synchronized(stateLock) {
         val pending = pendingNoteOverwrite ?: return
         // File-conflict-only action (see confirmNoteOverwrite's identical guard) — the hand-edit
         // dialog has no "Save to a new file" button.
         if (pending.handEdit != null) return
         pendingNoteOverwrite = null
-        val targetDir = activeNotesDir()
-        // Check the .ann sidecar too, not just the .md — a hand-deleted .md with an orphaned
-        // sidecar would otherwise let this pick a slot whose sidecar it then clobbers.
-        val newName = nextFreeNoteTargetName(pending.targetName, MAX_NOTE_TARGET_SUFFIX) { name ->
-            File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
-        }
+        val newName = freeNoteTargetName(pending.targetName)
         // Same reasoning as confirmNoteOverwrite: commit pending.pendingTab, the snapshot that
         // actually carries the edit(s) this prompt held back, not the still-unedited live tab.
         upAnn(pending.tabId) { pending.pendingTab.copy(noteTargetName = newName) }
@@ -17252,16 +17238,14 @@ class AppState(
      *  an unpinned tab pins it in the SAME atomic step, so no later call on the same tab can ever
      *  observe "blocks present, still unpinned" and re-derive a target from scratch. */
     private sealed interface AutoExportDecision {
-        /** Auto-export is off, `next` has no blocks yet, or `next` is already pinned — nothing to
-         *  decide; commit `next` as-is and let [autoExportAnnotations] do its usual thing. */
+        /** Auto-export is off, the note is empty, or its pin can be reused. */
         data object Skip : AutoExportDecision
 
         /** `next` would be the first edit on this (still-unpinned) tab to collide with an existing,
          *  un-owned export target — the case that needs a human decision before anything commits. */
         data class Conflict(val mdFile: File) : AutoExportDecision
 
-        /** `next` is the first edit to add blocks to a still-unpinned tab, and its resolved target
-         *  does not exist yet — safe to claim it right now, in the same commit as the edit. */
+        /** The edit claims a free target in the same commit. */
         data class ReadyToPin(val mdFile: File) : AutoExportDecision
     }
 
@@ -17269,7 +17253,13 @@ class AppState(
      *  hasn't been (and, for [AutoExportDecision.Conflict], will not be) written into `tabs` yet. */
     private fun autoExportDecision(next: LogTab): AutoExportDecision {
         if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return AutoExportDecision.Skip
-        if (next.noteTargetName != null) return AutoExportDecision.Skip
+        next.noteTargetName?.let { name ->
+            val otherNotes = if (next.sharedNote == null) sharedNoteHosts else tabs
+            if (otherNotes.none { name.equals(it.noteTargetName, ignoreCase = true) }) return AutoExportDecision.Skip
+            // Older sessions could already have pinned a private note and a shared note to the
+            // same file. Give this edit a free target before it reaches the writer.
+            return AutoExportDecision.ReadyToPin(File(activeNotesDir(), freeNoteTargetName(name)))
+        }
         val mdFile = resolveNoteTarget(activeNotesDir(), next)
         return if (mdFile.exists()) AutoExportDecision.Conflict(mdFile) else AutoExportDecision.ReadyToPin(mdFile)
     }
@@ -18398,7 +18388,12 @@ class AppState(
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
         if (!canCompare) compareMode = false
-        tabCounter.set((tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
+        // Closed source IDs remain meaningful to restored row references.
+        val savedTabIds = tabs.asSequence().map { it.id } + sharedNoteHosts.asSequence().flatMap { host ->
+            val note = requireNotNull(host.sharedNote)
+            (note.closedMembers.asSequence() + note.closedReferenceSources.asSequence()).map { it.tabId }
+        }
+        tabCounter.set((savedTabIds.mapNotNull { it.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
         // Shells restore synchronously with every user-visible piece of metadata (filter,
         // annotations, expanded/manual blocks). The file contents are queued and started by App()
         // after first composition; starting them inside AppState construction can race Compose's

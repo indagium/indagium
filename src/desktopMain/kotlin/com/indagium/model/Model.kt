@@ -1155,17 +1155,18 @@ data class LogTab(
     val notesView: String? = null,
 )
 
-/** What a shared-note host knows about the note: its name, the tabs that write into it and the members that were closed. */
+/** A shared note's name, members, and sources for reopening closed tabs. */
 data class SharedNoteInfo(
     val id: String,
     val name: String,
     val memberTabIds: List<String> = emptyList(),
-    val closedMembers: List<SharedNoteClosedMember> = emptyList(),
+    val closedMembers: List<SharedNoteClosedSource> = emptyList(),
     val createdAtMs: Long = 0L,
+    val closedReferenceSources: List<SharedNoteClosedSource> = emptyList(),
 )
 
-/** A member tab that was closed: enough to recognise (and reopen) the same file later. */
-data class SharedNoteClosedMember(
+/** Identifies a closed file and the profile that read its rows. */
+data class SharedNoteClosedSource(
     val tabId: String,
     val filename: String,
     val sourcePath: String?,

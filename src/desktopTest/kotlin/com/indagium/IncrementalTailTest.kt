@@ -88,7 +88,7 @@ class IncrementalTailTest {
             waitUntil { app.tab(tabId)!!.profileSourceLineCount == 4L }
             assertEquals(2, app.tab(tabId)!!.logData.size, "an open quote holds its record")
 
-            file.appendText("cell\",\n2024-01-01T00:00:03Z,ERROR,three\n")
+            file.appendText("cell\"\n2024-01-01T00:00:03Z,ERROR,three\n")
             waitUntil { app.tab(tabId)!!.logData.size == 4 }
 
             val rows = app.tab(tabId)!!.logData

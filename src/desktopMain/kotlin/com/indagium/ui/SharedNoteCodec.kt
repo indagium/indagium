@@ -3,7 +3,7 @@ package com.indagium.ui
 import com.indagium.model.Annotations
 import com.indagium.model.Filter
 import com.indagium.model.LogTab
-import com.indagium.model.SharedNoteClosedMember
+import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 
 // Autosave encoding of shared notes (see LogTab.sharedNote / AppState.sharedNoteHosts): the descriptor is field 22 of a
@@ -13,11 +13,23 @@ internal fun SharedNoteInfo.sharedNoteToken(): String = tokenFields(
     id,
     name,
     memberTabIds.joinToString(",") { it.b64() },
-    closedMembers.joinToString(",") {
-        tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty(), it.logFormatProfileSnapshot.orEmpty()).b64()
-    },
+    closedMembers.closedSourcesToken(),
     createdAtMs.toString(),
+    closedReferenceSources.closedSourcesToken(),
 )
+
+private fun List<SharedNoteClosedSource>.closedSourcesToken(): String = joinToString(",") {
+    tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty(), it.logFormatProfileSnapshot.orEmpty()).b64()
+}
+
+private fun String?.closedSourcesFromToken(): List<SharedNoteClosedSource> = orEmpty().encodedList().mapNotNull { encoded ->
+    runCatching {
+        val fields = encoded.tokenFields()
+        SharedNoteClosedSource(
+            fields[0], fields[1], fields.getOrNull(2)?.takeIf { it.isNotBlank() }, fields.getOrNull(3)?.takeIf { it.isNotBlank() },
+        )
+    }.getOrNull()
+}
 
 private fun String.sharedNoteFromToken(): SharedNoteInfo? = runCatching {
     val p = tokenFields()
@@ -25,15 +37,9 @@ private fun String.sharedNoteFromToken(): SharedNoteInfo? = runCatching {
         id = p[0],
         name = p[1],
         memberTabIds = p.getOrNull(2).orEmpty().encodedList(),
-        closedMembers = p.getOrNull(3).orEmpty().encodedList().mapNotNull { encoded ->
-            runCatching {
-                val f = encoded.tokenFields()
-                SharedNoteClosedMember(
-                    f[0], f[1], f.getOrNull(2)?.takeIf { it.isNotBlank() }, f.getOrNull(3)?.takeIf { it.isNotBlank() },
-                )
-            }.getOrNull()
-        },
+        closedMembers = p.getOrNull(3).closedSourcesFromToken(),
         createdAtMs = p.getOrNull(4)?.toLongOrNull() ?: 0L,
+        closedReferenceSources = p.getOrNull(5).closedSourcesFromToken(),
     )
 }.getOrNull()
 

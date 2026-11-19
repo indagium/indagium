@@ -6,10 +6,11 @@ import com.indagium.model.Annotations
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
-import com.indagium.model.SharedNoteClosedMember
+import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 import com.indagium.model.TabContentState
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
+import com.indagium.ui.TAB_TOKEN_SHARED_NOTE_INDEX
 import com.indagium.ui.AppState
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.mkTab
@@ -41,12 +42,18 @@ class SharedNoteModelTest {
             name = name,
             memberTabIds = members,
             closedMembers = listOf(
-                SharedNoteClosedMember(
+                SharedNoteClosedSource(
                     "c", "old|file.json", "/tmp/old|file.json", logFormatProfileJson(BUILTIN_LOG_FORMAT_PROFILES.first { it.id == "json-lines" }),
                 ),
-                SharedNoteClosedMember("d", "gone.log", null),
+                SharedNoteClosedSource("d", "gone.log", null),
             ),
             createdAtMs = 1_700_000_000_123L,
+            closedReferenceSources = listOf(
+                SharedNoteClosedSource(
+                    "t7", "compare.jsonl", "/tmp/compare.jsonl",
+                    logFormatProfileJson(BUILTIN_LOG_FORMAT_PROFILES.first { it.id == "json-lines" }),
+                ),
+            ),
         )
 
     private fun state(dir: File, notes: File = File(dir, "notes")) = AppState(File(dir, "state.cache"), notesDir = notes)
@@ -389,6 +396,14 @@ class SharedNoteModelTest {
         assertEquals("shared-1", restored.tab("a")?.notesView)
         assertNull(restored.tab("b")?.notesView)
         assertEquals(restored.sharedNoteHosts.map { it.id }, listOf("shared-1"))
+
+        val nextFile = File(dir, "new.log").apply { writeText("new log\n") }
+        val nextId = assertNotNull(restored.openFileWithLogFormatProfile(nextFile, "plain-text"))
+        assertTrue(nextId.removePrefix("t").toInt() > 7, "new tabs cannot reuse a saved source ID")
+        waitUntil { restored.tab(nextId)?.contentState == TabContentState.LOADED }
+        restored.close()
+        state.close()
+        dir.deleteRecursively()
     }
 
     @Test
@@ -432,13 +447,13 @@ class SharedNoteModelTest {
         state.activeTabId = "a"
         state.autosaveNow()
         val cache = File(dir, "state.cache")
-        // The previous version's tab token ends after selectedLogSectionId (field 21): drop fields 22 and 23.
+        // Keep only the fields written before shared notes were introduced.
         cache.writeText(
             cache.readLines().joinToString("\n") { line ->
                 if (line.startsWith("tab\t")) {
                     val fields = line.removePrefix("tab\t").split("|")
-                    assertEquals(24, fields.size)
-                    "tab\t" + fields.take(22).joinToString("|")
+                    assertTrue(fields.size > TAB_TOKEN_SHARED_NOTE_INDEX)
+                    "tab\t" + fields.take(TAB_TOKEN_SHARED_NOTE_INDEX).joinToString("|")
                 } else {
                     line
                 }
