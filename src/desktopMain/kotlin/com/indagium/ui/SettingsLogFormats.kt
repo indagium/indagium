@@ -1420,13 +1420,43 @@ internal fun LogFormatCapabilityList(capabilities: Map<LogCapability, LogCapabil
                 available.forEach { (capability, status) -> CapabilityChip(capability, status.availability) }
             }
         }
-        limited.forEach { (capability, status) ->
+        limitedCapabilityRows(limited.associate { it.key to it.value }).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                CapabilityChip(capability, status.availability)
-                AppText(status.reason, color = tc.ts, fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
+                row.capabilities.forEach { (capability, status) -> CapabilityChip(capability, status.availability) }
+                AppText(row.reason, color = tc.ts, fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
             }
         }
     }
+}
+
+/** One row of the partial or unavailable capabilities: one or more chips and the reason they share. */
+internal data class CapabilityRow(val capabilities: List<Pair<LogCapability, LogCapabilityStatus>>, val reason: String)
+
+private val PROCESS_CAPABILITIES = listOf(LogCapability.PID_THREAD_FILTER, LogCapability.PROCESS_MAP, LogCapability.PROCESS_NAMES)
+
+/** The reason the process capabilities share when they are off together. */
+internal const val NO_PROCESS_IDS_REASON = "No process IDs were parsed, so there is no process filter, process map or process names."
+
+/**
+ * The partial and unavailable capabilities as rows. The process ones (filter, map, names) all come down to
+ * the same missing process IDs: when two or more are unavailable they share one row and one reason
+ * instead of three rows saying it in three ways. Every other capability keeps its own row.
+ */
+internal fun limitedCapabilityRows(limited: Map<LogCapability, LogCapabilityStatus>): List<CapabilityRow> {
+    val ordered = limited.entries.sortedBy { it.key.ordinal }.map { it.key to it.value }
+    val offProcess = ordered.filter { (capability, status) ->
+        capability in PROCESS_CAPABILITIES && status.availability == CapabilityAvailability.UNAVAILABLE
+    }
+    if (offProcess.size < 2) return ordered.map { CapabilityRow(listOf(it), it.second.reason) }
+    val rows = mutableListOf<CapabilityRow>()
+    ordered.forEach { entry ->
+        when {
+            entry == offProcess.first() -> rows += CapabilityRow(offProcess, NO_PROCESS_IDS_REASON)
+            entry in offProcess -> Unit
+            else -> rows += CapabilityRow(listOf(entry), entry.second.reason)
+        }
+    }
+    return rows
 }
 
 @Composable

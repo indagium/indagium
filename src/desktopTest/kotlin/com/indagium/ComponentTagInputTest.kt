@@ -128,3 +128,29 @@ class LevelPillLabelsTest {
         assertEquals("Tags", componentFilterLabel(packages = true))
     }
 }
+
+/** Format details says "no process IDs" once, not three times. */
+class LimitedCapabilityRowsTest {
+    @Test
+    fun theProcessCapabilitiesShareOneRowWhenTheyAreOffTogether() {
+        fun off(reason: String) = LogCapabilityStatus(CapabilityAvailability.UNAVAILABLE, reason)
+        val limited = mapOf(
+            LogCapability.SEVERITY_FILTER to off("No severity values were parsed."),
+            LogCapability.PID_THREAD_FILTER to off("No process or thread identity values were parsed."),
+            LogCapability.PROCESS_MAP to off("No paired numeric process and thread identities values were parsed."),
+            LogCapability.PROCESS_NAMES to off("No resolved process name values were parsed."),
+            LogCapability.SOURCE_LOOKUP to off("Configure a source folder."),
+        )
+        val rows = com.indagium.ui.limitedCapabilityRows(limited)
+
+        assertEquals(3, rows.size)
+        assertEquals(
+            listOf(LogCapability.PID_THREAD_FILTER, LogCapability.PROCESS_MAP, LogCapability.PROCESS_NAMES),
+            rows[1].capabilities.map { it.first },
+        )
+        assertEquals(com.indagium.ui.NO_PROCESS_IDS_REASON, rows[1].reason)
+        // One process capability off on its own keeps its own reason.
+        val single = com.indagium.ui.limitedCapabilityRows(mapOf(LogCapability.PROCESS_NAMES to off("No resolved process name values were parsed.")))
+        assertEquals("No resolved process name values were parsed.", single.single().reason)
+    }
+}
