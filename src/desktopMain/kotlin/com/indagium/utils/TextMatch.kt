@@ -357,7 +357,8 @@ internal fun computeProfileColumnLayout(columns: List<LogDisplayField>, rows: Li
 
 private fun profileHeaderLabel(column: LogDisplayField): String = when (column.id) {
     "severity" -> "LVL"
-    "component" -> "TAG"
+    // A profile's components are loggers, units and apps, not Logcat tags: the filter tile says Components too.
+    "component" -> "COMPONENT"
     "process_id" -> "PID"
     "thread_id" -> "TID"
     else -> column.label.uppercase()

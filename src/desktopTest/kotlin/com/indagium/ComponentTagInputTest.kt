@@ -8,7 +8,9 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.combinedTagCandidates
+import com.indagium.ui.componentFilterLabel
 import com.indagium.ui.componentsArePackages
+import com.indagium.ui.levelPillLabels
 import com.indagium.ui.mkTab
 import com.indagium.ui.shownLogCapabilities
 import com.indagium.ui.tagInputPlaceholder
@@ -73,5 +75,34 @@ class ShownLogCapabilitiesTest {
 
         assertEquals(setOf(LogCapability.TEXT_SEARCH), shownLogCapabilities(syslog).keys)
         assertEquals(logcat, shownLogCapabilities(logcat))
+    }
+}
+
+/** A profile tab's level pills use the first letter of the level names its rows use. */
+class LevelPillLabelsTest {
+    private fun row(id: Int, level: LogLevel, name: String) = LogEntry(
+        id, "12:00:00", level, "c", "m",
+        recordMetadata = LogRecordMetadata(
+            displayColumns = listOf(LogDisplayField("severity", "level", name)),
+            originalSeverity = name,
+            severityKnown = true,
+            usesProfilePresentation = true,
+        ),
+    )
+
+    @Test
+    fun aProfileTabNamesItsLevelsAndLogcatKeepsTheAppLetters() {
+        val json = mkTab(
+            "json", "a.jsonl",
+            listOf(
+                row(1, LogLevel.V, "TRACE"), row(2, LogLevel.I, "INFO"), row(3, LogLevel.A, "FATAL"),
+                row(4, LogLevel.A, "CRIT"), row(5, LogLevel.A, "CRIT"),
+            ),
+        )
+        assertEquals(listOf("T", "D", "I", "W", "E", "C"), json.levelPillLabels())
+        val logcat = mkTab("logcat", "a.log", listOf(LogEntry(1, "12:00:00.000", LogLevel.I, "App", "hi")))
+        assertEquals(listOf("V", "D", "I", "W", "E", "A"), logcat.levelPillLabels())
+        assertEquals("Components", componentFilterLabel(packages = false))
+        assertEquals("Tags", componentFilterLabel(packages = true))
     }
 }

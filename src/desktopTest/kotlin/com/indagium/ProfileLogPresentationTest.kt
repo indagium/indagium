@@ -720,14 +720,14 @@ class ProfileLogPresentationTest {
         val rows = listOf(row(1, "INFO", "api", "started"), row(2, "WARNING", "", "slow"), row(3, "E", "storage", "failed"))
         val layout = requireNotNull(computeProfileColumnLayout(header, rows))
 
-        assertEquals(mapOf("timestamp" to 9, "severity" to 7, "component" to 7), layout.widths)
-        assertEquals("TIMESTAMP  LVL      TAG      MESSAGE", layout.header)
+        assertEquals(mapOf("timestamp" to 9, "severity" to 7, "component" to 9), layout.widths)
+        assertEquals("TIMESTAMP  LVL      COMPONENT  MESSAGE", layout.header)
         val rendered = rows.map { profileDisplayTextProjection(profileDisplayColumns(it)!!, columnWidths = layout.widths).text }
         assertEquals(
             listOf(
-                "10:00:01   INFO     api      started",
-                "10:00:02   WARNING" + " ".repeat(11) + "slow",
-                "10:00:03   E        storage  failed",
+                "10:00:01   INFO     api        started",
+                "10:00:02   WARNING" + " ".repeat(13) + "slow",
+                "10:00:03   E        storage    failed",
             ),
             rendered,
         )

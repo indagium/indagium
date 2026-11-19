@@ -1325,10 +1325,11 @@ internal fun FilterPanel(
             val pkgColor = PKG_CYAN
             val exNeg = DANGER_RED
             val totalActive = filter.pkgPrefixes.size + filter.excludePkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
+            val componentLabel = componentFilterLabel(componentsArePackages)
             sectionHost.Section(
                 LogViewSectionId.TAGS,
                 SectionChrome(
-                    "Tags",
+                    componentLabel,
                     summary = tagsSummary(filter),
                     trailing = if (filter.mode == FilterMode.TAGS && totalActive > 0) ({
                         Row(
@@ -1353,7 +1354,7 @@ internal fun FilterPanel(
                         }
                     }) else null,
                     modeTabs = SectionModeTabs(
-                        listOf("Tags", "Regex"),
+                        listOf(componentLabel, "Regex"),
                         if (filter.mode == FilterMode.KEYWORD) 1 else 0,
                         { index -> if (index == 1) onStartRegexSearch() else onSetFilterMode(FilterMode.TAGS) },
                     ),
@@ -2240,8 +2241,9 @@ internal fun FilterPanel(
         ) {
             if (fpState.lvlExpanded) {
                 val levels = LogLevel.entries
+                val levelLabels = remember(tab.id, tab.logData) { tab.levelPillLabels() }
                 SegmentedControl(
-                    options = levels.map { it.key.toString() },
+                    options = levelLabels,
                     selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
                     onToggle = { idx -> onToggleLevel(levels[idx]) },
                     selectedColors = levels.map { it.defaultColor },

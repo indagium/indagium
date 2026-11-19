@@ -1,5 +1,7 @@
 package com.indagium.ui
 
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 
 fun tagCandidates(
@@ -72,6 +74,37 @@ fun combinedTagCandidates(
  * match exactly: a dotted one is not a package.
  */
 internal fun LogTab.componentsArePackages(): Boolean = logData.firstOrNull()?.recordMetadata?.usesProfilePresentation != true
+
+/** The tag filter's name: Logcat calls its components tags; a profile tab's are components (a logger, a unit, an app). */
+internal fun componentFilterLabel(packages: Boolean): String = if (packages) "Tags" else "Components"
+
+private const val LEVEL_LABEL_SAMPLE_ROWS = 2_000
+
+private val levelLabelCache = object : LinkedHashMap<String, Pair<List<LogEntry>, List<String>>>(8, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<List<LogEntry>, List<String>>>?): Boolean = size > 16
+}
+
+/**
+ * The level filter's pill labels, one per [LogLevel] bucket. Logcat keeps V D I W E A. A profile tab
+ * shows the first letter of the level name its rows use for each bucket (T D I W E F for a JSON log with
+ * TRACE … FATAL, C for a syslog's CRIT), the app's letter where the tab has none.
+ */
+internal fun LogTab.levelPillLabels(): List<String> {
+    val appLetters = LogLevel.entries.map { it.key.toString() }
+    if (componentsArePackages()) return appLetters
+    synchronized(levelLabelCache) { levelLabelCache[id]?.takeIf { it.first === logData }?.let { return it.second } }
+    val counts = HashMap<LogLevel, HashMap<String, Int>>()
+    logData.asSequence().take(LEVEL_LABEL_SAMPLE_ROWS).filter { it.severityKnown }.forEach { entry ->
+        val shown = entry.recordMetadata?.displayColumns?.firstOrNull { it.id == "severity" }?.value
+        val name = (shown ?: entry.originalSeverity)?.trim()?.uppercase()?.takeIf { it.firstOrNull()?.isLetter() == true } ?: return@forEach
+        counts.getOrPut(entry.level) { HashMap() }.merge(name, 1, Int::plus)
+    }
+    val labels = LogLevel.entries.map { level ->
+        counts[level]?.maxByOrNull { it.value }?.key?.first()?.toString() ?: level.key.toString()
+    }
+    synchronized(levelLabelCache) { levelLabelCache[id] = logData to labels }
+    return labels
+}
 
 /** The tag field's hint: Logcat takes package prefixes or tags; a profile tab takes its components. */
 internal fun tagInputPlaceholder(packages: Boolean): String = if (packages) "pkg prefix or tag…" else "component…"

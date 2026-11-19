@@ -939,7 +939,7 @@ private fun TagsModeBarContent(
     Column(Modifier.fillMaxWidth()) {
         val switcher: @Composable () -> Unit = {
             SegmentedControl(
-                options = listOf("Tags", "Regex"),
+                options = listOf(componentFilterLabel(remember(tab.id, tab.logData) { tab.componentsArePackages() }), "Regex"),
                 selectedIndices = if (filter.mode == FilterMode.KEYWORD) setOf(1) else setOf(0),
                 onToggle = { index ->
                     if (index == 1) actions.onStartRegexSearch() else actions.onSetFilterMode(FilterMode.TAGS)
@@ -2284,7 +2284,7 @@ private fun RegexModeBarContent(
             // modes must show it, since it is the only way to change filter.mode while the panel is
             // hidden. See TagsModeBarContent for the shared `onToggle` dispatch this mirrors.
             SegmentedControl(
-                options = listOf("Tags", "Regex"),
+                options = listOf(componentFilterLabel(remember(tab.id, tab.logData) { tab.componentsArePackages() }), "Regex"),
                 selectedIndices = if (filter.mode == FilterMode.KEYWORD) setOf(1) else setOf(0),
                 onToggle = { index ->
                     if (index == 1) actions.onStartRegexSearch() else actions.onSetFilterMode(FilterMode.TAGS)
