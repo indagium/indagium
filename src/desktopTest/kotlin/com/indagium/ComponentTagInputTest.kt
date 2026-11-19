@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.model.ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.CapabilityAvailability
 import com.indagium.model.LogCapability
 import com.indagium.model.LogCapabilityStatus
@@ -10,7 +12,7 @@ import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.combinedTagCandidates
 import com.indagium.ui.componentFilterLabel
 import com.indagium.ui.componentsArePackages
-import com.indagium.ui.levelPillLabels
+import com.indagium.ui.levelPills
 import com.indagium.ui.mkTab
 import com.indagium.ui.shownLogCapabilities
 import com.indagium.ui.tagInputPlaceholder
@@ -78,7 +80,7 @@ class ShownLogCapabilitiesTest {
     }
 }
 
-/** A profile tab's level pills use the first letter of the level names its rows use. */
+/** A profile tab's level pills come from its profile, the same for every file of the format, each with a tooltip. */
 class LevelPillLabelsTest {
     private fun row(id: Int, level: LogLevel, name: String) = LogEntry(
         id, "12:00:00", level, "c", "m",
@@ -90,18 +92,22 @@ class LevelPillLabelsTest {
         ),
     )
 
+    private fun profile(id: String) = (BUILTIN_LOG_FORMAT_PROFILES + ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES).single { it.id == id }
+
     @Test
-    fun aProfileTabNamesItsLevelsAndLogcatKeepsTheAppLetters() {
-        val json = mkTab(
-            "json", "a.jsonl",
-            listOf(
-                row(1, LogLevel.V, "TRACE"), row(2, LogLevel.I, "INFO"), row(3, LogLevel.A, "FATAL"),
-                row(4, LogLevel.A, "CRIT"), row(5, LogLevel.A, "CRIT"),
-            ),
-        )
-        assertEquals(listOf("T", "D", "I", "W", "E", "C"), json.levelPillLabels())
-        val logcat = mkTab("logcat", "a.log", listOf(LogEntry(1, "12:00:00.000", LogLevel.I, "App", "hi")))
-        assertEquals(listOf("V", "D", "I", "W", "E", "A"), logcat.levelPillLabels())
+    fun theProfileNamesThePillsWhateverLevelsTheFileHolds() {
+        val full = mkTab("a", "a.jsonl", listOf(row(1, LogLevel.V, "TRACE"), row(2, LogLevel.A, "FATAL")), profile = profile("json-lines"))
+        val oneError = mkTab("b", "b.json", listOf(row(1, LogLevel.E, "ERROR")), profile = profile("json-lines"))
+        assertEquals(listOf("T", "D", "I", "W", "E", "F"), full.levelPills().map { it.letter })
+        assertEquals(full.levelPills(), oneError.levelPills())
+
+        val syslog = mkTab("s", "s.log", listOf(row(1, LogLevel.A, "CRIT")), profile = profile("syslog-rfc5424")).levelPills()
+        assertEquals(listOf("T", "D", "I", "W", "E", "C"), syslog.map { it.letter })
+        assertEquals("CRIT (2), ALERT (1), EMERG (0)", syslog.last().tooltip)
+        assertEquals("Verbose: none in this format", syslog.first().tooltip)
+
+        val logcat = mkTab("logcat", "a.log", listOf(LogEntry(1, "12:00:00.000", LogLevel.I, "App", "hi"))).levelPills()
+        assertEquals(listOf("V", "D", "I", "W", "E", "A"), logcat.map { it.letter })
         assertEquals("Components", componentFilterLabel(packages = false))
         assertEquals("Tags", componentFilterLabel(packages = true))
     }

@@ -1598,6 +1598,8 @@ fun SegmentedControl(
     // Extra modifier of one segment (a test tag, a content description) and a picture drawn before its label, in the label's colour.
     segmentModifier: (index: Int) -> Modifier = { Modifier },
     segmentLeading: (@Composable (index: Int, color: Color) -> Unit)? = null,
+    // A hover explanation per segment (a one-letter level pill names its levels); null adds no wrapper.
+    segmentTooltip: ((index: Int) -> String?)? = null,
 ) {
     val tc = tc()
     val controlShape = RoundedCornerShape(6.dp)
@@ -1620,9 +1622,11 @@ fun SegmentedControl(
                 else -> RoundedCornerShape(0.dp)
             }
             val coloured = enabled || !recolourWhenDisabled
-            Box(
+            val sizeModifier = if (fillWidth) Modifier.weight(if (weightByLabel) label.length + 4f else 1f) else Modifier.defaultMinSize(minWidth = 36.dp)
+            val tooltip = segmentTooltip?.invoke(index)
+            val segment: @Composable (Modifier) -> Unit = { outer -> Box(
                 contentAlignment = Alignment.Center,
-                modifier = (if (fillWidth) Modifier.weight(if (weightByLabel) label.length + 4f else 1f) else Modifier.defaultMinSize(minWidth = 36.dp))
+                modifier = outer
                     .height(segmentHeight)
                     .clip(segmentShape)
                     .background(
@@ -1658,6 +1662,11 @@ fun SegmentedControl(
                         )
                     }
                 }
+            } }
+            if (tooltip == null) {
+                segment(sizeModifier)
+            } else {
+                TooltipArea(tooltip = { ToolbarTooltip(tooltip) }, modifier = sizeModifier) { segment(Modifier.fillMaxWidth()) }
             }
             if (index < options.lastIndex) {
                 Box(Modifier.width(borderWidth).height(segmentHeight).background(tc.br))

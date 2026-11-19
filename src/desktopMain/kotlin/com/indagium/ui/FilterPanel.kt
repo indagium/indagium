@@ -2241,9 +2241,10 @@ internal fun FilterPanel(
         ) {
             if (fpState.lvlExpanded) {
                 val levels = LogLevel.entries
-                val levelLabels = remember(tab.id, tab.logData) { tab.levelPillLabels() }
+                val levelPills = remember(tab.id, tab.logFormatProfileSnapshot, tab.logData) { tab.levelPills() }
                 SegmentedControl(
-                    options = levelLabels,
+                    options = levelPills.map { it.letter },
+                    segmentTooltip = { levelPills.getOrNull(it)?.tooltip },
                     selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
                     onToggle = { idx -> onToggleLevel(levels[idx]) },
                     selectedColors = levels.map { it.defaultColor },

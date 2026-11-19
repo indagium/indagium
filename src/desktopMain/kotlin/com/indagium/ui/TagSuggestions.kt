@@ -1,8 +1,11 @@
 package com.indagium.ui
 
-import com.indagium.model.LogEntry
+import com.indagium.model.ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
+import com.indagium.utils.logFormatProfileFromJson
 
 fun tagCandidates(
     sortedTags: List<String>,
@@ -78,32 +81,44 @@ internal fun LogTab.componentsArePackages(): Boolean = logData.firstOrNull()?.re
 /** The tag filter's name: Logcat calls its components tags; a profile tab's are components (a logger, a unit, an app). */
 internal fun componentFilterLabel(packages: Boolean): String = if (packages) "Tags" else "Components"
 
-private const val LEVEL_LABEL_SAMPLE_ROWS = 2_000
+/** One level filter pill: its letter and the source level names it covers, for its tooltip. */
+internal data class LevelPill(val letter: String, val tooltip: String)
 
-private val levelLabelCache = object : LinkedHashMap<String, Pair<List<LogEntry>, List<String>>>(8, 0.75f, true) {
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<List<LogEntry>, List<String>>>?): Boolean = size > 16
-}
+private val GENERIC_LEVEL_NAMES = listOf(
+    listOf("TRACE", "VERBOSE"), listOf("DEBUG"), listOf("INFO"), listOf("WARN", "WARNING"), listOf("ERROR"), listOf("FATAL", "CRITICAL"),
+)
+private val SYSLOG_LEVEL_NAMES = listOf(
+    emptyList(), listOf("DEBUG (7)"), listOf("INFO (6)", "NOTICE (5)"), listOf("WARNING (4)"), listOf("ERROR (3)"),
+    listOf("CRIT (2)", "ALERT (1)", "EMERG (0)"),
+)
+private val PINO_LEVEL_NAMES = listOf(
+    listOf("TRACE (10)"), listOf("DEBUG (20)"), listOf("INFO (30)"), listOf("WARN (40)"), listOf("ERROR (50)"), listOf("FATAL (60)"),
+)
+private val SYSLOG_PRIORITY_KEYS = (0..7).map(Int::toString).toSet()
+private val PINO_LEVEL_KEYS = setOf("10", "20", "30", "40", "50", "60")
 
 /**
- * The level filter's pill labels, one per [LogLevel] bucket. Logcat keeps V D I W E A. A profile tab
- * shows the first letter of the level name its rows use for each bucket (T D I W E F for a JSON log with
- * TRACE … FATAL, C for a syslog's CRIT), the app's letter where the tab has none.
+ * The level filter's pills, one per [LogLevel] bucket. Logcat and DLT keep V D I W E A. A profile tab
+ * takes them from its profile, so every file of one format shows the same pills whatever levels it
+ * happens to hold: T D I W E F for the common names and Pino's scale, T D I W E C for syslog and
+ * journald (C for CRIT, ALERT and EMERG). Each tooltip names the levels the pill covers.
  */
-internal fun LogTab.levelPillLabels(): List<String> {
-    val appLetters = LogLevel.entries.map { it.key.toString() }
-    if (componentsArePackages()) return appLetters
-    synchronized(levelLabelCache) { levelLabelCache[id]?.takeIf { it.first === logData }?.let { return it.second } }
-    val counts = HashMap<LogLevel, HashMap<String, Int>>()
-    logData.asSequence().take(LEVEL_LABEL_SAMPLE_ROWS).filter { it.severityKnown }.forEach { entry ->
-        val shown = entry.recordMetadata?.displayColumns?.firstOrNull { it.id == "severity" }?.value
-        val name = (shown ?: entry.originalSeverity)?.trim()?.uppercase()?.takeIf { it.firstOrNull()?.isLetter() == true } ?: return@forEach
-        counts.getOrPut(entry.level) { HashMap() }.merge(name, 1, Int::plus)
+internal fun LogTab.levelPills(): List<LevelPill> {
+    if (componentsArePackages()) return LogLevel.entries.map { LevelPill(it.key.toString(), it.label) }
+    val profile = logFormatProfileSnapshot?.let(::logFormatProfileFromJson)
+        ?: (BUILTIN_LOG_FORMAT_PROFILES + ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES).firstOrNull { it.id == logFormatProfileId }
+    val keys = profile?.severityMapping?.keys.orEmpty()
+    val syslog = profile?.engine in setOf(LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164) || keys == SYSLOG_PRIORITY_KEYS
+    val names = when {
+        syslog -> SYSLOG_LEVEL_NAMES
+        keys == PINO_LEVEL_KEYS -> PINO_LEVEL_NAMES
+        else -> GENERIC_LEVEL_NAMES
     }
-    val labels = LogLevel.entries.map { level ->
-        counts[level]?.maxByOrNull { it.value }?.key?.first()?.toString() ?: level.key.toString()
+    val letters = if (syslog) listOf("T", "D", "I", "W", "E", "C") else listOf("T", "D", "I", "W", "E", "F")
+    return LogLevel.entries.mapIndexed { index, level ->
+        val covered = names.getOrNull(index).orEmpty()
+        LevelPill(letters[index], if (covered.isEmpty()) "${level.label}: none in this format" else covered.joinToString(", "))
     }
-    synchronized(levelLabelCache) { levelLabelCache[id] = logData to labels }
-    return labels
 }
 
 /** The tag field's hint: Logcat takes package prefixes or tags; a profile tab takes its components. */
