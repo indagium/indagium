@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -621,56 +622,71 @@ internal fun <T> SettingsDropdown(
             },
             properties = PopupProperties(focusable = false),
         ) {
-            Column(
+            // A list longer than the popup scrolls; the thin side scrollbar says so (and that more options are below).
+            val listScroll = rememberScrollState()
+            val scrolls = listScroll.maxValue > 0
+            Box(
                 Modifier.widthIn(min = fieldWidth).width(IntrinsicSize.Max)
                     .heightIn(max = DROPDOWN_POPUP_MAX_HEIGHT)
                     .shadow(8.dp, DROPDOWN_POPUP_SHAPE)
                     .background(tc.p, DROPDOWN_POPUP_SHAPE)
                     .border(1.dp, tc.br, DROPDOWN_POPUP_SHAPE)
-                    .verticalScroll(rememberScrollState())
-                    .padding(4.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                    .testTag("$testTag-popup"),
             ) {
-                options.forEachIndexed { index, option ->
-                    val active = option == selected
-                    val optionEnabled = isEnabled(option)
-                    val note = optionNote(option)
-                    HoverBox(
-                        modifier = Modifier.fillMaxWidth()
-                            .testTag(optionTag?.invoke(option) ?: "$testTag-option-$index")
-                            .clip(DROPDOWN_OPTION_SHAPE)
-                            .then(if (optionEnabled) Modifier else Modifier.semantics { disabled() }),
-                        baseBg = if (active) tc.abg else Color.Transparent,
-                        hoverEnabled = optionEnabled,
-                        onClick = if (optionEnabled) {
-                            {
-                                open = false
-                                onSelect(option)
-                                onInteraction()
-                            }
-                        } else {
-                            null
-                        },
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    Modifier.verticalScroll(listScroll)
+                        .padding(start = 4.dp, top = 4.dp, bottom = 4.dp, end = if (scrolls) (THIN_SCROLLBAR_DP + 6).dp else 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    options.forEachIndexed { index, option ->
+                        val active = option == selected
+                        val optionEnabled = isEnabled(option)
+                        val note = optionNote(option)
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth()
+                                .testTag(optionTag?.invoke(option) ?: "$testTag-option-$index")
+                                .clip(DROPDOWN_OPTION_SHAPE)
+                                .then(if (optionEnabled) Modifier else Modifier.semantics { disabled() }),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            hoverEnabled = optionEnabled,
+                            onClick = if (optionEnabled) {
+                                {
+                                    open = false
+                                    onSelect(option)
+                                    onInteraction()
+                                }
+                            } else {
+                                null
+                            },
                         ) {
-                            optionLeading?.invoke(option, if (active) tc.ac else tc.tx)
-                            AppText(
-                                label(option),
-                                color = if (active) tc.ac else tc.tx,
-                                fontSize = 11.sp,
-                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                modifier = Modifier.alpha(if (optionEnabled) 1f else DISABLED_ALPHA),
-                            )
-                            // A note stays at full strength even on a disabled option: it says why the option cannot be picked.
-                            if (note != null) {
-                                AppText("·", color = tc.ts, fontSize = 11.sp)
-                                AppText(note, color = tc.ts, fontSize = 10.sp)
+                            Row(
+                                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                optionLeading?.invoke(option, if (active) tc.ac else tc.tx)
+                                AppText(
+                                    label(option),
+                                    color = if (active) tc.ac else tc.tx,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                    modifier = Modifier.alpha(if (optionEnabled) 1f else DISABLED_ALPHA),
+                                )
+                                // A note stays at full strength even on a disabled option: it says why the option cannot be picked.
+                                if (note != null) {
+                                    AppText("·", color = tc.ts, fontSize = 11.sp)
+                                    AppText(note, color = tc.ts, fontSize = 10.sp)
+                                }
                             }
                         }
+                    }
+                }
+                if (scrolls) {
+                    Box(Modifier.matchParentSize().padding(vertical = 4.dp, horizontal = 2.dp)) {
+                        ThinVerticalScrollbar(
+                            listScroll,
+                            Modifier.align(Alignment.CenterEnd).fillMaxHeight().testTag("$testTag-scrollbar"),
+                        )
                     }
                 }
             }
