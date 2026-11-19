@@ -3,6 +3,8 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -2243,7 +2245,7 @@ internal fun LogViewer(
                         val tidMapSpineX = ROW_START_PAD
                         // A drag across a record tree's field rows scrolls the list while the pointer is held above or below it.
                         val recordTreeScroller = remember(lazyState) { ScrollableRecordTreeScroller(lazyState) }
-                        Box(
+                        LogRowsViewport(
                             contentModifier.onGloballyPositioned {
                                 contentTopY = it.positionInRoot().y
                                 recordTreeScroller.viewportCoordinates = it
@@ -3727,6 +3729,26 @@ internal fun middleEllipsis(text: String, maxChars: Int): String {
 // entirely on the common case of a short or absent name.
 internal fun shouldShowProcessNamePopup(processDisplay: String?, pidFieldWidth: Int): Boolean =
     processDisplay != null && processDisplay.length > pidFieldWidth
+
+private object LogHorizontalFocusScroll : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float =
+        if (size >= containerSize && offset < containerSize && offset + size > 0f) {
+            0f
+        } else {
+            super.calculateScrollDistance(offset, size, containerSize)
+        }
+}
+
+@Composable
+private fun LogRowsViewport(modifier: Modifier, content: @Composable BoxScope.() -> Unit) {
+    val verticalFocusScroll = LocalBringIntoViewSpec.current
+    // Focusing visible text in a wide row must not move the grid underneath an active click.
+    CompositionLocalProvider(LocalBringIntoViewSpec provides LogHorizontalFocusScroll) {
+        Box(modifier) {
+            CompositionLocalProvider(LocalBringIntoViewSpec provides verticalFocusScroll) { content() }
+        }
+    }
+}
 
 // Whether [pointerX] — a pointer position captured by LogRow's own hover pointerInput block, in the
 // same px coordinate space the row's BasicTextField measures in — falls inside [fieldStartX,

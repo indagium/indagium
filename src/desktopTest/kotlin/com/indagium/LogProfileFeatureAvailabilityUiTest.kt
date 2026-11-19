@@ -17,6 +17,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
@@ -143,6 +144,11 @@ class LogProfileFeatureAvailabilityUiTest {
         val originalHeaderBefore = headerLeft("original")
         val mainRowBefore = rowLeft("main")
         val originalRowBefore = rowLeft("original")
+
+        rule.onNodeWithTag("log-row-$tabId:main-$entryId").performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(entryId), state.tab(tabId)?.selected)
+        assertEquals(0, main.value, "focusing the visible part of a wide row keeps the columns in place")
 
         runBlocking { main.scrollTo(main.maxValue / 2) }
         rule.waitForIdle()
