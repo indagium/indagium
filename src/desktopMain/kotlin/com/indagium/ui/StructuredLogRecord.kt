@@ -617,6 +617,17 @@ private fun RowScope.KeyAndValue(
             val rowWidth = constraints.maxWidth
             val bounded = rowWidth != Constraints.Infinity
             val keyMax = if (bounded) (rowWidth * MAX_KEY_ROW_FRACTION).toInt() else Constraints.Infinity
+            // A key longer than its share of the row (journald's __REALTIME_TIMESTAMP in a narrow tile) is shown in full
+            // and its value goes on the next line, indented, rather than the key being cut with "…".
+            if (bounded && measurables[0].maxIntrinsicWidth(Constraints.Infinity) > keyMax) {
+                val keyPlaceable = measurables[0].measure(Constraints(maxWidth = rowWidth))
+                val indent = 2 * gapPx
+                val valuePlaceable = measurables[1].measure(Constraints(maxWidth = (rowWidth - indent).coerceAtLeast(0)))
+                return@Layout layout(rowWidth, keyPlaceable.height + valuePlaceable.height) {
+                    keyPlaceable.placeRelative(0, 0)
+                    valuePlaceable.placeRelative(indent, keyPlaceable.height)
+                }
+            }
             val keyPlaceable = measurables[0].measure(Constraints(maxWidth = keyMax))
             val valueMax = if (bounded) (rowWidth - keyPlaceable.width - gapPx).coerceAtLeast(0) else Constraints.Infinity
             val valuePlaceable = measurables[1].measure(Constraints(maxWidth = valueMax))
@@ -745,7 +756,10 @@ private fun StructuredHexDump(entryId: Int, path: String, bytes: ByteArray, dept
             .background(tc.bg, CORNER_SM)
             .testTag("structured-record-hex-${pathTag(path)}"),
     ) {
-        Column(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp)) {
+        val hexScroll = rememberScrollState()
+        // Room under the text for the scrollbar, when there is one, so it does not cover the last line.
+        val bottom = if (hexScroll.maxValue > 0) (4 + THIN_SCROLLBAR_DP).dp else 4.dp
+        Column(Modifier.horizontalScroll(hexScroll).padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = bottom)) {
             lines.take(MAX_RAW_LINES).forEachIndexed { index, line ->
                 androidx.compose.material3.Text(
                     buildAnnotatedString {
@@ -764,6 +778,10 @@ private fun StructuredHexDump(entryId: Int, path: String, bytes: ByteArray, dept
             if (lines.size > MAX_RAW_LINES) {
                 AppText("… ${lines.size - MAX_RAW_LINES} more lines omitted", color = tc.ts, fontSize = 10.sp, fontFamily = mono)
             }
+        }
+        // The dump scrolls sideways in a narrow tile; the thin bar says so.
+        if (hexScroll.maxValue > 0) {
+            ThinHorizontalScrollbar(hexScroll, Modifier.align(Alignment.BottomStart).fillMaxWidth().testTag("structured-record-hex-scrollbar-${pathTag(path)}"))
         }
     }
 }

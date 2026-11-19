@@ -400,7 +400,7 @@ class StructuredLogRecordUiTest {
     }
 
     @Test
-    fun anOverlongKeyIsEllipsizedAndItsValueStillShows() {
+    fun anOverlongKeyTakesTheRowAndItsValueGoesUnderIt() {
         val key = "k".repeat(70)
         val json = """{"$key":"visible-value"}"""
         rule.setContent {
@@ -414,16 +414,11 @@ class StructuredLogRecordUiTest {
         val row = "structured-record-node-207-root-$key"
         val rowBounds = rule.onNodeWithTag(row).getBoundsInRoot()
         val keyBounds = rule.onNode(hasText(key) and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).getBoundsInRoot()
-        assertTrue(keyBounds.right - keyBounds.left <= (rowBounds.right - rowBounds.left - 20.dp) * 0.45f + 1.dp, "the key takes at most about 45% of the row")
-        val node = rule.onNode(hasText(key) and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).fetchSemanticsNode()
-        val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
-        node.config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
-        assertTrue(layouts.single().hasVisualOverflow, "the long key is cut with an ellipsis")
-        rule.onNode(hasText("\"visible-value\"") and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true).assertIsDisplayed()
-        assertTrue(
-            valueLeft(row, "\"visible-value\"") >= keyBounds.right.value,
-            "the value starts after the key and has room",
-        )
+        // The key is wider than its 45% share, so it gets the row instead of being cut short at that share.
+        assertTrue(keyBounds.right - keyBounds.left > (rowBounds.right - rowBounds.left - 20.dp) * 0.45f + 1.dp, "the long key keeps more than 45% of the row")
+        val value = rule.onNode(hasText("\"visible-value\"") and hasAnyAncestor(hasTestTag(row)), useUnmergedTree = true)
+        value.assertIsDisplayed()
+        assertTrue(value.getBoundsInRoot().top >= keyBounds.bottom - 1.dp, "the value goes on the line under the key")
     }
 
     @Test
