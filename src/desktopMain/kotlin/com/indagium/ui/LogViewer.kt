@@ -49,11 +49,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.debug.AppLogger
@@ -4248,6 +4250,7 @@ private fun LogRow(
                         fontFamily = mono,
                         fontSize = fontSize,
                         lineHeight = rowLineHeightFor(annoLine, fontSize),
+                        lineHeightStyle = rowLineHeightStyleFor(rowLineHeightFor(annoLine, fontSize)),
                     ),
                     selectionColor = tc.ac.copy(alpha = SELECTION_OVERLAY_ALPHA),
                     handleColor = tc.ac,
@@ -4341,6 +4344,16 @@ internal const val SELECTION_OVERLAY_ALPHA = 0.35f
 // still overlapped for tall fonts).
 internal fun rowLineHeightFor(text: AnnotatedString, fontSize: TextUnit): TextUnit =
     if (text.spanStyles.any { it.item.fontFamily != null }) TextUnit.Unspecified else (fontSize.value + 4).sp
+
+/**
+ * How a fixed row line box places its text. Centred and untrimmed, a glyph from a taller fallback font
+ * (an emoji in "café node 🚀") stays inside the box: with the default trim that one row grew by 6px and
+ * broke the even row rhythm. A single-line row keeps its height (the field's 18dp minimum holds it);
+ * a wrapped row gains the 2px the trim used to take off. Rows that use natural metrics ([rowLineHeightFor]
+ * Unspecified) keep the default.
+ */
+internal fun rowLineHeightStyleFor(lineHeight: TextUnit): LineHeightStyle =
+    if (lineHeight.isSpecified) LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None) else LineHeightStyle.Default
 
 @Composable
 internal fun SelectableLogLineField(
