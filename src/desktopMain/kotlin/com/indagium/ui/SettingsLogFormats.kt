@@ -1421,9 +1421,19 @@ internal fun LogFormatCapabilityList(capabilities: Map<LogCapability, LogCapabil
             }
         }
         limitedCapabilityRows(limited.associate { it.key to it.value }).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                row.capabilities.forEach { (capability, status) -> CapabilityChip(capability, status.availability) }
-                AppText(row.reason, color = tc.ts, fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
+            if (row.capabilities.size == 1) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    row.capabilities.forEach { (capability, status) -> CapabilityChip(capability, status.availability) }
+                    AppText(row.reason, color = tc.ts, fontSize = 11.sp, maxLines = 2, modifier = Modifier.weight(1f))
+                }
+            } else {
+                // Several chips sharing a reason: they wrap as a group and the reason sits under them, so none is cut short.
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        row.capabilities.forEach { (capability, status) -> CapabilityChip(capability, status.availability) }
+                    }
+                    AppText(row.reason, color = tc.ts, fontSize = 11.sp, maxLines = 2)
+                }
             }
         }
     }
