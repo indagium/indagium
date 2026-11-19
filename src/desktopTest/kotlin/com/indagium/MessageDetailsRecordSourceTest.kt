@@ -4,6 +4,7 @@ import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
+import com.indagium.ui.distinctRecordFields
 import com.indagium.ui.messageDetailsCopyLabel
 import com.indagium.ui.messageDetailsShowsParsedFields
 import com.indagium.ui.messageDetailsTreeSource
@@ -78,5 +79,17 @@ class MessageDetailsRecordSourceTest {
         assertTrue(profileRecordsAddDetail("regex", listOf(multiline)))
         // A Logcat row has no profile record.
         assertFalse(profileRecordsAddDetail("logcat", listOf(LogEntry(6, "12:00:00.000", LogLevel.I, "App", "hi"))))
+    }
+
+    @Test
+    fun eachValueShowsOnceUnderItsSourceName() {
+        val logfmt = mapOf(
+            "time" to "2026-11-16T12:00:00Z", "level" to "INFO", "msg" to "ok", "pid" to "4100",
+            "TIMESTAMP" to "2026-11-16T12:00:00Z", "SEVERITY" to "INFO", "MESSAGE" to "ok", "PROCESS_ID" to "4100",
+        )
+        assertEquals(listOf("time", "level", "msg", "pid"), distinctRecordFields(logfmt).keys.toList())
+        // A role with no source copy (a syslog host parsed by the engine itself) stays.
+        val syslog = mapOf("HOST" to "demo-node", "sd.a@1.k" to "v", "structured_data" to "[a@1 k=\"v\"]")
+        assertEquals(listOf("HOST", "sd.a@1.k"), distinctRecordFields(syslog).keys.toList())
     }
 }

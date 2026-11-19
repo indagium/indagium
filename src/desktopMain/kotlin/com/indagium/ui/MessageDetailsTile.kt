@@ -71,9 +71,23 @@ internal fun isJsonRecord(raw: String?): Boolean = when (raw?.firstOrNull { !it.
 internal fun messageDetailsTreeSource(entry: LogEntry): String {
     val raw = entry.rawRecord
     if (isJsonRecord(raw)) return raw!!
-    val fields = entry.profileFields.filterValues { it.isNotBlank() }
+    val fields = distinctRecordFields(entry.profileFields.filterValues { it.isNotBlank() })
     if (entry.recordMetadata?.usesProfilePresentation != true || fields.isEmpty()) return raw ?: entry.msg
     return buildJsonObject { fields.forEach { (key, value) -> put(profileFieldKey(key), value) } }.toString()
+}
+
+/**
+ * A text record's fields with each value once. A parser keeps a value under its source key (logfmt's
+ * `msg`, a CSV header's `time`) and again under the role it maps to (MESSAGE, TIMESTAMP); the role copy
+ * goes when a source key holds the same value, so the tree uses the names of the Source line under it.
+ * Structured data listed key by key (sd.id.key) drops its one-string copy.
+ */
+internal fun distinctRecordFields(fields: Map<String, String>): Map<String, String> {
+    val sourceValues = fields.filterKeys { it !in ROLE_FIELD_KEYS }.values.toHashSet()
+    val hasStructuredKeys = fields.keys.any { it.startsWith("sd.") }
+    return fields.filter { (key, value) ->
+        !(key in ROLE_FIELD_KEYS && value in sourceValues) && !(hasStructuredKeys && key.equals("structured_data", ignoreCase = true))
+    }
 }
 
 /** Whether the tree shows parsed fields rather than the record as read, so the source line goes under it. */
