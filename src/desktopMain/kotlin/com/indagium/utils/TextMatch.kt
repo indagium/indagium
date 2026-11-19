@@ -319,14 +319,19 @@ internal fun profileColumnLayout(tabId: String, columns: List<LogDisplayField>, 
  */
 internal fun computeProfileColumnLayout(columns: List<LogDisplayField>, rows: List<LogEntry>): ProfileColumnLayout? {
     if (columns.isEmpty() || rows.firstOrNull()?.recordMetadata?.usesProfilePresentation != true) return null
-    val padded = columns.dropLast(1).map { it.id }.toSet()
-    val widths = HashMap<String, Int>()
-    columns.forEach { if (it.id in padded) widths[it.id] = profileHeaderLabel(it).length }
     val sample = if (rows.size <= 2 * PROFILE_WIDTH_SAMPLE_ROWS) {
         rows
     } else {
         rows.subList(0, PROFILE_WIDTH_SAMPLE_ROWS) + rows.subList(rows.size - PROFILE_WIDTH_SAMPLE_ROWS, rows.size)
     }
+    // A column no row has a value for (plain text's timestamp, level and tag; a JSON log without a time
+    // field) is left out of the header and gets no width, so rows do not keep an empty gap for it.
+    val withValues = HashSet<String>()
+    sample.forEach { entry -> entry.recordMetadata?.displayColumns?.forEach { if (it.value.isNotBlank()) withValues += it.id } }
+    val shownColumns = columns.filter { it.id in withValues }.ifEmpty { columns }
+    val padded = shownColumns.dropLast(1).map { it.id }.toSet()
+    val widths = HashMap<String, Int>()
+    shownColumns.forEach { if (it.id in padded) widths[it.id] = profileHeaderLabel(it).length }
     sample.forEach { entry ->
         entry.recordMetadata?.displayColumns?.forEach { column ->
             val current = widths[column.id] ?: return@forEach
@@ -344,9 +349,9 @@ internal fun computeProfileColumnLayout(columns: List<LogDisplayField>, rows: Li
         }
     }.trimEnd()
     return ProfileColumnLayout(
-        header = header(columns),
+        header = header(shownColumns),
         widths = widths,
-        compactHeader = header(columns.filterNot { isProfileProcessThreadColumn(it.id) }),
+        compactHeader = header(shownColumns.filterNot { isProfileProcessThreadColumn(it.id) }),
     )
 }
 

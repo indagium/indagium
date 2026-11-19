@@ -830,6 +830,31 @@ class ProfileLogPresentationTest {
     }
 
     @Test
+    fun aColumnNoRowHasAValueForLeavesTheHeaderAndTheRows() {
+        val header = listOf(
+            LogDisplayField("timestamp", "timestamp", ""),
+            LogDisplayField("severity", "level", ""),
+            LogDisplayField("component", "tag", ""),
+            LogDisplayField("message", "message", ""),
+        )
+        val rows = (1..2).map { id ->
+            profileEntry(
+                ts = "",
+                level = LogLevel.I,
+                tag = "",
+                msg = "Sample $id",
+                fields = emptyMap(),
+                columns = header.map { if (it.id == "message") it.copy(value = "Sample $id") else it },
+            )
+        }
+        val layout = requireNotNull(computeProfileColumnLayout(header, rows))
+
+        assertEquals("MESSAGE", layout.header)
+        assertEquals(emptyMap(), layout.widths)
+        assertEquals("Sample 1", profileDisplayTextProjection(profileDisplayColumns(rows[0])!!, columnWidths = layout.widths).text)
+    }
+
+    @Test
     fun aNarrowTileDropsPidAndTidFromTheHeaderAsFromTheRows() {
         val header = listOf(
             LogDisplayField("timestamp", "timestamp", ""),

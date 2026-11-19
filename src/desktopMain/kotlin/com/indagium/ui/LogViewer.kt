@@ -4183,8 +4183,9 @@ private fun LogRow(
                     onBoundsChanged = { left, right -> structuredDisclosureBounds = left to right },
                     onClick = { onToggleRecord(entry.id) },
                 )
-            } else if (profileLayout != null) {
-                // Rows without a disclosure arrow keep its place, so every row's text starts in one column.
+            } else if (profileLayout != null || tab.logFormat == LogFormat.DLT) {
+                // Rows without a disclosure arrow keep its place, so every row's text starts in one column. A DLT tab
+                // reserves it too: a payload with a line break gets an arrow, and it must not push that one row right.
                 Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT))
             }
             // Video anchor badge (plan doc's Task B) — this row is the one and only VideoAnchor.logId

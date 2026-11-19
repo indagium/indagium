@@ -698,6 +698,9 @@ fun ColHeader(
                 )
             }
         }
+        // DLT rows keep a disclosure arrow's place before their text (a multi-line payload has one); the header keeps it too.
+        // The row's 10dp item spacing already sits after the spacer, so it takes that much less.
+        if (dlt) Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT - 10.dp))
         AppText("TIMESTAMP", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(90.dp))
         if (hasPidTid) {
             // pidFieldChars > 5 only when the process-name feature is on AND this tab has a known
