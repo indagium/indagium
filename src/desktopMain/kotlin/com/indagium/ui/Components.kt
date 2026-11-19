@@ -1600,6 +1600,9 @@ fun SegmentedControl(
     segmentLeading: (@Composable (index: Int, color: Color) -> Unit)? = null,
     // A hover explanation per segment (a one-letter level pill names its levels); null adds no wrapper.
     segmentTooltip: ((index: Int) -> String?)? = null,
+    // One fill for every selected segment, while [selectedColors] still colour the labels. Level pills use it: each level
+    // colour at the same alpha reads at a different strength (grey and yellow faint, blue and red strong).
+    uniformSelectedFill: Color? = null,
 ) {
     val tc = tc()
     val controlShape = RoundedCornerShape(6.dp)
@@ -1631,7 +1634,7 @@ fun SegmentedControl(
                     .clip(segmentShape)
                     .background(
                         if (selected && coloured) {
-                            if (selectedSolid) selColor else selColor.copy(.2f)
+                            uniformSelectedFill ?: if (selectedSolid) selColor else selColor.copy(.2f)
                         } else {
                             Color.Transparent
                         },

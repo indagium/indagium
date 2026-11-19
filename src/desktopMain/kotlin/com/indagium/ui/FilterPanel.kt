@@ -2248,6 +2248,7 @@ internal fun FilterPanel(
                     selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
                     onToggle = { idx -> onToggleLevel(levels[idx]) },
                     selectedColors = levels.map { it.defaultColor },
+                    uniformSelectedFill = tc.tx.copy(alpha = LEVEL_PILL_FILL_ALPHA),
                     fillWidth = true,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 )
@@ -4507,3 +4508,6 @@ internal fun crashListEmptyText(analysis: LogAnalysis, lastRowId: Int?, live: Bo
     analysis.isStaleFor(lastRowId) -> "Analyzing crashes…"
     else -> "None found in this category"
 }
+
+/** The one fill of a selected level pill, a light wash of the text colour, so all six read equally on in Light and Dark. */
+private const val LEVEL_PILL_FILL_ALPHA = 0.09f
