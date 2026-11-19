@@ -2859,9 +2859,9 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid)
+                        ?: dltColumnHeader(tab, showPidTid, pidFieldChars),
                     profileHeaderFont = mono,
-                    dlt = tab.logFormat == LogFormat.DLT,
                 )
                 ItemList(
                     listItems = allItems,
@@ -2952,9 +2952,9 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid)
+                        ?: dltColumnHeader(tab, showPidTid, pidFieldChars),
                     profileHeaderFont = mono,
-                    dlt = tab.logFormat == LogFormat.DLT,
                 )
                 ItemList(
                     listItems = items,
@@ -3219,9 +3219,9 @@ internal fun LogViewer(
                     hasTidMap = tab.tidMap != null,
                     pidFieldChars = pidFieldChars,
                     contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid),
+                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid)
+                        ?: dltColumnHeader(tab, showPidTid, pidFieldChars),
                     profileHeaderFont = mono,
-                    dlt = tab.logFormat == LogFormat.DLT,
                 )
                 ItemList(
                     items, computedItems.summary, rowBoundsAbs, boxPosY,
