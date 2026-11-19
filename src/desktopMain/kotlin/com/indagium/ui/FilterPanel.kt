@@ -762,15 +762,17 @@ internal fun FilterPanel(
 
     // Combined candidates: pkg-prefix matches first (only when search has input), then tag matches.
     // Each entry is (value, isPkg): isPkg=true → add as package prefix; false → include/exclude as tag.
+    val componentsArePackages = remember(tab.id, tab.logData) { tab.componentsArePackages() }
     val combinedTagCandidates = remember(
         sortedTags,
+        componentsArePackages,
         tagSearch,
         filter.pkgPrefixes,
         filter.excludePkgPrefixes,
         tagUsage,
         mostUsedTagLimit,
     ) {
-        val pkgs = packagePrefixCandidates(sortedTags, tagSearch, limit = 4).map { it to true }
+        val pkgs = if (componentsArePackages) packagePrefixCandidates(sortedTags, tagSearch, limit = 4).map { it to true } else emptyList()
         val tags = tagCandidates(
             sortedTags = sortedTags,
             search = tagSearch,
@@ -1393,14 +1395,9 @@ internal fun FilterPanel(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                             )
                         }
-                        if (pidUnavailableReason != null) {
-                            AppText(
-                                "Process filtering unavailable: $pidUnavailableReason",
-                                color = tc.ts,
-                                fontSize = 10.sp,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                            )
-                        } else if (pidPartialReason != null) {
+                        // A tab without process IDs simply offers no process button on its tag rows: a banner saying so here,
+                        // inside the component filter, read as if the component filter itself were off.
+                        if (pidUnavailableReason == null && pidPartialReason != null) {
                             AppText(
                                 pidPartialReason,
                                 color = tc.ts,
@@ -1438,7 +1435,7 @@ internal fun FilterPanel(
                         InlineField(
                             tagInput,
                             { tagInput = it; tagSelectedIdx = -1 },
-                            "pkg prefix or tag…",
+                            tagInputPlaceholder(componentsArePackages),
                             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
                                 .testTag("filter-panel-tags-input")
                                 .focusRequester(tagFr)
@@ -1490,7 +1487,11 @@ internal fun FilterPanel(
                                                     onToggleExcludeTag(c.first)
                                                 }
                                             } else if (tagInput.isNotBlank()) {
-                                                if (tagInput.contains('.')) onAddPkgPrefix(tagInput) else onToggleTag(tagInput)
+                                                if (typedTagIsPackagePrefix(tagInput, componentsArePackages)) {
+                                                    onAddPkgPrefix(tagInput)
+                                                } else {
+                                                    onToggleTag(tagInput)
+                                                }
                                             } else {
                                                 return@onPreviewKeyEvent false
                                             }

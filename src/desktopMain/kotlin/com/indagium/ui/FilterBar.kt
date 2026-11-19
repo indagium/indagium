@@ -1112,8 +1112,12 @@ private fun TagAndPkgField(
         if (!canFilterByProcess) pidPopover.close()
     }
 
-    val candidates = remember(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit) {
-        combinedTagCandidates(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit)
+    val componentsArePackages = remember(tab.id, tab.logData) { tab.componentsArePackages() }
+    val candidates = remember(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit, componentsArePackages) {
+        combinedTagCandidates(
+            model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit,
+            offerPackagePrefixes = componentsArePackages,
+        )
     }
     val packagePrefixHasPids = remember(tab.analysis.tagPids, candidates) {
         candidates.asSequence().filter { it.second }
@@ -1167,7 +1171,7 @@ private fun TagAndPkgField(
         InlineField(
             input,
             { input = it; selectedIdx = -1 },
-            "pkg prefix or tag…",
+            tagInputPlaceholder(componentsArePackages),
             Modifier.fillMaxWidth()
                 .focusRequester(fr)
                 .testTag("filter-bar-tags-input")
@@ -1224,7 +1228,7 @@ private fun TagAndPkgField(
                                     actions.onToggleExcludeTag(c.first)
                                 }
                             } else if (input.isNotBlank()) {
-                                if (input.contains('.')) actions.onAddPkgPrefix(input) else actions.onToggleTag(input)
+                                if (typedTagIsPackagePrefix(input, componentsArePackages)) actions.onAddPkgPrefix(input) else actions.onToggleTag(input)
                             } else {
                                 return@onPreviewKeyEvent false
                             }

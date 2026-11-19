@@ -1,5 +1,7 @@
 package com.indagium.ui
 
+import com.indagium.model.LogTab
+
 fun tagCandidates(
     sortedTags: List<String>,
     search: String,
@@ -49,8 +51,10 @@ fun combinedTagCandidates(
     packagePrefixes: Set<String>,
     tagUsage: Map<String, Int>,
     mostUsedTagLimit: Int,
+    // False for a tab whose components are not Android packages (see componentsArePackages): no prefix rows then.
+    offerPackagePrefixes: Boolean = true,
 ): List<Pair<String, Boolean>> {
-    val pkgs = packagePrefixCandidates(sortedTags, search, limit = 4).map { it to true }
+    val pkgs = if (offerPackagePrefixes) packagePrefixCandidates(sortedTags, search, limit = 4).map { it to true } else emptyList()
     val tags = tagCandidates(
         sortedTags = sortedTags,
         search = search,
@@ -61,6 +65,19 @@ fun combinedTagCandidates(
     ).map { it to false }
     return pkgs + tags
 }
+
+/**
+ * Whether [this] tab's tags are Logcat tags, whose dotted names are Android packages a prefix can
+ * group. A profile's components (a systemd unit like checkout.service, a logger name) are names to
+ * match exactly: a dotted one is not a package.
+ */
+internal fun LogTab.componentsArePackages(): Boolean = logData.firstOrNull()?.recordMetadata?.usesProfilePresentation != true
+
+/** The tag field's hint: Logcat takes package prefixes or tags; a profile tab takes its components. */
+internal fun tagInputPlaceholder(packages: Boolean): String = if (packages) "pkg prefix or tag…" else "component…"
+
+/** Whether the typed [input] is added as a package prefix (a dotted name in a Logcat tab) rather than an exact tag. */
+internal fun typedTagIsPackagePrefix(input: String, packages: Boolean): Boolean = packages && input.contains('.')
 
 fun packagePrefixCandidates(sortedTags: List<String>, search: String, limit: Int = 8): List<String> {
     if (search.isBlank()) return emptyList()

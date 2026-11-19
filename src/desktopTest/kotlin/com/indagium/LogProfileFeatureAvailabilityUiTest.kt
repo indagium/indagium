@@ -135,8 +135,9 @@ class LogProfileFeatureAvailabilityUiTest {
         showFileView(state, tabId)
 
         assertTrue(rule.onAllNodes(hasText("Log level", substring = true)).fetchSemanticsNodes().isEmpty())
+        // No process banner inside the component filter, which still works: Format details lists the process filter as unavailable.
         rule.onAllNodes(hasText("Process filtering unavailable", substring = true)).fetchSemanticsNodes()
-            .also { assertTrue(it.isNotEmpty()) }
+            .also { assertTrue(it.isEmpty()) }
         rule.onNodeWithTag("filter-panel-tags-input").performTextInput("api")
         rule.waitUntil(5_000) {
             rule.onAllNodes(hasTestTag("filter-panel-tags-tag-candidate-0")).fetchSemanticsNodes().isNotEmpty()
