@@ -475,6 +475,38 @@ class LogViewLayoutStateTest {
     }
 
     @Test
+    fun restartClosesLogCompositionByDefaultAndRestoresEitherStateWhenEnabled() {
+        val tile = LogViewSectionId.LOG_COMPOSITION
+
+        fun assertRestart(restoresLastState: Boolean, collapsed: Boolean) {
+            val restarted = AppState(
+                autosaveFile = File(directory, "state.cache"),
+                restoreOnCreate = true,
+                notesDir = File(directory, "notes"),
+                archiveCacheDir = File(directory, "archives"),
+                customCommandsDir = File(directory, "commands"),
+                autoExportNotes = false,
+            )
+            try {
+                assertEquals(restoresLastState, restarted.settings.restoreLogCompositionOnStartup)
+                assertEquals(collapsed, restarted.isLogViewTileCollapsed(tile))
+            } finally {
+                restarted.close()
+            }
+        }
+
+        state.toggleLogViewTileCollapsed(tile)
+        assertFalse(state.isLogViewTileCollapsed(tile))
+        assertRestart(restoresLastState = false, collapsed = true)
+
+        state.updateSettings { it.copy(restoreLogCompositionOnStartup = true) }
+        assertRestart(restoresLastState = true, collapsed = false)
+
+        state.toggleLogViewTileCollapsed(tile)
+        assertRestart(restoresLastState = true, collapsed = true)
+    }
+
+    @Test
     fun revealingFilterTilesUnhidesExpandsAndClearsMaximize() {
         state.hideLogViewTile(LogViewSectionId.HIGHLIGHTERS)
         state.fpState.highlightersExpanded = false

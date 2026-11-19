@@ -51,6 +51,7 @@ internal fun JsonObjectBuilder.putLogViewLayoutSettings(settings: AppSettings) {
     settings.logViewLayout?.let { put("logViewLayout", logViewTileTreeJson(it)) }
     put("logViewHidden", idsJson(settings.logViewHidden))
     put("logViewCollapsed", idsJson(settings.logViewCollapsed))
+    put("restoreLogCompositionOnStartup", settings.restoreLogCompositionOnStartup)
     put("logViewTilesLocked", settings.logViewTilesLocked)
     put("lastLogViewPreset", settings.lastLogViewPreset.name)
     settings.compareLayout?.let { put("compareLayout", logViewTileTreeJson(it)) }
@@ -100,6 +101,8 @@ internal fun AppSettings.withLogViewLayoutSettingsFrom(o: JsonObject): AppSettin
         logViewLayout = single.first,
         logViewHidden = single.second,
         logViewCollapsed = idsFromJson(o["logViewCollapsed"])?.distinct() ?: logViewCollapsed,
+        restoreLogCompositionOnStartup = (o["restoreLogCompositionOnStartup"] as? JsonPrimitive)?.booleanOrNull
+            ?: restoreLogCompositionOnStartup,
         logViewTilesLocked = (o["logViewTilesLocked"] as? JsonPrimitive)?.booleanOrNull ?: logViewTilesLocked,
         lastLogViewPreset = if (requestedLastCustom != null && validLastCustom == null) {
             LogViewPresetId.CLASSIC

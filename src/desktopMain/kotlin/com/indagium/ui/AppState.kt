@@ -18225,6 +18225,8 @@ class AppState(
                 val value = line.substringAfter('\t', "")
                 restoreAutosaveKey(key, value)
             }
+            // Apply the startup preference after both the settings and the panel state have been read.
+            if (!settings.restoreLogCompositionOnStartup) fpState.logCompositionExpanded = false
             // Hosts first: restoreTabsFromAutosave drops a tab's notesView that points at a host that is gone.
             // A corrupt line loses the shared notes only, never the tabs after it.
             restoreSharedNoteHosts(

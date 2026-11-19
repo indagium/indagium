@@ -310,6 +310,29 @@ private fun chromePlacement() = listOf(
     ),
 )
 
+private fun logViewPanels() = listOf(
+    entry(
+        SettingsPage.LogView, "Original panel",
+        LOG_OPEN_WITH_ORIGINAL_HINT,
+        listOf("unfiltered", "split", "new files"),
+    ),
+    entry(
+        SettingsPage.LogView, LOG_COMPOSITION_STARTUP_LABEL,
+        LOG_COMPOSITION_STARTUP_HINT,
+        listOf("restart", "reopen", "restore", "collapsed", "repeated messages", "performance"),
+    ),
+    entry(
+        SettingsPage.LogView, "Minimap",
+        LOG_MINIMAP_HINT,
+        listOf("scrollbar", "overview"),
+    ),
+    entry(
+        SettingsPage.LogView, "Follow live logs",
+        LOG_FOLLOW_LIVE_HINT,
+        listOf("tail", "auto scroll", "autoscroll", "live watching"),
+    ),
+)
+
 private fun editorBehavior() = listOf(
     entry(SettingsPage.TabsToolbar, "Visible tabs", VISIBLE_TABS_HINT, listOf("tab bar", "overflow")),
     entry(
@@ -319,11 +342,6 @@ private fun editorBehavior() = listOf(
     ),
     entry(SettingsPage.SearchFilters, "Most-used tags", SEARCH_MOST_USED_TAGS_HINT, listOf("tag list", "filter")),
     entry(SettingsPage.SearchFilters, "Filter list rows", SEARCH_LIST_HEIGHT_HINT, listOf("sidebar", "height")),
-    entry(
-        SettingsPage.LogView, "Follow live logs",
-        LOG_FOLLOW_LIVE_HINT,
-        listOf("tail", "auto scroll", "autoscroll", "live watching"),
-    ),
     entry(
         SettingsPage.SearchFilters, "Regex summary",
         SEARCH_REGEX_SUMMARY_HINT,
@@ -345,19 +363,9 @@ private fun editorBehavior() = listOf(
         listOf("stack trace", "exception", "highlight", "anr"),
     ),
     entry(
-        SettingsPage.LogView, "Original panel",
-        LOG_OPEN_WITH_ORIGINAL_HINT,
-        listOf("unfiltered", "split", "new files"),
-    ),
-    entry(
         SettingsPage.LogView, "Row numbers",
         LOG_ROW_NUMBERS_HINT,
         listOf("line number", "gutter", "row number"),
-    ),
-    entry(
-        SettingsPage.LogView, "Minimap",
-        LOG_MINIMAP_HINT,
-        listOf("scrollbar", "overview"),
     ),
     entry(
         SettingsPage.SearchFilters, "Ctrl/Cmd+F opens",
@@ -875,7 +883,7 @@ private fun issueTracker() = listOf(
 )
 
 internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> =
-    general() + appearance() + appearanceShapes() + editorBehavior() + exportAnnotations() + capture() +
+    general() + appearance() + appearanceShapes() + logViewPanels() + editorBehavior() + exportAnnotations() + capture() +
         automation() + aiProviders() + voiceInput() + customAiCommands() + sourceCode() + issues() + logFormats() + testing() + issueTracker()
 
 // Bidirectional groups of interchangeable words. A query token that equals (or, from 3 letters on,

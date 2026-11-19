@@ -410,6 +410,12 @@ rule you can then edit in the panel.
      row count drops from ~200k to ~300 -->
 ![Reducing a noisy log with levels, tags and message rules](images/gif-04-filtering.gif)
 
+### Log composition
+
+Expand **Log composition** to see repeated messages in the current filtered view. The scan can
+take time on large logs, so the tile starts closed when Indagium reopens. To restore it as you left
+it, choose **Last state** under **Settings › Reading logs › Log view › Log composition on startup**.
+
 ### Clearing
 
 **Clear filter** resets everything for the tab, with a confirmation so you cannot lose a
@@ -1088,7 +1094,7 @@ PID and TID copying) sit indented under it and dim while it is off.
 | **Workspace** | **General** | Workspace profile cards (import, export and **Save current setup as profile…** are in the group's **⋯** menu), the Customized banner, the profile's layout, memory for inactive tabs (a switch plus minutes), and automatic update checks with **Check now** |
 | | **Appearance** | Theme (20 built in, plus Special themes), interface and log fonts, log font size, interface scale, the Linux file picker, and **Corners**: Tiles (five shapes) and Toolbar (**Same as tiles** or its own shape) |
 | | **Tabs & toolbar** | Tab style and what a tab shows, tab position, width, label and close button, visible tabs, toolbar placement (edge, alignment, order), button labels, and locking the layout |
-| **Reading logs** | **Log view** | Row numbers, row wrapping, process names in new tabs, the colour of field names and where values start (after the name or in a column) in expanded JSON records and Message details, Crash and Error row highlights, opening files with Original, the minimap, following live logs |
+| **Reading logs** | **Log view** | Row numbers, row wrapping, process names in new tabs, the colour of field names and where values start (after the name or in a column) in expanded JSON records and Message details, Crash and Error row highlights, opening files with Original, Log composition on startup, the minimap, following live logs |
 | | **Search & filters** | Search scope behavior, what `⌘F` opens, whether it also shows Original, split selection/Find linking, most-used tags, filter list height, the regex summary, navigation scroll margin |
 | | **Issue categories** | Custom issue rules (name + regex) |
 | | **Log formats** | Built-in format profiles, custom field mapping, guided CSV/TSV setup, previews, import and export |

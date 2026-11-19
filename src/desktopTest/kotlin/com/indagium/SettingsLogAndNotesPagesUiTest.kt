@@ -101,6 +101,23 @@ class SettingsLogAndNotesPagesUiTest {
     }
 
     @Test
+    fun logCompositionStartupSettingOffersClosedAndLastState() {
+        val state = AppState()
+        openPage(state, SettingsPage.LogView)
+        val startupOptions = hasAnyAncestor(hasTestTag(LogPageTags.LOG_COMPOSITION_STARTUP))
+        val closed = rule.onNode(startupOptions and hasText("Closed"))
+        val lastState = rule.onNode(startupOptions and hasText("Last state"))
+
+        closed.performScrollTo().assertIsSelected()
+        lastState.performClick().assertIsSelected()
+        assertTrue(state.settings.restoreLogCompositionOnStartup)
+        assertFalse(state.fpState.logCompositionExpanded)
+
+        closed.performClick().assertIsSelected()
+        assertFalse(state.settings.restoreLogCompositionOnStartup)
+    }
+
+    @Test
     fun recordFieldNamesRowChoosesAccentPlainOrCustomAndShowsTheColourControlOnlyForCustom() {
         val state = AppState()
         openPage(state, SettingsPage.LogView)

@@ -32,6 +32,8 @@ internal const val LOG_RECORD_VALUES_HINT = "Where a field's value starts in an 
 internal const val LOG_CRASH_ROWS_HINT = "Colour every row of an expanded crash group, not just its header."
 internal const val LOG_ERROR_ROWS_HINT = "Tint every Error-level row in every tab. A tab with its own style keeps it until you reset it."
 internal const val LOG_OPEN_WITH_ORIGINAL_HINT = "New files start with the unfiltered Original panel visible."
+internal const val LOG_COMPOSITION_STARTUP_LABEL = "Log composition on startup"
+internal const val LOG_COMPOSITION_STARTUP_HINT = "Closed waits for you to expand the tile before scanning. Last state restores the tile as you left it."
 internal const val LOG_MINIMAP_HINT = "Replace the scrollbar with a miniature of the file, coloured by level. Click it to jump."
 internal const val LOG_FOLLOW_LIVE_HINT = "Stay on the newest line while live-watching. Scrolling up pauses, scrolling to the end resumes."
 internal const val SEARCH_OPENS_HINT = "Find highlights matches and hides nothing. Tags and Regex focus that filter and hide other rows."
@@ -61,6 +63,7 @@ internal object LogPageTags {
     const val RECORD_VALUE_ALIGNMENT = "setting-record-value-alignment"
     const val CRASH_ROWS = "setting-crash-rows"
     const val OPEN_WITH_ORIGINAL = "setting-open-with-original"
+    const val LOG_COMPOSITION_STARTUP = "setting-log-composition-startup"
     const val MINIMAP = "setting-minimap"
     const val FOLLOW_LIVE = "setting-follow-live-logs"
     const val ALSO_SHOW_ORIGINAL = "setting-ctrl-f-also-shows-original"
@@ -194,6 +197,20 @@ internal fun LogViewSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 onChange = { next -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = next) } },
                 reclaimFocus = reclaimFocus,
                 testTag = LogPageTags.OPEN_WITH_ORIGINAL,
+            )
+        }
+        SettingsRow(LOG_COMPOSITION_STARTUP_LABEL, LOG_COMPOSITION_STARTUP_HINT) {
+            SettingsSegmented(
+                options = listOf("Closed", "Last state"),
+                selectedIndices = setOf(if (settings.restoreLogCompositionOnStartup) 1 else 0),
+                onToggle = { index ->
+                    val restore = index == 1
+                    if (restore != settings.restoreLogCompositionOnStartup) {
+                        state.updateSettings { it.copy(restoreLogCompositionOnStartup = restore) }
+                    }
+                    reclaimFocus()
+                },
+                modifier = Modifier.testTag(LogPageTags.LOG_COMPOSITION_STARTUP),
             )
         }
         SettingsRow("Minimap", LOG_MINIMAP_HINT) {

@@ -1847,6 +1847,8 @@ data class AppSettings(
     val recordFieldNameCustomArgb: Long? = null,
     /** Where a field's value starts in an expanded JSON record and in Message details; a file without the key reads as AFTER_NAME. JSON-only. */
     val recordValueAlignment: RecordValueAlignment = RecordValueAlignment.AFTER_NAME,
+    /** Restore the Log composition tile's expansion on app startup. Closed avoids an automatic scan. JSON-only. */
+    val restoreLogCompositionOnStartup: Boolean = false,
 )
 
 /** How the field names of an expanded record are coloured (Settings › Log view › Record field names). */
