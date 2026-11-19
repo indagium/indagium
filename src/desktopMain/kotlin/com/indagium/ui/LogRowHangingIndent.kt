@@ -51,13 +51,18 @@ internal const val MAX_HANGING_INDENT_FRACTION = 0.5f
  * The indent a profile row's wrapped lines hang at: its message column when that [fits], else just
  * after its first column ([fallbackChars]) when that fits, else none. A row whose message starts far to
  * the right (many columns) or that has no message still keeps its continuation lines off the first
- * column, so they never read as a new row.
+ * column, so they never read as a new row; in a pane too narrow even for that, a short fixed step.
  */
 internal fun chooseHangingIndentChars(messageChars: Int, fallbackChars: Int, fits: (Int) -> Boolean): Int = when {
     messageChars > 0 && fits(messageChars) -> messageChars
     fallbackChars > 0 && fits(fallbackChars) -> fallbackChars
+    // A narrow tile with many columns: a short fixed step still tells a continuation line from a new row.
+    (messageChars > 0 || fallbackChars > 0) && fits(MIN_HANGING_INDENT_CHARS) -> MIN_HANGING_INDENT_CHARS
     else -> 0
 }
+
+/** The last indent step before none, for a pane too narrow for the column-based ones. */
+internal const val MIN_HANGING_INDENT_CHARS = 4
 
 /**
  * Whether an indent of [indentPx] still leaves a wrapped row room to read in a field [fieldWidthPx]

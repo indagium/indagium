@@ -10,12 +10,14 @@ import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
+import com.indagium.ui.MIN_HANGING_INDENT_CHARS
 import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.chooseHangingIndentChars
 import com.indagium.ui.compactRecordSummary
 import com.indagium.ui.hangingContinuationLimit
 import com.indagium.ui.hangingIndentFits
 import com.indagium.ui.hangingIndentSp
+import com.indagium.ui.profileHeaderIndentChars
 import com.indagium.ui.stripVisualWrapBreaks
 import com.indagium.ui.visualLogLineForWrapLimit
 import com.indagium.ui.withHangingIndent
@@ -220,8 +222,16 @@ class ProfileRowHangingIndentTest {
         assertEquals(12, chooseHangingIndentChars(80, 12) { it <= 50 })
         // No message at all: the same fallback.
         assertEquals(12, chooseHangingIndentChars(0, 12) { it <= 50 })
-        // A pane too narrow even for that: no indent.
-        assertEquals(0, chooseHangingIndentChars(80, 30) { it <= 20 })
+        // A pane too narrow even for that: a short fixed step, so a continuation line still differs from a new row.
+        assertEquals(MIN_HANGING_INDENT_CHARS, chooseHangingIndentChars(80, 30) { it <= 20 })
+        // Narrower still, or a row with no columns to hang from: no indent.
+        assertEquals(0, chooseHangingIndentChars(80, 30) { it < MIN_HANGING_INDENT_CHARS })
         assertEquals(0, chooseHangingIndentChars(0, 0) { true })
+    }
+
+    @Test
+    fun theHeaderHangsAtItsMessageLabelOrItsSecondLabel() {
+        assertEquals(20 to 11, profileHeaderIndentChars("TIMESTAMP  LVL      MESSAGE"))
+        assertEquals(0 to 22, profileHeaderIndentChars("16/Nov/2026:12:00:00  HOST  HTTP METHOD"))
     }
 }

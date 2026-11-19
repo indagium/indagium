@@ -13,6 +13,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -68,6 +69,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -757,15 +759,29 @@ private fun ProfileColHeader(
             }
         }
         Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT))
-        AppText(
-            header,
-            color = tc.td,
-            fontSize = contentFontSizeSp.sp,
-            fontFamily = font ?: FontFamily.Monospace,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
+        // A tile too narrow for every label wraps the header the way it wraps rows, with the same indent rule, rather than
+        // cutting the right-most labels off: every column the rows show stays named.
+        val family = font ?: FontFamily.Monospace
+        var widthPx by remember { mutableStateOf(0) }
+        val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
+        val indent = rememberHangingIndent(messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx)
+        val text = remember(header, indent) { AnnotatedString(header).let { if (indent != null) it.withHangingIndent(indent) else it } }
+        BasicText(
+            text,
+            style = TextStyle(color = tc.td, fontSize = contentFontSizeSp.sp, fontFamily = family, fontWeight = FontWeight.SemiBold),
+            modifier = Modifier.weight(1f).onSizeChanged { widthPx = it.width }.testTag("colheader-profile-text"),
         )
     }
+}
+
+/**
+ * Where a profile header's continuation lines hang, by the same rule as its rows: the MESSAGE label's
+ * column, or the second label's. Labels are separated by two or more spaces.
+ */
+internal fun profileHeaderIndentChars(header: String): Pair<Int, Int> {
+    val message = Regex("(^|\\s{2})MESSAGE\\b").find(header)?.let { it.range.last - "MESSAGE".length + 1 } ?: 0
+    val second = Regex("\\S\\s{2,}(\\S)").find(header)?.groups?.get(1)?.range?.first ?: 0
+    return message to second
 }
 
 @Composable
