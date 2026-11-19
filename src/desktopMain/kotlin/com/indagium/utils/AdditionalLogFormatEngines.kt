@@ -195,6 +195,7 @@ internal fun parseLogfmtProfile(
                 continue
             }
             val fields = linkedMapOf<String, String>()
+            val fieldAliases = linkedMapOf<String, String>()
             parsed.forEach { (key, value) -> fields[key] = value }
             val aliases = mapOf(
                 LogFieldRole.TIMESTAMP to listOf("time", "timestamp", "ts"),
@@ -210,14 +211,23 @@ internal fun parseLogfmtProfile(
                 LogFieldRole.SOURCE to listOf("source", "caller", "file"),
             )
             profile.fieldMappings.forEach { (role, source) ->
-                val value = parsed[source] ?: aliases[role]?.firstNotNullOfOrNull(parsed::get)
-                if (value != null) fields[role.name] = value
+                val key = source.takeIf(parsed::containsKey) ?: aliases[role]?.firstOrNull(parsed::containsKey)
+                if (key != null) {
+                    fields[role.name] = parsed.getValue(key)
+                    fieldAliases[role.name] = key
+                }
             }
-            profile.attributes.forEach { attribute -> parsed[attribute.source]?.let { fields[attribute.id] = it } }
+            profile.attributes.forEach { attribute ->
+                parsed[attribute.source]?.let {
+                    fields[attribute.id] = it
+                    fieldAliases[attribute.id] = attribute.source
+                }
+            }
             yield(
                 AdditionalProfileRecord(
                     raw = raw,
                     fields = fields,
+                    fieldAliases = fieldAliases,
                     sourceStartLine = lineNumber,
                     sourceEndLine = lineNumber,
                 ),
@@ -392,6 +402,8 @@ private fun AdditionalProfileRecord.bufferSize(): Int =
 
 private data class CriRow(val timestamp: String, val stream: String, val tag: String, val payload: String)
 
+private val CRI_FIELD_ALIASES = mapOf("TIMESTAMP" to "time", "STREAM" to "stream", "MESSAGE" to "message")
+
 private class CriPending(
     val stream: String,
     val firstTimestamp: String,
@@ -423,6 +435,7 @@ private class CriPending(
         return AdditionalProfileRecord(
             raw = rawLines.toString(),
             fields = fields,
+            fieldAliases = CRI_FIELD_ALIASES,
             timestamp = firstTimestamp,
             sourceStartLine = startLine,
             sourceEndLine = endLine,

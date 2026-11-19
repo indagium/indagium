@@ -27,6 +27,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.model.LogEntry
 import com.indagium.utils.buildLogRecordDetails
+import com.indagium.utils.isJsonRecord
+import com.indagium.utils.recordInspectionSource
 
 private val DETAIL_LABEL_WIDTH = 96.dp
 private val FIELD_KEY_WIDTH = 180.dp
@@ -70,20 +72,27 @@ internal fun LogRecordDetailsDialog(
                     }
                 }
             }
-            AppText("Fields (${details.fields.size})", color = tc.ts, fontSize = 11.sp)
-            // The values are selectable so a part of one can be copied without the whole record.
-            SelectionContainer(Modifier.weight(1f, fill = false)) {
-                Column(
-                    Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    details.fields.forEach { (key, value) ->
-                        Row(
-                            Modifier.fillMaxWidth().testTag("log-record-field-$key").semantics(mergeDescendants = true) {},
-                            verticalAlignment = Alignment.Top,
-                        ) {
-                            AppText(key, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.width(FIELD_KEY_WIDTH))
-                            AppText(value, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = Int.MAX_VALUE)
+            val jsonSource = remember(entry) { entry.rawRecord?.takeIf(::isJsonRecord) }
+            if (jsonSource != null) {
+                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    StructuredRecordBody(entry.id, entry.recordInspectionSource(), MONO, startIndent = 0.dp, initiallyExpanded = true)
+                }
+            } else {
+                AppText("Fields (${details.fields.size})", color = tc.ts, fontSize = 11.sp)
+                // The values are selectable so a part of one can be copied without the whole record.
+                SelectionContainer(Modifier.weight(1f, fill = false)) {
+                    Column(
+                        Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        details.fields.forEach { (key, value) ->
+                            Row(
+                                Modifier.fillMaxWidth().testTag("log-record-field-$key").semantics(mergeDescendants = true) {},
+                                verticalAlignment = Alignment.Top,
+                            ) {
+                                AppText(key, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.width(FIELD_KEY_WIDTH))
+                                AppText(value, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = Int.MAX_VALUE)
+                            }
                         }
                     }
                 }
@@ -111,7 +120,7 @@ internal fun LogRecordDetailsDialog(
                 }
                 Box(Modifier.testTag("log-record-copy-json")) {
                     SettingsDialogButton("Copy fields as JSON") {
-                        onCopy(details.fieldsJson)
+                        onCopy(jsonSource ?: details.fieldsJson)
                         onReclaimFocus()
                     }
                 }

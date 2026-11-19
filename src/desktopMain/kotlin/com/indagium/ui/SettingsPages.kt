@@ -330,6 +330,7 @@ internal fun SettingsFooter(
     onSetupAssistant: () -> Unit,
     onVersion: () -> Unit,
     onDone: () -> Unit,
+    saveProfile: (() -> Unit)? = null,
 ) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().background(tc.p)) {
@@ -365,6 +366,9 @@ internal fun SettingsFooter(
                 }
             }
             Box(Modifier.size(8.dp))
+            if (saveProfile != null) {
+                AppButton("Save profile", onClick = saveProfile, modifier = Modifier.testTag("settings-log-format-save-footer"))
+            }
             AppButton("Done", onClick = onDone, variant = ButtonVariant.Primary, modifier = Modifier.testTag("settings-done"))
         }
     }

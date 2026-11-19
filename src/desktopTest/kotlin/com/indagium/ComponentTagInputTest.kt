@@ -11,9 +11,12 @@ import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.ui.combinedTagCandidates
+import com.indagium.ui.componentActionName
 import com.indagium.ui.componentFilterLabel
 import com.indagium.ui.componentsArePackages
+import com.indagium.ui.contextFilterIdentity
 import com.indagium.ui.levelPills
+import com.indagium.ui.messageRuleVariantsForEntry
 import com.indagium.ui.mkTab
 import com.indagium.ui.shownLogCapabilities
 import com.indagium.ui.tagInputPlaceholder
@@ -21,6 +24,7 @@ import com.indagium.ui.typedTagIsPackagePrefix
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Logcat tags group by Android package; a profile's components (a systemd unit, a logger) are matched exactly. */
@@ -78,6 +82,24 @@ class ComponentTagInputTest {
         assertTrue(withPackages.any { it.second })
         assertTrue(withoutPackages.none { it.second })
         assertTrue(withoutPackages.any { it.first == "checkout.service" })
+    }
+
+    @Test
+    fun contextActionsUseOnlyRealComponentsAndKeepUnscopedMessageRules() {
+        val component = journal.logData.single()
+        assertEquals("Component", journal.componentActionName())
+        assertEquals("checkout.service", component.contextFilterIdentity())
+        assertEquals(listOf("checkout.service", null), messageRuleVariantsForEntry(component, "hi").map { it.tag })
+
+        val noComponent = component.copy(tag = "")
+        val raw = logcat.logData.single().copy(tag = "RAW")
+        assertNull(noComponent.contextFilterIdentity())
+        assertNull(raw.contextFilterIdentity())
+        assertEquals(listOf(null), messageRuleVariantsForEntry(noComponent, "hi").map { it.tag })
+        assertEquals(listOf(null), messageRuleVariantsForEntry(raw, "hi").map { it.tag })
+        val context = raw.copy(tag = "ECU1/APP1/CTX1", dltContextId = "CTX1")
+        assertEquals("ECU1/APP1/CTX1", context.contextFilterIdentity(LogFormat.DLT))
+        assertNull(context.copy(dltContextId = null).contextFilterIdentity(LogFormat.DLT))
     }
 }
 

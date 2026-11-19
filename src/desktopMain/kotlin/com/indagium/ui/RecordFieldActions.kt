@@ -50,6 +50,7 @@ import com.indagium.utils.RecordFieldsResult
 import com.indagium.utils.joinRecordPath
 import com.indagium.utils.jsonSubtreeAt
 import com.indagium.utils.parseRecordJson
+import com.indagium.utils.recordInspectionSource
 import com.indagium.utils.recordFieldRefs
 import com.indagium.utils.recordValueText
 
@@ -406,7 +407,7 @@ internal fun AppState.recordFieldsMenuEntry(tabId: String, entryId: Int): CtxMen
  */
 internal fun AppState.requestAddRecordFields(tabId: String, entryId: Int, paths: List<List<String>>) {
     val entry = tab(tabId)?.rmap?.get(entryId) ?: return
-    when (val result = recordFieldRefs(entry.rawRecord, paths)) {
+    when (val result = recordFieldRefs(entry.recordInspectionSource(), paths)) {
         is RecordFieldsResult.Ok -> {
             recordFieldSelection = null
             recordFieldAnchor = null

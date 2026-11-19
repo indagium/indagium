@@ -77,12 +77,12 @@ internal fun hangingIndentFits(indentPx: Float, fieldWidthPx: Int): Boolean =
  * lines then start at the left edge, as without one).
  */
 @Composable
-internal fun rememberHangingIndent(messageChars: Int, fallbackChars: Int, family: FontFamily, fontSize: TextUnit, fieldWidthPx: Int): TextUnit? {
+internal fun rememberHangingIndent(messageChars: Int, fallbackChars: Int, family: FontFamily, fontSize: TextUnit, fieldWidthPx: Int, forceMessage: Boolean = false): TextUnit? {
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer(cacheSize = 1)
     val advance = remember(measurer, density, family, fontSize) { monoAdvancePx(measurer, family, fontSize) }
-    return remember(messageChars, fallbackChars, advance, density, fieldWidthPx) {
-        val chars = chooseHangingIndentChars(messageChars, fallbackChars) { hangingIndentFits(it * advance, fieldWidthPx) }
+    return remember(messageChars, fallbackChars, advance, density, fieldWidthPx, forceMessage) {
+        val chars = if (forceMessage) messageChars else chooseHangingIndentChars(messageChars, fallbackChars) { hangingIndentFits(it * advance, fieldWidthPx) }
         if (chars > 0) hangingIndentSp(chars, advance, density) else null
     }
 }

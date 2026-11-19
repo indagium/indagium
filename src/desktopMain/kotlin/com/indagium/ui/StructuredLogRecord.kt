@@ -61,6 +61,8 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.AppSettings
+import com.indagium.utils.hasRecordDetails
+import com.indagium.utils.recordInspectionSource
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
 import com.indagium.model.RecordFieldNameColor
@@ -120,18 +122,12 @@ internal val LocalRecordValueAlignment = staticCompositionLocalOf { RecordValueA
 /** How one tree places its values: [alignment], the shared [keyColumnDp] (COLUMN only) and the width of one space in [gapPx]. */
 private class RecordValueLayout(val alignment: RecordValueAlignment, val keyColumnDp: Float, val gapPx: Int)
 
-/** Returns the profile/DLT payload eligible for the inline record disclosure. */
-internal fun expandableRecordSource(entry: LogEntry, logFormat: LogFormat): String? {
-    val raw = entry.rawRecord
-    if (raw != null && entry.recordMetadata?.usesProfilePresentation == true) {
-        // A line that only starts with "[" (dmesg's "[    1.500000] …") is text, not a JSON array: isJsonRecord parses it.
-        if (raw.contains('\n') || raw.contains('\r') || isJsonRecord(raw)) return raw
-    }
-    if (logFormat == LogFormat.DLT && (entry.msg.contains('\n') || entry.msg.contains('\r'))) {
-        return raw ?: entry.msg
-    }
-    return null
-}
+internal fun canExpandRecord(entry: LogEntry, logFormat: LogFormat): Boolean =
+    entry.hasRecordDetails() || (logFormat == LogFormat.DLT && entry.msg.any { it == '\n' || it == '\r' })
+
+/** Returns the same record source used by the side pane and field actions. */
+internal fun expandableRecordSource(entry: LogEntry, logFormat: LogFormat): String? =
+    if (canExpandRecord(entry, logFormat)) entry.recordInspectionSource() else null
 
 /**
  * The collapsed row of a record that spans lines or runs long: its first line (cut at the preview cap
@@ -145,7 +141,7 @@ internal fun compactRecordSummary(text: androidx.compose.ui.text.AnnotatedString
     val firstLineEnd = if (breakAt < 0) raw.length else breakAt
     val headEnd = minOf(firstLineEnd, MAX_RECORD_PREVIEW_CHARS)
     val source = text.subSequence(0, headEnd)
-    val following = if (breakAt < 0) 0 else recordLines(raw.substring(breakAt).trimStart('\r', '\n')).count { it.isNotEmpty() }
+    val following = if (breakAt < 0) 0 else recordLines(raw).size - 1
     val suffix = buildString {
         if (headEnd < firstLineEnd) append(" …")
         if (following > 0) append(if (following == 1) " (+1 line)" else " (+$following lines)")

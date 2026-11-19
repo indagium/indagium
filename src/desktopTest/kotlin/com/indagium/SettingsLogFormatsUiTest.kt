@@ -30,6 +30,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -41,6 +42,7 @@ import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
+import com.indagium.model.LogProfileValueType
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
@@ -118,6 +120,83 @@ class SettingsLogFormatsUiTest {
         recordScreenshot("profile-dropdown-open", "settings-log-format-profile-popup")
     }
 
+    @Test
+    fun closingAProfileDraftCanCancelDiscardOrSave() {
+        val state = newState()
+        var dismissed = false
+        state.requestedSettingsPage = SettingsPage.LogFormats
+        rule.setContent { SettingsDialog(state, onDismiss = { dismissed = true }) }
+        fun newDraft(name: String) {
+            rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+            rule.onNodeWithTag("settings-log-format-name").performScrollTo().performTextReplacement(name)
+            rule.onNodeWithTag("settings-done").performClick()
+            rule.onNodeWithText("Save changes to $name?").assertExists()
+        }
+        newDraft("Keep editing")
+        rule.onNodeWithText("Cancel").performClick()
+        assertFalse(dismissed)
+        assertTrue(state.availableLogFormatProfiles().none { it.name == "Keep editing" })
+
+        rule.onNodeWithTag("settings-done").performClick()
+        rule.onNode(hasText("Discard") and !hasTestTag("settings-log-format-revert")).performClick()
+        assertTrue(dismissed)
+        assertTrue(state.availableLogFormatProfiles().none { it.name == "Keep editing" })
+
+        // The host stayed mounted to test the close callback. Save the same draft from the prompt.
+        rule.onNodeWithTag("settings-done").performClick()
+        rule.onNodeWithText("Save").performClick()
+        assertTrue(state.availableLogFormatProfiles().any { it.name == "Keep editing" })
+    }
+
+    @Test
+    fun nativeCsvGuideReadsOriginalColumnsAndKeepsQuotedCells() {
+        val state = newState()
+        val file = File(requireNotNull(tempDir), "source.csv")
+        file.writeText(
+            "time,level,component,pid,tid,message,request_id,duration_ms\n" +
+                "2026-11-16T12:00:00Z,INFO,Checkout,4100,4200,loaded,req-001,20\n" +
+                "2026-11-16T12:00:01Z,ERROR,Payment,4101,4201,\"timeout,\nsecond line\",req-002,35\n",
+        )
+        val id = requireNotNull(state.openFileWithLogFormatProfile(file, "plain-text"))
+        rule.waitUntil(15_000) { state.tab(id)?.contentState == com.indagium.model.TabContentState.LOADED }
+        state.activeTabId = id
+        openPage(state)
+        rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-start-csv").performScrollTo().performClick()
+        rule.onNodeWithText("Paste source").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-csv-guide-sample").performScrollTo().performTextReplacement("I/RAW  time,level,message")
+        rule.onNodeWithText("This sample starts with an I/RAW-style display prefix.", substring = true).assertExists()
+        rule.onNodeWithTag("settings-csv-guide-preview").assertIsNotEnabled()
+        rule.onNodeWithText("Current tab").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-csv-guide-preview").performScrollTo().performClick()
+        val suggest = rule.onNodeWithTag("settings-csv-guide-suggest")
+        rule.waitUntil(15_000) { rule.onAllNodesWithTag("settings-csv-guide-suggest").fetchSemanticsNodes().isNotEmpty() }
+        suggest.performScrollTo().performClick()
+        rule.onNodeWithTag("settings-csv-guide-preview").performScrollTo().performClick()
+        rule.waitUntil(5_000) { rule.onAllNodes(hasText("2 parsed records", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithTag("settings-log-format-save-footer").assertIsEnabled().performClick()
+        val profile = state.availableLogFormatProfiles().single { !it.readOnly }
+        assertEquals(LogFormatEngine.CSV, profile.engine)
+        assertEquals("time", profile.fieldMappings[LogFieldRole.TIMESTAMP])
+        assertEquals("request_id", profile.fieldMappings[LogFieldRole.REQUEST_ID])
+        val result = file.inputStream().use { com.indagium.utils.parseLogContent(it, fileName = file.name, profile = profile) }
+        assertEquals(listOf("loaded", "timeout,\nsecond line"), result.entries.map { it.msg })
+        assertEquals(CapabilityAvailability.AVAILABLE, result.capabilities[LogCapability.DELTA_TIME]?.availability)
+
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-plain-text").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-profile").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-${profile.id}").performScrollTo().performClick()
+        val type = rule.onNodeWithTag("settings-csv-guide-type-7")
+        type.performScrollTo().assert(hasText("Number")).performClick()
+        rule.onNodeWithTag("settings-csv-guide-type-7-option-0").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-save-footer").performClick()
+        val edited = state.availableLogFormatProfiles().single { it.id == profile.id }
+        assertEquals(profile.fieldMappings, edited.fieldMappings)
+        assertEquals(profile.visibleColumns, edited.visibleColumns)
+        assertEquals(LogProfileValueType.TEXT, edited.attributes.single().type)
+    }
+
     private fun recordScreenshot(name: String, tag: String? = null) {
         val image = if (tag == null) rule.onRoot().captureToImage() else rule.onNodeWithTag(tag).captureToImage()
         val pixels = image.toPixelMap()
@@ -145,6 +224,10 @@ class SettingsLogFormatsUiTest {
     private fun newProfileWithEngine(engineLabel: String) {
         rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
         rule.waitForIdle()
+        val discardPrompt = rule.onNode(hasText("Discard") and !hasTestTag("settings-log-format-revert"))
+        if (rule.onAllNodes(hasText("Save changes to", substring = true)).fetchSemanticsNodes().isNotEmpty()) {
+            discardPrompt.performClick()
+        }
         rule.onNodeWithTag("settings-log-format-engine").performScrollTo().performClick()
         rule.onNodeWithText(engineLabel).performClick()
         rule.waitForIdle()
@@ -311,7 +394,7 @@ class SettingsLogFormatsUiTest {
         rule.onNodeWithTag("settings-log-format-duplicate").assertDoesNotExist()
         openMenu("settings-log-format-profile-menu")
         rule.onNodeWithTag("settings-log-format-duplicate").assert(hasText("Duplicate"))
-        rule.onNodeWithTag("settings-log-format-delete").assert(hasText("Delete…"))
+        rule.onNodeWithTag("settings-log-format-delete").assert(hasText("Delete profile…"))
         rule.onNodeWithTag("settings-log-format-delete").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Delete Menu profile?").assertExists()

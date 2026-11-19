@@ -66,10 +66,8 @@ private fun Modifier.composedButHidden(): Modifier = this
         layout(0, 0) {}
     }
 
-/** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
- *  page switches and closing the dialog behind an unsaved-changes prompt without hoisting the
- *  section's entire edit-draft state up to the dialog. */
-internal class AiProviderGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
+/** The save and dirty state published by a Settings editor. */
+internal class SettingsDraftGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
 
 @Composable
 internal fun SettingsDialog(
@@ -93,10 +91,14 @@ internal fun SettingsDialog(
         }
         state.refreshArchiveCacheInfo()
     }
-    // Guards leaving the Providers page (switching to another page, or closing the dialog entirely)
-    // with unsaved profile edits. Only consulted while that page is actually selected, so a stale
-    // guard value left over from an earlier visit is harmless.
-    var aiProviderGuard by remember { mutableStateOf<AiProviderGuard?>(null) }
+    var aiProviderGuard by remember { mutableStateOf<SettingsDraftGuard?>(null) }
+    var logFormatGuard by remember { mutableStateOf<SettingsDraftGuard?>(null) }
+    fun currentDraftGuard(): SettingsDraftGuard? = when (selectedPage) {
+        SettingsPage.AiProviders -> aiProviderGuard
+        SettingsPage.LogFormats -> logFormatGuard
+        else -> null
+    }
+    val draftNoun = if (selectedPage == SettingsPage.LogFormats) "log format profile" else "provider"
     var pendingPageSwitch by remember { mutableStateOf<SettingsPage?>(null) }
     var pendingClose by remember { mutableStateOf(false) }
     // Set when the close prompt came from the footer's "Setup assistant…": Save or Discard then start the assistant (which closes
@@ -106,7 +108,7 @@ internal fun SettingsDialog(
 
     // Returns false when the switch was deferred behind the unsaved-changes prompt.
     fun requestPageSwitch(target: SettingsPage): Boolean {
-        if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
+        if (currentDraftGuard()?.isDirty == true) {
             guardSaveError = null
             pendingPageSwitch = target
             return false
@@ -141,7 +143,7 @@ internal fun SettingsDialog(
     }
 
     fun requestClose() {
-        if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
+        if (currentDraftGuard()?.isDirty == true) {
             guardSaveError = null
             pendingClose = true
         } else {
@@ -260,7 +262,7 @@ internal fun SettingsDialog(
                             Modifier.fillMaxSize()
                                 // While results are showing, the selected page stays composed but is
                                 // neither placed nor drawn: leaving it out of the tree would drop its
-                                // unsaved AI-provider edits, which the page-switch guard relies on.
+                                // unsaved profile edits, which the page-switch guard relies on.
                                 .then(if (searching) Modifier.composedButHidden() else Modifier)
                                 .verticalScroll(contentScroll)
                                 .onGloballyPositioned { anchors.content = it }
@@ -285,7 +287,9 @@ internal fun SettingsDialog(
                                 ::reclaimFocus,
                                 // A drill-in row opens its sub-page the way a nav click opens a page.
                                 onOpenPage = { target -> requestPageSwitch(target) },
-                            ) { aiProviderGuard = it }
+                                onProviderGuard = { aiProviderGuard = it },
+                                onLogFormatGuard = { logFormatGuard = it },
+                            )
                         }
                     }
                     if (!searching) {
@@ -300,9 +304,9 @@ internal fun SettingsDialog(
             SettingsFooter(
                 onShortcuts = { state.shortcutsOpen = true },
                 // Closes Settings first (unlike the shortcuts popup): the assistant is a dialog of
-                // its own. Unsaved AI-provider edits get the usual close prompt instead.
+                // its own. Unsaved profile edits get the usual close prompt instead.
                 onSetupAssistant = {
-                    if (selectedPage == SettingsPage.AiProviders && aiProviderGuard?.isDirty == true) {
+                    if (currentDraftGuard()?.isDirty == true) {
                         requestClose()
                         setupAssistantAfterClose = true
                     } else {
@@ -315,19 +319,36 @@ internal fun SettingsDialog(
                     reclaimFocus()
                 },
                 onDone = ::requestClose,
+                saveProfile = if (selectedPage == SettingsPage.LogFormats &&
+                    logFormatGuard?.isDirty == true && contentScroll.value > with(density) { 160.dp.roundToPx() }
+                ) {
+                    { logFormatGuard?.save?.invoke()?.let { guardSaveError = it } }
+                } else {
+                    null
+                },
             )
+        }
+    }
+
+    if (!pendingClose && pendingPageSwitch == null && guardSaveError != null) {
+        SettingsConfirmDialog(
+            title = "Could not save profile",
+            message = guardSaveError.orEmpty(),
+            onDismissRequest = { guardSaveError = null },
+        ) {
+            SettingsDialogButton("OK", primary = true) { guardSaveError = null }
         }
     }
 
     pendingPageSwitch?.let { target ->
         SettingsConfirmDialog(
-            title = "Save changes to ${aiProviderGuard?.profileName.orEmpty()}?",
-            message = "You changed this provider's settings without saving. Save them before switching pages?",
+            title = "Save changes to ${currentDraftGuard()?.profileName.orEmpty()}?",
+            message = "You changed this $draftNoun's settings without saving. Save them before switching pages?",
             error = guardSaveError,
             onDismissRequest = { pendingPageSwitch = null; guardSaveError = null },
         ) {
             SettingsDialogButton("Save", primary = true) {
-                val err = aiProviderGuard?.save?.invoke()
+                val err = currentDraftGuard()?.save?.invoke()
                 if (err == null) {
                     pendingPageSwitch = null
                     guardSaveError = null
@@ -364,13 +385,13 @@ internal fun SettingsDialog(
             setupAssistantAfterClose = false
         }
         SettingsConfirmDialog(
-            title = "Save changes to ${aiProviderGuard?.profileName.orEmpty()}?",
-            message = "You changed this provider's settings without saving. Save them before closing Settings?",
+            title = "Save changes to ${currentDraftGuard()?.profileName.orEmpty()}?",
+            message = "You changed this $draftNoun's settings without saving. Save them before closing Settings?",
             error = guardSaveError,
             onDismissRequest = ::cancelClose,
         ) {
             SettingsDialogButton("Save", primary = true) {
-                val err = aiProviderGuard?.save?.invoke()
+                val err = currentDraftGuard()?.save?.invoke()
                 if (err == null) finishClose() else guardSaveError = err
             }
             SettingsDialogButton("Discard", danger = true) { finishClose() }
@@ -386,7 +407,8 @@ internal fun SettingsPageBody(
     page: SettingsPage,
     reclaimFocus: () -> Unit,
     onOpenPage: (SettingsPage) -> Unit,
-    onProviderGuard: (AiProviderGuard) -> Unit,
+    onProviderGuard: (SettingsDraftGuard) -> Unit,
+    onLogFormatGuard: (SettingsDraftGuard?) -> Unit = {},
 ) {
     when (page) {
         SettingsPage.General -> GeneralSettingsSection(state, reclaimFocus)
@@ -395,7 +417,7 @@ internal fun SettingsPageBody(
         SettingsPage.LogView -> LogViewSettingsSection(state, reclaimFocus)
         SettingsPage.SearchFilters -> SearchFiltersSettingsSection(state, reclaimFocus)
         SettingsPage.IssueCategories -> IssueCategoriesSettingsSection(state, reclaimFocus)
-        SettingsPage.LogFormats -> LogFormatSettingsSection(state, reclaimFocus)
+        SettingsPage.LogFormats -> LogFormatSettingsSection(state, reclaimFocus, onLogFormatGuard)
         SettingsPage.SourceCode -> SourceCodeSettingsSection(state, reclaimFocus)
         SettingsPage.NotesWriting -> NotesWritingSettingsSection(state, reclaimFocus)
         SettingsPage.CopyExport -> CopyExportSettingsSection(state, reclaimFocus)

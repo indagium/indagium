@@ -50,7 +50,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // Settings › AI: Providers, Commands and Voice input, as groups of rows. Providers keeps its own unsaved-changes guard exactly as it was:
-// the draft, Save profile, the prompt that stops a switch, add or remove of a provider while the draft is dirty, the AiProviderGuard it
+// the draft, Save profile, the prompt that stops a switch, add or remove of a provider while the draft is dirty, the SettingsDraftGuard it
 // publishes for the dialog (which stops a page switch or Done), and the API key that is stored per keystroke for this session only.
 
 // The row descriptions the search index shares (SettingsSearchIndex.kt), so a result reads exactly like the row it points at.
@@ -104,7 +104,7 @@ internal object AiPageTags {
 // ── Providers ─────────────────────────────────────────────────────────
 
 @Composable
-internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProviderGuard) -> Unit = {}, reclaimFocus: () -> Unit = {}) {
+internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (SettingsDraftGuard) -> Unit = {}, reclaimFocus: () -> Unit = {}) {
     val tc = tc()
     // Settings migration normally guarantees this invariant, but keeping the editor safe during
     // a transient empty state avoids a compose-time crash while a profile list is being replaced.
@@ -151,12 +151,12 @@ internal fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvid
         modelDiscovery = state.aiSidebarRuntime.discoverModels(draft, apiKey)
     }
     val isDirty = draft != profile
-    SideEffect { onGuardChange(AiProviderGuard(isDirty, profile.displayName) { state.updateAiProviderProfile(draft) }) }
+    SideEffect { onGuardChange(SettingsDraftGuard(isDirty, profile.displayName) { state.updateAiProviderProfile(draft) }) }
 
     // Any navigation away from a dirty draft (switching provider, adding a new one, or removing a
     // *different* profile) goes through this instead of acting immediately, so edits are never
     // silently lost. Switching settings section or closing the dialog is guarded the same way, one
-    // level up in SettingsDialog, via the published AiProviderGuard above.
+    // level up in SettingsDialog, via the published SettingsDraftGuard above.
     var pendingNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
     var navigationSaveError by remember { mutableStateOf<String?>(null) }
     var pendingDeleteProfileId by remember { mutableStateOf<String?>(null) }

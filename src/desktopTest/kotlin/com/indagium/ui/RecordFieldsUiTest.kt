@@ -262,6 +262,29 @@ class RecordFieldsUiTest : SharedNoteUiTestBase() {
     }
 
     @Test
+    fun addingAParsedTextFieldToNotesUsesTheVisibleFieldSource() {
+        val entry = LogEntry(
+            1, "12:00:00.000", LogLevel.I, "daemon", "ready",
+            recordMetadata = LogRecordMetadata(
+                profileFields = mapOf("HOST" to "host1", "MESSAGE" to "ready", "sd.state" to "ready"),
+                rawRecord = "<134>1 2026-11-16T12:00:00.000Z host1 daemon 123 ID47 [example state=\"ready\"] ready",
+                usesProfilePresentation = true,
+            ),
+        )
+        setup { s ->
+            s.tabs = s.tabs.map { tab ->
+                if (tab.id == "a") mkTab("a", "a.log", listOf(entry)).copy(sourcePath = tab.sourcePath) else tab
+            }
+        }
+        selectRow(1)
+        rightClickNode(detailsNode("host"))
+        rule.onNodeWithText("Add field to notes").performClick()
+        val request = assertNotNull(state.addAnnRequest)
+        assertEquals(listOf("host"), request.recordFields!!.single().path)
+        assertEquals("\"host1\"", request.recordFields!!.single().json)
+    }
+
+    @Test
     fun theMenuOfAFieldUnderALogRowAddsItToo() {
         setupJson()
         rule.onNodeWithTag("structured-record-disclosure-1").performClick()

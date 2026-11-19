@@ -94,6 +94,9 @@ data class LogRecordMetadata(
     val usesProfilePresentation: Boolean = false,
     /** Logcat/DLT profile rows retain the legacy source-clock and rollover interpretation. */
     val usesLegacyClockSemantics: Boolean = false,
+    /** Generated key to original key when both refer to the same parsed field. */
+    val fieldAliases: Map<String, String> = emptyMap(),
+    val rawFallback: Boolean = false,
 )
 
 /** Immutable per-row projection, captured once during parsing for consistent display and export. */
@@ -1061,6 +1064,8 @@ data class LogTab(
     val logSectionViews: Map<String, LogSectionViewState> = emptyMap(),
     /** Last inspected message; transient, independent of toggling a row out of the selection. */
     val inspectedRecordId: Int? = null,
+    /** Native DLT presentation only; the profile and canonical record remain pinned to the tab. */
+    val dltSplitIdentifiers: Boolean = false,
     // Links this tab to a live capture recording session (ui/CaptureCoordinator.kt), if it's the
     // tab streaming one. Session-only, like tailing/search/tidMap above — deliberately ABSENT from
     // AutosaveCodec's tabToken()/tabShellFromToken()/persistedSnapshot(). A capture cannot survive

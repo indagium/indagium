@@ -69,7 +69,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.state.ToggleableState
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -759,17 +758,12 @@ private fun ProfileColHeader(
             }
         }
         Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT))
-        // A tile too narrow for every label wraps the header the way it wraps rows, with the same indent rule, rather than
-        // cutting the right-most labels off: every column the rows show stays named.
-        val family = font ?: FontFamily.Monospace
-        var widthPx by remember { mutableStateOf(0) }
-        val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
-        val indent = rememberHangingIndent(messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx)
-        val text = remember(header, indent) { AnnotatedString(header).let { if (indent != null) it.withHangingIndent(indent) else it } }
         BasicText(
-            text,
-            style = TextStyle(color = tc.td, fontSize = contentFontSizeSp.sp, fontFamily = family, fontWeight = FontWeight.SemiBold),
-            modifier = Modifier.weight(1f).onSizeChanged { widthPx = it.width }.testTag("colheader-profile-text"),
+            header,
+            style = TextStyle(color = tc.td, fontSize = contentFontSizeSp.sp, fontFamily = font ?: FontFamily.Monospace, fontWeight = FontWeight.SemiBold),
+            softWrap = false,
+            maxLines = 1,
+            modifier = Modifier.weight(1f).testTag("colheader-profile-text"),
         )
     }
 }
@@ -1913,6 +1907,7 @@ internal fun CtxItem(
 
 @Composable
 internal fun CtxTagActions(
+    label: String = "Tag",
     highlighted: Boolean = false,
     onInclude: () -> Unit,
     onExclude: () -> Unit,
@@ -1935,7 +1930,7 @@ internal fun CtxTagActions(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            AppText("Tag", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
             Row(
                 Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -2663,6 +2658,7 @@ internal sealed class CtxMenuEntry {
     data class Action(val icon: ImageVector, val label: String, val enabled: Boolean = true, val onClick: () -> Unit) : CtxMenuEntry()
 
     data class TagActions(
+        val label: String,
         val onInclude: () -> Unit,
         val onExclude: () -> Unit,
         val onHighlight: () -> Unit,

@@ -10,6 +10,8 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -23,12 +25,14 @@ import com.indagium.model.CapabilityAvailability
 import com.indagium.model.LogCapability
 import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogFieldRole
+import com.indagium.model.LogFormatAttribute
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.ProfileTimestampKind
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
 import com.indagium.ui.logCapabilitiesForTab
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -102,6 +106,56 @@ class LogProfileFeatureAvailabilityUiTest {
         }
         val directory = File("build/log-format-qa").apply { mkdirs() }
         assertTrue(ImageIO.write(rendered, "png", File(directory, "$name.png")))
+    }
+
+    @Test
+    fun profileHeadersScrollWithTheirOwnRowsInFilteredAndOriginalPanes() {
+        val state = newState()
+        val attributes = List(6) { index ->
+            LogFormatAttribute(id = "field_$index", label = "Field $index", source = "field_$index", visibleByDefault = true)
+        }
+        val profile = LogFormatProfile(
+            id = "wide-columns", name = "Wide columns", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+            visibleColumns = listOf(LogFieldRole.MESSAGE),
+            attributes = attributes,
+        )
+        val header = (attributes.map { it.source } + "message").joinToString(",")
+        val data = (attributes.map { "a".repeat(38) } + "log message").joinToString(",")
+        val tabId = openProfileLog(state, profile, "$header\n$data")
+        state.upTab(tabId) { it.copy(showUnfiltered = true) }
+        showFileView(state, tabId)
+
+        val entryId = requireNotNull(state.tab(tabId)).logData.single().id
+        val main = state.logViewerScrollStateStore.scrollState("$tabId:main")
+        val original = state.logViewerScrollStateStore.scrollState("$tabId:original")
+        rule.waitUntil(LOAD_TIMEOUT_MS) { main.maxValue in 1 until Int.MAX_VALUE && original.maxValue in 1 until Int.MAX_VALUE }
+
+        fun headerLeft(pane: String): Float = rule.onNode(
+            hasTestTag("colheader-profile-text") and hasAnyAncestor(hasTestTag("log-column-header-$tabId:$pane")),
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot().left.value
+        fun rowLeft(pane: String): Float =
+            rule.onNodeWithTag("log-row-$tabId:$pane-$entryId").getUnclippedBoundsInRoot().left.value
+
+        val mainHeaderBefore = headerLeft("main")
+        val originalHeaderBefore = headerLeft("original")
+        val mainRowBefore = rowLeft("main")
+        val originalRowBefore = rowLeft("original")
+
+        runBlocking { main.scrollTo(main.maxValue / 2) }
+        rule.waitForIdle()
+        val mainShift = mainHeaderBefore - headerLeft("main")
+        assertTrue(mainShift > 0f)
+        assertEquals(mainShift, mainRowBefore - rowLeft("main"), 1f)
+        assertEquals(originalHeaderBefore, headerLeft("original"), 1f)
+
+        runBlocking { original.scrollTo(original.maxValue / 2) }
+        rule.waitForIdle()
+        val originalShift = originalHeaderBefore - headerLeft("original")
+        assertTrue(originalShift > 0f)
+        assertEquals(originalShift, originalRowBefore - rowLeft("original"), 1f)
+        assertEquals(mainShift, mainHeaderBefore - headerLeft("main"), 1f)
     }
 
     @Test

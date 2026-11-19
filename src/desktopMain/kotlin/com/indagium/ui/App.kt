@@ -730,13 +730,17 @@ fun App(
                         // separate pendingSequenceStart term is needed here.
                         // Fields picked (or text-selected) in this row's record tree: the menu can add them too.
                         val fieldsEntry = state.recordFieldsMenuEntry(ctx.tabId, ctx.entryId)
+                        val inspectable = entry.hasRecordDetails()
+                        val identityAction = ctxTab.componentActionName()
+                        val hasIdentityAction = entry.contextFilterIdentity(ctxTab.logFormat) != null &&
+                            ctxTab.canUseProfileCapability(LogCapability.COMPONENT_FILTER, ctxCapabilities)
                         val estimatedMenuHeight = (490 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (hasProcessBlock) 73 else 0) +
                             (if (hasProcessSecondRow) 28 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
-                            (if (entry.hasRecordDetails()) 32 else 0) +
+                            (if (inspectable) 32 else 0) - (if (hasIdentityAction) 0 else 100) +
                             (if (fieldsEntry != null) 32 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 76 else 0)).dp
                         val menuScroll = rememberScrollState()
@@ -810,22 +814,25 @@ fun App(
                                     submenu = ruleVariants.map { v -> CtxSubmenuOption(v.label) { state.showOnlyMessagesLikeVariant(v) } },
                                 ),
                             )
-                            add(CtxMenuEntry.Divider)
-                            add(
-                                CtxMenuEntry.TagActions(
-                                    onInclude = { state.addTagFilterFromCtx() },
-                                    onExclude = { state.addExcludeTagFromCtx() },
-                                    onHighlight = { state.addHlTagFromCtx() },
-                                    onHighlightColor = { color -> state.addHlTagFromCtx(color) },
-                                    highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
-                                    preferPickerLeft = submenuOpensLeft,
-                                ),
-                            )
-                            add(
-                                CtxMenuEntry.Action(Icons.Outlined.FormatColorFill, "Highlight lines with this tag") {
-                                    state.addHlTagFromCtx(wholeLine = true)
-                                },
-                            )
+                            if (hasIdentityAction) {
+                                add(CtxMenuEntry.Divider)
+                                add(
+                                    CtxMenuEntry.TagActions(
+                                        label = identityAction,
+                                        onInclude = { state.addTagFilterFromCtx() },
+                                        onExclude = { state.addExcludeTagFromCtx() },
+                                        onHighlight = { state.addHlTagFromCtx() },
+                                        onHighlightColor = { color -> state.addHlTagFromCtx(color) },
+                                        highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
+                                        preferPickerLeft = submenuOpensLeft,
+                                    ),
+                                )
+                                add(
+                                    CtxMenuEntry.Action(Icons.Outlined.FormatColorFill, "Highlight lines with this ${identityAction.lowercase()}") {
+                                        state.addHlTagFromCtx(wholeLine = true)
+                                    },
+                                )
+                            }
                             add(CtxMenuEntry.Divider)
                             // Sequence actions — own block, "Add as sequence" pulled out of the
                             // highlight block above to sit next to the rest of the sequence
@@ -863,7 +870,7 @@ fun App(
                                     },
                                 )
                                 // Only for rows that carry parsed fields or a raw record (profile formats), never Logcat.
-                                if (entry.hasRecordDetails()) {
+                                if (inspectable) {
                                     add(
                                         CtxMenuEntry.Action(Icons.Outlined.Info, "Record details…") {
                                             state.ctx = null
@@ -1147,6 +1154,7 @@ fun App(
                                             CtxItem(e.icon, e.label, highlighted = e === selectedEntry, enabled = e.enabled, onClick = e.onClick)
                                         is CtxMenuEntry.TagActions ->
                                             CtxTagActions(
+                                                label = e.label,
                                                 highlighted = e === selectedEntry,
                                                 onInclude = e.onInclude,
                                                 onExclude = e.onExclude,

@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
@@ -37,6 +38,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
@@ -51,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
@@ -62,6 +65,7 @@ import com.indagium.debug.AppLogger
 import com.indagium.model.*
 import com.indagium.utils.HlSpan
 import com.indagium.utils.OrderedIntSet
+import com.indagium.utils.ProfileColumnLayout
 import com.indagium.utils.ProfileDisplayTextProjection
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.asLogEntryView
@@ -1027,6 +1031,8 @@ internal fun buildLogLineRender(
     errorHighlightStyle: ErrorHighlightStyle? = null,
     // Column widths of a profile tab (profileColumnLayout); null leaves the columns unpadded.
     profileColumnWidths: Map<String, Int>? = null,
+    shownProfileColumns: Set<String>? = null,
+    nativeDltGrid: Boolean? = null,
 ): LogLineRender {
     // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
     // source of truth (utils/TextMatch.kt) — never against what's actually rendered below, which
@@ -1046,7 +1052,12 @@ internal fun buildLogLineRender(
     val lineText = visibleLogLineText(entry)
     val profileColumns = profileDisplayColumns(entry)
     val profileProjection = profileColumns?.let {
-        profileDisplayTextProjection(it, processDisplay, includeProcessThread = showPidTid, columnWidths = profileColumnWidths)
+        profileDisplayTextProjection(
+            it, processDisplay, includeProcessThread = showPidTid,
+            columnWidths = profileColumnWidths, shownColumnIds = shownProfileColumns,
+        )
+    } ?: nativeDltGrid?.let { split ->
+        dltGridProjection(entry, split, profileColumnWidths.orEmpty())
     }
     val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext, errorHighlightStyle)
     // A klogg whole-line rule recolours every character of the row through the base colours below,
@@ -1167,7 +1178,7 @@ private fun profileFieldColor(
     messageColor: Color,
 ): Color = when {
     id == "timestamp" || id == "time" || id == "ts" -> timestampColor
-    isProfileProcessIdColumn(id) || isProfileThreadIdColumn(id) -> processColor
+    id == "session" || isProfileProcessIdColumn(id) || isProfileThreadIdColumn(id) -> processColor
     isProfileSeverityColumn(id) -> if (entry.severityKnown) entry.level.defaultColor else Color(UNKNOWN_SEVERITY_TEXT_COLOR_ARGB)
     id == "component" || id == "tag" -> componentColor
     else -> messageColor
@@ -1429,6 +1440,7 @@ internal fun LogViewer(
     onToggleTimeDelta: () -> Unit = {},
     metadataJsonTagVisible: Boolean? = null,
     onToggleMetadataJsonTag: () -> Unit = {},
+    onToggleDltIdentifiers: () -> Unit = {},
     /**
      * Which structured records are open, kept by the tab's owner so Expand all / Collapse all reach them. Null keeps the state in this
      * viewer (preview and test callers); [onToggleRecord] then goes unused.
@@ -1565,7 +1577,9 @@ internal fun LogViewer(
     // this recompute whenever new data arrives, same as the other remember/LaunchedEffect calls
     // in this file that key on the tailed-growth size. any{} short-circuits on the first match,
     // so this only re-pays a full scan repeatedly for tabs that genuinely have zero pid/tid data.
-    val hasPidTid = remember(tab.id, totalCnt) { tab.logData.any { it.pid > 0 } }
+    val hasPidTid = remember(tab.id, totalCnt) {
+        tab.logData.any { if (tab.logFormat == LogFormat.DLT) it.pid != 0 else it.pid > 0 }
+    }
     val effectiveDeltaTimeStatus = deltaTimeStatus ?: tab.profileCapability(LogCapability.DELTA_TIME)
     val deltaTimeEnabled = effectiveDeltaTimeStatus?.availability != CapabilityAvailability.UNAVAILABLE
     val effectiveProcessNamesStatus = processNamesStatus ?: tab.profileCapability(LogCapability.PROCESS_NAMES)
@@ -1589,7 +1603,75 @@ internal fun LogViewer(
     var localRecordExpansion by remember(tab.id) { mutableStateOf(RecordExpansion()) }
     val records = recordExpansion ?: localRecordExpansion
     val toggleRecord: (Int) -> Unit = if (recordExpansion != null) onToggleRecord else { id -> localRecordExpansion = localRecordExpansion.toggled(id) }
-    val hasExpandableRecords = remember(tab.id, tab.logData.firstOrNull()) { tabHasExpandableRecords(tab) }
+    val nativeDltGrid = tab.logFormat == LogFormat.DLT && tab.logData.firstOrNull()?.recordMetadata?.usesProfilePresentation != true
+    val projectedGrid = key(tab.id, tab.profileDisplayColumns) {
+        val layout by produceState<ProfileColumnLayout?>(null, tab.logData) {
+            value = withContext(Dispatchers.Default) {
+                val context = coroutineContext
+                profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData, context::ensureActive)
+            }
+        }
+        layout
+    }
+    val grid = if (nativeDltGrid) {
+        remember(tab.dltSplitIdentifiers, hasPidTid) { dltGridLayout(tab.dltSplitIdentifiers, hasPidTid) }
+    } else {
+        projectedGrid
+    }
+    val gridMeasurer = rememberTextMeasurer()
+    val gridDensity = LocalDensity.current
+    val gridFontSize = baseSp()
+    val gridCharWidth = remember(gridMeasurer, gridDensity, gridFontSize, mono) {
+        monoAdvancePx(gridMeasurer, mono, gridFontSize) / gridDensity.density
+    }
+    fun gridWidth(minimum: Dp, timeDeltaChars: Int): Dp {
+        val layout = grid ?: return minimum
+        val left = ROW_START_PAD + STRUCTURED_DISCLOSURE_SLOT +
+            (if (settings.showRowNumbers) rowNumberColumnWidth(gridFontSize.value, tab.logData.size.toString().length) + ROW_NUM_GAP else 0.dp) +
+            (if (tab.showTimeDelta) timeDeltaColumnWidth(gridFontSize.value, timeDeltaChars) + ROW_NUM_GAP else 0.dp) +
+            (if (tab.tidMap != null) TID_MAP_HIT_WIDTH else 0.dp)
+        val fixed = (layout.minimumChars * gridCharWidth).dp + left + 14.dp
+        val manual = if (settings.autoLogRowWrap) 0.dp else logContentWidthDp(
+            effectiveLogWrapLimitChars(false, settings.logRowWrapLimitChars, minimum.value, gridCharWidth), gridCharWidth,
+        )
+        return maxOf(minimum, fixed, manual)
+    }
+
+    @Composable
+    fun PaneColumnHeader(panelKey: String, pidTid: Boolean, timeDeltaChars: Int) {
+        val layout = grid
+        val header: @Composable () -> Unit = {
+            ColHeader(
+                pidTid,
+                showRowNumbers = settings.showRowNumbers,
+                rowNumDigits = tab.logData.size.toString().length,
+                showTimeDelta = tab.showTimeDelta,
+                timeDeltaChars = timeDeltaChars,
+                hasTidMap = tab.tidMap != null,
+                pidFieldChars = pidFieldChars,
+                contentFontSizeSp = settings.fontSize,
+                profileHeader = layout?.header,
+                profileHeaderFont = mono,
+            )
+        }
+        if (layout == null) {
+            header()
+        } else {
+            val scroll = scrollStates.scrollState(panelKey)
+            val gutter = if (settings.showMinimap) 16.dp + MINIMAP_CONTENT_GAP + MINIMAP_WIDTH else 0.dp
+            Layout(
+                header,
+                Modifier.fillMaxWidth().background(tc.p2).padding(end = gutter).clipToBounds().testTag("log-column-header-$panelKey"),
+            ) { measurables, constraints ->
+                val width = gridWidth(constraints.maxWidth.toDp(), timeDeltaChars).roundToPx()
+                val placeable = measurables.single().measure(Constraints.fixedWidth(width))
+                layout(constraints.maxWidth, placeable.height) {
+                    placeable.placeRelative(-scroll.value, 0)
+                }
+            }
+        }
+    }
+    val hasExpandableRecords = rememberRecordAvailability(tab)
     val canExpandAll = computedItems.summary.collapsedGroupCount > 0 || (hasExpandableRecords && !records.allExpanded)
     val canCollapseAll = computedItems.summary.expandedGroupCount > 0 || (hasExpandableRecords && records.anyExpanded)
     val expandAllAction: () -> Unit = {
@@ -1734,6 +1816,8 @@ internal fun LogViewer(
                     showMinimap = settings.showMinimap,
                     metadataJsonTagVisible = metadataJsonTagVisible,
                     onToggleMetadataJsonTag = { toolbarContextMenuOpen = false; onToggleMetadataJsonTag() },
+                    dltSplitIdentifiers = tab.dltSplitIdentifiers.takeIf { nativeDltGrid },
+                    onToggleDltIdentifiers = { toolbarContextMenuOpen = false; onToggleDltIdentifiers() },
                     processNameMode = tab.processNameMode,
                     manualProcessNamePicks = tab.manualProcessNamePicks,
                     processNamesEnabled = processNamesEnabled,
@@ -2095,18 +2179,21 @@ internal fun LogViewer(
                         } else {
                             0.dp
                         }).coerceAtLeast(0.dp)
-                        val effectiveWrapLimitChars = effectiveLogWrapLimitChars(
+                        val effectiveWrapLimitChars = maxOf(grid?.minimumChars ?: 0, effectiveLogWrapLimitChars(
                             auto = settings.autoLogRowWrap,
                             configuredLimitChars = settings.logRowWrapLimitChars,
                             visibleWidthDp = logViewportWidth.value,
                             charWidthDp = charWidthDp,
-                        )
-                        val rowContentWidth = if (settings.autoLogRowWrap) {
+                        ))
+                        val rowContentWidth = if (grid != null) {
+                            gridWidth(logViewportWidth, timeDeltaChars)
+                        } else if (settings.autoLogRowWrap) {
                             logViewportWidth
                         } else {
                             logContentWidthDp(effectiveWrapLimitChars, charWidthDp)
                         }
-                        val contentModifier = if (settings.autoLogRowWrap) {
+                        val scrollHorizontally = !settings.autoLogRowWrap || rowContentWidth > logViewportWidth
+                        val contentModifier = if (!scrollHorizontally) {
                             Modifier.width(logViewportWidth).fillMaxHeight()
                         } else {
                             // horizontalScroll(hScroll) already reacts to PointerEventType.Scroll
@@ -2126,8 +2213,8 @@ internal fun LogViewer(
                                 .onPointerEvent(PointerEventType.Enter) { onHoverPanelKey(panelKey) }
                                 .onPointerEvent(PointerEventType.Exit) { onHoverPanelKey(null) }
                         }
-                        LaunchedEffect(settings.autoLogRowWrap, hScroll) {
-                            if (settings.autoLogRowWrap && hScroll.value != 0) hScroll.scrollTo(0)
+                        LaunchedEffect(scrollHorizontally, hScroll) {
+                            if (!scrollHorizontally && hScroll.value != 0) hScroll.scrollTo(0)
                         }
                         // Absolute Y of this content Box's own top-left — the same
                         // positionInRoot()-based bookkeeping rowBoundsAbs already uses for row hit-
@@ -2202,6 +2289,8 @@ internal fun LogViewer(
                                             is LogItem.Row -> LogRow(
                                                 item = item,
                                                 tab = effectiveTab,
+                                                grid = grid,
+                                                nativeDltGrid = tab.dltSplitIdentifiers.takeIf { nativeDltGrid },
                                                 panelKey = panelKey,
                                                 mono = mono,
                                                 tc = tc,
@@ -2338,7 +2427,7 @@ internal fun LogViewer(
                             ThinVerticalScrollbar(lazyState, Modifier.fillMaxHeight())
                         }
                     }
-                    if (!settings.autoLogRowWrap) {
+                    if (!settings.autoLogRowWrap || (grid != null && hScroll.maxValue in 1 until Int.MAX_VALUE)) {
                         ThinHorizontalScrollbar(hScroll, Modifier.fillMaxWidth().padding(end = 8.dp))
                     }
                     Box(Modifier.fillMaxWidth().height(3.dp)) {
@@ -2850,19 +2939,7 @@ internal fun LogViewer(
                 // Original panel's Δt values use its local selection, independent of the
                 // Filtered panel's tab.selected below; the gutter width itself stays fixed.
                 val originalTimeDeltaChars = rememberTimeDeltaChars(tab, allItems)
-                ColHeader(
-                    showPidTid,
-                    showRowNumbers = settings.showRowNumbers,
-                    rowNumDigits = tab.logData.size.toString().length,
-                    showTimeDelta = tab.showTimeDelta,
-                    timeDeltaChars = originalTimeDeltaChars,
-                    hasTidMap = tab.tidMap != null,
-                    pidFieldChars = pidFieldChars,
-                    contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid)
-                        ?: dltColumnHeader(tab, showPidTid, pidFieldChars),
-                    profileHeaderFont = mono,
-                )
+                PaneColumnHeader("${tab.id}:original", showPidTid, originalTimeDeltaChars)
                 ItemList(
                     listItems = allItems,
                     listSummary = computedAllItems.summary,
@@ -2943,19 +3020,7 @@ internal fun LogViewer(
                     )
                 }
                 val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, items)
-                ColHeader(
-                    showPidTid,
-                    showRowNumbers = settings.showRowNumbers,
-                    rowNumDigits = tab.logData.size.toString().length,
-                    showTimeDelta = tab.showTimeDelta,
-                    timeDeltaChars = filteredTimeDeltaChars,
-                    hasTidMap = tab.tidMap != null,
-                    pidFieldChars = pidFieldChars,
-                    contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid)
-                        ?: dltColumnHeader(tab, showPidTid, pidFieldChars),
-                    profileHeaderFont = mono,
-                )
+                PaneColumnHeader("${tab.id}:main", showPidTid, filteredTimeDeltaChars)
                 ItemList(
                     listItems = items,
                     listSummary = computedItems.summary,
@@ -3024,7 +3089,7 @@ internal fun LogViewer(
                     ) { info ->
                         StaleRowsLayer(rowsStale, tab.id, tc.bg) {
                             Column(Modifier.fillMaxSize().background(tc.bg)) {
-                                OriginalPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                                OriginalPane(grid != null || pidTidColumnsVisible(hasPidTid, info.widthDp))
                             }
                         }
                     },
@@ -3033,7 +3098,7 @@ internal fun LogViewer(
                     StaleRowsLayer(rowsStale, tab.id, tc.bg) {
                         Column(Modifier.fillMaxSize().background(tc.bg).onGloballyPositioned { containerH = it.size.height / density }) {
                             Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
-                            FilteredSplitPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                            FilteredSplitPane(grid != null || pidTidColumnsVisible(hasPidTid, info.widthDp))
                         }
                     }
                 })
@@ -3210,19 +3275,7 @@ internal fun LogViewer(
                     )
                 }
                 val mainTimeDeltaChars = rememberTimeDeltaChars(tab, items)
-                ColHeader(
-                    showPidTid,
-                    showRowNumbers = settings.showRowNumbers,
-                    rowNumDigits = tab.logData.size.toString().length,
-                    showTimeDelta = tab.showTimeDelta,
-                    timeDeltaChars = mainTimeDeltaChars,
-                    hasTidMap = tab.tidMap != null,
-                    pidFieldChars = pidFieldChars,
-                    contentFontSizeSp = settings.fontSize,
-                    profileHeader = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)?.headerFor(showPidTid)
-                        ?: dltColumnHeader(tab, showPidTid, pidFieldChars),
-                    profileHeaderFont = mono,
-                )
+                PaneColumnHeader("${tab.id}:main", showPidTid, mainTimeDeltaChars)
                 ItemList(
                     items, computedItems.summary, rowBoundsAbs, boxPosY,
                     effectiveTab = tab.copy(search = filteredSearch),
@@ -3240,7 +3293,7 @@ internal fun LogViewer(
                     StaleRowsLayer(rowsStale, tab.id, tc.bg) {
                         Column(Modifier.fillMaxSize().background(tc.bg)) {
                             Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
-                            SinglePane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                            SinglePane(grid != null || pidTidColumnsVisible(hasPidTid, info.widthDp))
                         }
                     }
                 })
@@ -3693,6 +3746,8 @@ internal fun pointerInsidePidFieldX(pointerX: Float, fieldStartX: Float, fieldEn
 private fun LogRow(
     item: LogItem.Row,
     tab: LogTab,
+    grid: ProfileColumnLayout? = null,
+    nativeDltGrid: Boolean? = null,
     panelKey: String,
     mono: FontFamily,
     tc: ThemeColors,
@@ -3760,7 +3815,8 @@ private fun LogRow(
     val density  = LocalDensity.current.density
     val entry    = item.entry
     val isSel    = entry.id in tab.selected
-    val structuredRecordSource = remember(entry, tab.logFormat) { expandableRecordSource(entry, tab.logFormat) }
+    val recordInspectable = remember(entry, tab.logFormat) { canExpandRecord(entry, tab.logFormat) }
+    val latestRecordInspectable by rememberUpdatedState(recordInspectable)
     val structuredRecordExpanded = recordExpanded
     var structuredDisclosureBounds by remember(tab.id, entry.id) { mutableStateOf<Pair<Float, Float>?>(null) }
     val latestStructuredDisclosureBounds by rememberUpdatedState(structuredDisclosureBounds)
@@ -3844,10 +3900,10 @@ private fun LogRow(
     // isSel is a key because a klogg whole-line rule's text colour is dropped on selected rows
     // (see buildLogLineRender's suppressLineTextColor) — the row's selection background must stay
     // readable — so the text has to be rebuilt when selection toggles.
-    val profileLayout = profileColumnLayout(tab.id, tab.profileDisplayColumns, tab.logData)
+    val profileLayout = grid
     val lineRender = remember(
         tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
-        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid, errorHighlightStyle, profileLayout,
+        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid, errorHighlightStyle, profileLayout, recordInspectable, nativeDltGrid,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
@@ -3869,25 +3925,30 @@ private fun LogRow(
             cellBg = cellBg,
             suppressLineTextColor = isSel || isCrashGroupRow,
             profileColumnWidths = profileLayout?.widths,
+            shownProfileColumns = profileLayout?.shownColumnIds,
+            nativeDltGrid = nativeDltGrid,
             showPidTid = showPidTid,
             errorHighlightStyle = errorHighlightStyle,
         )
-        if (autoWrap) {
-            built
+        val summary = if (recordInspectable && built.text.text.any { it == '\n' || it == '\r' }) {
+            compactRecordSummary(built.text)
         } else {
-            val indent = chooseHangingIndentChars(built.messageIndentChars, built.fallbackIndentChars) {
-                it <= wrapLimitChars * MAX_HANGING_INDENT_FRACTION
-            }
-            built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars, indent))
+            built.text
+        }
+        if (autoWrap) {
+            built.copy(text = summary)
+        } else {
+            val indent = if (profileLayout?.wrapsMessage == true) built.messageIndentChars else 0
+            built.copy(text = visualLogLineForWrapLimit(summary, wrapLimitChars, indent))
         }
     }
-    val compactLine = if (structuredRecordSource != null) compactRecordSummary(lineRender.text) else lineRender.text
+    val compactLine = lineRender.text
     // A profile row wraps under its message column. One paragraph over the whole row: the indent
     // applies after a soft wrap and after a wrap-limit "\n" alike, and the row stays one text field,
     // so drag-selection and copy are untouched (no padding characters are added).
     var textFieldWidthPx by remember(tab.id, entry.id) { mutableStateOf(0) }
-    val hangingIndent = if (profileLayout != null && (lineRender.messageIndentChars > 0 || lineRender.fallbackIndentChars > 0)) {
-        rememberHangingIndent(lineRender.messageIndentChars, lineRender.fallbackIndentChars, mono, fontSize, textFieldWidthPx)
+    val hangingIndent = if (profileLayout?.wrapsMessage == true && lineRender.messageIndentChars > 0) {
+        rememberHangingIndent(lineRender.messageIndentChars, 0, mono, fontSize, textFieldWidthPx, forceMessage = true)
     } else {
         null
     }
@@ -3994,7 +4055,7 @@ private fun LogRow(
                                                 !mods.isMetaPressed && !mods.isAltPressed
                                             pressDragged = false
                                             val disclosureBounds = latestStructuredDisclosureBounds
-                                            pressOnRecordDisclosure = structuredRecordSource != null && position != null &&
+                                            pressOnRecordDisclosure = latestRecordInspectable && position != null &&
                                                 disclosureBounds?.let { (left, right) ->
                                                     val xInRoot = latestRowRoot.x + position.x
                                                     xInRoot in left..right
@@ -4060,7 +4121,7 @@ private fun LogRow(
                                         // second-click handling. It therefore preserves desktop word
                                         // selection while adding only the independent video seek action.
                                         if (!pressOnRecordDisclosure && doubleClickInProgress && !pressDragged && pressUnmodified) {
-                                            if (structuredRecordSource != null) latestOnToggleRecord(entry.id)
+                                            if (latestRecordInspectable) latestOnToggleRecord(entry.id)
                                             onLogRowDoubleClick?.invoke(entry.id)
                                             // Consume this pair; a third rapid click starts the next gesture.
                                             lastPrimaryPressMs = 0L
@@ -4181,7 +4242,7 @@ private fun LogRow(
             if (item.indent > 0) {
                 Spacer(Modifier.width(INDENT_STEP * item.indent))
             }
-            if (structuredRecordSource != null) {
+            if (recordInspectable) {
                 StructuredRecordDisclosure(
                     entryId = entry.id,
                     expanded = structuredRecordExpanded,
@@ -4314,10 +4375,11 @@ private fun LogRow(
                 }
             }
         }
-        if (structuredRecordExpanded && structuredRecordSource != null) {
+        if (structuredRecordExpanded && recordInspectable) {
+            val source = remember(entry, tab.logFormat) { requireNotNull(expandableRecordSource(entry, tab.logFormat)) }
             StructuredRecordBody(
                 entryId = entry.id,
-                source = structuredRecordSource,
+                source = source,
                 mono = mono,
                 startIndent = ROW_START_PAD +
                     (if (hasTidMap) TID_MAP_HIT_WIDTH else 0.dp) +
@@ -5077,6 +5139,8 @@ private fun ToolbarOptionsPopup(
     showMinimap: Boolean,
     metadataJsonTagVisible: Boolean?,
     onToggleMetadataJsonTag: () -> Unit,
+    dltSplitIdentifiers: Boolean?,
+    onToggleDltIdentifiers: () -> Unit,
     processNameMode: ProcessNameMode,
     manualProcessNamePicks: Set<Int>,
     processNamesEnabled: Boolean,
@@ -5115,6 +5179,18 @@ private fun ToolbarOptionsPopup(
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 )
+            }
+            if (dltSplitIdentifiers != null) {
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth().testTag("dlt-identifier-columns-toggle"),
+                    onClick = onToggleDltIdentifiers,
+                ) {
+                    AppText(
+                        if (dltSplitIdentifiers) "Combine DLT identifiers" else "Separate DLT identifiers",
+                        color = tc.tx, fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
             }
             if (metadataJsonTagVisible != null) {
                 HoverBox(

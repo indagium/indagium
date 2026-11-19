@@ -8,12 +8,12 @@ import androidx.compose.ui.test.performClick
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogFormatEngine
 import com.indagium.ui.LogRecordDetailsDialog
+import com.indagium.ui.nodeTag
 import com.indagium.utils.parseLogContent
 import org.junit.Rule
 import java.io.ByteArrayInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 @OptIn(ExperimentalTestApi::class)
 class LogRecordDetailsDialogUiTest {
@@ -40,14 +40,14 @@ class LogRecordDetailsDialogUiTest {
         rule.waitForIdle()
 
         rule.onNodeWithTag("log-record-details-dialog").assertExists()
-        rule.onNodeWithTag("log-record-field-device").assertTextContains("sda1", substring = true)
+        rule.onNodeWithTag(nodeTag("${entry.id}.root", "device")).assertTextContains("sda1", substring = true)
         rule.onNodeWithTag("log-record-raw").assertTextContains("disk full", substring = true)
         rule.onNodeWithTag("log-record-summary-level").assertTextContains("Error", substring = true)
 
         rule.onNodeWithTag("log-record-copy-raw").performClick()
         assertEquals(listOf(raw), copied)
         rule.onNodeWithTag("log-record-copy-json").performClick()
-        assertTrue(copied.last().contains("\"device\": \"sda1\""), copied.last())
+        assertEquals(raw, copied.last())
         assertEquals(2, refocused, "each copy returns focus to the log view")
 
         rule.onNodeWithTag("log-record-close").performClick()

@@ -28,12 +28,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.LogEntry
-import com.indagium.model.LogFieldRole
 import com.indagium.model.LogTab
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
+import com.indagium.utils.isJsonRecord
+import com.indagium.utils.recordInspectionSource
 
 internal fun inspectedMessage(tab: LogTab): LogEntry? {
     val id = tab.inspectedRecordId?.takeIf { it in tab.selected } ?: tab.selected.lastOrNull() ?: tab.inspectedRecordId
@@ -48,87 +45,15 @@ internal fun messageDetailsCopyLabel(entry: LogEntry): String {
     val text = messageDetailsCopyText(entry)
     return when {
         isJsonRecord(text) -> "Copy JSON"
-        '\n' in text.trimEnd() -> "Copy record"
+        text.trimEnd().any { it == '\n' || it == '\r' } -> "Copy record"
         else -> "Copy line"
     }
 }
 
-/**
- * Whether [raw] is a JSON object or array: the tree then shows it as it was read. A line that only
- * starts with "[" (dmesg's "[    1.500000] …") is text, so an array must parse.
- */
-internal fun isJsonRecord(raw: String?): Boolean = when (raw?.firstOrNull { !it.isWhitespace() }) {
-    '{' -> true
-    '[' -> runCatching { Json.parseToJsonElement(raw) is JsonArray }.getOrDefault(false)
-    else -> false
-}
+internal fun messageDetailsTreeSource(entry: LogEntry): String = entry.recordInspectionSource()
 
-/**
- * What the tile's tree shows for [entry]: a JSON record as read; for a record parsed from text (syslog,
- * logfmt, CSV, an access log), its parsed fields as one object, keys as the profile names them; for
- * anything else, the text itself.
- */
-internal fun messageDetailsTreeSource(entry: LogEntry): String {
-    val raw = entry.rawRecord
-    if (isJsonRecord(raw)) return raw!!
-    val fields = distinctRecordFields(entry.profileFields.filterValues { it.isNotBlank() })
-    if (entry.recordMetadata?.usesProfilePresentation != true || fields.isEmpty()) return raw ?: entry.msg
-    return buildJsonObject { fields.forEach { (key, value) -> put(profileFieldKey(key), value) } }.toString()
-}
-
-/**
- * A text record's fields with each value once. A parser keeps a value under its source key (logfmt's
- * `msg`, a CSV header's `time`) and again under the role it maps to (MESSAGE, TIMESTAMP); the role copy
- * goes when a source key holds the same value, so the tree uses the names of the Source line under it.
- * Structured data listed key by key (sd.id.key) drops its one-string copy.
- */
-internal fun distinctRecordFields(fields: Map<String, String>): Map<String, String> {
-    val sourceValues = fields.filterKeys { it !in ROLE_FIELD_KEYS }.values.toHashSet()
-    val hasStructuredKeys = fields.keys.any { it.startsWith("sd.") }
-    return fields.filter { (key, value) ->
-        !(key in ROLE_FIELD_KEYS && value in sourceValues) && !(hasStructuredKeys && key.equals("structured_data", ignoreCase = true))
-    }
-}
-
-/** Whether the tree shows parsed fields rather than the record as read, so the source line goes under it. */
 internal fun messageDetailsShowsParsedFields(entry: LogEntry): Boolean =
-    !isJsonRecord(entry.rawRecord) && messageDetailsTreeSource(entry) != (entry.rawRecord ?: entry.msg)
-
-private val ROLE_FIELD_KEYS = LogFieldRole.entries.associate { it.name to it.name.lowercase() }
-
-// A field the profile maps to a role is stored under the role's name (PROCESS_ID); the tree names it as the row's columns do.
-private fun profileFieldKey(key: String): String = ROLE_FIELD_KEYS[key] ?: key
-
-/**
- * Whether the Message details tile has anything to add for a profile tab: a JSON record, a record of
- * several lines, or a parsed field the row does not show (an RFC 5424 host or structured data, an access
- * log's referrer, a logfmt key). A sample of rows decides, once per set of rows, so the tile does not come
- * and go with the selection. A syslog 3164 tab shows host and process this way; a dmesg tab, whose row is
- * the whole record, gets no tile.
- */
-internal fun profileRecordsAddDetail(tabId: String, rows: List<LogEntry>): Boolean = synchronized(detailCache) {
-    detailCache[tabId]?.takeIf { it.first === rows }?.let { return it.second }
-    val sample = if (rows.size <= DETAIL_SAMPLE_ROWS) rows else rows.subList(0, DETAIL_SAMPLE_ROWS)
-    val result = sample.any(::recordAddsDetail)
-    detailCache[tabId] = rows to result
-    result
-}
-
-private fun recordAddsDetail(entry: LogEntry): Boolean {
-    val metadata = entry.recordMetadata?.takeIf { it.usesProfilePresentation } ?: return false
-    val raw = metadata.rawRecord ?: entry.msg
-    if (isJsonRecord(raw) || '\n' in raw.trimEnd()) return true
-    val shown = metadata.displayColumns.mapTo(HashSet()) { it.value.trim() }
-    return metadata.profileFields.values.any { value -> value.isNotBlank() && value.trim() !in shown && value.trim() != raw.trim() }
-}
-
-private const val DETAIL_SAMPLE_ROWS = 200
-private const val MAX_DETAIL_CACHE = 16
-
-private val detailCache = object : LinkedHashMap<String, Pair<List<LogEntry>, Boolean>>(16, 0.75f, true) {
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<List<LogEntry>, Boolean>>?): Boolean =
-        size > MAX_DETAIL_CACHE
-}
+    messageDetailsTreeSource(entry) != messageDetailsCopyText(entry)
 
 /** The tile's header action: copies the inspected message's record, the raw JSON where it has one. */
 @Composable
@@ -179,6 +104,7 @@ internal fun MessageDetailsTileBody(tab: LogTab) {
         return
     }
     key(entry.id, entry.rawRecord, entry.msg) {
+        val treeSource = remember(entry) { messageDetailsTreeSource(entry) }
         val scroll = rememberScrollState()
         // A drag across the field rows scrolls the tile while the pointer is held above or below it.
         val treeScroller = remember(scroll) { ScrollableRecordTreeScroller(scroll) }
@@ -196,7 +122,7 @@ internal fun MessageDetailsTileBody(tab: LogTab) {
                 CompositionLocalProvider(LocalRecordTreeScroller provides treeScroller) {
                     StructuredRecordBody(
                         entryId = entry.id,
-                        source = messageDetailsTreeSource(entry),
+                        source = treeSource,
                         mono = FontFamily.Monospace,
                         startIndent = 0.dp,
                         initiallyExpanded = true,
@@ -205,7 +131,7 @@ internal fun MessageDetailsTileBody(tab: LogTab) {
                         recordTabId = tab.id,
                     )
                 }
-                if (messageDetailsShowsParsedFields(entry)) MessageDetailsSourceLine(entry)
+                if (entry.rawRecord != null && treeSource != entry.rawRecord) MessageDetailsSourceLine(entry)
             }
             // In a matchParentSize box so the scrollbar's fillMaxHeight does not claim the region's whole height.
             Box(Modifier.matchParentSize()) {

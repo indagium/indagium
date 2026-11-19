@@ -4,7 +4,7 @@ import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
-import com.indagium.ui.distinctRecordFields
+import com.indagium.utils.distinctRecordFields
 import com.indagium.ui.messageDetailsCopyLabel
 import com.indagium.ui.messageDetailsShowsParsedFields
 import com.indagium.ui.messageDetailsTreeSource
@@ -65,6 +65,7 @@ class MessageDetailsRecordSourceTest {
     fun theCopyActionIsNamedForWhatItCopies() {
         assertEquals("Copy JSON", messageDetailsCopyLabel(row(3, """{"msg":"ok"}""", emptyMap(), emptyList())))
         assertEquals("Copy line", messageDetailsCopyLabel(syslog))
+        assertEquals("Copy line", messageDetailsCopyLabel(row(8, "{ malformed JSON }", emptyMap(), emptyList())))
         assertEquals("Copy record", messageDetailsCopyLabel(row(4, "ERROR boom\n  at a.b(C.kt:1)", emptyMap(), emptyList())))
     }
 
@@ -74,6 +75,7 @@ class MessageDetailsRecordSourceTest {
         assertTrue(profileRecordsAddDetail("syslog", listOf(syslog)))
         // A dmesg row is its whole record.
         assertFalse(profileRecordsAddDetail("dmesg", listOf(dmesg)))
+        assertTrue(profileRecordsAddDetail("late", List(250) { dmesg } + syslog))
         // A record of several lines always has more to show.
         val multiline = row(5, "ERROR boom\n  at a.b(C.kt:1)", mapOf("MESSAGE" to "ERROR boom"), listOf("message" to "ERROR boom"))
         assertTrue(profileRecordsAddDetail("regex", listOf(multiline)))
@@ -87,9 +89,9 @@ class MessageDetailsRecordSourceTest {
             "time" to "2026-11-16T12:00:00Z", "level" to "INFO", "msg" to "ok", "pid" to "4100",
             "TIMESTAMP" to "2026-11-16T12:00:00Z", "SEVERITY" to "INFO", "MESSAGE" to "ok", "PROCESS_ID" to "4100",
         )
-        assertEquals(listOf("time", "level", "msg", "pid"), distinctRecordFields(logfmt).keys.toList())
-        // A role with no source copy (a syslog host parsed by the engine itself) stays.
-        val syslog = mapOf("HOST" to "demo-node", "sd.a@1.k" to "v", "structured_data" to "[a@1 k=\"v\"]")
-        assertEquals(listOf("HOST", "sd.a@1.k"), distinctRecordFields(syslog).keys.toList())
+        val aliases = mapOf("TIMESTAMP" to "time", "SEVERITY" to "level", "MESSAGE" to "msg", "PROCESS_ID" to "pid")
+        assertEquals(listOf("time", "level", "msg", "pid"), distinctRecordFields(logfmt, aliases).keys.toList())
+        val distinct = mapOf("MESSAGE" to "ready", "sd.a@1.state" to "ready")
+        assertEquals(distinct, distinctRecordFields(distinct))
     }
 }

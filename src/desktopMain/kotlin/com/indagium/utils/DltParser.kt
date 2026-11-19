@@ -41,6 +41,7 @@ data class ParsedLog(
     val selectedSectionId: String? = null,
     /** Set when a plain metadata JSON file was parsed from its bytes: where each section lives, for switching sections later. */
     val metadataSectionIndex: MetadataJsonSectionIndex? = null,
+    val csvColumns: List<String> = emptyList(),
 ) {
     val capabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> by lazy {
         profile?.let { com.indagium.model.deriveLogCapabilities(it, entries, sourceClockId = sourceClockId) }.orEmpty()

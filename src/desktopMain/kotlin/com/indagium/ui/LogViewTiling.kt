@@ -302,9 +302,9 @@ private fun LogViewTileSurface(
     measurements: TileMeasureStore<LogViewSectionId>?,
 ) {
     val settings = state.settings
-    val ctx = state.logViewTileContext(tab)
+    val ctx = state.logViewTileContext(tab, rememberRecordAvailability(tab))
     val isVisible: (LogViewSectionId) -> Boolean = { logViewTileVisible(it, ctx, settings.logViewHidden) }
-    val baseLayout = state.logViewLayoutForTab(tab)
+    val baseLayout = state.logViewLayoutForContext(ctx)
 
     // The chrome's toolbar bar can be dropped into these tiles: it asks the host to put the toolbar tile at the drop target.
     val bridge = LocalToolbarDock.current

@@ -1,8 +1,10 @@
 package com.indagium.utils
 
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFieldRole
 import com.indagium.model.ParsedTime
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -29,13 +31,71 @@ internal data class LogRecordDetails(
         }
 }
 
-/**
- * Whether [this] row has anything beyond its visible columns. A Logcat row has no metadata, and an
- * unparsed Logcat row shares an empty one, so neither offers the dialog.
- */
+private val ROLE_FIELD_KEYS = LogFieldRole.entries.associate { it.name to it.name.lowercase() }
+
+internal fun isJsonRecord(raw: String?): Boolean {
+    if (raw == null) return false
+    val end = when (raw.firstOrNull { !it.isWhitespace() }) {
+        '{' -> '}'
+        '[' -> ']'
+        else -> return false
+    }
+    if (raw.lastOrNull { !it.isWhitespace() } != end) return false
+    return runCatching { Json.parseToJsonElement(raw) }
+        .getOrNull().let { it is JsonObject || it is JsonArray }
+}
+
+/** Generated aliases are removed only when the parser retained their original field. */
+internal fun distinctRecordFields(fields: Map<String, String>, aliases: Map<String, String> = emptyMap()): Map<String, String> =
+    fields.filter { (key, value) -> value.isNotBlank() && aliases[key]?.let { fields[it] != value } != false }
+
+private fun fieldKey(key: String, fields: Map<String, String>): String =
+    ROLE_FIELD_KEYS[key]?.takeUnless { it in fields } ?: key
+
+internal fun LogEntry.dltDetailFields(): Map<String, String> = buildMap {
+    dltEcuId?.let { put("ECU", it) }
+    dltAppId?.let { put("APID", it) }
+    dltContextId?.let { put("CTID", it) }
+    pid.takeIf { it != 0 }?.let { put("Session ID", Integer.toUnsignedString(it)) }
+    dltMessageType?.let { put("Message type", it) }
+    if (dltTimestampSource == "storage") {
+        dltTimestamp?.let { put("Storage time", Instant.ofEpochSecond(it).plusMillis(ts.substringAfterLast('.').toLongOrNull() ?: 0).toString()) }
+    }
+    val ticks = dltUptime ?: dltTimestamp?.takeIf { dltTimestampSource in setOf("relative", "viewer") }
+    ticks?.let { put("ECU uptime", "${java.math.BigDecimal.valueOf(it, 4).toPlainString()} s") }
+}
+
+private fun LogEntry.hasDltDetails(): Boolean =
+    dltEcuId != null || dltAppId != null || dltContextId != null || dltTimestampSource != null || dltMessageType != null
+
+internal fun LogEntry.recordInspectionFields(): Map<String, String> {
+    if (hasDltDetails()) return dltDetailFields() + ("message" to msg)
+    val fields = distinctRecordFields(profileFields, recordMetadata?.fieldAliases.orEmpty())
+    return fields.mapKeys { (key, _) -> fieldKey(key, fields) }
+}
+
+internal fun LogEntry.recordInspectionSource(): String {
+    val source = rawRecord
+    if (source != null && isJsonRecord(source)) return source
+    val fields = recordInspectionFields()
+    if (fields.isEmpty()) return source ?: msg
+    return buildJsonObject { fields.forEach { (key, value) -> put(key, value) } }.toString()
+}
+
 internal fun LogEntry.hasRecordDetails(): Boolean {
-    val metadata = recordMetadata ?: return false
-    return metadata.profileFields.isNotEmpty() || metadata.rawRecord != null
+    if (hasDltDetails()) return true
+    val metadata = recordMetadata?.takeIf { it.usesProfilePresentation } ?: return false
+    val raw = rawRecord ?: msg
+    if (metadata.displayColumns.any { it.id != "message" && it.value.length > MAX_PROFILE_COLUMN_CHARS }) return true
+    if (raw.length > 180 || raw.trimEnd().any { it == '\n' || it == '\r' } || isJsonRecord(raw)) return true
+    val fields = distinctRecordFields(profileFields, metadata.fieldAliases)
+    if (fields.isEmpty()) return false
+    val aliases = metadata.fieldAliases
+    val shown = metadata.displayColumns.filter { it.value.isNotBlank() }.flatMapTo(hashSetOf()) { column ->
+        val roleKey = LogFieldRole.entries.firstOrNull { it.name.equals(column.id, ignoreCase = true) }?.name
+        listOfNotNull(column.id, roleKey, aliases[column.id], roleKey?.let(aliases::get))
+    }
+    return fields.keys.any { it !in shown }
 }
 
 internal fun buildLogRecordDetails(entry: LogEntry): LogRecordDetails {
@@ -44,9 +104,11 @@ internal fun buildLogRecordDetails(entry: LogEntry): LogRecordDetails {
     if (originalTime != null) summary += LogRecordDetailLine("time", "Time", originalTime)
     entry.parsedTime?.let(::describeParsedTime)?.let { summary += LogRecordDetailLine("parsed-time", "Parsed time", it) }
     summary += LogRecordDetailLine("level", "Level", describeLevel(entry))
-    entry.tag.takeIf { it.isNotBlank() && it != "RAW" }?.let { summary += LogRecordDetailLine("component", "Component", it) }
+    entry.tag.takeIf { it.isNotBlank() && it != "RAW" }?.let {
+        summary += LogRecordDetailLine("component", if (entry.hasDltDetails()) "Context" else "Component", it)
+    }
     describeSourceLines(entry.sourceStartLine, entry.sourceEndLine)?.let { summary += LogRecordDetailLine("source", "Source", it) }
-    return LogRecordDetails(summary, entry.profileFields.map { (key, value) -> key to value }, entry.rawRecord)
+    return LogRecordDetails(summary, entry.recordInspectionFields().toList(), entry.rawRecord)
 }
 
 private fun describeLevel(entry: LogEntry): String {

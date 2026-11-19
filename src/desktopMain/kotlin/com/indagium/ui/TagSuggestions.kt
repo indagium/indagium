@@ -94,6 +94,19 @@ internal fun LogTab.compactComponentFilterLabel(): String = when {
     else -> "Comp."
 }
 
+internal fun LogTab.componentActionName(): String = when {
+    isNativeDlt() -> "Context"
+    componentsArePackages() -> "Tag"
+    else -> "Component"
+}
+
+internal fun com.indagium.model.LogEntry.contextFilterIdentity(format: LogFormat? = null): String? =
+    tag.takeIf {
+        it.isNotBlank() &&
+            (it != "RAW" || recordMetadata?.usesProfilePresentation == true) &&
+            (format != LogFormat.DLT || dltEcuId != null || dltAppId != null || dltContextId != null)
+    }
+
 /** The tag field's hint for [this] tab. */
 internal fun LogTab.tagInputPlaceholder(): String = if (isNativeDlt()) "ECU/APP/CTX…" else tagInputPlaceholder(componentsArePackages())
 

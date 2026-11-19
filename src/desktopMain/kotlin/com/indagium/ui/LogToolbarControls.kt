@@ -144,7 +144,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         // the other stateful toggle here, signals its state via label text instead — "Δt on/off"
         // has no comparably natural alternate label, so a filled/tinted button is the toggle cue).
         AppButton(
-            if (model.view.deltaTime.partialReason != null) "Δt partial" else "Δt",
+            "Δt",
             onClick = model.actions.onToggleTimeDelta,
             variant = if (model.view.showTimeDelta) ButtonVariant.Primary else ButtonVariant.Secondary,
             enabled = model.view.deltaTime.enabled,

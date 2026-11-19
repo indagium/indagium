@@ -416,6 +416,7 @@ internal fun SettingsOverflowMenu(
     testTag: String,
     modifier: Modifier = Modifier,
     onInteraction: () -> Unit = {},
+    label: String? = null,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -423,20 +424,24 @@ internal fun SettingsOverflowMenu(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     Box(modifier) {
-        Box(
-            Modifier.size(OVERFLOW_TARGET)
-                .testTag(testTag)
-                .clip(CORNER_SM)
-                .background(if (hovered || open) tc.hv else Color.Transparent, CORNER_SM)
-                .hoverable(interaction)
-                .clickable(interactionSource = interaction, indication = null, role = Role.Button) {
-                    open = !open
-                    onInteraction()
-                }
-                .semantics { this.contentDescription = contentDescription },
-            contentAlignment = Alignment.Center,
-        ) {
-            AppText("⋯", color = tc.ts, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        if (label != null) {
+            AppButton(label, onClick = { open = !open; onInteraction() }, modifier = Modifier.testTag(testTag))
+        } else {
+            Box(
+                Modifier.size(OVERFLOW_TARGET)
+                    .testTag(testTag)
+                    .clip(CORNER_SM)
+                    .background(if (hovered || open) tc.hv else Color.Transparent, CORNER_SM)
+                    .hoverable(interaction)
+                    .clickable(interactionSource = interaction, indication = null, role = Role.Button) {
+                        open = !open
+                        onInteraction()
+                    }
+                    .semantics { this.contentDescription = contentDescription },
+                contentAlignment = Alignment.Center,
+            ) {
+                AppText("⋯", color = tc.ts, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
         }
         if (open) {
             Popup(

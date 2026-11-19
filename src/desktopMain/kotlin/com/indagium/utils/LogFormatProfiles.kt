@@ -163,6 +163,7 @@ internal data class ProfileRecord(
     val sourceStartLine: Long,
     val sourceEndLine: Long,
     val dayOfYear: Short = NO_DATE,
+    val fieldAliases: Map<String, String> = emptyMap(),
 )
 
 internal data class AdditionalProfileRecord(
@@ -173,6 +174,7 @@ internal data class AdditionalProfileRecord(
     val sourceStartLine: Long,
     val sourceEndLine: Long,
     val parseFields: Boolean = true,
+    val fieldAliases: Map<String, String> = emptyMap(),
 )
 
 internal fun parseAdditionalRecords(
@@ -201,6 +203,7 @@ internal fun AdditionalProfileRecord.toProfileRecord(): ProfileRecord = ProfileR
     parseFields = parseFields,
     sourceStartLine = sourceStartLine,
     sourceEndLine = sourceEndLine,
+    fieldAliases = fieldAliases,
 )
 
 private fun parseProfileSequence(
@@ -232,13 +235,14 @@ private fun parseProfileSequence(
         return parseCriProfile(countedLines, profile, startId, sourceClockId, sourceLineOffset)
             .copy(sourceLineCount = lineCounter.count)
     }
+    val csv = if (profile.engine == LogFormatEngine.CSV) CsvRecordMachine(profile, diagnostics, null, sourceLineOffset) else null
     val records = when (profile.engine) {
         LogFormatEngine.PLAIN_TEXT -> physicalLines(countedLines, sourceLineOffset)
         LogFormatEngine.REGEX -> machineRecords(countedLines) {
             continuationMachine(profile, diagnostics, sourceLineOffset) ?: RegexRecordMachine(profile, diagnostics, sourceLineOffset)
         }
         LogFormatEngine.JSON_LINES -> jsonRecords(countedLines, profile, diagnostics, sourceLineOffset, includeIncompleteJsonTail)
-        LogFormatEngine.CSV -> machineRecords(countedLines) { CsvRecordMachine(profile, diagnostics, null, sourceLineOffset) }
+        LogFormatEngine.CSV -> machineRecords(countedLines) { requireNotNull(csv) }
         LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 ->
             continuationMachine(profile, diagnostics, sourceLineOffset)?.let { machine -> machineRecords(countedLines) { machine } }
                 ?: syslogRecords(countedLines, diagnostics, profile.engine == LogFormatEngine.SYSLOG_RFC5424, sourceLineOffset)
@@ -252,8 +256,13 @@ private fun parseProfileSequence(
         recordToEntry(startId + index, record, profile, timeParser, compactor)
     }.toList()
     if (diagnostics.size > 30) diagnostics.subList(30, diagnostics.size).clear()
-    diagnostics += "Parsed ${entries.size} records with ${profile.name}; unmatched records remain available as raw text."
-    return ParsedLog(LogFormat.LOGCAT, entries, profile, diagnostics, sourceClockId, lineCounter.count)
+    val fallbackCount = entries.count { it.recordMetadata?.rawFallback == true }
+    diagnostics += if (fallbackCount == 0) {
+        "Parsed ${entries.size} records with ${profile.name}."
+    } else {
+        "Parsed ${entries.size - fallbackCount} records with ${profile.name}; retained $fallbackCount as raw text."
+    }
+    return ParsedLog(LogFormat.LOGCAT, entries, profile, diagnostics, sourceClockId, lineCounter.count, csvColumns = csv?.columns.orEmpty())
 }
 
 private class ProfileLineCounter(startAt: Long) {
@@ -783,6 +792,8 @@ internal class CsvRecordMachine(
     /** The header row once it has been read; never emitted as a record. */
     var headers: List<String>? = initialHeaders
         private set
+    private var firstColumnCount = 0
+    val columns: List<String> get() = headers ?: List(firstColumnCount, Int::toString)
     private var current = StringBuilder()
     private var quoteState = CsvQuoteState.FIELD_START
     private var startLine = 0L
@@ -792,6 +803,7 @@ internal class CsvRecordMachine(
     override fun accept(line: String, out: MutableList<ProfileRecord>) {
         lineNumber++
         if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
+        if (line.isEmpty() && current.isEmpty()) return
         if (current.isEmpty()) startLine = lineNumber else current.append('\n')
         current.append(line)
         val updatedState = updateCsvQuoteState(line, quoteState, profile.delimiter)
@@ -817,7 +829,16 @@ internal class CsvRecordMachine(
             headers = cells.map(String::trim)
             return
         }
-        out += ProfileRecord(raw, mapCells(cells), sourceStartLine = startLine, sourceEndLine = lineNumber)
+        val expected = headers
+        if (expected != null && cells.size != expected.size) {
+            diagnostics.addLimited("A CSV record with a different column count was kept as raw text.")
+            out += ProfileRecord(raw, parseFields = false, sourceStartLine = startLine, sourceEndLine = lineNumber)
+            return
+        }
+        if (firstColumnCount == 0) firstColumnCount = cells.size
+        val aliases = linkedMapOf<String, String>()
+        val fields = mapCells(cells, aliases)
+        out += ProfileRecord(raw, fields, sourceStartLine = startLine, sourceEndLine = lineNumber, fieldAliases = aliases)
     }
 
     override fun finish(out: MutableList<ProfileRecord>) {
@@ -830,7 +851,7 @@ internal class CsvRecordMachine(
 
     override fun hasPendingRecord(): Boolean = current.isNotEmpty()
 
-    private fun mapCells(cells: List<String>): Map<String, String> {
+    private fun mapCells(cells: List<String>, aliases: MutableMap<String, String>): Map<String, String> {
         val fields = if (profile.hasHeader) {
             headers.orEmpty().zip(cells).toMap()
         } else {
@@ -839,9 +860,17 @@ internal class CsvRecordMachine(
         val mapped = linkedMapOf<String, String>()
         profile.fieldMappings.forEach { (role, source) ->
             val value = fields[source] ?: source.toIntOrNull()?.let { fields[it.toString()] }
-            if (value != null) mapped[role.name] = value
+            if (value != null) {
+                mapped[role.name] = value
+                aliases[role.name] = source
+            }
         }
-        profile.attributes.forEach { attribute -> fields[attribute.source]?.let { mapped[attribute.id] = it } }
+        profile.attributes.forEach { attribute ->
+            fields[attribute.source]?.let {
+                mapped[attribute.id] = it
+                aliases[attribute.id] = attribute.source
+            }
+        }
         fields.forEach { (key, value) -> mapped.putIfAbsent(key, value) }
         return mapped
     }
@@ -1064,6 +1093,17 @@ internal fun recordToEntry(
         processIdentity = role(LogFieldRole.PROCESS_ID),
         threadIdentity = role(LogFieldRole.THREAD_ID),
         usesProfilePresentation = true,
+        fieldAliases = compactor.internAliases(
+            if (profile.engine == LogFormatEngine.REGEX) {
+                profile.attributes.mapNotNull { attribute ->
+                    profile.fieldMappings.entries.firstOrNull { it.value == attribute.source }
+                        ?.key?.name?.takeIf { it in fields && attribute.id in fields }?.let { attribute.id to it }
+                }.toMap()
+            } else {
+                record.fieldAliases.filter { (alias, source) -> source != alias && source in fields }
+            },
+        ),
+        rawFallback = !record.parseFields,
     )
     return LogEntry(
         id = id,
@@ -1171,6 +1211,11 @@ internal class ProfileRowCompactor {
     private val schemas = HashMap<List<String>, Array<String>>()
     private val shortValues = HashMap<String, String>()
     private val emptyColumns = HashMap<String, LogDisplayField>()
+
+    private val aliasMaps = mutableMapOf<Map<String, String>, Map<String, String>>()
+
+    fun internAliases(aliases: Map<String, String>): Map<String, String> =
+        if (aliases.isEmpty()) emptyMap() else aliasMaps.getOrPut(aliases) { aliases }
 
     /** Levels, logger names, status codes and ids of a few characters repeat on most rows. */
     fun shared(value: String): String {

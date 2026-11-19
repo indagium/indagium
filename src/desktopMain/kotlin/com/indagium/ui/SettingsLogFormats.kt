@@ -17,6 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -92,7 +94,11 @@ private fun newLogFormatDraft(): LogFormatProfile = LogFormatProfile(
 
 /** Settings editor for parser profiles, bounded previews, and the profile import/export lifecycle. */
 @Composable
-internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
+internal fun LogFormatSettingsSection(
+    state: AppState,
+    reclaimFocus: () -> Unit,
+    onGuardChange: (SettingsDraftGuard?) -> Unit = {},
+) {
     val profiles = state.availableLogFormatProfiles()
     if (profiles.isEmpty()) return
 
@@ -120,6 +126,8 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
     var importConflictUpdate by remember { mutableStateOf(false) }
     var exportDialogOpen by remember { mutableStateOf(false) }
     var deleteConfirmationOpen by remember { mutableStateOf(false) }
+    var pendingNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var navigationSaveError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     val canEdit = !selectedProfile.readOnly
@@ -204,14 +212,30 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         draft != savedProfile || detectionTextEdited(savedProfile, extensionText, headerText, contentRegex)
     )
 
-    fun saveDraft() {
-        runCatching { state.saveLogFormatProfile(buildDraft()).getOrThrow() }
-            .onSuccess { saved ->
-                chooseProfile(saved)
-                state.clearLogFormatProfileError()
-            }
-            .onFailure { localError = it.message ?: "Could not save this profile." }
-        reclaimFocus()
+    fun saveDraft(): String? = runCatching { state.saveLogFormatProfile(buildDraft()).getOrThrow() }.fold(
+        onSuccess = { saved ->
+            chooseProfile(saved)
+            state.clearLogFormatProfileError()
+            null
+        },
+        onFailure = { it.message ?: "Could not save this profile." },
+    )
+
+    val needsSave = canEdit && (savedProfile == null || dirty)
+    val latestSave = rememberUpdatedState(::saveDraft)
+    val profileName = draft.name.ifBlank { "Untitled profile" }
+    val guard = remember(canEdit, needsSave, profileName) {
+        if (canEdit) SettingsDraftGuard(needsSave, profileName) { latestSave.value() } else null
+    }
+    SideEffect { onGuardChange(guard) }
+
+    fun navigate(action: () -> Unit) {
+        if (needsSave) {
+            pendingNavigation = action
+            navigationSaveError = null
+        } else {
+            action()
+        }
     }
 
     SettingsGroup("Log format profiles", modifier = Modifier.settingsAnchor("Log format profiles")) {
@@ -221,7 +245,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                     options = profiles,
                     selected = selectedProfile,
                     label = LogFormatProfile::name,
-                    onSelect = ::chooseProfile,
+                    onSelect = { next -> if (next.id != selectedId) navigate { chooseProfile(next) } },
                     testTag = "settings-log-format-profile",
                     modifier = Modifier.weight(1f),
                     minWidth = 190.dp,
@@ -230,14 +254,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 )
                 SettingsButton(
                     "New profile",
-                    {
-                        val emptyProfile = newLogFormatDraft()
-                        selectedId = emptyProfile.id
-                        draft = emptyProfile
-                        sample = defaultProfileSample(emptyProfile.engine)
-                        clearPreview()
-                        reclaimFocus()
-                    },
+                    { navigate { chooseProfile(newLogFormatDraft()); reclaimFocus() } },
                     modifier = Modifier.testTag("settings-log-format-new"),
                 )
                 SettingsOverflowMenu(
@@ -275,7 +292,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 revision = savedProfile?.revision,
                 dirty = dirty,
                 saveEnabled = (savedProfile == null || dirty) && !previewLoading,
-                onSave = ::saveDraft,
+                onSave = { localError = saveDraft(); reclaimFocus() },
                 onRevert = {
                     chooseProfile(savedProfile ?: profiles.first())
                     reclaimFocus()
@@ -283,9 +300,9 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 menu = savedProfile?.let {
                     listOf(
                         SettingsMenuItem("Duplicate", "settings-log-format-duplicate") {
-                            state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile)
+                            navigate { state.duplicateLogFormatProfile(selectedId)?.let(::chooseProfile) }
                         },
-                        SettingsMenuItem("Delete…", "settings-log-format-delete", danger = true) { deleteConfirmationOpen = true },
+                        SettingsMenuItem("Delete profile…", "settings-log-format-delete", danger = true) { deleteConfirmationOpen = true },
                     )
                 }.orEmpty(),
                 reclaimFocus = reclaimFocus,
@@ -381,7 +398,14 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
         }
     }
 
-    // Only for a text format the user can edit: it writes the regex engine's rule from a sample line.
+    if (canEdit && draft.engine == LogFormatEngine.PLAIN_TEXT) {
+        SettingsButton("Set up CSV / TSV", onClick = {
+            editDraft { it.copy(engine = LogFormatEngine.CSV, delimiter = defaultCsvDelimiter(state)) }
+            sample = ""
+        }, modifier = Modifier.testTag("settings-log-format-start-csv"))
+    }
+
+    // Writes a regex from a representative source line.
     if (canEdit && draft.engine in setOf(LogFormatEngine.REGEX, LogFormatEngine.PLAIN_TEXT)) {
         LogFormatColumnBuilderPanel(selectedId, reclaimFocus) { format, sampleLine ->
             editDraft { current ->
@@ -429,6 +453,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                         editDraft {
                             it.copy(
                                 engine = engine,
+                                delimiter = if (engine == LogFormatEngine.CSV) defaultCsvDelimiter(state) else it.delimiter,
                                 fieldMappings = mappings,
                                 regexPattern = if (engine == LogFormatEngine.REGEX && it.regexPattern.isBlank()) {
                                     DEFAULT_PROFILE_REGEX
@@ -437,7 +462,7 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                                 },
                             )
                         }
-                        sample = defaultProfileSample(engine)
+                        sample = if (engine == LogFormatEngine.CSV) "" else defaultProfileSample(engine)
                     },
                     testTag = "settings-log-format-engine",
                     minWidth = 250.dp,
@@ -543,6 +568,15 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
             }
             if (draft.engine == LogFormatEngine.CSV) {
                 SettingsStackedRow("CSV delimiter", "Use one character as the delimiter.") {
+                    SettingsSegmented(
+                        options = listOf("Comma", "Tab"),
+                        selectedIndices = when (draft.delimiter) {
+                            ',' -> setOf(0)
+                            '\t' -> setOf(1)
+                            else -> emptySet()
+                        },
+                        onToggle = { index -> editDraft { it.copy(delimiter = if (index == 0) ',' else '\t') } },
+                    )
                     SettingsTextField(
                         draft.delimiter.toString(),
                         { value ->
@@ -569,6 +603,10 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
                 }
             }
         }
+
+        if (draft.engine == LogFormatEngine.CSV) CsvProfileGuide(
+            state, draft, sample, { sample = it; clearPreview() }, ::editDraft,
+        )
 
         SettingsGroup("Fields and time") {
             if (!supportsProfileFields(draft.engine)) {
@@ -1057,6 +1095,30 @@ internal fun LogFormatSettingsSection(state: AppState, reclaimFocus: () -> Unit)
             },
         )
     }
+    pendingNavigation?.let { action ->
+        fun closePrompt() {
+            navigationSaveError = null
+            pendingNavigation = null
+        }
+        SettingsConfirmDialog(
+            title = "Save changes to $profileName?",
+            message = "Save the current log format profile before continuing?",
+            error = navigationSaveError,
+            onDismissRequest = ::closePrompt,
+        ) {
+            SettingsDialogButton("Save", primary = true) {
+                val error = saveDraft()
+                if (error == null) {
+                    closePrompt()
+                    action()
+                } else {
+                    navigationSaveError = error
+                }
+            }
+            SettingsDialogButton("Discard", danger = true) { closePrompt(); action() }
+            SettingsDialogButton("Cancel", onClick = ::closePrompt)
+        }
+    }
     if (deleteConfirmationOpen) {
         SettingsConfirmDialog(
             title = "Delete ${selectedProfile.name}?",
@@ -1180,8 +1242,9 @@ private fun CustomProfileHeader(
             if (menu.isNotEmpty()) {
                 SettingsOverflowMenu(
                     items = menu,
-                    contentDescription = "More profile actions",
+                    contentDescription = "Profile actions",
                     testTag = "settings-log-format-profile-menu",
+                    label = "Profile actions",
                     onInteraction = reclaimFocus,
                 )
             }
@@ -1294,7 +1357,7 @@ private fun summarySeverity(profile: LogFormatProfile): String = when {
 private fun analyzerLabel(id: String): String = if (id == "android-crash") "Android crash analysis" else id
 
 @Composable
-private fun ProfilePreviewResults(parsed: ParsedLog) {
+internal fun ProfilePreviewResults(parsed: ParsedLog) {
     val tc = tc()
     Column(
         Modifier
@@ -1305,9 +1368,8 @@ private fun ProfilePreviewResults(parsed: ParsedLog) {
             .testTag("settings-log-format-preview-results"),
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        val countLabel = if (parsed.entries.size == 1) "record" else "records"
         AppText(
-            "${parsed.entries.size} parsed $countLabel · ${parsed.profile?.name.orEmpty()}",
+            "${profilePreviewCountLabel(parsed)} · ${parsed.profile?.name.orEmpty()}",
             color = tc.tx,
             fontSize = 12.sp,
         )
@@ -1324,6 +1386,13 @@ private fun ProfilePreviewResults(parsed: ParsedLog) {
             }
         }
     }
+}
+
+internal fun profilePreviewCountLabel(parsed: ParsedLog): String {
+    val rawCount = parsed.entries.count { it.recordMetadata?.rawFallback == true }
+    val matched = parsed.entries.size - rawCount
+    val countLabel = if (matched == 1) "record" else "records"
+    return "$matched parsed $countLabel" + if (rawCount > 0) " · $rawCount kept as raw text" else ""
 }
 
 /** The most extra profile fields a previewed record lists under its line. */
@@ -1547,7 +1616,7 @@ private fun LogFormatExportDialog(
 }
 
 @Composable
-private fun MultilineSettingsField(value: String, onChange: (String) -> Unit, placeholder: String, testTag: String) {
+internal fun MultilineSettingsField(value: String, onChange: (String) -> Unit, placeholder: String, testTag: String) {
     val colors = tc()
     BasicTextField(
         value = value,
@@ -1563,6 +1632,9 @@ private fun MultilineSettingsField(value: String, onChange: (String) -> Unit, pl
         },
     )
 }
+
+private fun defaultCsvDelimiter(state: AppState): Char =
+    if (state.activeTab()?.filename?.endsWith(".tsv", ignoreCase = true) == true) '\t' else ','
 
 private fun defaultProfileSample(engine: LogFormatEngine): String = when (engine) {
     LogFormatEngine.PLAIN_TEXT -> "Application started\nConnection established"
@@ -1713,14 +1785,14 @@ private fun epochUnitLabel(unit: ProfileEpochUnit): String = when (unit) {
     ProfileEpochUnit.NANOS -> "Nanoseconds"
 }
 
-private fun valueTypeLabel(type: LogProfileValueType): String = when (type) {
+internal fun valueTypeLabel(type: LogProfileValueType): String = when (type) {
     LogProfileValueType.TEXT -> "Text"
     LogProfileValueType.NUMBER -> "Number"
     LogProfileValueType.BOOLEAN -> "True / false"
     LogProfileValueType.TIMESTAMP -> "Timestamp"
 }
 
-private fun roleLabel(role: LogFieldRole): String = when (role) {
+internal fun roleLabel(role: LogFieldRole): String = when (role) {
     LogFieldRole.TIMESTAMP -> "Timestamp"
     LogFieldRole.SEVERITY -> "Severity"
     LogFieldRole.COMPONENT -> "Component"

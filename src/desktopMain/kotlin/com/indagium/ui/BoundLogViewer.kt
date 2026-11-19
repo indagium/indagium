@@ -101,6 +101,10 @@ internal fun BoundLogViewer(
         recordExpansion = state.recordExpansion(tab.id),
         onToggleRecord = { state.toggleRecordExpansion(tab.id, it) },
         onToggleMetadataJsonTag = { state.toggleMetadataJsonTag(tab.id) },
+        onToggleDltIdentifiers = {
+            state.upTab(tab.id) { it.copy(dltSplitIdentifiers = !it.dltSplitIdentifiers) }
+            state.autosaveNow()
+        },
         onOpenSearch = { if (state.isSearchOpen(tab.id)) state.closeSearch(tab.id) else state.openSearch(tab.id) },
         onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
         onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },

@@ -19,6 +19,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
@@ -622,7 +623,10 @@ class StructuredLogRecordUiTest {
         assertEquals(setOf(secondId), app.tab(tabId)?.selected, "the disclosure must not select its parent row")
         saveIntegrationScreenshot("viewer-two-events-expanded")
 
-        rule.onNodeWithTag("log-row-$tabId:main-$firstId").performClick()
+        rule.onNodeWithTag("log-row-$tabId:main-$firstId").performMouseInput {
+            click(androidx.compose.ui.geometry.Offset(8f, center.y))
+        }
+        rule.waitForIdle()
         assertEquals(setOf(firstId), app.tab(tabId)?.selected, "ordinary row selection still targets the parent ID")
     }
 

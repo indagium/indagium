@@ -52,7 +52,7 @@ internal fun LogFormatColumnBuilderPanel(
     val tc = tc()
     var sampleLine by remember(profileId) { mutableStateOf("") }
     var separator by remember(profileId) { mutableStateOf(ColumnSeparator.WHITESPACE) }
-    var customSeparator by remember(profileId) { mutableStateOf("|") }
+    var customSeparator by remember(profileId) { mutableStateOf("") }
     var splitChars by remember(profileId) { mutableStateOf("") }
     var applied by remember(profileId) { mutableStateOf(false) }
     var error by remember(profileId) { mutableStateOf<String?>(null) }
@@ -71,7 +71,7 @@ internal fun LogFormatColumnBuilderPanel(
         error = null
     }
 
-    SettingsGroup("Set up from a sample line") {
+    SettingsGroup("Generate a regex from a sample") {
         SettingsStackedRow(
             "Sample line",
             "Paste one typical line of the log. It is cut into columns below; say what each column is, and the parsing rule is written for you.",
@@ -102,10 +102,11 @@ internal fun LogFormatColumnBuilderPanel(
                     segmentModifier = { index -> Modifier.testTag("settings-log-format-builder-separator-$index") },
                 )
                 if (separator == ColumnSeparator.CUSTOM) {
+                    AppText("Custom separator", color = tc.ts, fontSize = 11.sp)
                     SettingsTextField(
                         customSeparator,
                         { customSeparator = it; changed() },
-                        placeholder = "|",
+                        placeholder = "e.g. |",
                         monospace = true,
                         modifier = Modifier.width(80.dp),
                         testTag = "settings-log-format-builder-custom-separator",
@@ -122,6 +123,11 @@ internal fun LogFormatColumnBuilderPanel(
                         testTag = "settings-log-format-builder-split-chars",
                     )
                 }
+            }
+        }
+        if (looksLikeCopiedRawRows(sampleLine)) {
+            SettingsStackedRow("Sample contains a display prefix") {
+                AppText("Use the original source line unless your file contains the I/RAW prefix.", color = tc.warn, fontSize = 11.sp)
             }
         }
         if (pieces.isNotEmpty()) {

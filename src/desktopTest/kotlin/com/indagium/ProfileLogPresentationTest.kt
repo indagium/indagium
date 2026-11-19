@@ -32,6 +32,7 @@ import com.indagium.ui.annotationsToken
 import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.mkTab
 import com.indagium.utils.LogLinePresentationContext
+import com.indagium.utils.MAX_PROFILE_COLUMN_CHARS
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.buildFilteredCsv
 import com.indagium.utils.buildFilteredTxt
@@ -827,6 +828,23 @@ class ProfileLogPresentationTest {
                 attributes,
             ).map { it.id },
         )
+    }
+
+    @Test
+    fun aLongFieldKeepsTheMessageAlignedAndLeavesCanonicalTextIntact() {
+        val request = "req-" + "a".repeat(80)
+        val columns = listOf(LogDisplayField("request", "Request", request), LogDisplayField("message", "Message", "started"))
+        val row = profileEntry("", LogLevel.I, "", "started", mapOf("request" to request), columns)
+        val layout = requireNotNull(computeProfileColumnLayout(columns.map { it.copy(value = "") }, listOf(row)))
+        val projection = profileDisplayTextProjection(columns, columnWidths = layout.widths)
+        val canonical = visibleLogLineText(row)
+
+        assertEquals(MAX_PROFILE_COLUMN_CHARS, layout.widths["request"])
+        assertEquals("…", projection.text.substring(MAX_PROFILE_COLUMN_CHARS - 1, MAX_PROFILE_COLUMN_CHARS))
+        assertEquals(layout.header.indexOf("MESSAGE"), projection.text.indexOf("started"))
+        assertEquals("Request=$request  started", canonical)
+        assertEquals(projection.text.indexOf("req-"), projection.remapOffset(canonical.indexOf("req-")))
+        assertEquals(projection.text.indexOf("started"), projection.remapOffset(canonical.indexOf("started")))
     }
 
     @Test

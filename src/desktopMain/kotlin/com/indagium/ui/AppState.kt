@@ -260,10 +260,11 @@ data class MessageRuleVariant(val label: String, val pattern: String, val tag: S
 // Separator set and truncateAtSeparator are promoted to utils/MessageTemplates.kt (shared with the
 // message-template histogram's Normal/Loose granularity folding) — imported above.
 internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? = null): List<MessageRuleVariant> {
+    val identity = entry.contextFilterIdentity()
     val selected = selectedText?.trim().orEmpty()
     if (selected.isNotBlank()) {
-        return listOf(
-            MessageRuleVariant("${entry.tag}: $selected", selected, entry.tag),
+        return listOfNotNull(
+            identity?.let { MessageRuleVariant("$it: $selected", selected, it) },
             MessageRuleVariant(selected, selected, null),
         )
     }
@@ -271,8 +272,10 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
     val toFirst = truncateAtSeparator(entry.msg, 1)
     val toSecond = truncateAtSeparator(entry.msg, 2)
     return buildList {
-        add(MessageRuleVariant("${entry.tag}: $toFirst", toFirst, entry.tag))
-        if (toSecond != toFirst) add(MessageRuleVariant("${entry.tag}: $toSecond", toSecond, entry.tag))
+        if (identity != null) {
+            add(MessageRuleVariant("$identity: $toFirst", toFirst, identity))
+            if (toSecond != toFirst) add(MessageRuleVariant("$identity: $toSecond", toSecond, identity))
+        }
         add(MessageRuleVariant(toFirst, toFirst, null))
         if (toSecond != toFirst) add(MessageRuleVariant(toSecond, toSecond, null))
     }.take(4)
@@ -495,21 +498,27 @@ internal fun normalizeFilterForCapabilities(
     capabilities: Map<LogCapability, LogCapabilityStatus>,
     profile: LogFormatProfile?,
 ): FilterCapabilityNormalization {
+    val cleaned = filter.copy(
+        activeTags = filter.activeTags.filterNot(String::isBlank).toSet(),
+        excludeTags = filter.excludeTags.filterNot(String::isBlank).toSet(),
+        pkgPrefixes = filter.pkgPrefixes.filterNot(String::isBlank).toSet(),
+        excludePkgPrefixes = filter.excludePkgPrefixes.filterNot(String::isBlank).toSet(),
+    )
     // Logcat and DLT tabs keep every saved criterion, as they always have: an empty tab or a file
     // with no tags yet must not lose the filter the user loaded. Only other formats are trimmed.
     if (profile == null || profile.engine == LogFormatEngine.LOGCAT || profile.engine == LogFormatEngine.DLT) {
-        return FilterCapabilityNormalization(filter, null)
+        return FilterCapabilityNormalization(cleaned, null)
     }
     val unavailableTags = capabilities[LogCapability.COMPONENT_FILTER]?.availability == CapabilityAvailability.UNAVAILABLE
     val unavailablePid = capabilities[LogCapability.PID_THREAD_FILTER]?.availability == CapabilityAvailability.UNAVAILABLE
     val unavailableLevels = capabilities[LogCapability.SEVERITY_FILTER]?.availability == CapabilityAvailability.UNAVAILABLE
-    val normalized = filter.copy(
-        activeTags = if (unavailableTags) emptySet() else filter.activeTags,
-        excludeTags = if (unavailableTags) emptySet() else filter.excludeTags,
-        pkgPrefixes = if (unavailableTags) emptySet() else filter.pkgPrefixes,
-        excludePkgPrefixes = if (unavailableTags) emptySet() else filter.excludePkgPrefixes,
-        pidTidFilter = if (unavailablePid) "" else filter.pidTidFilter,
-        levels = if (unavailableLevels) LogLevel.entries.toSet() else filter.levels,
+    val normalized = cleaned.copy(
+        activeTags = if (unavailableTags) emptySet() else cleaned.activeTags,
+        excludeTags = if (unavailableTags) emptySet() else cleaned.excludeTags,
+        pkgPrefixes = if (unavailableTags) emptySet() else cleaned.pkgPrefixes,
+        excludePkgPrefixes = if (unavailableTags) emptySet() else cleaned.excludePkgPrefixes,
+        pidTidFilter = if (unavailablePid) "" else cleaned.pidTidFilter,
+        levels = if (unavailableLevels) LogLevel.entries.toSet() else cleaned.levels,
     )
     val removed = buildList {
         if (unavailableTags && filter.hasComponentFilterCriteria()) add("tag")
@@ -10388,7 +10397,15 @@ class AppState(
 
     fun expandAll(tabId: String) {
         val t = tab(tabId) ?: return
-        if (tabHasExpandableRecords(t)) setRecordExpansion(tabId, RecordExpansion.ALL_EXPANDED)
+        when (cachedRecordAvailability(t)) {
+            true -> setRecordExpansion(tabId, RecordExpansion.ALL_EXPANDED)
+            null -> ioScope.launch(Dispatchers.Default) {
+                if (profileRecordsAddDetail(t.id, t.logData, t.logFormat) && tab(t.id)?.logData === t.logData) {
+                    setRecordExpansion(t.id, RecordExpansion.ALL_EXPANDED)
+                }
+            }
+            false -> Unit
+        }
         if (!t.largeFileMode) {
             upTab(tabId) { it.copy(expanded = visibleExpandableGroupIds(it)) }
             return
@@ -12767,16 +12784,22 @@ class AppState(
         if (queuedSteps != 0) moveSearchMatch(tabId, queuedSteps, scope)
     }
 
+    private fun contextMenuIdentity(menu: CtxMenuState): String? {
+        val tab = tab(menu.tabId) ?: return null
+        if (!tab.canUseProfileCapability(LogCapability.COMPONENT_FILTER, logCapabilitiesForTab(tab))) return null
+        return tab.rmap[menu.entryId]?.contextFilterIdentity(tab.logFormat)
+    }
+
     fun addTagFilterFromCtx() {
         val c = ctx ?: return
-        val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
+        val tag = contextMenuIdentity(c) ?: return
         toggleTag(c.tabId, tag); requestScrollAnchor(c.tabId, c.entryId); ctx = null
     }
 
     // No requestScrollAnchor — excluding this row's own tag removes it from the filtered view.
     fun addExcludeTagFromCtx() {
         val c = ctx ?: return
-        val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
+        val tag = contextMenuIdentity(c) ?: return
         toggleExcludeTag(c.tabId, tag); ctx = null
     }
 
@@ -12796,7 +12819,7 @@ class AppState(
     // wholeLine = true is the "Highlight lines with this tag" item; the default stays match-only.
     fun addHlTagFromCtx(color: Color? = null, wholeLine: Boolean = false) {
         val c = ctx ?: return
-        val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
+        val tag = contextMenuIdentity(c) ?: return
         addHl(
             c.tabId,
             tag,
@@ -12929,7 +12952,7 @@ class AppState(
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, entry.msg)
-        addMessageRule(c.tabId, include = false, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        addMessageRule(c.tabId, include = false, pattern = text, regex = false, tag = contextMenuIdentity(c), packagePrefix = null)
         ctx = null
     }
 
@@ -12937,7 +12960,7 @@ class AppState(
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, entry.msg)
-        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = contextMenuIdentity(c), packagePrefix = null)
         requestScrollAnchor(c.tabId, c.entryId)
         ctx = null
     }
@@ -12952,7 +12975,8 @@ class AppState(
         val c = ctx ?: return emptyList()
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return emptyList()
         val selectedText = c.selText.takeIf { it.isNotBlank() }?.let { extractMsgText(it, entry, entry.msg) }
-        return messageRuleVariantsForEntry(entry, selectedText)
+        val variants = messageRuleVariantsForEntry(entry, selectedText)
+        return if (contextMenuIdentity(c) == null) variants.filter { it.tag == null } else variants
     }
 
     // No requestScrollAnchor — see hideMessagesLikeCtx.

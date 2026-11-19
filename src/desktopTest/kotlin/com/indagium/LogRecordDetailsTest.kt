@@ -37,10 +37,10 @@ class LogRecordDetailsTest {
     }
 
     @Test
-    fun aRowWithFieldsOrARawRecordOffersDetails() {
+    fun jsonIsInspectableAndShortRawTextStaysCompact() {
         assertTrue(jsonRow("""{"level":"INFO","message":"hi"}""").hasRecordDetails())
         val rawOnly = LogEntry(1, "", LogLevel.V, "", "x", recordMetadata = LogRecordMetadata(rawRecord = "x"))
-        assertTrue(rawOnly.hasRecordDetails())
+        assertFalse(rawOnly.hasRecordDetails())
     }
 
     @Test

@@ -1801,7 +1801,7 @@ internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
     logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
-    selectedLogSectionId, sharedNote, notesView,
+    selectedLogSectionId, sharedNote, notesView, dltSplitIdentifiers,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1972,6 +1972,7 @@ internal fun LogTab.tabToken(): String {
         sharedNote?.sharedNoteToken().orEmpty(),
         // Trailing field (23): which shared note this tab's Notes tile shows (a host id); empty = the tab's own note.
         notesView.orEmpty(),
+        dltSplitIdentifiers.toString(),
     )
 }
 
@@ -2086,6 +2087,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             // tab never carries it. Field 23 (append-only): the shared note this tab's Notes tile shows; AppState
             // drops an id whose host no longer exists.
             notesView = p.getOrNull(TAB_TOKEN_NOTES_VIEW_INDEX)?.takeIf { it.isNotBlank() },
+            dltSplitIdentifiers = p.getOrNull(24)?.toBooleanStrictOrNull() == true,
         ),
         source,
     )

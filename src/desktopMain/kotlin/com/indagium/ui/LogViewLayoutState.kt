@@ -4,6 +4,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
 import com.indagium.model.LogCapability
 import com.indagium.model.LogTab
+import com.indagium.utils.hasRecordDetails
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
@@ -35,7 +36,10 @@ internal fun AppState.hasVideoTileContent(tab: LogTab): Boolean =
     tab.attachedVideo != null || tab.captureSessionId != null || hasTimelineOnlyVideoPanel(this, tab)
 
 /** What decides which tiles of the single log view apply to [tab] right now. */
-internal fun AppState.logViewTileContext(tab: LogTab): LogViewTileContext =
+internal fun AppState.logViewTileContext(
+    tab: LogTab,
+    hasRecordDetails: Boolean = cachedRecordAvailability(tab) ?: tab.logData.firstOrNull()?.hasRecordDetails() == true,
+): LogViewTileContext =
     LogViewTileContext(
         compare = false,
         showUnfiltered = tab.showUnfiltered,
@@ -49,7 +53,7 @@ internal fun AppState.logViewTileContext(tab: LogTab): LogViewTileContext =
         hasSeverityFilter = tab.canUseProfileCapability(LogCapability.SEVERITY_FILTER, logCapabilitiesForTab(tab)),
         hasSections = tab.hasSectionNavigation(),
         // Decided for the tab's rows, never by the selection, so the tile does not come and go as rows are clicked.
-        hasMessageDetails = profileRecordsAddDetail(tab.id, tab.logData),
+        hasMessageDetails = hasRecordDetails,
     )
 
 /** The tab-strip toggle behind [group]. */
@@ -76,7 +80,10 @@ internal fun AppState.currentLogViewLayout(): TileNode<LogViewSectionId> =
     activeTab()?.let(::logViewLayoutForTab) ?: effectiveLogViewLayout(settings, legacyLogViewSizes())
 
 internal fun AppState.logViewLayoutForTab(tab: LogTab): TileNode<LogViewSectionId> =
-    withAuxiliaryLogTiles(effectiveLogViewLayout(settings, legacyLogViewSizes()), logViewTileContext(tab))
+    logViewLayoutForContext(logViewTileContext(tab))
+
+internal fun AppState.logViewLayoutForContext(context: LogViewTileContext): TileNode<LogViewSectionId> =
+    withAuxiliaryLogTiles(effectiveLogViewLayout(settings, legacyLogViewSizes()), context)
 
 /** Stores [tree] as the single log view's layout (a release-only edit: the host calls this once per gesture). */
 internal fun AppState.commitLogViewLayout(tree: TileNode<LogViewSectionId>) {
