@@ -301,9 +301,13 @@ class SharedNoteModelTest {
         assertEquals("9.9", state.sharedNoteHost(host)!!.annotations.appVersion)
         assertEquals("", call("get_issue_description")["issueDescription"])
 
-        // add_log_note copies rows out of a log tab (it runs behind withLoadedRows), so a host id is unknown to it; Phase 3 adds notes from a member tab.
-        val logNote = gateway.execute("add_log_note", mapOf("tabId" to host, "lineIds" to listOf(1))) as Map<*, *>
-        assertEquals("no such tab: $host", logNote["error"])
+        // add_log_note copies rows out of a log tab, so for a host it also needs the tab the rows come from (sourceTabId).
+        val noSource = gateway.execute("add_log_note", mapOf("tabId" to host, "lineIds" to listOf(1))) as Map<*, *>
+        assertTrue((noSource["error"] as String).contains("sourceTabId"), noSource.toString())
+        val logNote = gateway.execute("add_log_note", mapOf("tabId" to host, "sourceTabId" to "a", "lineIds" to listOf(1))) as Map<*, *>
+        assertNull(logNote["error"], logNote.toString())
+        assertEquals("a", (blocks().last() as AnnBlock.LogRef).sourceTabId)
+        assertNull(call("delete_note_block", "blockId" to blocks().last().id)["error"])
 
         assertNull(call("clear_all_notes")["error"])
         assertTrue(blocks().isEmpty())

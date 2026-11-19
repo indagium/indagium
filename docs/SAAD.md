@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 17 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `proofread`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 156: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 166: `MCP_TOOLS` (`debug/ControlServer.kt`) is the core list plus the log-format, shared-note, test-suite, test-run and issue catalogues appended at its end; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -1897,6 +1897,7 @@ stays local to the text editor; Ctrl+Z/Cmd+Z elsewhere restores the active sessi
 | `IndagiumToolGateway.kt` | Joins catalogue to handlers, enforces parity, defines the confirmation policy, derives OpenAI function definitions |
 | `IndagiumToolOperations.kt` | Tool handler map — the actual behaviour behind each catalogue entry |
 | `TestSuiteToolCatalog.kt` / `TestRunToolCatalog.kt` / `IssueToolCatalog.kt` + matching `*Operations.kt` | Catalog-driven suite, authoring, script, run/report and issue-evidence tools; gateway startup enforces descriptor/handler parity and the tool index is generated from the current catalog (§26.2) |
+| `SharedNoteToolCatalog.kt` + `SharedNoteToolOperations.kt` | The three shared-note tools, appended to `MCP_TOOLS`: `list_shared_notes` (every shared note: host id, name, open and closed members, block count; optional `tabId` filter), `create_shared_note` (name, member tabs, optional `fromTabId` to share that tab's private note) and `set_shared_note_members` (replace the open members). All three are AUTOMATIC Notes tools (no confirmation, no per-call approval, not counted against an AI run's analysis budget). Every existing Notes tool takes a shared note's host id as `tabId`; `add_log_note` on a host also needs `sourceTabId`, and `get_annotation_blocks` reports each row reference's `sourceTabId`, `sourceFilename` and `sourceSectionId` |
 | `ExternalToolApproval.kt` / `ExternalRunApproval.kt` / `ExternalTrackerApproval.kt` | `PER_CALL_APPROVAL_MCP_TOOLS` and the dialog content for each call an external client must have approved (§26.9.2) |
 | `Json.kt` | Hand-rolled JSON encode/decode for flat DTOs |
 | `AppLogger.kt` | Opt-in diagnostic log, written in Android threadtime grammar so Indagium can open its own log |
@@ -3851,7 +3852,7 @@ Concrete recipes for the five changes most likely to be needed.
 
 ### 22.1 Add an MCP / automation tool
 
-1. Add a descriptor to `MCP_TOOLS` (`debug/ControlServer.kt:767`) — or, for a test-suite, run or issue tool, to the matching `*ToolCatalog.kt` list that `MCP_TOOLS` appends (`:1692`) — using the `schema(...)` DSL. Mind
+1. Add a descriptor to `MCP_TOOLS` (`debug/ControlServer.kt:767`) — or, for a test-suite, run or issue tool, to the matching `*ToolCatalog.kt` list that `MCP_TOOLS` appends (at the end of the list) — using the `schema(...)` DSL. Mind
    the type tokens: `"array"` means array-of-string, `"array<integer>"` means array-of-number, and
    the distinction measurably changes model behaviour (`debug/ControlServer.kt` `schema` DSL).
 2. Add a handler with the **same name** to `operationHandlers`

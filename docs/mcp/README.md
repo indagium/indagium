@@ -87,6 +87,11 @@ A few worth calling out:
   Markdown, so read the block first when preserving content. `update_note_caption` updates only a
   LogRef, Image, or structured diagram's Markdown caption and preserves a diagram's model, source
   fence, and hash; ordinary text Notes are rejected with guidance to use `update_note_block`.
+- `list_shared_notes`, `create_shared_note`, and `set_shared_note_members` manage shared notes: Notes
+  that several open tabs write into. A shared note's `hostId` is accepted as `tabId` by every Notes
+  tool; `add_log_note` on a `hostId` also takes `sourceTabId` (the open tab whose rows `lineIds`
+  cite), and `get_annotation_blocks` reports each log block's `sourceTabId`, `sourceFilename`, and
+  `sourceSectionId`.
 
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.

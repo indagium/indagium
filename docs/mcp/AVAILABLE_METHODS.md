@@ -89,6 +89,14 @@ Recent state; file-open calls must still use explicit approved fixture paths.
   `clear_all_notes` is the explicit,
   confirmation-required bulk clear for both sections and every block; it preserves the private
   issue description and case metadata.
+- Shared notes are Notes that several open tabs write into together. `list_shared_notes` lists them
+  (`hostId`, `name`, open `members`, `closedMembers` with the file path, `blockCount`; pass `tabId` to
+  see only the notes that tab belongs to). `create_shared_note` makes one from `memberTabIds`, or from
+  a tab's existing private note with `fromTabId`. `set_shared_note_members` replaces its open members.
+  A shared note's `hostId` works as `tabId` for every Notes tool above (`get_annotation_blocks`,
+  `add_text_note`, `update_note_block`, ...). `add_log_note` on a `hostId` also needs `sourceTabId`, the
+  open tab whose rows `lineIds` refer to. `get_annotation_blocks` reports each log block's
+  `sourceTabId`, `sourceFilename` and `sourceSectionId`, so you can tell which file a reference came from.
 - `export_analysis`, `export_filtered_log`, `save_annotations`, and `load_annotations` write or
   restore user-requested artifacts; confirm paths and destructive choices first.
 - `list_filter_presets`, `apply_filter_preset`, and `save_filter_preset` manage reusable filters.

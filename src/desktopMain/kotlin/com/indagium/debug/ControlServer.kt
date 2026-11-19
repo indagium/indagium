@@ -1170,6 +1170,10 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "List every existing Notes annotation block with its id and safe identifying details. " +
             "Text and log blocks include their Markdown text/caption and line ids; image blocks " +
             "include Markdown caption, format, byte size, and video metadata but never image bytes. " +
+            "A log block that cites rows of another tab (always the case in a shared note) also reports " +
+            "sourceTabId, sourceFilename and sourceSectionId (the log section the rows were captured " +
+            "from), and recordFields (path and json) when it cites chosen fields of a JSON record. " +
+            "`tabId` may be a shared note's hostId (from list_shared_notes). " +
             "Markdown supports headings, bold/italic/strikethrough, lists, quotes, links, and " +
             "inline/fenced code.",
         schema("tabId" to "string", required = listOf("tabId")),
@@ -1210,7 +1214,16 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "anchors rather than enumerating every line, and put the full Markdown description in " +
             "caption. Captions support headings, bold/italic/strikethrough, lists, quotes, links, " +
             "and inline/fenced code.",
-        schema("tabId" to "string", "lineIds" to "array<integer>", "caption" to "string", required = listOf("tabId", "lineIds")),
+        schema(
+            "tabId" to "string", "lineIds" to "array<integer>", "caption" to "string", "sourceTabId" to "string",
+            required = listOf("tabId", "lineIds"),
+            descriptions = mapOf(
+                "tabId" to "The tab whose Notes get the block and whose line ids are cited, or a shared note's hostId " +
+                    "(then sourceTabId is required).",
+                "sourceTabId" to "Only with a shared note's hostId as tabId: the open tab whose rows lineIds refer to. " +
+                    "The block records that tab and its log section as the source.",
+            ),
+        ),
     ),
     McpTool(
         "add_image_note",
@@ -1840,7 +1853,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Check a device capture, marker, or snapshot operation by operationId.",
         schema("operationId" to "string", required = listOf("operationId")),
     ),
-) + LOG_FORMAT_MCP_TOOLS + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS + ISSUE_MCP_TOOLS
+) + LOG_FORMAT_MCP_TOOLS + SHARED_NOTE_MCP_TOOLS + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS + ISSUE_MCP_TOOLS
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
 // escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.
@@ -1871,6 +1884,9 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/annotations/section/set", "set_annotation_section"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
+    Triple(HttpMethod.Get, "/shared-notes", "list_shared_notes"),
+    Triple(HttpMethod.Post, "/shared-notes/create", "create_shared_note"),
+    Triple(HttpMethod.Post, "/shared-notes/members", "set_shared_note_members"),
     Triple(HttpMethod.Post, "/annotations/image", "add_image_note"),
     Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),
     Triple(HttpMethod.Post, "/annotations/caption", "update_note_caption"),

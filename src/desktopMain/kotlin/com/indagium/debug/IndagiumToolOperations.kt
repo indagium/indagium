@@ -313,8 +313,11 @@ internal class IndagiumToolOperations(
 
     // The issue tools (create from a step, list, get, update, delete) live in IssueToolOperations.kt.
     private val issueOperations = IssueToolOperations(appState)
+
+    // The shared-note tools (list, create, set members) live in SharedNoteToolOperations.kt / SharedNoteToolCatalog.kt.
+    private val sharedNoteOperations = SharedNoteToolOperations(appState)
     private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> =
-        coreOperationHandlers + testSuiteOperations.handlers + testRunOperations.handlers
+        coreOperationHandlers + sharedNoteOperations.handlers + testSuiteOperations.handlers + testRunOperations.handlers
 
     private val rowDependentSuspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
         "reparse_tab_with_log_format_profile" to { a ->
@@ -375,9 +378,22 @@ internal class IndagiumToolOperations(
             val id = a.str("tabId") ?: ""
             if (appState.sharedNoteHost(id) != null) getIssueDescription(id) else withLoadedRows(id) { getIssueDescription(it.id) }
         },
-        "add_log_note" to { a -> withLoadedRows(a.str("tabId") ?: "") {
-            addLogNoteRoute(it.id, a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
-        } },
+        "add_log_note" to { a ->
+            val tabId = a.str("tabId") ?: ""
+            val lineIds = a.intList("lineIds") ?: emptyList()
+            val caption = a.str("caption") ?: ""
+            if (appState.sharedNoteHost(tabId) != null) {
+                // A shared note has no rows of its own: the rows come from the open tab named by sourceTabId.
+                val sourceTabId = a.str("sourceTabId") ?: ""
+                if (sourceTabId.isBlank()) {
+                    mapOf("error" to "tabId is a shared note: pass sourceTabId, the open tab whose rows lineIds refer to")
+                } else {
+                    withLoadedRows(sourceTabId) { addSharedLogNoteRoute(tabId, it, lineIds, caption) }
+                }
+            } else {
+                withLoadedRows(tabId) { addLogNoteRoute(it.id, lineIds, caption) }
+            }
+        },
         "export_analysis" to { a -> withLoadedRows(a.str("tabId") ?: "") {
             exportAnalysisRoute(it.id, a.str("path") ?: "")
         } },
@@ -2247,6 +2263,25 @@ internal class IndagiumToolOperations(
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 
+    // The rows of [source] copied into the shared note [hostId], the way "Add to notes" does from a member tab: the block names the
+    // source tab, its file label and its log section, and freezes the rows. confirmAddAnn does not return the new block's id, so it
+    // is the one block that was not there before.
+    private fun addSharedLogNoteRoute(hostId: String, source: LogTab, lineIds: List<Int>, caption: String): Map<String, Any?> {
+        if (source.isCaptureLauncher) return mapOf("error" to "no such tab: ${source.id}")
+        // As in the app, only a member tab writes into a shared note.
+        if (source.id !in appState.sharedNoteHost(hostId)?.sharedNote?.memberTabIds.orEmpty()) {
+            return mapOf("error" to "tab ${source.id} is not a member of shared note $hostId: add it with set_shared_note_members first")
+        }
+        val ids = lineIds.distinct().sorted().filter { it in source.rmap }
+        if (ids.isEmpty()) return mapOf("error" to "none of lineIds exist in tab ${source.id}")
+        val before = appState.noteTab(hostId)?.annotations?.blocks?.mapTo(HashSet()) { it.id }.orEmpty()
+        val label = appState.displaySourceLabel(source.sourcePath, source.filename, appState.noteTab(hostId)?.filename)
+        appState.confirmAddAnn(hostId, source.id, ids, caption, label)
+        val id = appState.noteTab(hostId)?.annotations?.blocks?.lastOrNull { it.id !in before }?.id
+            ?: return mapOf("error" to noteNotCreatedMessage(hostId, "log note"))
+        return mapOf("ok" to true, "tabId" to hostId, "blockId" to id, "sourceTabId" to source.id)
+    }
+
     // The only writer of AnnBlock.Image outside the video panel's own "Add frame to notes" button.
     // Exactly one source must be supplied — silently preferring one over another would make a
     // caller that passed two think the wrong one had been used. The videoMs form deliberately goes
@@ -2704,6 +2739,7 @@ internal class IndagiumToolOperations(
             "caption" to block.caption,
             "sourceTabId" to block.sourceTabId,
             "sourceFilename" to block.sourceFilename,
+            "sourceSectionId" to block.sourceSectionId,
         ) + block.recordFields.let { fields ->
             // Only a reference made from chosen fields of a JSON record has them; other blocks report exactly what they did.
             if (fields == null) emptyMap() else mapOf("recordFields" to fields.map { mapOf("path" to it.path, "json" to it.json) })
