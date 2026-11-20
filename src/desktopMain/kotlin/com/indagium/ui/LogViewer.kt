@@ -1627,17 +1627,29 @@ internal fun LogViewer(
         monoAdvancePx(gridMeasurer, mono, gridFontSize) / gridDensity.density
     }
 
+    // Auto-wrap mode never scrolls a grid sideways: rows and the column header fit the tile and wrap (hanging under their message
+    // or second column, and dropping PID/TID in a narrow tile). Only manual wrap mode keeps a fixed-width grid that scrolls.
     fun gridWidth(minimum: Dp, timeDeltaChars: Int): Dp {
         val layout = grid ?: return minimum
+        if (settings.autoLogRowWrap) return minimum
         val left = ROW_START_PAD + STRUCTURED_DISCLOSURE_SLOT +
             (if (settings.showRowNumbers) rowNumberColumnWidth(gridFontSize.value, tab.logData.size.toString().length) + ROW_NUM_GAP else 0.dp) +
             (if (tab.showTimeDelta) timeDeltaColumnWidth(gridFontSize.value, timeDeltaChars) + ROW_NUM_GAP else 0.dp) +
             (if (tab.tidMap != null) TID_MAP_HIT_WIDTH else 0.dp)
         val fixed = (layout.minimumChars * gridCharWidth).dp + left + 14.dp
-        val manual = if (settings.autoLogRowWrap) 0.dp else logContentWidthDp(
+        val manual = logContentWidthDp(
             effectiveLogWrapLimitChars(false, settings.logRowWrapLimitChars, minimum.value, gridCharWidth), gridCharWidth,
         )
         return maxOf(minimum, fixed, manual)
+    }
+
+    // Whether a pane of [paneWidthDp] shows PID/TID. The native DLT grid and a manual-wrap grid are fixed-width and keep them;
+    // a profile grid in auto-wrap mode drops them in a narrow tile like any log does. Only the width decides there: the grid's
+    // own columns say whether it has PID/TID columns at all, which hasPidTid (a numeric pid on some row) does not.
+    fun gridPidTidVisible(paneWidthDp: Float): Boolean = when {
+        grid == null -> pidTidColumnsVisible(hasPidTid, paneWidthDp)
+        nativeDltGrid || !settings.autoLogRowWrap -> true
+        else -> pidTidColumnsVisible(true, paneWidthDp)
     }
 
     @Composable
@@ -1653,8 +1665,10 @@ internal fun LogViewer(
                 hasTidMap = tab.tidMap != null,
                 pidFieldChars = pidFieldChars,
                 contentFontSizeSp = settings.fontSize,
-                profileHeader = layout?.header,
+                // The header names exactly the columns the rows show: no PID/TID in a pane that dropped them.
+                profileHeader = layout?.headerFor(pidTid),
                 profileHeaderFont = mono,
+                profileHeaderWraps = settings.autoLogRowWrap,
             )
         }
         if (layout == null) {
@@ -1669,7 +1683,8 @@ internal fun LogViewer(
                 val width = gridWidth(constraints.maxWidth.toDp(), timeDeltaChars).roundToPx()
                 val placeable = measurables.single().measure(Constraints.fixedWidth(width))
                 layout(constraints.maxWidth, placeable.height) {
-                    placeable.placeRelative(-scroll.value, 0)
+                    // Nothing scrolls sideways in auto-wrap mode, so the header never moves.
+                    placeable.placeRelative(if (settings.autoLogRowWrap) 0 else -scroll.value, 0)
                 }
             }
         }
@@ -2195,7 +2210,7 @@ internal fun LogViewer(
                         } else {
                             logContentWidthDp(effectiveWrapLimitChars, charWidthDp)
                         }
-                        val scrollHorizontally = !settings.autoLogRowWrap || rowContentWidth > logViewportWidth
+                        val scrollHorizontally = !settings.autoLogRowWrap
                         val contentModifier = if (!scrollHorizontally) {
                             Modifier.width(logViewportWidth).fillMaxHeight()
                         } else {
@@ -2430,7 +2445,7 @@ internal fun LogViewer(
                             ThinVerticalScrollbar(lazyState, Modifier.fillMaxHeight())
                         }
                     }
-                    if (!settings.autoLogRowWrap || (grid != null && hScroll.maxValue in 1 until Int.MAX_VALUE)) {
+                    if (!settings.autoLogRowWrap) {
                         ThinHorizontalScrollbar(hScroll, Modifier.fillMaxWidth().padding(end = 8.dp))
                     }
                     Box(Modifier.fillMaxWidth().height(3.dp)) {
@@ -3092,7 +3107,7 @@ internal fun LogViewer(
                     ) { info ->
                         StaleRowsLayer(rowsStale, tab.id, tc.bg) {
                             Column(Modifier.fillMaxSize().background(tc.bg)) {
-                                OriginalPane(grid != null || pidTidColumnsVisible(hasPidTid, info.widthDp))
+                                OriginalPane(gridPidTidVisible(info.widthDp))
                             }
                         }
                     },
@@ -3101,7 +3116,7 @@ internal fun LogViewer(
                     StaleRowsLayer(rowsStale, tab.id, tc.bg) {
                         Column(Modifier.fillMaxSize().background(tc.bg).onGloballyPositioned { containerH = it.size.height / density }) {
                             Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
-                            FilteredSplitPane(grid != null || pidTidColumnsVisible(hasPidTid, info.widthDp))
+                            FilteredSplitPane(gridPidTidVisible(info.widthDp))
                         }
                     }
                 })
@@ -3296,7 +3311,7 @@ internal fun LogViewer(
                     StaleRowsLayer(rowsStale, tab.id, tc.bg) {
                         Column(Modifier.fillMaxSize().background(tc.bg)) {
                             Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
-                            SinglePane(grid != null || pidTidColumnsVisible(hasPidTid, info.widthDp))
+                            SinglePane(gridPidTidVisible(info.widthDp))
                         }
                     }
                 })
@@ -3970,8 +3985,16 @@ private fun LogRow(
     // applies after a soft wrap and after a wrap-limit "\n" alike, and the row stays one text field,
     // so drag-selection and copy are untouched (no padding characters are added).
     var textFieldWidthPx by remember(tab.id, entry.id) { mutableStateOf(0) }
-    val hangingIndent = if (profileLayout?.wrapsMessage == true && lineRender.messageIndentChars > 0) {
-        rememberHangingIndent(lineRender.messageIndentChars, 0, mono, fontSize, textFieldWidthPx, forceMessage = true)
+    // Auto-wrap mode wraps at the tile width: the message column when it fits, else the second column, else a short step (see
+    // chooseHangingIndentChars), so a row whose message is not last, or does not fit, still hangs off the first column. Manual
+    // mode wraps a fixed-width grid at the message column.
+    val autoIndent = autoWrap && profileLayout != null && (lineRender.messageIndentChars > 0 || lineRender.fallbackIndentChars > 0)
+    val manualIndent = !autoWrap && profileLayout?.wrapsMessage == true && lineRender.messageIndentChars > 0
+    val hangingIndent = if (autoIndent || manualIndent) {
+        rememberHangingIndent(
+            lineRender.messageIndentChars, if (autoIndent) lineRender.fallbackIndentChars else 0, mono, fontSize, textFieldWidthPx,
+            forceMessage = manualIndent,
+        )
     } else {
         null
     }

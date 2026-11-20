@@ -865,7 +865,10 @@ internal class CsvRecordMachine(
         } else {
             cells.mapIndexed { index, cell -> index.toString() to cell }.toMap()
         }
-        val mapped = linkedMapOf<String, String>()
+        // The source columns come first, in the order the line has them; a role or attribute that maps to a column of another
+        // name is added after them. Re-assigning an existing key keeps its place, so a value is the same whichever way it is
+        // reached: only the order of the keys is the source line's.
+        val mapped = LinkedHashMap(fields)
         profile.fieldMappings.forEach { (role, source) ->
             val value = fields[source] ?: source.toIntOrNull()?.let { fields[it.toString()] }
             if (value != null) {
@@ -879,7 +882,6 @@ internal class CsvRecordMachine(
                 aliases[attribute.id] = attribute.source
             }
         }
-        fields.forEach { (key, value) -> mapped.putIfAbsent(key, value) }
         return mapped
     }
 }

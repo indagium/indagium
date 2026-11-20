@@ -45,24 +45,33 @@ internal fun isJsonRecord(raw: String?): Boolean {
         .getOrNull().let { it is JsonObject || it is JsonArray }
 }
 
-/** Generated aliases are removed only when the parser retained their original field. */
-internal fun distinctRecordFields(fields: Map<String, String>, aliases: Map<String, String> = emptyMap()): Map<String, String> =
-    fields.filter { (key, value) -> value.isNotBlank() && aliases[key]?.let { fields[it] != value } != false }
+/**
+ * Generated aliases are removed only when the parser retained their original field. Structured data listed key by key
+ * (`sd.id.key`) drops its one-string copy.
+ */
+internal fun distinctRecordFields(fields: Map<String, String>, aliases: Map<String, String> = emptyMap()): Map<String, String> {
+    val hasStructuredKeys = fields.keys.any { it.startsWith("sd.") }
+    return fields.filter { (key, value) ->
+        value.isNotBlank() && aliases[key]?.let { fields[it] != value } != false &&
+            !(hasStructuredKeys && key.equals("structured_data", ignoreCase = true))
+    }
+}
 
 private fun fieldKey(key: String, fields: Map<String, String>): String =
     ROLE_FIELD_KEYS[key]?.takeUnless { it in fields } ?: key
 
+/** A DLT row's details, keyed in lowercase snake_case like the other formats' (and the DLT profile's own field names). */
 internal fun LogEntry.dltDetailFields(): Map<String, String> = buildMap {
-    dltEcuId?.let { put("ECU", it) }
-    dltAppId?.let { put("APID", it) }
-    dltContextId?.let { put("CTID", it) }
-    pid.takeIf { it != 0 }?.let { put("Session ID", Integer.toUnsignedString(it)) }
-    dltMessageType?.let { put("Message type", it) }
+    dltEcuId?.let { put("ecu", it) }
+    dltAppId?.let { put("apid", it) }
+    dltContextId?.let { put("ctid", it) }
+    pid.takeIf { it != 0 }?.let { put("session_id", Integer.toUnsignedString(it)) }
+    dltMessageType?.let { put("message_type", it) }
     if (dltTimestampSource == "storage") {
-        dltTimestamp?.let { put("Storage time", Instant.ofEpochSecond(it).plusMillis(ts.substringAfterLast('.').toLongOrNull() ?: 0).toString()) }
+        dltTimestamp?.let { put("storage_time", Instant.ofEpochSecond(it).plusMillis(ts.substringAfterLast('.').toLongOrNull() ?: 0).toString()) }
     }
     val ticks = dltUptime ?: dltTimestamp?.takeIf { dltTimestampSource in setOf("relative", "viewer") }
-    ticks?.let { put("ECU uptime", "${java.math.BigDecimal.valueOf(it, 4).toPlainString()} s") }
+    ticks?.let { put("ecu_uptime", "${java.math.BigDecimal.valueOf(it, 4).toPlainString()} s") }
 }
 
 private fun LogEntry.hasDltDetails(): Boolean =

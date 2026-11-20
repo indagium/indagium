@@ -6,6 +6,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -15,12 +17,15 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.indagium.model.CapabilityAvailability
 import com.indagium.model.LogCapability
@@ -45,6 +50,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 private const val LOAD_TIMEOUT_MS = 10_000L
+private const val WIDE_CELL_CHARS = 38
 
 @OptIn(ExperimentalTestApi::class)
 class LogProfileFeatureAvailabilityUiTest {
@@ -88,10 +94,10 @@ class LogProfileFeatureAvailabilityUiTest {
         return tabId
     }
 
-    private fun showFileView(state: AppState, tabId: String) {
-        state.annotationVisible = true
+    private fun showFileView(state: AppState, tabId: String, width: Dp = 1180.dp, notes: Boolean = true) {
+        state.annotationVisible = notes
         rule.setContent {
-            Box(Modifier.size(1180.dp, 760.dp)) {
+            Box(Modifier.size(width, 760.dp)) {
                 state.tab(tabId)?.let { FileView(state, it) }
             }
         }
@@ -112,18 +118,10 @@ class LogProfileFeatureAvailabilityUiTest {
     @Test
     fun profileHeadersScrollWithTheirOwnRowsInFilteredAndOriginalPanes() {
         val state = newState()
-        val attributes = List(6) { index ->
-            LogFormatAttribute(id = "field_$index", label = "Field $index", source = "field_$index", visibleByDefault = true)
-        }
-        val profile = LogFormatProfile(
-            id = "wide-columns", name = "Wide columns", engine = LogFormatEngine.CSV,
-            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
-            visibleColumns = listOf(LogFieldRole.MESSAGE),
-            attributes = attributes,
-        )
-        val header = (attributes.map { it.source } + "message").joinToString(",")
-        val data = (attributes.map { "a".repeat(38) } + "log message").joinToString(",")
-        val tabId = openProfileLog(state, profile, "$header\n$data")
+        // Manual wrap mode keeps a fixed-width grid that scrolls sideways; auto-wrap mode wraps it instead (tests below).
+        state.settings = state.settings.copy(autoLogRowWrap = false)
+        val (profile, contents) = wideProfile()
+        val tabId = openProfileLog(state, profile, contents)
         state.upTab(tabId) { it.copy(showUnfiltered = true) }
         showFileView(state, tabId)
 
@@ -163,6 +161,149 @@ class LogProfileFeatureAvailabilityUiTest {
         assertTrue(originalShift > 0f)
         assertEquals(originalShift, originalRowBefore - rowLeft("original"), 1f)
         assertEquals(mainShift, mainHeaderBefore - headerLeft("main"), 1f)
+    }
+
+    private fun wideProfile(): Pair<LogFormatProfile, String> {
+        val attributes = List(6) { index ->
+            LogFormatAttribute(id = "field_$index", label = "Field $index", source = "field_$index", visibleByDefault = true)
+        }
+        val profile = LogFormatProfile(
+            id = "wide-columns", name = "Wide columns", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+            visibleColumns = listOf(LogFieldRole.MESSAGE),
+            attributes = attributes,
+        )
+        val header = (attributes.map { it.source } + "message").joinToString(",")
+        val data = (attributes.map { "a".repeat(WIDE_CELL_CHARS) } + "log message").joinToString(",")
+        return profile to "$header\n$data"
+    }
+
+    private fun pidTidProfile(): Pair<LogFormatProfile, String> {
+        val profile = LogFormatProfile(
+            id = "pid-tid", name = "Pid tid", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(
+                LogFieldRole.TIMESTAMP to "time", LogFieldRole.PROCESS_ID to "pid",
+                LogFieldRole.THREAD_ID to "tid", LogFieldRole.MESSAGE to "message",
+            ),
+            visibleColumns = listOf(LogFieldRole.TIMESTAMP, LogFieldRole.PROCESS_ID, LogFieldRole.THREAD_ID, LogFieldRole.MESSAGE),
+        )
+        return profile to "time,pid,tid,message\n2026-11-20T10:00:00Z,4100,4200,worker started"
+    }
+
+    private fun rowTextLayout(tabId: String, pane: String, entryId: Int, text: String): TextLayoutResult {
+        val node = rule.onNode(
+            hasText(text, substring = true) and hasAnyAncestor(hasTestTag("log-row-$tabId:$pane-$entryId")),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        val layouts = mutableListOf<TextLayoutResult>()
+        node.config[SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+        return layouts.single()
+    }
+
+    private fun headerTextLayout(tabId: String, pane: String): TextLayoutResult {
+        val node = rule.onNode(
+            hasTestTag("colheader-profile-text") and hasAnyAncestor(hasTestTag("log-column-header-$tabId:$pane")),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        val layouts = mutableListOf<TextLayoutResult>()
+        node.config[SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+        return layouts.single()
+    }
+
+    private fun headerText(tabId: String, pane: String): String = rule.onNode(
+        hasTestTag("colheader-profile-text") and hasAnyAncestor(hasTestTag("log-column-header-$tabId:$pane")),
+        useUnmergedTree = true,
+    ).fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+
+    @Test
+    fun aWideProfileGridWrapsInsteadOfScrollingSidewaysInAutoWrapMode() {
+        val state = newState()
+        state.settings = state.settings.copy(autoLogRowWrap = true)
+        val (profile, data) = wideProfile()
+        val tabId = openProfileLog(state, profile, data)
+        state.upTab(tabId) { it.copy(showUnfiltered = true) }
+        showFileView(state, tabId, width = 600.dp, notes = false)
+
+        val entryId = requireNotNull(state.tab(tabId)).logData.single().id
+        for (pane in listOf("main", "original")) {
+            rule.waitUntil(LOAD_TIMEOUT_MS) {
+                rule.onAllNodesWithTag("log-row-$tabId:$pane-$entryId").fetchSemanticsNodes().isNotEmpty()
+            }
+            rule.waitForIdle()
+            // No horizontalScroll is attached in auto-wrap mode, so the state keeps its never-measured maxValue (Int.MAX_VALUE), not a
+            // real scroll range; a pane that scrolled sideways would report a range in 1 until Int.MAX_VALUE.
+            val scroll = state.logViewerScrollStateStore.scrollState("$tabId:$pane")
+            assertTrue(scroll.maxValue !in 1 until Int.MAX_VALUE, "$pane pane scrolls sideways (range ${scroll.maxValue})")
+            assertEquals(0, scroll.value)
+
+            val row = rule.onNodeWithTag("log-row-$tabId:$pane-$entryId").getUnclippedBoundsInRoot()
+            assertTrue(row.left.value >= 0f && row.right.value <= 600f, "$pane row $row sticks out of the 600 dp tile")
+            val layout = rowTextLayout(tabId, pane, entryId, "log message")
+            assertTrue(layout.lineCount > 1, "$pane row is one line, so it did not wrap")
+            val message = layout.layoutInput.text.text.indexOf("log message")
+            assertTrue(message >= 0)
+            val box = layout.getBoundingBox(message)
+            assertTrue(box.right <= layout.size.width, "$pane message ends at ${box.right} past the text width ${layout.size.width}")
+            assertTrue(layout.getLineLeft(layout.lineCount - 1) > 0f, "$pane continuation lines hang at the left edge")
+
+            val header = rule.onNode(
+                hasTestTag("colheader-profile-text") and hasAnyAncestor(hasTestTag("log-column-header-$tabId:$pane")),
+                useUnmergedTree = true,
+            ).getUnclippedBoundsInRoot()
+            assertTrue(header.right.value <= 600f, "$pane header $header sticks out of the 600 dp tile")
+            assertTrue((header.bottom - header.top).value > 2 * 12f, "$pane header is one line, so it did not wrap")
+
+            // The header hangs under the same column as its rows and gets the same text width. (Its lines need not break where the
+            // rows' do: its labels are shorter than the padded columns under them.)
+            val headerLayout = headerTextLayout(tabId, pane)
+            assertEquals(layout.size.width, headerLayout.size.width, "$pane header and rows have different text widths")
+            assertEquals(headerLayout.getLineLeft(1), layout.getLineLeft(1), 0.5f, "$pane header and row hang at different indents")
+        }
+    }
+
+    @Test
+    fun aNarrowTileDropsPidAndTidFromBothTheHeaderAndTheRows() {
+        val state = newState()
+        val (profile, data) = pidTidProfile()
+        val tabId = openProfileLog(state, profile, data)
+        state.upTab(tabId) { it.copy(showUnfiltered = true) }
+        showFileView(state, tabId, width = 400.dp, notes = false)
+
+        val entryId = requireNotNull(state.tab(tabId)).logData.single().id
+        for (pane in listOf("main", "original")) {
+            rule.waitUntil(LOAD_TIMEOUT_MS) {
+                rule.onAllNodesWithTag("log-row-$tabId:$pane-$entryId").fetchSemanticsNodes().isNotEmpty()
+            }
+            rule.waitForIdle()
+            val header = headerText(tabId, pane)
+            assertTrue("PID" !in header && "TID" !in header, "$pane header names PID/TID in a narrow tile: $header")
+            assertTrue("TIMESTAMP" in header && "MESSAGE" in header, header)
+            val row = rowTextLayout(tabId, pane, entryId, "worker started").layoutInput.text.text
+            assertTrue("4100" !in row && "4200" !in row, "$pane row shows PID/TID in a narrow tile: $row")
+        }
+    }
+
+    @Test
+    fun aWideTileKeepsPidAndTidInBothTheHeaderAndTheRows() {
+        val state = newState()
+        val (profile, data) = pidTidProfile()
+        val tabId = openProfileLog(state, profile, data)
+        state.upTab(tabId) { it.copy(showUnfiltered = true) }
+        showFileView(state, tabId, width = 1400.dp, notes = false)
+
+        val entryId = requireNotNull(state.tab(tabId)).logData.single().id
+        for (pane in listOf("main", "original")) {
+            rule.waitUntil(LOAD_TIMEOUT_MS) {
+                rule.onAllNodesWithTag("log-row-$tabId:$pane-$entryId").fetchSemanticsNodes().isNotEmpty()
+            }
+            rule.waitForIdle()
+            val header = headerText(tabId, pane)
+            assertTrue("PID" in header && "TID" in header, "$pane header lost PID/TID in a wide tile: $header")
+            val row = rowTextLayout(tabId, pane, entryId, "worker started").layoutInput.text.text
+            assertTrue("4100" in row && "4200" in row, "$pane row lost PID/TID in a wide tile: $row")
+            // The header and the rows were padded to the same column widths, so the message label sits over the message.
+            assertEquals(header.indexOf("MESSAGE"), row.indexOf("worker started"), "$pane header and row columns drifted apart")
+        }
     }
 
     @Test

@@ -93,5 +93,10 @@ class MessageDetailsRecordSourceTest {
         assertEquals(listOf("time", "level", "msg", "pid"), distinctRecordFields(logfmt, aliases).keys.toList())
         val distinct = mapOf("MESSAGE" to "ready", "sd.a@1.state" to "ready")
         assertEquals(distinct, distinctRecordFields(distinct))
+        // Structured data listed key by key (sd.id.key) drops its one-string copy; without per-key fields the string stays.
+        val syslog = mapOf("HOST" to "demo-node", "sd.a@1.k" to "v", "structured_data" to "[a@1 k=\"v\"]")
+        assertEquals(listOf("HOST", "sd.a@1.k"), distinctRecordFields(syslog).keys.toList())
+        val unparsed = mapOf("HOST" to "demo-node", "structured_data" to "[a@1 k=\"v\"]")
+        assertEquals(listOf("HOST", "structured_data"), distinctRecordFields(unparsed).keys.toList())
     }
 }

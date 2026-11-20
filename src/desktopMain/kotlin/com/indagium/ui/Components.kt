@@ -69,6 +69,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -660,10 +661,16 @@ fun ColHeader(
     // the widths the rows use. The header is then drawn in the rows' own font so the two line up.
     profileHeader: String? = null,
     profileHeaderFont: FontFamily? = null,
+    // The profile header wraps at the tile width, hanging under its MESSAGE or second label, as the rows do (auto-wrap mode, where
+    // nothing scrolls sideways). False keeps it one line, for a fixed-width grid that scrolls with its rows (manual wrap mode).
+    profileHeaderWraps: Boolean = false,
 ) {
     val tc = tc()
     if (profileHeader != null) {
-        ProfileColHeader(profileHeader, profileHeaderFont, showRowNumbers, rowNumDigits, showTimeDelta, timeDeltaChars, hasTidMap, contentFontSizeSp)
+        ProfileColHeader(
+            profileHeader, profileHeaderFont, showRowNumbers, rowNumDigits, showTimeDelta, timeDeltaChars, hasTidMap, contentFontSizeSp,
+            profileHeaderWraps,
+        )
         return
     }
     Row(
@@ -737,12 +744,14 @@ private fun ProfileColHeader(
     timeDeltaChars: Int,
     hasTidMap: Boolean,
     contentFontSizeSp: Int,
+    wraps: Boolean,
 ) {
     val tc = tc()
     val fontSize = contentFontSizeSp.toFloat()
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
-            .padding(start = ROW_START_PAD, end = 12.dp, top = 4.dp, bottom = 4.dp)
+            // The same end padding as a log row (LogRow), so a wrapping header breaks where its rows do.
+            .padding(start = ROW_START_PAD, end = 8.dp, top = 4.dp, bottom = 4.dp)
             .testTag("colheader-profile"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -758,13 +767,29 @@ private fun ProfileColHeader(
             }
         }
         Spacer(Modifier.width(STRUCTURED_DISCLOSURE_SLOT))
-        BasicText(
-            header,
-            style = TextStyle(color = tc.td, fontSize = contentFontSizeSp.sp, fontFamily = font ?: FontFamily.Monospace, fontWeight = FontWeight.SemiBold),
-            softWrap = false,
-            maxLines = 1,
-            modifier = Modifier.weight(1f).testTag("colheader-profile-text"),
-        )
+        val family = font ?: FontFamily.Monospace
+        val style = TextStyle(color = tc.td, fontSize = contentFontSizeSp.sp, fontFamily = family, fontWeight = FontWeight.SemiBold)
+        if (wraps) {
+            // A tile too narrow for every label wraps the header the way it wraps rows, with the same indent rule, rather than
+            // cutting the right-most labels off: every column the rows show stays named.
+            var widthPx by remember { mutableStateOf(0) }
+            val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
+            val indent = rememberHangingIndent(messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx)
+            val text = remember(header, indent) { AnnotatedString(header).let { if (indent != null) it.withHangingIndent(indent) else it } }
+            BasicText(
+                text,
+                style = style,
+                modifier = Modifier.weight(1f).onSizeChanged { widthPx = it.width }.testTag("colheader-profile-text"),
+            )
+        } else {
+            BasicText(
+                header,
+                style = style,
+                softWrap = false,
+                maxLines = 1,
+                modifier = Modifier.weight(1f).testTag("colheader-profile-text"),
+            )
+        }
     }
 }
 
