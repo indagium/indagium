@@ -346,11 +346,28 @@ internal fun boundedProfileCell(text: String, columns: Int): String {
 internal data class ProfileColumnLayout(
     val columns: List<LogDisplayField>,
     val widths: Map<String, Int>,
+    // The widest value each column holds (at most MAX_PROFILE_COLUMN_CHARS), unlike [widths], which a label can widen. Empty when unknown.
+    val valueWidths: Map<String, Int> = emptyMap(),
 ) {
     val shownColumnIds = columns.mapTo(hashSetOf()) { it.id }
     val wrapsMessage = columns.lastOrNull()?.id == "message"
     val header = headerFor(true)
     val minimumChars = header.length + if (wrapsMessage) MIN_MESSAGE_COLUMN_CHARS - "MESSAGE".length else 0
+
+    /**
+     * The characters of the widest row's first line: every shown column but the last at its padded width plus the
+     * separators, then the last column's widest value (rows do not pad the last column, so a label wider than its values
+     * does not stretch them). Null when that is unbounded or unknown: a trailing message is as long as it is, and a layout
+     * that was not measured has no value widths.
+     */
+    fun rowCharsFor(includeProcessThread: Boolean): Int? {
+        if (wrapsMessage) return null
+        val shown = columns.filter { includeProcessThread || !isProfileProcessThreadColumn(it.id) }
+        val last = shown.lastOrNull() ?: return null
+        val lastValue = valueWidths[last.id]?.takeIf { it > 0 } ?: return null
+        val lead = shown.dropLast(1).sumOf { (widths[it.id] ?: return null) + PROFILE_FIELD_SEPARATOR.length }
+        return lead + lastValue
+    }
 
     fun headerFor(includeProcessThread: Boolean): String =
         columns.filter { includeProcessThread || !isProfileProcessThreadColumn(it.id) }.joinToString(PROFILE_FIELD_SEPARATOR) { column ->
@@ -418,7 +435,7 @@ private fun layoutProfileColumns(columns: List<LogDisplayField>, observed: Map<S
     val fixed = if (visible.lastOrNull()?.id == "message") visible.dropLast(1) else visible
     return ProfileColumnLayout(visible, fixed.associate { column ->
         column.id to maxOf(profileHeaderLabel(column).length.coerceAtMost(MAX_PROFILE_COLUMN_CHARS), observed[column.id] ?: 0)
-    })
+    }, valueWidths = observed.toMap())
 }
 
 private fun profileHeaderLabel(column: LogDisplayField): String = when (column.id) {

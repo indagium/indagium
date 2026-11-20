@@ -1669,6 +1669,7 @@ internal fun LogViewer(
                 profileHeader = layout?.headerFor(pidTid),
                 profileHeaderFont = mono,
                 profileHeaderWraps = settings.autoLogRowWrap,
+                profileRowChars = layout?.rowCharsFor(pidTid),
             )
         }
         if (layout == null) {

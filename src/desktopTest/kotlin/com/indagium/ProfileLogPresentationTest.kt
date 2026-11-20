@@ -31,8 +31,10 @@ import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.mkTab
+import com.indagium.ui.profileHeaderForWrapping
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_PROFILE_COLUMN_CHARS
+import com.indagium.utils.ProfileColumnLayout
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.buildFilteredCsv
 import com.indagium.utils.buildFilteredTxt
@@ -747,6 +749,79 @@ class ProfileLogPresentationTest {
 
         // A Logcat tab has no profile layout.
         assertNull(computeProfileColumnLayout(header, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+    }
+
+    private val httpHeader = "TIMESTAMP".padEnd(20) + "  " + "HOST".padEnd(8) + "  " + "HTTP METHOD".padEnd(11) + "  " + "BYTES SENT"
+
+    private fun httpLayout(withProcess: Boolean = false): ProfileColumnLayout {
+        val definitions = listOfNotNull(
+            LogDisplayField("timestamp", "timestamp", ""),
+            LogDisplayField("process_id", "process id", "").takeIf { withProcess },
+            LogDisplayField("host", "Host", ""),
+            LogDisplayField("http_method", "HTTP method", ""),
+            LogDisplayField("bytes_sent", "Bytes sent", ""),
+        )
+
+        fun row(id: Int, pid: String, host: String, method: String, bytes: String) = profileEntry(
+            ts = "16/Nov/2026:12:00:0$id", level = LogLevel.I, tag = "", msg = "", fields = emptyMap(),
+            columns = listOfNotNull(
+                LogDisplayField("timestamp", "timestamp", "16/Nov/2026:12:00:0$id"),
+                LogDisplayField("process_id", "process id", pid).takeIf { withProcess },
+                LogDisplayField("host", "Host", host),
+                LogDisplayField("http_method", "HTTP method", method),
+                LogDisplayField("bytes_sent", "Bytes sent", bytes),
+            ),
+        )
+        val rows = listOf(row(1, "4100", "10.0.0.7", "GET", "512"), row(2, "4100", "10.0.0.7", "POST", "7"))
+        return requireNotNull(computeProfileColumnLayout(definitions, rows))
+    }
+
+    @Test
+    fun theWidestRowIsTheColumnsBeforeTheLastPlusTheLastColumnsWidestValue() {
+        val layout = httpLayout()
+        // "BYTES SENT" is 10 characters wide in the header, but no row holds more than 3 in that column.
+        assertEquals(httpHeader, layout.header)
+        assertEquals(10, layout.widths.getValue("bytes_sent"))
+        assertEquals(20 + 2 + 8 + 2 + 11 + 2 + 3, layout.rowCharsFor(true))
+        assertTrue(layout.rowCharsFor(true)!! < layout.header.length)
+    }
+
+    @Test
+    fun theWidestRowFollowsTheColumnsAPaneShows() {
+        val layout = httpLayout(withProcess = true)
+        // The PID column is as wide as its values ("4100"), wider than its label.
+        assertEquals(20 + 2 + 4 + 2 + 8 + 2 + 11 + 2 + 3, layout.rowCharsFor(true))
+        // Without PID/TID (a narrow pane) the row is as wide as the other columns.
+        assertEquals(20 + 2 + 8 + 2 + 11 + 2 + 3, layout.rowCharsFor(false))
+        assertEquals(httpHeader, layout.headerFor(false))
+    }
+
+    @Test
+    fun aRowEndingInTheMessageIsAsLongAsItsMessageAndAnUnmeasuredLayoutHasNoRowWidth() {
+        val withMessage = ProfileColumnLayout(
+            listOf(LogDisplayField("timestamp", "timestamp", ""), LogDisplayField("message", "message", "")),
+            mapOf("timestamp" to 9),
+            valueWidths = mapOf("timestamp" to 8, "message" to 40),
+        )
+        assertNull(withMessage.rowCharsFor(true))
+        val unmeasured = ProfileColumnLayout(
+            listOf(LogDisplayField("timestamp", "timestamp", ""), LogDisplayField("host", "Host", "")),
+            mapOf("timestamp" to 9, "host" to 4),
+        )
+        assertNull(unmeasured.rowCharsFor(true))
+    }
+
+    @Test
+    fun aWrappingHeaderJoinsTheWordsOfEachLabelAndKeepsItsLength() {
+        val header = httpHeader
+        val wrapping = profileHeaderForWrapping(header)
+        assertEquals(header.length, wrapping.length)
+        assertEquals(header.replace("HTTP METHOD", "HTTP\u00A0METHOD").replace("BYTES SENT", "BYTES\u00A0SENT"), wrapping)
+        // Columns stay separated by plain spaces, which are where the header may break.
+        assertTrue("  HTTP" in wrapping && "HOST      HTTP" in wrapping)
+        // Labels without a space, the padding between columns and a header with nothing to join are untouched.
+        assertEquals("TIMESTAMP  LVL      MESSAGE", profileHeaderForWrapping("TIMESTAMP  LVL      MESSAGE"))
+        assertEquals("", profileHeaderForWrapping(""))
     }
 
     @Test

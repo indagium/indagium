@@ -57,6 +57,7 @@ private const val LOAD_TIMEOUT_MS = 10_000L
 private const val WIDE_CELL_CHARS = 38
 private const val SQUEEZE_CELL_CHARS = 14
 private const val MAX_NARROWING_STEPS = 25
+private const val FIELD_TOLERANCE_CHARS = 1.5f
 private const val SQUEEZE_MESSAGE_START = 3 * (SQUEEZE_CELL_CHARS + 2)
 private const val SQUEEZE_MESSAGE = "Configuration loaded successfully"
 
@@ -310,16 +311,14 @@ class LogProfileFeatureAvailabilityUiTest {
         assertEquals(SQUEEZE_MESSAGE_START, expected.indexOf(SQUEEZE_MESSAGE))
         val advancePx = wide.getBoundingBox(0).let { it.right - it.left }
 
-        // Narrow the tile until about 12 characters remain after the message column. The text field's share of the tile is not
-        // one to one, so walk there by what the row itself measures.
-        val targetChars = SQUEEZE_MESSAGE_START + 12
-        repeat(MAX_NARROWING_STEPS) {
-            val fieldChars = rowTextLayout(tabId, "main", entryId, "Configuration").size.width / advancePx
-            if (kotlin.math.abs(fieldChars - targetChars) > 1.5f) {
-                tileWidth -= with(rule.density) { ((fieldChars - targetChars) * advancePx).toDp() }
-                rule.waitForIdle()
-            }
-        }
+        // Narrow the tile until about 12 characters remain after the message column.
+        walkToFieldChars(
+            target = (SQUEEZE_MESSAGE_START + 12).toFloat(),
+            fieldChars = { rowTextLayout(tabId, "main", entryId, "Configuration").size.width / advancePx },
+            advancePx = advancePx,
+            shrink = { tileWidth -= it },
+        )
+        rule.waitUntil(LOAD_TIMEOUT_MS) { rowTextLayout(tabId, "main", entryId, "Configuration").layoutInput.text.text.contains('\n') }
         val narrow = rowTextLayout(tabId, "main", entryId, "Configuration")
         val shown = narrow.layoutInput.text.text
         val messageStart = shown.indexOf(SQUEEZE_MESSAGE)
@@ -331,6 +330,102 @@ class LogProfileFeatureAvailabilityUiTest {
         val secondColumn = shown.indexOf("b".repeat(SQUEEZE_CELL_CHARS))
         assertEquals(narrow.getBoundingBox(secondColumn).left, narrow.getBoundingBox(messageStart).left, 1f)
         assertEquals(0f, narrow.getLineLeft(0), 0.5f)
+    }
+
+    /**
+     * Changes the tile width by [shrink] (positive narrows) until [fieldChars] reads about [target] characters. The text field's share
+     * of the tile is not one to one, so it walks there by what the row or header itself measures.
+     */
+    private fun walkToFieldChars(target: Float, fieldChars: () -> Float, advancePx: Float, shrink: (androidx.compose.ui.unit.Dp) -> Unit) {
+        repeat(MAX_NARROWING_STEPS) {
+            val chars = fieldChars()
+            if (kotlin.math.abs(chars - target) > FIELD_TOLERANCE_CHARS) {
+                shrink(with(rule.density) { ((chars - target) * advancePx).toDp() })
+                rule.waitForIdle()
+            }
+        }
+        assertTrue(kotlin.math.abs(fieldChars() - target) <= FIELD_TOLERANCE_CHARS, "the field is ${fieldChars()} characters wide, not about $target")
+    }
+
+    /** An access log: no message, so the last column (Bytes sent) is as wide as its values and its label is wider. */
+    private fun httpProfile(): Pair<LogFormatProfile, String> {
+        val labels = listOf("Host" to "host", "HTTP method" to "method", "HTTP status" to "status", "Bytes sent" to "bytes")
+        val profile = LogFormatProfile(
+            id = "http-columns", name = "HTTP columns", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.TIMESTAMP to "time"),
+            visibleColumns = listOf(LogFieldRole.TIMESTAMP),
+            attributes = labels.map { (label, source) -> LogFormatAttribute(id = "x_$source", label = label, source = source, visibleByDefault = true) },
+        )
+        return profile to "time,host,method,status,bytes\n2026-11-20T10:00:00Z,10.0.0.7,GET,200,512"
+    }
+
+    private fun openHttpLog(state: AppState, tileWidth: () -> androidx.compose.ui.unit.Dp): Triple<String, Int, Float> {
+        state.settings = state.settings.copy(autoLogRowWrap = true)
+        val (profile, data) = httpProfile()
+        val tabId = openProfileLog(state, profile, data)
+        state.annotationVisible = false
+        rule.setContent { Box(Modifier.size(tileWidth(), 760.dp)) { state.tab(tabId)?.let { FileView(state, it) } } }
+        rule.waitForIdle()
+        val entryId = requireNotNull(state.tab(tabId)).logData.single().id
+        rule.waitUntil(LOAD_TIMEOUT_MS) {
+            rule.onAllNodesWithTag("log-row-$tabId:main-$entryId").fetchSemanticsNodes().isNotEmpty()
+        }
+        val advancePx = headerTextLayout(tabId, "main").getBoundingBox(0).let { it.right - it.left }
+        return Triple(tabId, entryId, advancePx)
+    }
+
+    @Test
+    fun aNarrowHttpHeaderBreaksOnlyBetweenColumnsSoEachLabelStaysWhole() {
+        val state = newState()
+        var tileWidth by mutableStateOf(1000.dp)
+        val (tabId, entryId, advancePx) = openHttpLog(state) { tileWidth }
+        val header = headerText(tabId, "main")
+        assertTrue("HTTP\u00A0METHOD" in header && "BYTES\u00A0SENT" in header, "the labels' words are joined: $header")
+
+        // A tile about 45 characters wide: the five columns (68 characters) cannot share one line.
+        walkToFieldChars(
+            target = 45f,
+            fieldChars = { headerTextLayout(tabId, "main").size.width / advancePx },
+            advancePx = advancePx,
+            shrink = { tileWidth -= it },
+        )
+        val layout = headerTextLayout(tabId, "main")
+        val shown = layout.layoutInput.text.text
+        assertTrue(layout.lineCount > 1, "the header wraps: $shown")
+        for (label in listOf("HTTP\u00A0METHOD", "HTTP\u00A0STATUS", "BYTES\u00A0SENT")) {
+            val start = shown.indexOf(label)
+            assertTrue(start >= 0, "$label is in the header: $shown")
+            assertEquals(layout.getLineForOffset(start), layout.getLineForOffset(start + label.length - 1), "$label is split between lines")
+        }
+        // The no-break space is drawn at the same advance as every other character, so columns still line up.
+        val gap = shown.indexOf('\u00A0')
+        assertEquals(advancePx, layout.getBoundingBox(gap).let { it.right - it.left }, 0.5f)
+        // The rows keep the text the user sees and copies.
+        assertTrue(rowTextLayout(tabId, "main", entryId, "GET").layoutInput.text.text.contains("GET"))
+    }
+
+    @Test
+    fun aHeaderWhoseRowsFitStaysOnOneLineAndEndsItsLongLastLabelWithAnEllipsis() {
+        val state = newState()
+        var tileWidth by mutableStateOf(1000.dp)
+        val (tabId, entryId, advancePx) = openHttpLog(state) { tileWidth }
+
+        // Rows are 61 characters wide (the last column holds "512"), the header 68 (its last label is "BYTES SENT").
+        walkToFieldChars(
+            target = 64f,
+            fieldChars = { headerTextLayout(tabId, "main").size.width / advancePx },
+            advancePx = advancePx,
+            shrink = { tileWidth -= it },
+        )
+        val row = rowTextLayout(tabId, "main", entryId, "GET")
+        assertEquals(1, row.lineCount, "the row fits: ${row.layoutInput.text.text}")
+        val layout = headerTextLayout(tabId, "main")
+        assertEquals(1, layout.lineCount, "the header stays on one line: ${layout.layoutInput.text.text}")
+        val text = layout.layoutInput.text.text
+        // Skia does not report an ellipsis through isLineEllipsized; the line simply stops short of the full text, at the overrun.
+        val visibleEnd = layout.getLineEnd(0, visibleEnd = true)
+        assertTrue(visibleEnd < text.length, "its last label is cut short: visible $visibleEnd of ${text.length}")
+        assertTrue(visibleEnd > text.indexOf("BYTES"), "only the last label is cut: visible $visibleEnd, label at ${text.indexOf("BYTES")}")
     }
 
     @Test

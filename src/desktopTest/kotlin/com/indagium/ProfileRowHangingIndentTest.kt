@@ -21,6 +21,7 @@ import com.indagium.ui.hangingContinuationLimit
 import com.indagium.ui.hangingIndentLeavesRoom
 import com.indagium.ui.hangingIndentSp
 import com.indagium.ui.messageBreaksOntoOwnLine
+import com.indagium.ui.profileHeaderForWrapping
 import com.indagium.ui.profileHeaderIndentChars
 import com.indagium.ui.stripVisualWrapBreaks
 import com.indagium.ui.visualLogLineForWrapLimit
@@ -333,5 +334,8 @@ class ProfileRowHangingIndentTest {
     fun theHeaderHangsAtItsMessageLabelOrItsSecondLabel() {
         assertEquals(20 to 11, profileHeaderIndentChars("TIMESTAMP  LVL      MESSAGE"))
         assertEquals(0 to 22, profileHeaderIndentChars("16/Nov/2026:12:00:00  HOST  HTTP METHOD"))
+        // The wrapping header shows its words joined by no-break spaces, with the same length, so the indents are unchanged.
+        val joined = profileHeaderForWrapping("TIMESTAMP  REQUEST ID  MESSAGE")
+        assertEquals(profileHeaderIndentChars("TIMESTAMP  REQUEST ID  MESSAGE"), profileHeaderIndentChars(joined))
     }
 }

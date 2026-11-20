@@ -664,12 +664,15 @@ fun ColHeader(
     // The profile header wraps at the tile width, hanging under its MESSAGE or second label, as the rows do (auto-wrap mode, where
     // nothing scrolls sideways). False keeps it one line, for a fixed-width grid that scrolls with its rows (manual wrap mode).
     profileHeaderWraps: Boolean = false,
+    // The characters of the widest row's first line (ProfileColumnLayout.rowCharsFor), null when unbounded or unknown. A wrapping header
+    // whose rows fit its tile stays on one line even if its last label is wider than its values: that label ends in "…".
+    profileRowChars: Int? = null,
 ) {
     val tc = tc()
     if (profileHeader != null) {
         ProfileColHeader(
             profileHeader, profileHeaderFont, showRowNumbers, rowNumDigits, showTimeDelta, timeDeltaChars, hasTidMap, contentFontSizeSp,
-            profileHeaderWraps,
+            profileHeaderWraps, profileRowChars,
         )
         return
     }
@@ -745,6 +748,7 @@ private fun ProfileColHeader(
     hasTidMap: Boolean,
     contentFontSizeSp: Int,
     wraps: Boolean,
+    rowChars: Int?,
 ) {
     val tc = tc()
     val fontSize = contentFontSizeSp.toFloat()
@@ -773,15 +777,26 @@ private fun ProfileColHeader(
             // A tile too narrow for every label wraps the header the way it wraps rows, with the same indent rule, rather than
             // cutting the right-most labels off: every column the rows show stays named.
             var widthPx by remember { mutableStateOf(0) }
+            val advance = rememberMonoAdvancePx(family, contentFontSizeSp.sp)
+            val fieldChars = fieldCharsFor(widthPx, advance)
             val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
             // The MESSAGE label goes to its own line exactly when the rows' messages do (see messageBreaksOntoOwnLine).
             val plan = rememberHangingIndent(
                 messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx, firstLineChars = header.length,
             )
-            val text = remember(header, plan, messageChars) { AnnotatedString(header).withHangingPlan(plan, messageChars) }
+            // Words of one label are joined by no-break spaces (same length, same advance), so the header breaks only between
+            // columns and each label stays over its values.
+            val text = remember(header, plan, messageChars) {
+                AnnotatedString(profileHeaderForWrapping(header)).withHangingPlan(plan, messageChars)
+            }
+            // Rows that fit the tile on one line with a header that does not: only the last label overruns its (shorter) values.
+            val rowsFit = rowChars != null && fieldChars > 0f && rowChars <= fieldChars && header.length > fieldChars
             BasicText(
-                text,
+                if (rowsFit) AnnotatedString(header) else text,
                 style = style,
+                softWrap = !rowsFit,
+                maxLines = if (rowsFit) 1 else Int.MAX_VALUE,
+                overflow = if (rowsFit) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier = Modifier.weight(1f).onSizeChanged { widthPx = it.width }.testTag("colheader-profile-text"),
             )
         } else {
@@ -795,6 +810,14 @@ private fun ProfileColHeader(
         }
     }
 }
+
+/**
+ * [header] with the single spaces inside each label replaced by no-break spaces (U+00A0), so a wrapping header can break only
+ * between columns, which are separated by two or more plain spaces. The length is unchanged.
+ */
+internal fun profileHeaderForWrapping(header: String): String = header.replace(LABEL_WORD_GAP, "\u00A0")
+
+private val LABEL_WORD_GAP = Regex("(?<=\\S) (?=\\S)")
 
 /**
  * Where a profile header's continuation lines hang, by the same rule as its rows: the MESSAGE label's

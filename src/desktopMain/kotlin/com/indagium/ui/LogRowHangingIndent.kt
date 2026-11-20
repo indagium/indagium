@@ -40,6 +40,13 @@ internal fun monoAdvancePx(measurer: TextMeasurer, family: FontFamily, fontSize:
     return layout.getHorizontalPosition(ADVANCE_SAMPLE_CHARS, usePrimaryDirection = true) / ADVANCE_SAMPLE_CHARS
 }
 
+/** [monoAdvancePx] for the current composition, measured again only when the font or size changes. */
+@Composable
+internal fun rememberMonoAdvancePx(family: FontFamily, fontSize: TextUnit): Float {
+    val measurer = rememberTextMeasurer(cacheSize = 1)
+    return remember(measurer, family, fontSize) { monoAdvancePx(measurer, family, fontSize) }
+}
+
 /** The width of [chars] monospace characters of [advancePx] pixels each, in sp at this density and font scale. */
 internal fun hangingIndentSp(chars: Int, advancePx: Float, density: Density): TextUnit =
     with(density) { (chars * advancePx).toSp() }
@@ -133,8 +140,7 @@ internal fun rememberHangingIndent(
     firstLineChars: Int = 0,
 ): HangingPlan {
     val density = LocalDensity.current
-    val measurer = rememberTextMeasurer(cacheSize = 1)
-    val advance = remember(measurer, density, family, fontSize) { monoAdvancePx(measurer, family, fontSize) }
+    val advance = rememberMonoAdvancePx(family, fontSize)
     return remember(messageChars, fallbackChars, advance, density, fieldWidthPx, forceMessage, firstLineChars) {
         val fieldChars = fieldCharsFor(fieldWidthPx, advance)
         val chars = if (forceMessage) messageChars else chooseHangingIndentChars(messageChars, fallbackChars, fieldChars)
