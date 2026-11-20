@@ -403,6 +403,19 @@ class ProfileRowHangingIndentTest {
         assertEquals("TIMESTAMP  HOST", cut[0])
         assertEquals(16, cut[1].length)
         assertTrue(cut[1].endsWith("…"))
+        // The end padding takes a label that overruns by less than it: a 28-character line in a 27-character field (as HTTP METHOD
+        // ends at 51 in a 50-character one) fits an overhang of 1.08; one more character, or a 7-character overrun (BYTES SENT
+        // beside 3-digit values), is still cut.
+        val method = "TIMESTAMP  HOST  HTTP METHOD"
+        val whole = profileWrappingHeaderText(method, emptyList(), fieldChars = 27f, indentChars = 0, overhangChars = 1.08f)
+        assertEquals(profileHeaderForWrapping(method), whole)
+        assertEquals(1, whole.lines().size)
+        assertEquals(28, whole.length)
+        assertFalse(whole.endsWith("…"))
+        val oneMore = profileWrappingHeaderText(method, emptyList(), fieldChars = 26f, indentChars = 0, overhangChars = 1.08f)
+        assertTrue(oneMore.endsWith("…") && oneMore.length == 27, oneMore)
+        val sevenOver = profileWrappingHeaderText(method, emptyList(), fieldChars = 21f, indentChars = 0, overhangChars = 1.08f)
+        assertTrue(sevenOver.endsWith("…") && sevenOver.length == 22, sevenOver)
         // An unmeasured field cuts nothing.
         assertEquals(profileHeaderForWrapping(header), profileWrappingHeaderText(header, emptyList(), 0f, 0))
     }

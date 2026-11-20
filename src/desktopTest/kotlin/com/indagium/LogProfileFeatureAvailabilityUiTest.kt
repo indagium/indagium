@@ -466,9 +466,29 @@ class LogProfileFeatureAvailabilityUiTest {
         val shown = header.layoutInput.text.text
         val row = rowTextLayout(tabId, "main", entryId, "GET")
         val rowText = row.layoutInput.text.text
-        // HTTP METHOD would end at column 51 of a 50-character field (GET fits, its 11-character label does not): the one label
-        // that is cut, at the field edge, and every other label is whole.
-        assertTrue(shown.lines().first().endsWith("HTTP\u00A0METH…"), "the overrunning label ends in an ellipsis: [$shown]")
+        // HTTP METHOD would end at column 51 of a 50-character field (GET fits, its 11-character label does not), one character
+        // past the text's width: the header's end padding takes it, so it is drawn whole, and not clipped by the text's own bounds.
+        assertTrue(shown.lines().first().endsWith("HTTP\u00A0METHOD"), "the label is drawn whole: [$shown]")
+        val lastLetter = shown.indexOf("HTTP\u00A0METHOD") + "HTTP\u00A0METHOD".length - 1
+        val reach = header.getBoundingBox(lastLetter).right
+        assertTrue(reach > header.size.width && reach <= header.size.width + advancePx * 1.5f, "reach=$reach width=${header.size.width}")
+        assertTrue(
+            state.logViewerScrollStateStore.scrollState("$tabId:main").maxValue !in 1 until Int.MAX_VALUE,
+            "the header made the pane scroll sideways",
+        )
+        assertTrue(header.layoutInput.overflow == androidx.compose.ui.text.style.TextOverflow.Visible, "the text is not clipped to its bounds")
+        // ...and its last letter is really painted in that padding: pixels there differ from the plain header background.
+        val bounds = rule.onNode(
+            hasTestTag("colheader-profile-text") and hasAnyAncestor(hasTestTag("log-column-header-$tabId:main")),
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val image = rule.onRoot().captureToImage().toPixelMap()
+        val textRight = bounds.right.value.toInt()
+        val background = image[textRight + advancePx.toInt() * 2, bounds.top.value.toInt() + 4]
+        val painted = (textRight until textRight + (reach - header.size.width).toInt()).any { x ->
+            (bounds.top.value.toInt() until bounds.bottom.value.toInt()).any { y -> image[x, y] != background }
+        }
+        assertTrue(painted, "nothing is drawn past the text's right edge $textRight")
         assertEquals(2, shown.lines().size, "[$shown]")
         assertEquals(2, row.lineCount, "the row wraps once: [$rowText]")
         assertEquals(row.lineCount, header.lineCount, "header and row break into different line counts: [$shown] / [$rowText]")

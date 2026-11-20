@@ -737,6 +737,9 @@ internal fun ColHeader(
     }
 }
 
+// The header's end padding, the same as a log row's: a wrapping header's last label on a line may reach into it.
+private val PROFILE_HEADER_END_PADDING = 8.dp
+
 /**
  * The header of a profile tab. Its gutters repeat the row's own (start padding, tid map, row
  * number, time delta, disclosure arrow) at the row's font size, so the names sit over the values.
@@ -760,7 +763,7 @@ private fun ProfileColHeader(
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
             // The same end padding as a log row (LogRow), so a wrapping header breaks where its rows do.
-            .padding(start = ROW_START_PAD, end = 8.dp, top = 4.dp, bottom = 4.dp)
+            .padding(start = ROW_START_PAD, end = PROFILE_HEADER_END_PADDING, top = 4.dp, bottom = 4.dp)
             .testTag("colheader-profile"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -784,6 +787,9 @@ private fun ProfileColHeader(
             var widthPx by remember { mutableStateOf(0) }
             val advance = rememberMonoAdvancePx(family, contentFontSizeSp.sp)
             val fieldChars = fieldCharsFor(widthPx, advance)
+            // How far a label may reach past the text's own width: into the header's end padding (a whole label that overruns by less
+            // is not worth an ellipsis; the row's text reaches the same place). The text is drawn unclipped for it.
+            val overhangChars = if (advance > 0f) with(LocalDensity.current) { PROFILE_HEADER_END_PADDING.toPx() } / advance else 0f
             val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
             // The header is laid out as its widest row is, not wrapped freely: it breaks before a column when that column's value
             // would not fit (profileHeaderBreakOffsets), and its MESSAGE label goes to its own line exactly when the rows' messages do
@@ -791,9 +797,9 @@ private fun ProfileColHeader(
             val plan = rememberHangingIndent(
                 messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx, firstLineChars = Int.MAX_VALUE,
             )
-            val text = remember(header, plan, cells, fieldChars) {
+            val text = remember(header, plan, cells, fieldChars, overhangChars) {
                 val breaks = profileHeaderBreakOffsets(cells.orEmpty(), fieldChars, plan.indentChars, plan.messageOnOwnLine)
-                val shown = AnnotatedString(profileWrappingHeaderText(header, breaks, fieldChars, plan.indentChars))
+                val shown = AnnotatedString(profileWrappingHeaderText(header, breaks, fieldChars, plan.indentChars, overhangChars))
                 plan.indent?.let { shown.withHangingIndent(it) } ?: shown
             }
             // Rows that fit the tile on one line with a header that does not: only the last label overruns its (shorter) values.
@@ -803,7 +809,7 @@ private fun ProfileColHeader(
                 style = style,
                 softWrap = false,
                 maxLines = if (rowsFit) 1 else Int.MAX_VALUE,
-                overflow = if (rowsFit) TextOverflow.Ellipsis else TextOverflow.Clip,
+                overflow = if (rowsFit) TextOverflow.Ellipsis else TextOverflow.Visible,
                 modifier = Modifier.weight(1f).onSizeChanged { widthPx = it.width }.testTag("colheader-profile-text"),
             )
         } else {
@@ -924,7 +930,7 @@ fun ToolbarBtn(
                             fontSize = 12.sp,
                             fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
                             // A label in a column of fixed width (a vertical toolbar) shortens with an ellipsis instead of being cut.
-                            overflow = if (ellipsize) TextOverflow.Ellipsis else TextOverflow.Clip,
+                            overflow = if (ellipsize) TextOverflow.Ellipsis else TextOverflow.Visible,
                         )
                     }
                 }
