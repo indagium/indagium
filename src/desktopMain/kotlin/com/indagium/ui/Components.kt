@@ -90,6 +90,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.LogLevel
 import com.indagium.ui.holiday.LocalHoliday
+import com.indagium.utils.ProfileHeaderCell
 import kotlinx.coroutines.delay
 import java.awt.KeyboardFocusManager
 import kotlin.math.abs
@@ -633,7 +634,7 @@ internal fun FullTextHint(
 private const val COL_HEADER_FONT_SP = 9f
 
 @Composable
-fun ColHeader(
+internal fun ColHeader(
     hasPidTid: Boolean = false,
     showRowNumbers: Boolean = false,
     rowNumDigits: Int = 1,
@@ -667,12 +668,15 @@ fun ColHeader(
     // The characters of the widest row's first line (ProfileColumnLayout.rowCharsFor), null when unbounded or unknown. A wrapping header
     // whose rows fit its tile stays on one line even if its last label is wider than its values: that label ends in "…".
     profileRowChars: Int? = null,
+    // The shown columns' label offsets, advances and value widths (ProfileColumnLayout.headerCellsFor): the wrapping header breaks
+    // exactly where its rows do. Null lays the header out on one unbroken line.
+    profileHeaderCells: List<ProfileHeaderCell>? = null,
 ) {
     val tc = tc()
     if (profileHeader != null) {
         ProfileColHeader(
             profileHeader, profileHeaderFont, showRowNumbers, rowNumDigits, showTimeDelta, timeDeltaChars, hasTidMap, contentFontSizeSp,
-            profileHeaderWraps, profileRowChars,
+            profileHeaderWraps, profileRowChars, profileHeaderCells,
         )
         return
     }
@@ -749,6 +753,7 @@ private fun ProfileColHeader(
     contentFontSizeSp: Int,
     wraps: Boolean,
     rowChars: Int?,
+    cells: List<ProfileHeaderCell>?,
 ) {
     val tc = tc()
     val fontSize = contentFontSizeSp.toFloat()
@@ -780,21 +785,23 @@ private fun ProfileColHeader(
             val advance = rememberMonoAdvancePx(family, contentFontSizeSp.sp)
             val fieldChars = fieldCharsFor(widthPx, advance)
             val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
-            // The MESSAGE label goes to its own line exactly when the rows' messages do (see messageBreaksOntoOwnLine).
+            // The header is laid out as its widest row is, not wrapped freely: it breaks before a column when that column's value
+            // would not fit (profileHeaderBreakOffsets), and its MESSAGE label goes to its own line exactly when the rows' messages do
+            // (messageBreaksOntoOwnLine; a header's first line is unbounded, so only the squeezed test decides).
             val plan = rememberHangingIndent(
-                messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx, firstLineChars = header.length,
+                messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx, firstLineChars = Int.MAX_VALUE,
             )
-            // Words of one label are joined by no-break spaces (same length, same advance), so the header breaks only between
-            // columns and each label stays over its values.
-            val text = remember(header, plan, messageChars) {
-                AnnotatedString(profileHeaderForWrapping(header)).withHangingPlan(plan, messageChars)
+            val text = remember(header, plan, cells, fieldChars) {
+                val breaks = profileHeaderBreakOffsets(cells.orEmpty(), fieldChars, plan.indentChars, plan.messageOnOwnLine)
+                val shown = AnnotatedString(profileWrappingHeaderText(header, breaks, fieldChars, plan.indentChars))
+                plan.indent?.let { shown.withHangingIndent(it) } ?: shown
             }
             // Rows that fit the tile on one line with a header that does not: only the last label overruns its (shorter) values.
             val rowsFit = rowChars != null && fieldChars > 0f && rowChars <= fieldChars && header.length > fieldChars
             BasicText(
                 if (rowsFit) AnnotatedString(header) else text,
                 style = style,
-                softWrap = !rowsFit,
+                softWrap = false,
                 maxLines = if (rowsFit) 1 else Int.MAX_VALUE,
                 overflow = if (rowsFit) TextOverflow.Ellipsis else TextOverflow.Clip,
                 modifier = Modifier.weight(1f).onSizeChanged { widthPx = it.width }.testTag("colheader-profile-text"),

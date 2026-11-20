@@ -21,13 +21,16 @@ import com.indagium.ui.hangingContinuationLimit
 import com.indagium.ui.hangingIndentLeavesRoom
 import com.indagium.ui.hangingIndentSp
 import com.indagium.ui.messageBreaksOntoOwnLine
+import com.indagium.ui.profileHeaderBreakOffsets
 import com.indagium.ui.profileHeaderForWrapping
 import com.indagium.ui.profileHeaderIndentChars
+import com.indagium.ui.profileWrappingHeaderText
 import com.indagium.ui.stripVisualWrapBreaks
 import com.indagium.ui.visualLogLineForWrapLimit
 import com.indagium.ui.withBreakBefore
 import com.indagium.ui.withHangingIndent
 import com.indagium.ui.withHangingPlan
+import com.indagium.utils.ProfileHeaderCell
 import com.indagium.utils.RegexEvaluationContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -337,5 +340,70 @@ class ProfileRowHangingIndentTest {
         // The wrapping header shows its words joined by no-break spaces, with the same length, so the indents are unchanged.
         val joined = profileHeaderForWrapping("TIMESTAMP  REQUEST ID  MESSAGE")
         assertEquals(profileHeaderIndentChars("TIMESTAMP  REQUEST ID  MESSAGE"), profileHeaderIndentChars(joined))
+    }
+
+    /** Header cells from (label length, padded width, widest value) per column, a separator of two characters after each. */
+    private fun cells(vararg columns: Triple<Int, Int, Int>, messageLast: Boolean = false): List<ProfileHeaderCell> {
+        var offset = 0
+        return columns.mapIndexed { index, (_, padded, value) ->
+            ProfileHeaderCell(offset, padded + 2, value, isMessage = messageLast && index == columns.lastIndex).also { offset += padded + 2 }
+        }
+    }
+
+    // timestamp 26 | host 11 | method label 11, values 4 | path 25 | status label 6, values 3 | bytes label 10, values 3
+    private val httpCells = cells(
+        Triple(9, 26, 26), Triple(4, 11, 11), Triple(11, 11, 4), Triple(9, 25, 25), Triple(6, 6, 3), Triple(10, 10, 3),
+    )
+
+    @Test
+    fun aHeaderBreaksBeforeAColumnWhenItsValueDoesNotFitNotItsLabel() {
+        // Rows in a 50-character field: "ts  host  GET" then "/path  200  100". The METHOD label (11) is wider than its value
+        // (4), but only the value counts, so HTTP METHOD stays on line one and HTTP PATH (offset 54) starts line two.
+        assertEquals(listOf(26 + 2 + 11 + 2 + 11 + 2), profileHeaderBreakOffsets(httpCells, 50f, indentChars = 4, messageOnOwnLine = false))
+        // A wide field needs no break; an unmeasured one none either.
+        assertEquals(emptyList(), profileHeaderBreakOffsets(httpCells, 200f, 4, false))
+        assertEquals(emptyList(), profileHeaderBreakOffsets(httpCells, 0f, 4, false))
+        // A narrower field (40) breaks before the method too (41), the path (54, first on its line, never broken again) and the bytes (89).
+        assertEquals(listOf(41, 54, 89), profileHeaderBreakOffsets(httpCells, 40f, indentChars = 4, messageOnOwnLine = false))
+    }
+
+    // timestamp 23 | LVL 4 | component 12 | request id 10 (values 9) | duration 13 (values 4) | message
+    private val csvCells = cells(
+        Triple(9, 23, 23), Triple(3, 4, 4), Triple(9, 12, 12), Triple(10, 10, 9), Triple(13, 13, 4), Triple(7, 7, 7),
+        messageLast = true,
+    )
+
+    @Test
+    fun aNarrowCsvHeaderBreaksWhereItsRowsDoAndMovesMessageToItsOwnLine() {
+        // Field 50: REQUEST ID (offset 45) does not fit on line one; DURATION (MS) then fits beside it; MESSAGE is squeezed.
+        assertEquals(listOf(45, 72), profileHeaderBreakOffsets(csvCells, 50f, indentChars = 4, messageOnOwnLine = true))
+        // The message never forces a break unless the plan says so.
+        assertEquals(listOf(45), profileHeaderBreakOffsets(csvCells, 50f, indentChars = 4, messageOnOwnLine = false))
+    }
+
+    @Test
+    fun aWideCsvHeaderMovesOnlyMessage() {
+        assertEquals(listOf(72), profileHeaderBreakOffsets(csvCells, 100f, indentChars = 25, messageOnOwnLine = true))
+        assertEquals(emptyList(), profileHeaderBreakOffsets(csvCells, 100f, indentChars = 25, messageOnOwnLine = false))
+        // A message that is the first column on its line has nothing to move away from.
+        assertEquals(emptyList(), profileHeaderBreakOffsets(listOf(ProfileHeaderCell(0, 9, 7, isMessage = true)), 20f, 0, true))
+    }
+
+    @Test
+    fun theWrappingHeaderTextHasBreaksNoBreakSpacesNoTrailingSpacesAndCutsAnOverrun() {
+        val header = "TIMESTAMP  HOST  HTTP METHOD  BYTES SENT"
+        val breakAt = header.indexOf("HTTP")
+        val text = profileWrappingHeaderText(header, listOf(breakAt), fieldChars = 80f, indentChars = 4)
+        assertEquals("TIMESTAMP  HOST\nHTTP\u00A0METHOD  BYTES\u00A0SENT", text)
+        assertEquals(header.replace(" ", ""), text.replace("\n", "").replace("\u00A0", "").replace(" ", ""))
+        // No breaks and a wide field: just the joined header.
+        assertEquals(profileHeaderForWrapping(header), profileWrappingHeaderText(header, emptyList(), 80f, 0))
+        // The last label overruns a 30-character line, hanging 4 in: it ends in an ellipsis within the room.
+        val cut = profileWrappingHeaderText(header, listOf(breakAt), fieldChars = 20f, indentChars = 4).split('\n')
+        assertEquals("TIMESTAMP  HOST", cut[0])
+        assertEquals(16, cut[1].length)
+        assertTrue(cut[1].endsWith("…"))
+        // An unmeasured field cuts nothing.
+        assertEquals(profileHeaderForWrapping(header), profileWrappingHeaderText(header, emptyList(), 0f, 0))
     }
 }

@@ -330,6 +330,15 @@ class LogProfileFeatureAvailabilityUiTest {
         val secondColumn = shown.indexOf("b".repeat(SQUEEZE_CELL_CHARS))
         assertEquals(narrow.getBoundingBox(secondColumn).left, narrow.getBoundingBox(messageStart).left, 1f)
         assertEquals(0f, narrow.getLineLeft(0), 0.5f)
+
+        // The header's MESSAGE label moves with the message: its own line, over the message.
+        val header = headerTextLayout(tabId, "main")
+        val headerShown = header.layoutInput.text.text
+        val label = headerShown.indexOf("MESSAGE")
+        assertEquals('\n', headerShown[label - 1], "MESSAGE starts a line of the header: $headerShown")
+        assertEquals(1, header.getLineForOffset(label))
+        assertEquals(narrow.getBoundingBox(messageStart).left, header.getBoundingBox(label).left, 1f)
+        assertEquals(header.getBoundingBox(headerShown.indexOf("FIELD\u00A01")).left, narrow.getBoundingBox(secondColumn).left, 1f)
     }
 
     /**
@@ -396,6 +405,23 @@ class LogProfileFeatureAvailabilityUiTest {
             val start = shown.indexOf(label)
             assertTrue(start >= 0, "$label is in the header: $shown")
             assertEquals(layout.getLineForOffset(start), layout.getLineForOffset(start + label.length - 1), "$label is split between lines")
+        }
+        // Every label starts on the same line and at the same x as the values of its column in the row.
+        val row = rowTextLayout(tabId, "main", entryId, "GET")
+        val rowText = row.layoutInput.text.text
+        assertEquals(row.lineCount, layout.lineCount, "header and row break into different line counts: [$shown] / [$rowText]")
+        var rowFrom = 0
+        val columns = listOf(
+            "TIMESTAMP" to "", "HOST" to "10.0.0.7", "HTTP\u00A0METHOD" to "GET", "HTTP\u00A0STATUS" to "200", "BYTES\u00A0SENT" to "512",
+        )
+        for ((label, value) in columns) {
+            val labelAt = shown.indexOf(label)
+            val valueAt = if (value.isEmpty()) 0 else rowText.indexOf(value, rowFrom).also { rowFrom = it }
+            assertEquals(
+                row.getLineForOffset(valueAt), layout.getLineForOffset(labelAt),
+                "$label is on another line than its value: [$shown] / [$rowText]",
+            )
+            assertEquals(row.getBoundingBox(valueAt).left, layout.getBoundingBox(labelAt).left, 1f, "$label is not over its value: [$shown] / [$rowText]")
         }
         // The no-break space is drawn at the same advance as every other character, so columns still line up.
         val gap = shown.indexOf('\u00A0')

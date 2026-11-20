@@ -115,7 +115,7 @@ internal fun AnnotatedString.withBreakBefore(offset: Int): AnnotatedString {
 }
 
 /** How a profile row or header is laid out for its field: its hanging indent and whether its message starts a new line. */
-internal class HangingPlan(val indent: TextUnit?, val messageOnOwnLine: Boolean)
+internal class HangingPlan(val indent: TextUnit?, val messageOnOwnLine: Boolean, val indentChars: Int = 0)
 
 /** [this] with [plan] applied: the message on its own line (at [messageOffset]) when the plan says so, then the hanging indent. */
 internal fun AnnotatedString.withHangingPlan(plan: HangingPlan, messageOffset: Int): AnnotatedString {
@@ -145,6 +145,6 @@ internal fun rememberHangingIndent(
         val fieldChars = fieldCharsFor(fieldWidthPx, advance)
         val chars = if (forceMessage) messageChars else chooseHangingIndentChars(messageChars, fallbackChars, fieldChars)
         val breaks = !forceMessage && firstLineChars > 0 && messageBreaksOntoOwnLine(messageChars, firstLineChars, fieldChars)
-        HangingPlan(if (chars > 0) hangingIndentSp(chars, advance, density) else null, breaks)
+        HangingPlan(if (chars > 0) hangingIndentSp(chars, advance, density) else null, breaks, chars)
     }
 }

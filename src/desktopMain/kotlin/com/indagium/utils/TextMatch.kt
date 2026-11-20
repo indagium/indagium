@@ -343,6 +343,18 @@ internal fun boundedProfileCell(text: String, columns: Int): String {
     return flat.substring(0, flat.offsetByCodePoints(0, columns - 1)) + "…"
 }
 
+/**
+ * One column of a wrapping profile header. [labelStart] is where its label starts in the header text, [advanceChars] how far
+ * it moves a line along (padded width plus separator), [valueChars] the widest value rows hold in it (the label's length when
+ * unknown), and [isMessage] marks the trailing message column.
+ */
+internal data class ProfileHeaderCell(
+    val labelStart: Int,
+    val advanceChars: Int,
+    val valueChars: Int,
+    val isMessage: Boolean = false,
+)
+
 internal data class ProfileColumnLayout(
     val columns: List<LogDisplayField>,
     val widths: Map<String, Int>,
@@ -367,6 +379,25 @@ internal data class ProfileColumnLayout(
         val lastValue = valueWidths[last.id]?.takeIf { it > 0 } ?: return null
         val lead = shown.dropLast(1).sumOf { (widths[it.id] ?: return null) + PROFILE_FIELD_SEPARATOR.length }
         return lead + lastValue
+    }
+
+    /**
+     * The shown columns as a wrapping header lays them out ([ProfileHeaderCell]): where each label starts in [headerFor], how
+     * far it advances the line, and the widest value rows hold under it.
+     */
+    fun headerCellsFor(includeProcessThread: Boolean): List<ProfileHeaderCell> {
+        val shown = columns.filter { includeProcessThread || !isProfileProcessThreadColumn(it.id) }
+        var offset = 0
+        return shown.mapIndexed { index, column ->
+            val label = boundedProfileCell(profileHeaderLabel(column), MAX_PROFILE_COLUMN_CHARS)
+            val padded = maxOf(widths[column.id] ?: 0, label.length)
+            ProfileHeaderCell(
+                labelStart = offset,
+                advanceChars = padded + PROFILE_FIELD_SEPARATOR.length,
+                valueChars = valueWidths[column.id]?.takeIf { it > 0 } ?: label.length,
+                isMessage = column.id == "message" && index == shown.lastIndex,
+            ).also { offset += it.advanceChars }
+        }
     }
 
     fun headerFor(includeProcessThread: Boolean): String =
