@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -9,6 +10,8 @@ import com.indagium.ui.messageDetailsShowsParsedFields
 import com.indagium.ui.messageDetailsTreeSource
 import com.indagium.ui.profileRecordsAddDetail
 import com.indagium.utils.distinctRecordFields
+import com.indagium.utils.parseLogContent
+import java.io.ByteArrayInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -52,6 +55,18 @@ class MessageDetailsRecordSourceTest {
             messageDetailsTreeSource(syslog),
         )
         assertTrue(messageDetailsShowsParsedFields(syslog))
+    }
+
+    @Test
+    fun anRfc5424TreeFollowsTheSourceLineAndEndsWithTheMessage() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "syslog-rfc5424" }
+        val line = "<165>1 2026-11-20T10:00:00Z host app 4100 ID47 [exampleSDID@32473 iut=\"3\"] An application event"
+        val entry = parseLogContent(ByteArrayInputStream((line + "\n").toByteArray()), profile = profile).entries.single()
+        assertEquals(
+            """{"timestamp":"2026-11-20T10:00:00Z","host":"host","component":"app","process_id":"4100","message_id":"ID47",""" +
+                """"sd.exampleSDID@32473.iut":"3","message":"An application event"}""",
+            messageDetailsTreeSource(entry),
+        )
     }
 
     @Test

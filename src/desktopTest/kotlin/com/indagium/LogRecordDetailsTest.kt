@@ -109,6 +109,24 @@ class LogRecordDetailsTest {
     }
 
     @Test
+    fun anRfc5424RecordListsItsFieldsInTheOrderOfTheSourceLineWithTheMessageLast() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "syslog-rfc5424" }
+        // <PRI>VERSION TIMESTAMP HOST APP PROCID MSGID [SD] MSG
+        val line = "<165>1 2026-11-20T10:00:00Z host app 4100 ID47 [exampleSDID@32473 iut=\"3\" eventSource=\"Application\"] An application event"
+        val entry = parseLogContent(ByteArrayInputStream((line + "\n").toByteArray()), profile = profile).entries.single()
+        val expected = listOf(
+            "timestamp", "host", "component", "process_id", "message_id",
+            "sd.exampleSDID@32473.iut", "sd.exampleSDID@32473.eventSource", "message",
+        )
+        assertEquals(expected, buildLogRecordDetails(entry).fields.map { it.first })
+        assertEquals(expected, entry.recordInspectionFields().keys.toList())
+        // A record with nil structured data ("-") and no timestamp keeps the source segment before its message.
+        val plain = "<165>1 - host app 4100 ID47 - just text"
+        val bare = parseLogContent(ByteArrayInputStream((plain + "\n").toByteArray()), profile = profile).entries.single()
+        assertEquals(listOf("host", "component", "process_id", "message_id", "structured_data", "message"), buildLogRecordDetails(bare).fields.map { it.first })
+    }
+
+    @Test
     fun csvDetailsListTheFieldsInTheOrderOfTheSourceLine() {
         val profile = LogFormatProfile(
             id = "ordered-csv", name = "Ordered CSV", engine = LogFormatEngine.CSV,

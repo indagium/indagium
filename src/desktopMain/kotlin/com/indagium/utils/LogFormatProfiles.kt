@@ -974,16 +974,17 @@ private fun parseRfc5424StructuredData(raw: String): Triple<Map<String, String>,
     val priority = values[1].toIntOrNull()?.takeIf { it in 0..MAX_SYSLOG_PRIORITY } ?: return null
     val severity = SYSLOG_SEVERITY[priority % SYSLOG_SEVERITIES_PER_FACILITY]
     val timestamp = values[3].takeUnless { it == "-" }
+    // In the order of the source line, <PRI>VERSION TIMESTAMP HOST APP PROCID MSGID [SD] MSG, so Message details reads like it.
     val fields = linkedMapOf(
         LogFieldRole.TIMESTAMP.name to timestamp.orEmpty(),
-        LogFieldRole.COMPONENT.name to values[5].takeUnless { it == "-" }.orEmpty(),
-        LogFieldRole.MESSAGE.name to rest.substring(cursor),
         LogFieldRole.HOST.name to values[4].takeUnless { it == "-" }.orEmpty(),
+        LogFieldRole.COMPONENT.name to values[5].takeUnless { it == "-" }.orEmpty(),
         "process_id" to values[6].takeUnless { it == "-" }.orEmpty(),
         "message_id" to values[7].takeUnless { it == "-" }.orEmpty(),
     )
     fields.putAll(sdFields)
     fields["structured_data"] = rest.take(cursor)
+    fields[LogFieldRole.MESSAGE.name] = rest.substring(cursor)
     if (timestamp == null) fields.remove(LogFieldRole.TIMESTAMP.name)
     return Triple(fields, severity, timestamp)
 }
