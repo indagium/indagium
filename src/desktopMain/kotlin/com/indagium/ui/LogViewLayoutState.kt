@@ -3,6 +3,7 @@ package com.indagium.ui
 import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
 import com.indagium.model.LogCapability
+import com.indagium.model.LogCapabilityStatus
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
@@ -35,10 +36,14 @@ internal fun AppState.legacyLogViewSizes(): LogViewLegacySizes =
 internal fun AppState.hasVideoTileContent(tab: LogTab): Boolean =
     tab.attachedVideo != null || tab.captureSessionId != null || hasTimelineOnlyVideoPanel(this, tab)
 
-/** What decides which tiles of the single log view apply to [tab] right now. */
+/**
+ * What decides which tiles of the single log view apply to [tab] right now. [capabilities] lets a composable that
+ * already remembers the tab's capability map pass it in instead of deriving it again on every call.
+ */
 internal fun AppState.logViewTileContext(
     tab: LogTab,
     hasRecordDetails: Boolean = cachedRecordAvailability(tab) ?: tab.logData.firstOrNull()?.hasRecordDetails() == true,
+    capabilities: Map<LogCapability, LogCapabilityStatus>? = null,
 ): LogViewTileContext =
     LogViewTileContext(
         compare = false,
@@ -50,7 +55,7 @@ internal fun AppState.logViewTileContext(
         hasVideoPanel = hasVideoTileContent(tab),
         toolbarInLayout = settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT && logViewMaximized == null,
         groupOn = ::logViewGroupOn,
-        hasSeverityFilter = tab.canUseProfileCapability(LogCapability.SEVERITY_FILTER, logCapabilitiesForTab(tab)),
+        hasSeverityFilter = tab.canUseProfileCapability(LogCapability.SEVERITY_FILTER, capabilities ?: logCapabilitiesForTab(tab)),
         hasSections = tab.hasSectionNavigation(),
         // Decided for the tab's rows, never by the selection, so the tile does not come and go as rows are clicked.
         hasMessageDetails = hasRecordDetails,

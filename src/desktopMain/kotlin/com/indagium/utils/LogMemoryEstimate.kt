@@ -12,8 +12,14 @@ import kotlin.math.ceil
  */
 const val LOG_HEAP_BYTES_PER_FILE_BYTE: Double = 3.5
 
-/** Generic profile rows retain parsed fields and display projections beside each source record. */
-const val PROFILE_LOG_HEAP_BYTES_PER_FILE_BYTE: Double = 8.0
+/**
+ * Generic profile rows retain parsed fields and display projections beside each source record.
+ *
+ * Calibration (200k rows, retained heap divided by file bytes, measured with the profile benchmark
+ * harness): logcat 2.1, DLT 2.5, JSON Lines 6.4-8.2, syslog 6.7-10.1, CRI 10.1, HTTP combined 10.5,
+ * dmesg 9.4, CSV 8.1. 12.0 covers the worst measured format with some headroom.
+ */
+const val PROFILE_LOG_HEAP_BYTES_PER_FILE_BYTE: Double = 12.0
 
 /** Largest part count a memory-driven split suggestion proposes (matches the dialog's stepper range). */
 private const val MAX_MEMORY_SPLIT_PARTS = 32

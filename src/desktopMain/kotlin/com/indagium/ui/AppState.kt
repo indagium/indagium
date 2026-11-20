@@ -136,6 +136,7 @@ import com.indagium.utils.HeapTrim
 import com.indagium.utils.LogContentKind
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
+import com.indagium.utils.MAX_PROFILE_NAME_CHARS
 import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.MergeSourceFile
 import com.indagium.utils.MetadataJsonSectionIndex
@@ -180,7 +181,7 @@ import com.indagium.utils.invalidateComputeCache
 import com.indagium.utils.isLikelyDltSourceFile
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isSupportedArchiveFile
-import com.indagium.utils.isUtf16LogFile
+import com.indagium.utils.isUtf16LogFileCached
 import com.indagium.utils.isValidRegexPattern
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.loadMetadataJsonSection
@@ -188,7 +189,6 @@ import com.indagium.utils.logFormatProfileFromJson
 import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.matchingHighlighter
 import com.indagium.utils.matchingMessageRule
-import com.indagium.utils.memoryShortfall
 import com.indagium.utils.memoryShortfallForEstimatedBytes
 import com.indagium.utils.mergeLogs
 import com.indagium.utils.messageRuleSpecForTemplate
@@ -286,6 +286,7 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 internal const val MAX_NOTE_TARGET_SUFFIX = 1000
 private const val MAX_CUSTOM_LOG_FORMAT_PROFILES = 200
+private const val PINNED_PROFILE_SNAPSHOT_CACHE_ENTRIES = 32
 private const val PROFILE_PREVIEW_SAMPLE_CHARS = 512 * 1024
 private const val PROFILE_PREVIEW_SAMPLE_LINES = 2000
 
@@ -1866,19 +1867,19 @@ internal data class SplitOpenFailure(val title: String, val message: String, val
 
 /**
  * Free-heap budget shared by everything one confirmed prompt opens: [tryReserve] answers whether a
- * file of the given size still fits (and reserves it), [reserveRegardless] accounts for a file that
- * is opened anyway (the first part of a split, an "open as is" source).
+ * file whose estimated resident heap is the given size still fits (and reserves it),
+ * [reserveRegardless] accounts for a file that is opened anyway (the first part of a split, an "open as
+ * is" source). Callers pass estimated heap bytes (see `AppState.estimatedOpenHeapBytes`), not file sizes.
  */
 internal class MemoryOpenBudget(private var remainingBytes: Long) {
-    fun tryReserve(fileBytes: Long): Boolean {
-        val need = estimatedHeapBytesForLog(fileBytes)
-        if (need > remainingBytes) return false
-        remainingBytes -= need
+    fun tryReserve(estimatedBytes: Long): Boolean {
+        if (estimatedBytes > remainingBytes) return false
+        remainingBytes -= estimatedBytes
         return true
     }
 
-    fun reserveRegardless(fileBytes: Long) {
-        remainingBytes = (remainingBytes - estimatedHeapBytesForLog(fileBytes)).coerceAtLeast(0L)
+    fun reserveRegardless(estimatedBytes: Long) {
+        remainingBytes = (remainingBytes - estimatedBytes).coerceAtLeast(0L)
     }
 }
 
@@ -4426,7 +4427,7 @@ class AppState(
      */
     internal fun captureLogResumeBacklogShortfall(tabId: String): MemoryShortfall? {
         val backlog = tailCoordinator.pausedBacklogBytes(tabId) ?: return null
-        return memoryShortfallFor(listOf(backlog))
+        return memoryShortfallFor(estimatedHeapBytesForLog(backlog))
     }
 
     /**
@@ -4458,11 +4459,53 @@ class AppState(
     internal var heapFreeBytesProvider: () -> Long = { heapFreeBytesEstimate() }
 
     /** Shortfall for opening [source] alone right now, or null when it fits (MCP split preview/route). */
-    internal fun memoryShortfallForSource(source: SplitSource): MemoryShortfall? = memoryShortfallFor(listOf(source.sizeBytes))
+    internal fun memoryShortfallForSource(source: SplitSource): MemoryShortfall? =
+        memoryShortfallFor(estimatedOpenHeapBytes(source, null))
 
-    /** Shortfall for opening plain logs totalling [fileSizes] bytes at once, or null when they fit. */
-    private fun memoryShortfallFor(fileSizes: List<Long>): MemoryShortfall? =
-        memoryShortfall(fileSizes, heapFreeBytesProvider())
+    /** Shortfall for opening logs whose estimated resident heap is [estimatedBytes] (summed over the batch), or null when they fit. */
+    private fun memoryShortfallFor(estimatedBytes: Long): MemoryShortfall? =
+        memoryShortfallForEstimatedBytes(estimatedBytes, heapFreeBytesProvider())
+
+    /** Estimated resident heap once [fileBytes] of a log in [profile]'s format are parsed and open. */
+    internal fun estimatedHeapBytesForProfile(profile: LogFormatProfile, fileBytes: Long): Long =
+        if (profile.engine == LogFormatEngine.LOGCAT || profile.engine == LogFormatEngine.DLT) {
+            estimatedHeapBytesForLog(fileBytes)
+        } else {
+            estimatedHeapBytesForProfileLog(fileBytes)
+        }
+
+    /**
+     * Estimated resident heap for opening the plain [file] with an explicit [profile], or, without one,
+     * with the profile content detection would pick (read from the first [CONTENT_SNIFF_BYTES]). A
+     * generic profile's rows retain several times more heap per file byte than Logcat or DLT rows.
+     * Archives and compressed files (their on-disk size is not the content size) and any read failure
+     * keep the Logcat factor.
+     */
+    internal fun estimatedOpenHeapBytes(file: File, profile: LogFormatProfile?): Long {
+        val bytes = file.length()
+        if (profile != null) return estimatedHeapBytesForProfile(profile, bytes)
+        if (detectArchiveFormat(file) !is ArchiveFormat.None) return estimatedHeapBytesForLog(bytes)
+        val sample = runCatching { file.inputStream().use { it.readNBytes(CONTENT_SNIFF_BYTES) } }.getOrNull()
+            ?: return estimatedHeapBytesForLog(bytes)
+        val selected = runCatching {
+            val kind = classifyLogContent(sample, sample.size < CONTENT_SNIFF_BYTES, file.name)
+            selectLogContentProfile(sample, kind, file.name, null, availableLogFormatProfiles()).profile
+        }.getOrNull() ?: return estimatedHeapBytesForLog(bytes)
+        return estimatedHeapBytesForProfile(selected, bytes)
+    }
+
+    /** [estimatedOpenHeapBytes] for a split source; an archive entry has no cheap content sample, so it keeps the Logcat factor. */
+    internal fun estimatedOpenHeapBytes(source: SplitSource, profile: LogFormatProfile?): Long = when (source) {
+        is SplitSource.RealFile -> estimatedOpenHeapBytes(source.file, profile)
+        is SplitSource.ArchiveEntry ->
+            profile?.let { estimatedHeapBytesForProfile(it, source.sizeBytes) } ?: estimatedHeapBytesForLog(source.sizeBytes)
+    }
+
+    /** Sum of [estimatedOpenHeapBytes] over a batch opened together (no overflow past Long.MAX_VALUE). */
+    private fun estimatedOpenHeapBytes(files: List<File>): Long =
+        files.fold(0L) { total, file -> saturatingAdd(total, estimatedOpenHeapBytes(file, null)) }
+
+    private fun saturatingAdd(a: Long, b: Long): Long = runCatching { Math.addExact(a, b) }.getOrDefault(Long.MAX_VALUE)
 
     internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
 
@@ -7780,15 +7823,32 @@ class AppState(
     private fun pinnedLogFormatProfile(tab: LogTab): LogFormatProfile? {
         val snapshot = tab.logFormatProfileSnapshot
         if (snapshot != null) {
-            val pinned = logFormatProfileFromJson(snapshot)
+            val pinned = parsedPinnedProfileSnapshot(snapshot)
                 ?: error("The saved log format profile snapshot for '${tab.filename}' is invalid. Choose a profile and reparse into a new tab.")
             require(tab.logFormatProfileId == null || pinned.id == tab.logFormatProfileId) {
                 "The saved log format profile ID does not match its snapshot. Choose a profile and reparse into a new tab."
             }
-            validateLogFormatProfile(pinned)
             return pinned
         }
         return tab.logFormatProfileId?.let(::logFormatProfile)
+    }
+
+    /** A decoded, validated snapshot, or null when it is invalid; null results are remembered too. */
+    private class PinnedProfileSnapshot(val profile: LogFormatProfile?)
+
+    // The log view asks for the pinned profile on every recomposition; decoding and validating a snapshot
+    // (JSON parse plus regex and zone checks) each time is wasted work, so each snapshot is decoded once.
+    private val pinnedProfileSnapshots = object : LinkedHashMap<String, PinnedProfileSnapshot>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PinnedProfileSnapshot>): Boolean =
+            size > PINNED_PROFILE_SNAPSHOT_CACHE_ENTRIES
+    }
+
+    private fun parsedPinnedProfileSnapshot(snapshot: String): LogFormatProfile? {
+        synchronized(pinnedProfileSnapshots) { pinnedProfileSnapshots[snapshot] }?.let { return it.profile }
+        // decodeLogFormatProfiles validates every profile it returns, so a decoded snapshot is already valid.
+        val decoded = PinnedProfileSnapshot(logFormatProfileFromJson(snapshot))
+        synchronized(pinnedProfileSnapshots) { pinnedProfileSnapshots[snapshot] = decoded }
+        return decoded.profile
     }
 
     internal fun pinnedLogFormatProfile(tabId: String): LogFormatProfile? =
@@ -7861,7 +7921,7 @@ class AppState(
             val path = sourceTab.sourcePath?.takeIf { '!' !in it }
                 ?: return LogCapabilityStatus(CapabilityAvailability.UNAVAILABLE, "Tailing requires a plain file source.")
             val file = File(path)
-            if (!file.isFile || detectArchiveFormat(file) != ArchiveFormat.None || isUtf16LogFile(file)) {
+            if (!file.isFile || detectArchiveFormat(file) != ArchiveFormat.None || isUtf16LogFileCached(file)) {
                 return LogCapabilityStatus(CapabilityAvailability.UNAVAILABLE, "Tailing supports only an existing, uncompressed UTF-8 file.")
             }
         }
@@ -7926,12 +7986,7 @@ class AppState(
         val sourceBytes = tab.archiveCandidate?.sizeBytes
             ?: File(source.substringBefore('!')).length()
 
-        fun estimate(profileForRows: LogFormatProfile, bytes: Long): Long =
-            if (profileForRows.engine in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT)) {
-                estimatedHeapBytesForLog(bytes)
-            } else {
-                estimatedHeapBytesForProfileLog(bytes)
-            }
+        val estimate = ::estimatedHeapBytesForProfile
         val oldProfile = pinnedLogFormatProfileResult(tab.id).getOrNull() ?: builtinProfileFor(tab.logFormat)
         val oldResidentBytes = if (tab.logData.isEmpty()) 0L else estimate(oldProfile, sourceBytes)
         val newRowsBytes = estimate(profile, sourceBytes)
@@ -7978,13 +8033,18 @@ class AppState(
         }
         val newProfile = original.copy(
             id = newId("lf"),
-            name = uniqueLogFormatProfileName("${original.name} copy", settings.customLogFormatProfiles.map { it.name }),
+            name = uniqueLogFormatProfileName(original.name, settings.customLogFormatProfiles.map { it.name }, tail = " copy"),
             description = original.description,
             revision = 1,
             readOnly = false,
             // A copy must never silently take over a file extension.
             detection = original.detection.copy(alwaysUseForExtensions = false),
         )
+        val invalid = runCatching { validateLogFormatProfile(newProfile) }.exceptionOrNull()
+        if (invalid != null) {
+            logFormatProfileError = invalid.message ?: "That profile cannot be copied."
+            return null
+        }
         updateSettings { it.copy(customLogFormatProfiles = it.customLogFormatProfiles + newProfile) }
         clearLogFormatProfileError()
         return newProfile
@@ -8056,6 +8116,7 @@ class AppState(
                     readOnly = false,
                     detection = candidate.detection.copy(alwaysUseForExtensions = false),
                 )
+                validateLogFormatProfile(copy)
                 custom += copy
                 copy
             }
@@ -8404,12 +8465,22 @@ class AppState(
         logFormatProfileError = null
     }
 
-    private fun uniqueLogFormatProfileName(base: String, existing: Collection<String>): String {
+    /**
+     * [base] plus [tail] made unique among [existing] with a " N" suffix, never longer than the codec's
+     * name limit: the stem is cut (and trimmed) so the tail and number always fit.
+     */
+    internal fun uniqueLogFormatProfileName(base: String, existing: Collection<String>, tail: String = ""): String {
         val names = existing.map { it.lowercase() }.toSet()
-        if (base.lowercase() !in names) return base
-        var suffix = 2
-        while ("$base $suffix".lowercase() in names) suffix++
-        return "$base $suffix"
+
+        fun fit(suffix: String): String {
+            val room = MAX_PROFILE_NAME_CHARS - suffix.length
+            return (if (base.length > room) base.take(room).trimEnd() else base) + suffix
+        }
+        val first = fit(tail)
+        if (first.lowercase() !in names) return first
+        var number = 2
+        while (fit("$tail $number").lowercase() in names) number++
+        return fit("$tail $number")
     }
 
     private fun mergeCapabilities(
@@ -13556,24 +13627,25 @@ class AppState(
                 if (tabsToMerge.any { it.logFormat == LogFormat.DLT }) {
                     DLT_EXPORT_COLUMNS.forEach { column -> mergedProfileColumns.putIfAbsent(column.id, column) }
                 }
+                // Each of these walks every merged row (or every source's capability map): once, then reused below.
+                val mergedCapabilities = if (firstProfile != null && sameProfile) {
+                    deriveLogCapabilities(firstProfile, merged, sourceClockId = null, sourceLookupSupported = sourceLookupConfigured())
+                } else {
+                    mergeCapabilities(tabsToMerge.map { it.logCapabilities })
+                }
+                val mergedFieldNames = merged.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet()
                 val t = mkTab(
                     "t$n", newTabName, merged,
                     analysis = pendingAnalysis(merged, format, analysisProfile),
                     processNameMode = newTabProcessNameMode(),
                     logFormat = format,
                     profile = firstProfile?.takeIf { sameProfile },
-                    profileCapabilities = if (firstProfile != null && sameProfile) {
-                        deriveLogCapabilities(firstProfile, merged, sourceClockId = null, sourceLookupSupported = sourceLookupConfigured())
-                    } else {
-                        mergeCapabilities(tabsToMerge.map { it.logCapabilities })
-                    },
+                    profileCapabilities = mergedCapabilities,
                 ).copy(
                     logFormatProfileId = firstProfile?.takeIf { sameProfile }?.id,
                     logFormatProfileSnapshot = firstProfile?.takeIf { sameProfile }?.let(::logFormatProfileJson),
-                    logCapabilities = firstProfile?.takeIf { sameProfile }
-                        ?.let { deriveLogCapabilities(it, merged, sourceLookupSupported = sourceLookupConfigured()) }
-                        ?: mergeCapabilities(tabsToMerge.map { it.logCapabilities }),
-                    profileFieldNames = merged.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet(),
+                    logCapabilities = mergedCapabilities,
+                    profileFieldNames = mergedFieldNames,
                     profileClockSignature = signatures.firstOrNull(),
                     profileDisplayColumns = mergedProfileColumns.values.toList(),
                     profileProjectionSchemaPresent = tabsToMerge.any { it.profileProjectionSchemaPresent } ||
@@ -13666,7 +13738,7 @@ class AppState(
             requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
         // Files opened together are all resident at once, so the memory check sums the whole batch.
-        val shortfall = if (plainFiles.isEmpty()) null else memoryShortfallFor(plainFiles.map { it.length() })
+        val shortfall = if (plainFiles.isEmpty()) null else memoryShortfallFor(estimatedOpenHeapBytes(plainFiles))
         // A memory-only prompt (nothing over the size threshold) offers every plain file of the batch:
         // which of them to split is the user's call, and there is exactly one shortfall for the batch.
         val promptFiles = if (oversizedFiles.isEmpty() && shortfall != null) plainFiles else oversizedFiles
@@ -13877,7 +13949,7 @@ class AppState(
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
         // no SplitSource to route into — BoundedInputStream during parsing is its size cap).
         if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None) {
-            val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(file.length()))
+            val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(estimatedOpenHeapBytes(file, profile))
             if (requiresSplitPrompt(file.length()) || shortfall != null) {
                 val source = SplitSource.RealFile(file)
                 raiseSplitPrompt(
@@ -14606,7 +14678,7 @@ class AppState(
         originGroupId: String? = null,
     ): List<String> {
         // Entry sizes are the real (uncompressed) sizes, so the memory check applies to them too.
-        val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(selected.map { it.sizeBytes })
+        val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(selected.sumOf { estimatedHeapBytesForLog(it.sizeBytes) })
         val (sizeOversized, sizeNormal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
         // Memory-only prompt: offer every selected entry (same rule as openPaths).
         val memoryOnly = sizeOversized.isEmpty() && shortfall != null
@@ -14724,7 +14796,7 @@ class AppState(
         splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES,
     ): List<String> {
         val files = selected.map { File(folder, it.entryPath) }
-        val shortfall = memoryShortfallFor(files.map { it.length() })
+        val shortfall = memoryShortfallFor(estimatedOpenHeapBytes(files))
         val (sizeOversized, sizeNormal) = selected.zip(files).partition { (_, file) ->
             requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
@@ -14802,7 +14874,11 @@ class AppState(
             activateAlreadyOpenTab(existing.id); return existing.id
         }
         if (!bypassSplitPrompt) {
-            val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(candidate.sizeBytes))
+            val shortfall = if (bypassMemoryCheck) {
+                null
+            } else {
+                memoryShortfallFor(estimatedOpenHeapBytes(SplitSource.ArchiveEntry(zipFile, candidate), profile))
+            }
             if (requiresSplitPrompt(candidate.sizeBytes) || shortfall != null) {
                 val source = SplitSource.ArchiveEntry(zipFile, candidate)
                 raiseSplitPrompt(
@@ -15015,7 +15091,7 @@ class AppState(
                 // Deferred files were already weighed in the prompt's batch decision: no fresh free-heap
                 // check, or each could raise a new prompt over the others and some would never open.
                 pending.deferredFiles.forEach { file ->
-                    budget?.reserveRegardless(file.length())
+                    budget?.reserveRegardless(estimatedOpenHeapBytes(file, null))
                     val source = SplitSource.RealFile(file)
                     openPathInternal(
                         file,
@@ -15024,7 +15100,7 @@ class AppState(
                     )?.let(openedTabIds::add)
                 }
                 pending.deferredArchiveEntries.forEach { deferred ->
-                    budget?.reserveRegardless(deferred.candidate.sizeBytes)
+                    budget?.reserveRegardless(estimatedHeapBytesForLog(deferred.candidate.sizeBytes))
                     val source = SplitSource.ArchiveEntry(deferred.archiveFile, deferred.candidate)
                     openZipEntry(
                         deferred.archiveFile,
@@ -15040,7 +15116,7 @@ class AppState(
                     }
                     when (modes[source.id] ?: SplitMode.SPLIT) {
                         SplitMode.OPEN_AS_IS -> {
-                            budget?.reserveRegardless(source.sizeBytes)
+                            budget?.reserveRegardless(estimatedOpenHeapBytes(source, selectedProfile))
                             openSplitSourceAsIs(source, pending.originGroupIds[source.id], selectedProfile)?.let(openedTabIds::add)
                         }
                         SplitMode.SPLIT -> {
@@ -15147,10 +15223,10 @@ class AppState(
         written.forEach { part ->
             // The first part always opens; later ones only while the budget still holds them.
             val fits = budget == null || if (openedIds.isEmpty()) {
-                budget.reserveRegardless(part.length())
+                budget.reserveRegardless(estimatedHeapBytesForProfile(effectiveProfile, part.length()))
                 true
             } else {
-                budget.tryReserve(part.length())
+                budget.tryReserve(estimatedHeapBytesForProfile(effectiveProfile, part.length()))
             }
             if (fits) loadSplitPartAsTab(part, originGroupId, effectiveProfile)?.let(openedIds::add) else unopened += part
         }

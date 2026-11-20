@@ -136,6 +136,28 @@ internal fun isUtf16LogFile(file: File): Boolean =
         }
     }.getOrDefault(false)
 
+private const val UTF16_FILE_CACHE_CAP = 256
+private val utf16FileCacheLock = Any()
+
+// Access-order LRU like ArchiveFormat's cache; the file's length and mtime are part of the key, so a file
+// rewritten in place is read again.
+private val utf16FileCache = object : LinkedHashMap<String, Boolean>(16, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>): Boolean = size > UTF16_FILE_CACHE_CAP
+}
+
+/**
+ * [isUtf16LogFile] memoized per path, length and modification time, for callers that ask on every
+ * recomposition (the capability status of a tab) and must not read the file each time.
+ */
+internal fun isUtf16LogFileCached(file: File): Boolean {
+    val key = runCatching { "${file.canonicalPath}#${file.length()}#${file.lastModified()}" }.getOrNull()
+        ?: return isUtf16LogFile(file)
+    synchronized(utf16FileCacheLock) { utf16FileCache[key]?.let { return it } }
+    val detected = isUtf16LogFile(file)
+    synchronized(utf16FileCacheLock) { utf16FileCache[key] = detected }
+    return detected
+}
+
 internal fun isLikelyTextSample(sample: ByteArray): Boolean =
     sample.none { it.toInt() == 0 } || detectLogTextEncoding(sample).isUtf16
 

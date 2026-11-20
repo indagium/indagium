@@ -340,4 +340,53 @@ class IncrementalTailTest {
         assertEquals(CapabilityAvailability.PARTIAL, app.tab(tabId)!!.logCapabilities.getValue(LogCapability.DELTA_TIME).availability)
         app.stopTailing(tabId)
     }
+
+    // A syslog record is shown the moment its header arrives and revised in place when its stack trace follows in
+    // later batches. The revision is folded into the tab's derived values without rescanning the tab, and the
+    // outcome must be what opening the finished file gives.
+    @Test
+    fun aRevisedSyslogRecordLeavesTheTabEqualToAFreshOpenOfTheWholeFile() {
+        val app = newState()
+        val profileId = "syslog-rfc5424"
+
+        fun record(second: Int, name: String, pid: Int, text: String) =
+            "<34>1 2024-11-16T10:00:%02dZ host $name $pid ID$second - $text".format(second)
+        val file = File(requireNotNull(dir), "revised.log").apply {
+            writeText(
+                listOf(record(1, "alpha", 11, "one"), record(2, "beta", 22, "two"), record(3, "alpha", 11, "three")).joinToString("\n", postfix = "\n"),
+            )
+        }
+        val tabId = requireNotNull(app.openFileWithLogFormatProfile(file, profileId))
+        waitUntil { app.tab(tabId)?.contentState == TabContentState.LOADED }
+        app.startTailing(tabId)
+        waitUntil { app.tab(tabId)!!.tailing }
+
+        file.appendText("  at frame.one(One.java:1)\n")
+        waitUntil { app.tab(tabId)!!.logData.last().msg.endsWith("frame.one(One.java:1)") }
+        file.appendText("  at frame.two(Two.java:2)\n" + record(4, "gamma", 33, "four") + "\n")
+        waitUntil { app.tab(tabId)!!.logData.size == 4 && app.tab(tabId)!!.logData[2].msg.endsWith("frame.two(Two.java:2)") }
+        app.stopTailing(tabId)
+        waitUntil { !app.tab(tabId)!!.tailing }
+
+        val copy = File(requireNotNull(dir), "revised-copy.log").also { file.copyTo(it) }
+        val freshId = requireNotNull(app.openFileWithLogFormatProfile(copy, profileId))
+        waitUntil { app.tab(freshId)?.contentState == TabContentState.LOADED }
+        val tailed = app.tab(tabId)!!
+        val fresh = app.tab(freshId)!!
+
+        assertEquals(fresh.logData.map { it.id }, tailed.logData.map { it.id })
+        assertEquals(fresh.logData.map { it.msg }, tailed.logData.map { it.msg })
+        assertEquals(fresh.logData.map { it.tag }, tailed.logData.map { it.tag })
+        assertEquals(fresh.logData.map { it.sourceStartLine to it.sourceEndLine }, tailed.logData.map { it.sourceStartLine to it.sourceEndLine })
+        assertEquals(fresh.analysis.tagCounts, tailed.analysis.tagCounts)
+        assertEquals(mapOf("alpha" to 2, "beta" to 1, "gamma" to 1), tailed.analysis.tagCounts)
+        assertEquals(fresh.analysis.processNames, tailed.analysis.processNames)
+        assertEquals(fresh.analysis.tagPids, tailed.analysis.tagPids)
+        assertEquals(fresh.profileFieldNames, tailed.profileFieldNames)
+        assertEquals(
+            fresh.logCapabilities.mapValues { it.value.availability },
+            tailed.logCapabilities.mapValues { it.value.availability },
+        )
+        assertEquals(fresh.profileClockSignature, tailed.profileClockSignature)
+    }
 }

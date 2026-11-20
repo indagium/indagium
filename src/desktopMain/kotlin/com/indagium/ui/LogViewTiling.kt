@@ -302,7 +302,19 @@ private fun LogViewTileSurface(
     measurements: TileMeasureStore<LogViewSectionId>?,
 ) {
     val settings = state.settings
-    val ctx = state.logViewTileContext(tab, rememberRecordAvailability(tab))
+    // Same keys as FileView/BoundLogViewer: deriving the capabilities parses the pinned profile and reads the source file.
+    val profileCapabilities = remember(
+        state,
+        tab.id,
+        tab.logCapabilities,
+        tab.logFormatProfileId,
+        tab.logFormatProfileSnapshot,
+        tab.sourcePath,
+        state.settings.sourceFolders,
+    ) {
+        state.logCapabilitiesForTab(tab)
+    }
+    val ctx = state.logViewTileContext(tab, rememberRecordAvailability(tab), profileCapabilities)
     val isVisible: (LogViewSectionId) -> Boolean = { logViewTileVisible(it, ctx, settings.logViewHidden) }
     val baseLayout = state.logViewLayoutForContext(ctx)
 

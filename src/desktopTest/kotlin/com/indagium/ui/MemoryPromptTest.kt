@@ -144,6 +144,36 @@ class MemoryPromptTest {
         }
     }
 
+    // Profile rows retain several times more heap per file byte than Logcat rows, so the same file size
+    // that fits as Logcat must raise the memory prompt as JSON Lines.
+    @Test
+    fun jsonLinesFileNeedsTheProfileFactorWhileALogcatFileOfTheSameSizeDoesNot() {
+        val dir = newDir()
+        val json = File(dir, "events.jsonl").apply {
+            writeText(
+                (1..400).joinToString("") { index ->
+                    """{"timestamp":"2026-05-04T12:30:%02dZ","level":"INFO","message":"event number $index"}""".format(index % 60) + "\n"
+                },
+            )
+        }
+        val logcat = File(dir, "app.log").apply { writeText(logLines(2_000)) }
+        // Fits at 3.5 bytes of heap per file byte, does not fit at 12.
+        val jsonApp = newApp(dir, free = json.length() * 5)
+        val logcatApp = newApp(dir, free = logcat.length() * 5)
+        try {
+            jsonApp.openFile(json)
+            val pending = assertNotNull(jsonApp.pendingSplitPrompt)
+            assertEquals(MemoryShortfall((json.length() * 12.0).toLong(), json.length() * 5), pending.memoryShortfall)
+            assertTrue(jsonApp.tabs.isEmpty())
+
+            logcatApp.openFile(logcat)
+            assertNull(logcatApp.pendingSplitPrompt)
+        } finally {
+            jsonApp.close()
+            logcatApp.close()
+        }
+    }
+
     @Test
     fun shortfallLineUsesGigabytesWithOneDecimal() {
         assertEquals(

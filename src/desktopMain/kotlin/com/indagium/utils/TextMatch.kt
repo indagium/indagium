@@ -300,7 +300,30 @@ internal fun profileDisplayText(
     columns: List<LogDisplayField>,
     processDisplayName: String? = null,
     includeProcessThread: Boolean = true,
-): String = profileDisplayTextProjection(columns, processDisplayName, includeProcessThread).text
+): String = if (processDisplayName == null && includeProcessThread) {
+    canonicalProfileText(columns)
+} else {
+    profileDisplayTextProjection(columns, processDisplayName, includeProcessThread).text
+}
+
+/**
+ * The text of a profile row that Filter and Find match: every non-blank column, an extra field as
+ * "label=value", joined by two spaces, unpadded and untruncated. It is exactly
+ * `profileDisplayTextProjection(columns).text`, built without the offset segments, rendered ranges
+ * and padding bookkeeping that only the drawn row needs, which matters once per row per filter pass.
+ */
+internal fun canonicalProfileText(columns: List<LogDisplayField>): String {
+    val text = StringBuilder()
+    var first = true
+    for (column in columns) {
+        if (column.value.isBlank()) continue
+        if (!first) text.append(PROFILE_FIELD_SEPARATOR)
+        first = false
+        if (!isStandardProfileColumn(column.id)) text.append(column.label).append('=')
+        text.append(column.value)
+    }
+    return text.toString()
+}
 
 private const val PROFILE_FIELD_SEPARATOR = "  "
 
@@ -408,7 +431,7 @@ private fun profileHeaderLabel(column: LogDisplayField): String = when (column.i
 }
 
 internal fun profileDisplayText(entry: LogEntry): String? =
-    profileDisplayColumns(entry)?.let { profileDisplayText(it) }
+    profileDisplayColumns(entry)?.let(::canonicalProfileText)
 
 // This is the exact text presented by LogViewer. Keyword-regex filtering and its visual
 // highlight must use one representation so punctuation at field boundaries cannot make a row
@@ -638,20 +661,61 @@ internal fun boundedRegexGroups(text: String, pattern: String, fullMatch: Boolea
     }
 }
 
-/** One profile-parse operation shares a single 100ms budget and timeout counter across records. */
-internal class BoundedProfileRegexMatcher(pattern: String) {
+/** Records in a row that must time out (each also after one retry) before the matcher gives up for the rest of the parse. */
+private const val MAX_CONSECUTIVE_PROFILE_REGEX_TIMEOUTS = 3
+
+/**
+ * Records in one parse that may time out in total, however far apart. Each costs two full budgets
+ * (200 ms), so without this cap a pattern that is slow on every tenth line of a million-line file
+ * would never trip the streak rule above and the parse would run for hours.
+ */
+private const val MAX_TOTAL_PROFILE_REGEX_TIMEOUTS = 8
+
+/**
+ * One profile-parse operation's matcher. Every record gets its own fresh match budget, and a record that
+ * times out is retried once (a GC pause or preemption does not recur back to back). Only a record that
+ * times out twice counts; the matcher stops matching (every later record is raw) after
+ * [MAX_CONSECUTIVE_PROFILE_REGEX_TIMEOUTS] such records in a row, or after
+ * [MAX_TOTAL_PROFILE_REGEX_TIMEOUTS] in the whole parse; a record that finishes within its budget
+ * resets only the streak. One slow record therefore stays raw without turning the rest of the file raw.
+ */
+internal class BoundedProfileRegexMatcher(
+    pattern: String,
+    // Overridden only by deterministic tests; every production parse uses the 100ms default.
+    private val matchBudgetNanos: Long = REGEX_MATCH_BUDGET_NANOS,
+) {
     private val compiled = regexCache.getOrPut(RegexKey(pattern, false)) { runCatching { Regex(pattern) } }.getOrNull()
-    private val context = RegexEvaluationContext()
-    val timedOut: Boolean get() = context.hasTimedOut
+    private var everTimedOut = false
+    private var consecutiveTimeouts = 0
+    private var totalTimeouts = 0
+    val timedOut: Boolean get() = everTimedOut
 
     fun groups(text: String, fullMatch: Boolean = false): List<String?>? {
         val regex = compiled ?: return null
-        return context.evaluate(patternKey, false, timedOutResult = null) {
-            val bounded = deadlineWrap(text, context)
-            val match = if (fullMatch) regex.matchEntire(bounded) else regex.find(bounded)
-            match?.groups?.map { it?.value }
+        val givenUp = consecutiveTimeouts >= MAX_CONSECUTIVE_PROFILE_REGEX_TIMEOUTS ||
+            totalTimeouts >= MAX_TOTAL_PROFILE_REGEX_TIMEOUTS
+        if (givenUp) return null
+        repeat(ATTEMPTS_PER_RECORD) {
+            val context = RegexEvaluationContext(matchBudgetNanos)
+            val groups = context.evaluate(patternKey, false, timedOutResult = null) {
+                val bounded = deadlineWrap(text, context)
+                val match = if (fullMatch) regex.matchEntire(bounded) else regex.find(bounded)
+                match?.groups?.map { it?.value }
+            }
+            if (!context.hasTimedOut) {
+                consecutiveTimeouts = 0
+                return groups
+            }
         }
+        everTimedOut = true
+        consecutiveTimeouts++
+        totalTimeouts++
+        return null
     }
 
     private val patternKey: String = "profile:${compiled?.pattern.orEmpty()}"
+
+    private companion object {
+        const val ATTEMPTS_PER_RECORD = 2
+    }
 }

@@ -14,6 +14,7 @@ import com.indagium.utils.deltaMillis
 import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.parseLogContent
 import com.indagium.utils.parseLogFormatPreview
+import com.indagium.utils.parseProfileLines
 import com.indagium.utils.validateLogFormatProfile
 import java.io.ByteArrayInputStream
 import kotlin.test.Test
@@ -21,6 +22,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class LogFormatParserCoreTest {
@@ -478,6 +480,73 @@ class LogFormatParserCoreTest {
         assertEquals(copy.hashCode(), first.profileFields.hashCode())
         // Repeated short values are one object across rows.
         assertTrue(first.profileFields["level"] === second.profileFields["level"])
+    }
+
+    @Test
+    fun tailLinesOfACustomLogcatProfileCarryTheSameProjectionAsAWholeFileOpen() {
+        val lines = listOf(
+            "11-16 10:00:00.000 10 20 I Worker: ready",
+            "11-16 10:00:01.000 11 21 E Net: failed",
+        )
+        val custom = LogFormatProfile(
+            id = "custom-logcat-tail",
+            name = "Custom Logcat tail",
+            description = "Customized logcat presentation",
+            engine = LogFormatEngine.LOGCAT,
+            visibleColumns = listOf(LogFieldRole.SEVERITY, LogFieldRole.COMPONENT, LogFieldRole.MESSAGE),
+        )
+        val whole = parseLogContent(ByteArrayInputStream(lines.joinToString("\n").toByteArray()), profile = custom).entries
+        val tailed = parseProfileLines(lines, custom).entries
+        assertEquals(whole.size, tailed.size)
+        whole.zip(tailed).forEach { (expected, actual) ->
+            assertEquals(expected.recordMetadata?.displayColumns, actual.recordMetadata?.displayColumns)
+            assertEquals(expected.recordMetadata?.usesProfilePresentation, actual.recordMetadata?.usesProfilePresentation)
+            assertTrue(actual.recordMetadata?.usesProfilePresentation == true)
+            assertEquals(expected.profileFields, actual.profileFields)
+        }
+
+        val builtin = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "android-logcat" }
+        assertTrue(parseProfileLines(lines, builtin).entries.all { it.recordMetadata == null })
+    }
+
+    @Test
+    fun repeatedShortColumnValuesShareOneDisplayFieldAndAPlainMessageSharesTheRecordText() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.JSON_LINES }.copy(
+            attributes = listOf(LogFormatAttribute("traceId", "Trace ID", "trace", visibleByDefault = true)),
+        )
+        val rows = (1..3).joinToString("\n") { index ->
+            """{"time":"2024-01-01T00:00:0${index}Z","level":"INFO","msg":"message number $index","trace":"abc-1"}"""
+        }
+        val entries = parseLogContent(ByteArrayInputStream(rows.toByteArray()), profile = profile).entries
+        assertEquals(3, entries.size)
+        val level = entries.map { entry -> entry.recordMetadata!!.displayColumns.first { it.id == "severity" } }
+        val trace = entries.map { entry -> entry.recordMetadata!!.displayColumns.first { it.id == "traceId" } }
+        assertEquals(listOf("INFO", "INFO", "INFO"), level.map { it.value })
+        assertSame(level[0], level[1])
+        assertSame(level[1], level[2])
+        assertEquals(listOf("abc-1", "abc-1", "abc-1"), trace.map { it.value })
+        assertSame(trace[0], trace[2])
+        // The long, unique message is a column of its own per row.
+        val messages = entries.map { entry -> entry.recordMetadata!!.displayColumns.first { it.id == "message" } }
+        assertEquals(listOf("message number 1", "message number 2", "message number 3"), messages.map { it.value })
+
+        val plain = parseLogContent(
+            ByteArrayInputStream("a plain line that is long enough not to be interned as a short value\n".toByteArray()),
+            profile = plainTextProfile(),
+        ).entries.single()
+        assertTrue(plain.msg === plain.rawRecord, "the message of a plain record is the record's own String")
+
+        val wholeLine = LogFormatProfile(
+            id = "whole-line", name = "Whole line", description = "", engine = LogFormatEngine.REGEX, regexPattern = "^(.+)$",
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "1"),
+        )
+        val regex = parseLogContent(
+            ByteArrayInputStream("a single line regex message that is longer than a short shared value\n".toByteArray()),
+            profile = wholeLine,
+        ).entries.single()
+        assertEquals(regex.rawRecord, regex.msg)
+        assertTrue(regex.msg === regex.rawRecord, "a message that is the whole record is the record's own String")
+        assertTrue(regex.profileFields.values.any { it === regex.rawRecord }, "so is the message field")
     }
 
     private fun plainTextProfile() = LogFormatProfile(

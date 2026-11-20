@@ -2,6 +2,8 @@ package com.indagium
 
 import com.indagium.model.ADDITIONAL_BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
+import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
 import com.indagium.model.LogFormatProfile
@@ -12,6 +14,7 @@ import com.indagium.utils.detectAdditionalLogProfileResult
 import com.indagium.utils.parseCriProfile
 import com.indagium.utils.parseLogContent
 import com.indagium.utils.parseLogfmtProfile
+import com.indagium.utils.passesFilter
 import com.indagium.utils.validateLogFormatProfile
 import java.io.ByteArrayInputStream
 import kotlin.test.Test
@@ -183,6 +186,31 @@ class AdditionalLogFormatProfilesTest {
         assertTrue(entry.parsedTime?.epochMillis != null)
         assertFalse(entry.severityKnown)
         assertEquals(row, entry.rawRecord)
+    }
+
+    @Test
+    fun keywordFilterAndExcludeSeeTheSourceRecordLikeFindDoes() {
+        val row = "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /index.html HTTP/1.1\" 200 512 " +
+            "\"https://example.test/\" \"Mozilla/5.0 ZebraCrawler\""
+        val entry = parseLogContent(ByteArrayInputStream((row + "\n").toByteArray()), profile = profile("http-common-combined")).entries.single()
+        assertTrue(entry.recordMetadata?.usesProfilePresentation == true)
+
+        fun keyword(text: String, regex: Boolean = false) = Filter(mode = FilterMode.KEYWORD, kwText = text, kwRegex = regex)
+        assertTrue(passesFilter(entry, keyword("ZebraCrawler")), "a word only in the source record keeps the row")
+        assertTrue(passesFilter(entry, keyword("Zebra.*wler", regex = true)))
+        assertTrue(passesFilter(entry, keyword("index.html")), "a visible word still keeps it")
+        assertFalse(passesFilter(entry, keyword("NoSuchWord")))
+
+        fun excluding(text: String, regex: Boolean = false) = Filter(excludeKw = text, excludeKwRegex = regex)
+        assertFalse(passesFilter(entry, excluding("ZebraCrawler")), "the exclude filter drops a row whose source record matches")
+        assertFalse(passesFilter(entry, excluding("Zebra.*wler", regex = true)))
+        assertTrue(passesFilter(entry, excluding("NoSuchWord")))
+
+        val logcat = parseLogContent(
+            ByteArrayInputStream("11-16 10:00:00.000 10 20 I Worker: ready\n".toByteArray()),
+        ).entries.single()
+        assertNull(logcat.rawRecord)
+        assertFalse(passesFilter(logcat, keyword("ZebraCrawler")))
     }
 
     @Test

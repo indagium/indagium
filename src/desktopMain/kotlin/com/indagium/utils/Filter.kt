@@ -209,9 +209,9 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexConte
             if (filter.kwText.isBlank()) {
                 true
             } else if (filter.kwRegex) {
-                containsPattern(visibleLogLineText(entry), filter.kwText, regex = true, regexContext = regexContext)
+                visibleOrRawRecordContains(entry, filter.kwText, regex = true, regexContext = regexContext)
             } else if (entry.recordMetadata?.usesProfilePresentation == true) {
-                containsPattern(visibleLogLineText(entry), filter.kwText, regex = false, regexContext = regexContext)
+                visibleOrRawRecordContains(entry, filter.kwText, regex = false, regexContext = regexContext)
             } else {
                 tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex, regexContext = regexContext)
             }
@@ -224,9 +224,26 @@ private fun entryContainsKeyword(
     isRegex: Boolean,
     regexContext: RegexEvaluationContext,
 ): Boolean = if (entry.recordMetadata?.usesProfilePresentation == true) {
-    containsPattern(visibleLogLineText(entry), pattern, regex = isRegex, regexContext = regexContext)
+    visibleOrRawRecordContains(entry, pattern, regex = isRegex, regexContext = regexContext)
 } else {
     tagMsgContainsPattern(entry.tag, entry.msg, pattern, isRegex, regexContext = regexContext)
+}
+
+/**
+ * The visible row text, then, for a profile row, its source record: Find (`computeSearchMatches`) already
+ * matches both, so a keyword filter must keep and exclude exactly the rows Find reports. Logcat rows have
+ * no source record, so they are unchanged.
+ */
+private fun visibleOrRawRecordContains(
+    entry: LogEntry,
+    pattern: String,
+    regex: Boolean,
+    regexContext: RegexEvaluationContext,
+): Boolean {
+    if (containsPattern(visibleLogLineText(entry), pattern, regex = regex, regexContext = regexContext)) return true
+    if (entry.recordMetadata?.usesProfilePresentation != true) return false
+    val raw = entry.rawRecord ?: return false
+    return containsPattern(raw, pattern, regex = regex, regexContext = regexContext)
 }
 
 // internal (not private): AppState's tag-prefix/specific-class conflict detector (Wave 2.2) needs

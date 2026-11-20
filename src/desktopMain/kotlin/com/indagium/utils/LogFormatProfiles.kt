@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.text.ParsePosition
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -18,6 +19,10 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoField
+import java.time.temporal.TemporalField
+import java.time.temporal.TemporalQueries
+import java.time.temporal.WeekFields
 import java.util.Locale
 
 private const val MAX_PROFILE_RECORD_CHARS = 256 * 1024
@@ -45,6 +50,7 @@ private const val MILLIS_PER_SECOND_DOUBLE = 1000.0
 private const val MILLIS_PER_MICRO_DOUBLE = 1000.0
 private const val NANOS_PER_MILLI_DOUBLE = 1_000_000.0
 private const val MILLIS_PER_LOCAL_DAY = 86_400_000L
+private const val OFFSET_CLOCK_IDENTITY = "absolute-offset"
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 private val MILLIS_PER_SECOND_DECIMAL = BigDecimal("1000")
 private val MICROSECONDS_TO_MILLIS = BigDecimal("0.001")
@@ -224,7 +230,9 @@ private fun parseProfileSequence(
     }
     if (profile.engine == LogFormatEngine.LOGCAT) {
         val entries = parseLogcatLines(countedLines, startId)
+        // A customised Logcat profile projects its columns; the unmodified built-in stays plain.
         return ParsedLog(LogFormat.LOGCAT, entries, profile, sourceClockId = sourceClockId, sourceLineCount = lineCounter.count)
+            .withLogcatProfile(profile)
     }
     if (profile.engine == LogFormatEngine.DLT) error("DLT must be dispatched before text profile parsing.")
     if (profile.engine == LogFormatEngine.LOGFMT) {
@@ -1060,9 +1068,11 @@ internal fun recordToEntry(
     val pid = role(LogFieldRole.PROCESS_ID)?.toIntOrNull() ?: fields["process_id"]?.toIntOrNull() ?: 0
     val tid = role(LogFieldRole.THREAD_ID)?.toIntOrNull() ?: 0
     val parsedTime = timeText?.let { timeParser.parse(it, fields["clock_time"]) }
-    val profileFields = compactor.compact(fields)
+    val profileFields = compactor.compact(fields, record.raw)
     // Docker's `log` and similar fields end with the line break of the original output; a row does not.
+    // A message that is the whole record (plain text, a single-line regex) is the record's own String, not a copy.
     val messageText = (if (record.parseFields) role(LogFieldRole.MESSAGE) else null)?.withoutTrailingLineBreak()
+        ?.let { if (it == record.raw) record.raw else it }
     val visibleColumnFields = profile.visibleColumns.map { visibleRole ->
         val value = when (visibleRole) {
             LogFieldRole.TIMESTAMP -> parsedTime?.let { epochDisplayTime(it, profile) } ?: timeText?.let { relativeDisplayTime(it, profile) }.orEmpty()
@@ -1076,7 +1086,7 @@ internal fun recordToEntry(
     }
     // A missing value stays as an empty column, so the columns after it keep their place under the header.
     val attributeColumns = profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        LogDisplayField(attribute.id, attribute.label, fields[attribute.id].orEmpty())
+        compactor.column(attribute.id, attribute.label, fields[attribute.id].orEmpty())
     }
     val displayColumns = withAttributeColumns(profile, visibleColumnFields, attributeColumns)
     val projectedColumns: List<LogDisplayField> = displayColumns.ifEmpty { emptyList() }
@@ -1211,6 +1221,8 @@ internal class ProfileRowCompactor {
     private val schemas = HashMap<List<String>, Array<String>>()
     private val shortValues = HashMap<String, String>()
     private val emptyColumns = HashMap<String, LogDisplayField>()
+    private val shortColumns = HashMap<String, HashMap<String, LogDisplayField>>()
+    private var shortColumnCount = 0
 
     private val aliasMaps = mutableMapOf<Map<String, String>, Map<String, String>>()
 
@@ -1225,9 +1237,24 @@ internal class ProfileRowCompactor {
         return value
     }
 
-    /** A column with no value on this row is the same object on every such row. */
-    fun column(id: String, label: String, value: String): LogDisplayField =
-        if (value.isEmpty()) emptyColumns.getOrPut(id) { LogDisplayField(id, label, "") } else LogDisplayField(id, label, shared(value))
+    /**
+     * A column with no value on this row is the same object on every such row, and so is one with a short
+     * value (a level, a component, a stream, a status code), which repeats on most rows of a log. Only a
+     * long value is a new object per row, as it is a new String per row.
+     */
+    fun column(id: String, label: String, value: String): LogDisplayField {
+        if (value.isEmpty()) return emptyColumns.getOrPut(id) { LogDisplayField(id, label, "") }
+        if (value.length > MAX_SHARED_VALUE_CHARS) return LogDisplayField(id, label, value)
+        val byValue = shortColumns.getOrPut(id) { HashMap() }
+        val known = byValue[value]
+        if (known != null && known.label == label) return known
+        val created = LogDisplayField(id, label, shared(value))
+        if (known == null && shortColumnCount < MAX_SHARED_VALUES) {
+            byValue[value] = created
+            shortColumnCount++
+        }
+        return created
+    }
 
     /** A single-line record carries one boxed line number, not two equal ones. */
     fun lineSpan(start: Long, end: Long): Pair<Long?, Long?> {
@@ -1235,7 +1262,8 @@ internal class ProfileRowCompactor {
         return boxedStart to if (end == start) boxedStart else end
     }
 
-    fun compact(fields: Map<String, String>): Map<String, String> {
+    /** [raw] is the record's own text: a field value equal to it (a plain-text message) reuses that String. */
+    fun compact(fields: Map<String, String>, raw: String? = null): Map<String, String> {
         if (fields.isEmpty()) return emptyMap()
         val count = minOf(fields.size, MAX_PROFILE_FIELDS)
         val rowKeys = ArrayList<String>(count)
@@ -1246,12 +1274,13 @@ internal class ProfileRowCompactor {
             val shortKey = key.take(MAX_PROFILE_FIELD_KEY_CHARS)
             // Truncation can make two keys equal; the later one wins, as it did in a hash map.
             val existing = if (shortKey.length == key.length) -1 else rowKeys.indexOf(shortKey)
+            val shortValue = value.take(MAX_PROFILE_FIELD_VALUE_CHARS).let { if (raw != null && it == raw) raw else shared(it) }
             if (existing >= 0) {
-                rowValues[existing] = shared(value.take(MAX_PROFILE_FIELD_VALUE_CHARS))
+                rowValues[existing] = shortValue
                 continue
             }
             rowKeys += shortKey
-            rowValues[index++] = shared(value.take(MAX_PROFILE_FIELD_VALUE_CHARS))
+            rowValues[index++] = shortValue
         }
         val sharedKeys = schemas[rowKeys] ?: rowKeys.toTypedArray().also { created ->
             // A log whose rows all differ in shape gains nothing from sharing; stop collecting.
@@ -1284,25 +1313,47 @@ private fun normalizeProfileSeverity(value: String?): Pair<LogLevel, Boolean> = 
     else -> LogLevel.V to false
 }
 
-internal class ProfileTimeParser(private val profile: LogFormatProfile, private val sourceClockId: String?) {
+internal class ProfileTimeParser(private val profile: LogFormatProfile, sourceClockId: String?) {
     private val zone = profile.timezone.takeIf(String::isNotBlank)?.let(ZoneId::of)
     private val clockIdentity = profile.relativeClock.takeIf {
         profile.timestampKind == ProfileTimestampKind.RELATIVE && it.isNotBlank()
     } ?: "${profile.timestampKind.name.lowercase()}:${sourceClockId ?: profile.id}"
     private val candidates = buildTimeFormatterCandidates(profile)
 
+    // The clock-identity strings every parsed row carries, built once instead of once per row.
+    private val calendar = CalendarTimeContext(
+        zone = zone,
+        localIdentity = "local:${sourceClockId ?: profile.id}",
+        zoneIdentity = zone?.let { "zone:${it.id}" },
+        fallbackIdentity = clockIdentity,
+    )
+
     fun parse(value: String, timeOnlyOverride: String? = null): ParsedTime = when (profile.timestampKind) {
         ProfileTimestampKind.EPOCH -> parseEpochTime(value, profile, zone, clockIdentity)
         ProfileTimestampKind.RELATIVE -> parseRelativeTime(value, profile, clockIdentity)
-        else -> parseCalendarTime(
-            value,
-            timeOnlyOverride ?: value,
-            candidates,
-            zone,
-            sourceClockId ?: profile.id,
-            clockIdentity,
-        )
+        else -> parseCalendarTime(value, timeOnlyOverride ?: value, candidates, calendar)
     }
+}
+
+/** What [parseCalendarTime] needs besides the text: the zone, the clock identities derived from it and a hint. */
+private class CalendarTimeContext(
+    val zone: ZoneId?,
+    val localIdentity: String,
+    val zoneIdentity: String?,
+    val fallbackIdentity: String,
+) {
+    /**
+     * Index of the candidate whose offset date-time attempt produced the previous value, or -1. Rows of one
+     * log nearly always share one format, so that attempt is made first, with a single parse and no
+     * screening. A hint, never a result: the offset attempt is the first one of its candidate, so trying it
+     * early changes nothing about which attempt wins.
+     */
+    var offsetWinner: Int = -1
+}
+
+/** A timestamp formatter plus the locale's week-based-year field, resolved once (looking it up per row is costly). */
+private class TimeCandidate(val formatter: DateTimeFormatter) {
+    val weekBasedYear: TemporalField = WeekFields.of(formatter.locale).weekBasedYear()
 }
 
 private fun parseEpochTime(
@@ -1359,38 +1410,101 @@ private fun relativeTimeUnit(suffix: String): ProfileEpochUnit = when (suffix.lo
     else -> ProfileEpochUnit.MILLIS
 }
 
+/**
+ * Tries every candidate in order and returns the first result, as it always did. A candidate whose
+ * grammar does not match the whole value is skipped without building an exception, and an offset or
+ * local date-time attempt is skipped when the parsed fields cannot possibly satisfy it; every attempt
+ * that is made can still fail while resolving (an impossible date), so it stays inside a runCatching.
+ * When the previous value was an offset date-time, that candidate's offset attempt goes first, unscreened.
+ */
 private fun parseCalendarTime(
     original: String,
     value: String,
-    candidates: List<DateTimeFormatter>,
-    zone: ZoneId?,
-    sourceClockId: String?,
-    clockIdentity: String,
-): ParsedTime = candidates.firstNotNullOfOrNull { formatter ->
-    parseOffsetTime(original, value, formatter, zone)
-        ?: parseLocalDateTime(original, value, formatter, zone, sourceClockId)
-        ?: parseLocalTime(original, value, formatter, sourceClockId)
-} ?: ParsedTime(original, clockIdentity = clockIdentity)
+    candidates: List<TimeCandidate>,
+    context: CalendarTimeContext,
+): ParsedTime {
+    for (index in candidates.indices) {
+        val candidate = candidates[index]
+        val hintedOffset = index == context.offsetWinner
+        val parsed = (if (hintedOffset) parseOffsetTime(original, value, candidate.formatter, context.zone) else null)
+            ?: parseScreenedCandidate(original, value, candidate, context, offsetAlreadyTried = hintedOffset)
+        if (parsed != null) {
+            context.offsetWinner = if (parsed.clockIdentity == OFFSET_CLOCK_IDENTITY) index else -1
+            return parsed
+        }
+    }
+    return ParsedTime(original, clockIdentity = context.fallbackIdentity)
+}
+
+private fun parseScreenedCandidate(
+    original: String,
+    value: String,
+    candidate: TimeCandidate,
+    context: CalendarTimeContext,
+    offsetAlreadyTried: Boolean,
+): ParsedTime? {
+    val shape = timeParseShape(candidate.formatter, value, candidate.weekBasedYear) ?: return null
+    val offset = if (shape.mayHaveOffset && !offsetAlreadyTried) {
+        parseOffsetTime(original, value, candidate.formatter, context.zone)
+    } else {
+        null
+    }
+    return offset
+        ?: (if (shape.mayHaveDate) parseLocalDateTime(original, value, candidate.formatter, context) else null)
+        ?: parseLocalTime(original, value, candidate.formatter, context.localIdentity)
+}
+
+/** What a formatter found in a value, read before resolution; see [timeParseShape]. */
+internal class TimeParseShape(val mayHaveOffset: Boolean, val mayHaveDate: Boolean)
+
+/**
+ * Parses [value] with [formatter] without resolving it, and says which later attempts can still succeed:
+ * null when the formatter does not consume the whole value (every full parse would throw), otherwise
+ * whether the value carried an offset or zone (needed for an OffsetDateTime) and any field a calendar
+ * date can come from (needed for a LocalDateTime). [weekBasedYear] is the formatter locale's week-based
+ * year, which a `Y` pattern letter parses instead of a year. Conservative: it only rules out an attempt
+ * that would certainly fail.
+ */
+internal fun timeParseShape(formatter: DateTimeFormatter, value: String, weekBasedYear: TemporalField? = null): TimeParseShape? {
+    val position = ParsePosition(0)
+    val parsed = runCatching { formatter.parseUnresolved(value, position) }.getOrNull() ?: return null
+    if (position.errorIndex >= 0 || position.index != value.length) return null
+    val mayHaveOffset = formatter.zone != null || parsed.isSupported(ChronoField.OFFSET_SECONDS) ||
+        parsed.query(TemporalQueries.zone()) != null
+    val mayHaveDate = DATE_SOURCE_FIELDS.any(parsed::isSupported) ||
+        (weekBasedYear != null && parsed.isSupported(weekBasedYear))
+    return TimeParseShape(mayHaveOffset, mayHaveDate)
+}
+
+private val DATE_SOURCE_FIELDS = listOf(
+    ChronoField.YEAR,
+    ChronoField.YEAR_OF_ERA,
+    ChronoField.EPOCH_DAY,
+    ChronoField.PROLEPTIC_MONTH,
+    ChronoField.INSTANT_SECONDS,
+)
 
 private fun parseOffsetTime(
     original: String,
     value: String,
     formatter: DateTimeFormatter,
     zone: ZoneId?,
-): ParsedTime? = runCatching {
-    val offset = OffsetDateTime.parse(value, formatter)
+): ParsedTime? = runCatching { offsetParsedTime(original, OffsetDateTime.parse(value, formatter), zone) }.getOrNull()
+
+private fun offsetParsedTime(original: String, offset: OffsetDateTime, zone: ZoneId?): ParsedTime {
     val local = offset.atZoneSameInstant(zone ?: offset.offset).format(TIME_OUTPUT)
-    ParsedTime(original, offset.toInstant().toEpochMilli(), local, "absolute-offset")
-}.getOrNull()
+    return ParsedTime(original, offset.toInstant().toEpochMilli(), local, OFFSET_CLOCK_IDENTITY)
+}
 
 private fun parseLocalDateTime(
     original: String,
     value: String,
     formatter: DateTimeFormatter,
-    zone: ZoneId?,
-    sourceClockId: String?,
-): ParsedTime? = runCatching {
-    val localDateTime = LocalDateTime.parse(value, formatter)
+    context: CalendarTimeContext,
+): ParsedTime? = runCatching { localDateTimeParsedTime(original, LocalDateTime.parse(value, formatter), context) }.getOrNull()
+
+private fun localDateTimeParsedTime(original: String, localDateTime: LocalDateTime, context: CalendarTimeContext): ParsedTime {
+    val zone = context.zone
     val epoch = zone?.let { localDateTime.atZone(it).toInstant().toEpochMilli() }
     val wallMillis = if (zone == null) {
         localDateTime.toLocalDate().toEpochDay() * MILLIS_PER_LOCAL_DAY +
@@ -1398,32 +1512,32 @@ private fun parseLocalDateTime(
     } else {
         null
     }
-    ParsedTime(
+    return ParsedTime(
         original,
         epoch,
         localDateTime.format(TIME_OUTPUT),
-        zone?.let { "zone:${it.id}" } ?: "local:${sourceClockId ?: ""}",
+        context.zoneIdentity ?: context.localIdentity,
         localWallMillis = wallMillis,
     )
-}.getOrNull()
+}
 
 private fun parseLocalTime(
     original: String,
     value: String,
     formatter: DateTimeFormatter,
-    sourceClockId: String?,
+    localIdentity: String,
 ): ParsedTime? = runCatching {
     val local = LocalTime.parse(value, formatter).format(TIME_OUTPUT)
-    ParsedTime(original, null, local, "local:${sourceClockId ?: ""}")
+    ParsedTime(original, null, local, localIdentity)
 }.getOrNull()
 
-private fun buildTimeFormatterCandidates(profile: LogFormatProfile): List<DateTimeFormatter> {
+private fun buildTimeFormatterCandidates(profile: LogFormatProfile): List<TimeCandidate> {
     val custom = profile.timestampPattern.takeIf(String::isNotBlank)
-        ?.let { DateTimeFormatter.ofPattern(it, Locale.ROOT) }
+        ?.let { TimeCandidate(DateTimeFormatter.ofPattern(it, Locale.ROOT)) }
     return when (profile.timestampKind) {
         ProfileTimestampKind.CUSTOM -> listOfNotNull(custom)
-        ProfileTimestampKind.TIME_OF_DAY -> TIME_OF_DAY_FORMATTERS
-        else -> listOfNotNull(custom) + STANDARD_TIMESTAMP_FORMATTERS
+        ProfileTimestampKind.TIME_OF_DAY -> TIME_OF_DAY_CANDIDATES
+        else -> listOfNotNull(custom) + STANDARD_TIMESTAMP_CANDIDATES
     }
 }
 
@@ -1535,16 +1649,16 @@ private fun MutableList<String>.addLimited(message: String) {
 private val TIME_OUTPUT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ROOT)
 private val LONG_MIN_DECIMAL = BigDecimal.valueOf(Long.MIN_VALUE)
 private val LONG_MAX_DECIMAL = BigDecimal.valueOf(Long.MAX_VALUE)
-private val TIME_OF_DAY_FORMATTERS = listOf(
-    DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ROOT),
-    DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT),
+private val TIME_OF_DAY_CANDIDATES = listOf(
+    TimeCandidate(DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ROOT)),
+    TimeCandidate(DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT)),
 )
-private val STANDARD_TIMESTAMP_FORMATTERS = listOf(
-    DateTimeFormatter.ISO_DATE_TIME,
-    DateTimeFormatter.ISO_OFFSET_DATE_TIME,
-    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS", Locale.ROOT),
-    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT),
-) + TIME_OF_DAY_FORMATTERS
+private val STANDARD_TIMESTAMP_CANDIDATES = listOf(
+    TimeCandidate(DateTimeFormatter.ISO_DATE_TIME),
+    TimeCandidate(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+    TimeCandidate(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS", Locale.ROOT)),
+    TimeCandidate(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)),
+) + TIME_OF_DAY_CANDIDATES
 private val SYSLOG_SEVERITY = listOf("EMERG", "ALERT", "CRIT", "ERROR", "WARNING", "NOTICE", "INFO", "DEBUG")
 private val RELATIVE_TIME_REGEX = Regex("^([0-9]+(?:\\.[0-9]+)?)\\s*(ms|s|sec|us|µs|ns)$", RegexOption.IGNORE_CASE)
 private val RFC5424_PREFIX_REGEX = Regex("^<([0-9]{1,3})>([1-9][0-9]?) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ([^ ]+) ")

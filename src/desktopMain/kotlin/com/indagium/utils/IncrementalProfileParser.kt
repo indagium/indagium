@@ -30,6 +30,9 @@ internal class IncrementalProfileParser(
     private val compactor = ProfileRowCompactor()
     private val seedEntryIdsByStartLine = mutableMapOf<Long, Int>()
 
+    /** How many open-record seeds the parser holds; a test seam for the "never grows with closed records" guarantee. */
+    internal val seedCountForTesting: Int get() = seedEntryIdsByStartLine.size
+
     /** Existing rows whose content was extended and must be replaced in-place by the tail owner. */
     var replacedEntryIds: Set<Int> = emptySet()
         private set
@@ -91,9 +94,16 @@ internal class IncrementalProfileParser(
             if (seededId != null) replaced += seededId
             entries += recordToEntry(id, record, profile, timeParser, compactor)
         }
-        // Remember the row that shows the still-open record, so its next state replaces it.
-        (machine as? ContinuationJoinMachine)?.pendingReplacementStartLine()?.let { openStart ->
-            entries.lastOrNull { it.sourceStartLine == openStart }?.let { seedEntryIdsByStartLine[openStart] = it.id }
+        // Remember the row that shows the still-open record, so its next state replaces it. A joining
+        // machine holds at most one open record, so a seed for any other start line belongs to a record
+        // that has since closed and is dropped; otherwise the map would grow with every record of a long tail.
+        (machine as? ContinuationJoinMachine)?.let { join ->
+            val openStart = join.pendingReplacementStartLine()
+            val openId = openStart?.let { start ->
+                entries.lastOrNull { it.sourceStartLine == start }?.id ?: seedEntryIdsByStartLine[start]
+            }
+            seedEntryIdsByStartLine.clear()
+            if (openStart != null && openId != null) seedEntryIdsByStartLine[openStart] = openId
         }
         replacedEntryIds = replaced
         return ParsedLog(LogFormat.LOGCAT, entries, profile, diagnostics.toList(), sourceClockId, lineCount)

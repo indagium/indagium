@@ -1,5 +1,6 @@
 package com.indagium.utils
 
+import com.indagium.debug.AppLogger
 import com.indagium.model.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -20,7 +21,7 @@ private const val LOG_FORMAT_PROFILE_SCHEMA = 1
 private const val LOG_FORMAT_BUNDLE_FORMAT = "indagium-log-format-profiles"
 private const val LOG_FORMAT_BUNDLE_VERSION = 1
 private const val MAX_IMPORTED_PROFILES = 200
-private const val MAX_PROFILE_NAME_CHARS = 120
+internal const val MAX_PROFILE_NAME_CHARS = 120
 private const val MAX_PROFILE_DESCRIPTION_CHARS = 1000
 private const val MAX_PROFILE_REVISION = 100_000
 private const val MAX_PROFILE_ATTRIBUTES = 128
@@ -71,34 +72,54 @@ fun logFormatProfileFromJson(raw: String): LogFormatProfile? = runCatching {
     decodeLogFormatProfiles(raw).singleOrNull()
 }.getOrNull()
 
-fun logFormatProfilesFromJson(raw: String): List<LogFormatProfile> = runCatching {
-    decodeLogFormatProfiles(raw)
-}.getOrDefault(emptyList())
+/**
+ * Lenient decoder for the settings library: every array element is decoded and validated on its own, so
+ * one bad profile (a hand-edited file, a newer schema, a regex a later build rejects) never drops the
+ * valid ones next to it. Invalid elements and repeated ids (the first wins) are skipped.
+ */
+fun logFormatProfilesFromJson(raw: String): List<LogFormatProfile> {
+    val values = runCatching { profileJsonValues(Json.parseToJsonElement(raw)) }.getOrNull() ?: return emptyList()
+    val seen = mutableSetOf<String>()
+    val result = mutableListOf<LogFormatProfile>()
+    for ((index, element) in values.withIndex()) {
+        if (result.size >= MAX_IMPORTED_PROFILES) break
+        val decoded = runCatching { element.jsonObject.toLogFormatProfile().also(::validateLogFormatProfile) }
+        val profile = decoded.getOrNull()
+        when {
+            profile == null -> runCatching {
+                AppLogger.warn("settings", "Skipped invalid log format profile #$index: ${decoded.exceptionOrNull()?.message}")
+            }
+            seen.add(profile.id) -> result += profile
+        }
+    }
+    return result
+}
 
 /** Strict decoder for import/preview flows; malformed profiles are reported before mutation. */
 fun decodeLogFormatProfiles(raw: String): List<LogFormatProfile> {
-    val root = Json.parseToJsonElement(raw)
-    val values = when {
-        root is JsonArray -> root
-        root is JsonObject && root["profiles"] is JsonArray -> {
-            root["format"]?.let { format ->
-                require(format.stringValue() == LOG_FORMAT_BUNDLE_FORMAT) { "This file is not a log format profile bundle." }
-            }
-            if ("bundleVersion" in root) {
-                require(root.strictIntOrNull("bundleVersion") == LOG_FORMAT_BUNDLE_VERSION) {
-                    "Unsupported log format bundle version. Update Indagium to import it."
-                }
-            }
-            root["profiles"] as JsonArray
-        }
-        root is JsonObject && "id" in root -> JsonArray(listOf(root))
-        else -> error("Expected a profile object or profile array")
-    }
+    val values = profileJsonValues(Json.parseToJsonElement(raw))
     return values.map { it.jsonObject.toLogFormatProfile() }.also { profiles ->
         require(profiles.size <= MAX_IMPORTED_PROFILES) { "A profile bundle may contain at most $MAX_IMPORTED_PROFILES profiles." }
         require(profiles.map { it.id }.distinct().size == profiles.size) { "Profile IDs must be unique." }
         profiles.forEach(::validateLogFormatProfile)
     }
+}
+
+private fun profileJsonValues(root: JsonElement): JsonArray = when {
+    root is JsonArray -> root
+    root is JsonObject && root["profiles"] is JsonArray -> {
+        root["format"]?.let { format ->
+            require(format.stringValue() == LOG_FORMAT_BUNDLE_FORMAT) { "This file is not a log format profile bundle." }
+        }
+        if ("bundleVersion" in root) {
+            require(root.strictIntOrNull("bundleVersion") == LOG_FORMAT_BUNDLE_VERSION) {
+                "Unsupported log format bundle version. Update Indagium to import it."
+            }
+        }
+        root["profiles"] as JsonArray
+    }
+    root is JsonObject && "id" in root -> JsonArray(listOf(root))
+    else -> error("Expected a profile object or profile array")
 }
 
 private fun LogFormatProfile.toJson() = buildJsonObject {

@@ -414,10 +414,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                 changedRows.filterNot { it.id in revisedIds }
             }
             val replacementsById = replacementEntries.associateBy(LogEntry::id)
-            val changedReplacements = replacementEntries.filter { replacement ->
+            val revisedPairs = replacementEntries.mapNotNull { replacement ->
                 val index = t.logData.binarySearchBy(replacement.id, selector = LogEntry::id)
-                index >= 0 && t.logData[index] != replacement
+                if (index >= 0 && t.logData[index] != replacement) t.logData[index] to replacement else null
             }
+            val changedReplacements = revisedPairs.map { it.second }
             if (parser != null && parsedProfileBatch != null && parsedProfileBatch.entries.isEmpty()) {
                 // The lines were consumed but their record is still held (or nothing was held): only the
                 // line position moves. An empty batch must not reach the capability merge below.
@@ -428,7 +429,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                 recordConsumedLines(tabId, parsedProfileBatch?.sourceLineCount)
                 return
             }
-            val hasReplacements = changedReplacements.isNotEmpty()
+            val batch = TailBatch(
+                appended = appendedEntries,
+                revisedOld = revisedPairs.map { it.first },
+                revisedNew = changedReplacements,
+                replacementsById = replacementsById,
+            )
             val capabilityProfile = profile ?: appState.defaultLogFormatProfile(t.logFormat)
             val currentClockSignature = t.profileClockSignature
             val previousTimelineReason = t.logCapabilities[com.indagium.model.LogCapability.TIMELINE]?.reason.orEmpty()
@@ -442,16 +448,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // humongous array per batch at 1.3M rows). The returned list is a NEW object
                     // each batch, so every `===` cache keyed on logData invalidates exactly as it
                     // did with the old `cur.logData + newEntries` copy.
-                    val rows = buildTailRowsState(
-                        tabId,
-                        cur,
-                        capabilityProfile,
-                        changedRows,
-                        appendedEntries,
-                        replacementsById,
-                        hasReplacements,
-                        clockWasAlreadyIncompatible,
-                    )
+                    val rows = buildTailRowsState(tabId, cur, capabilityProfile, batch, clockWasAlreadyIncompatible)
                     val nextData = rows.data
                     val nextCapabilities = rows.capabilities
                     val nextClockSignature = rows.clockSignature
@@ -489,7 +486,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // of, so folding in raw unfiltered lines would quietly mix filtered and
                     // unfiltered counts into one number. forFilter carries through unchanged: this
                     // merge extends an existing result, it does not answer a new question.
-                    val derived = updateTailDerivedState(cur, nextData, appendedEntries, hasReplacements)
+                    val derived = updateTailDerivedState(cur, batch)
                     cur.copy(
                         logData = nextData,
                         logCapabilities = nextCapabilities,
@@ -611,16 +608,28 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         val analysis: LogAnalysis,
     )
 
-    /** Caller holds stateLock; revising an existing row invalidates every row-derived snapshot. */
-    private fun updateTailDerivedState(
-        current: LogTab,
-        nextData: List<LogEntry>,
-        appendedEntries: List<LogEntry>,
-        hasReplacements: Boolean,
-    ): TailDerivedState {
+    /**
+     * What one tail batch did to the tab: [appended] new rows and [revisedNew] rows that replaced an
+     * earlier version of themselves ([revisedOld], same order). Every derived value is maintained over
+     * [changed] (the new versions plus the appended rows) and the old versions it supersedes, never by
+     * rescanning the whole tab; [replacementsById] is only for swapping the rows into the list.
+     */
+    private class TailBatch(
+        val appended: List<LogEntry>,
+        val revisedOld: List<LogEntry>,
+        val revisedNew: List<LogEntry>,
+        val replacementsById: Map<Int, LogEntry>,
+    ) {
+        val hasRevisions: Boolean get() = revisedNew.isNotEmpty()
+        val changed: List<LogEntry> by lazy(LazyThreadSafetyMode.NONE) { revisedNew + appended }
+    }
+
+    /** Caller holds stateLock; revising an existing row invalidates the composition snapshot but not the per-row counters. */
+    private fun updateTailDerivedState(current: LogTab, batch: TailBatch): TailDerivedState {
         val revision = current.messageCompositionRevision + 1
         val existingComposition = current.messageComposition
-        val composition = if (hasReplacements) {
+        val appendedEntries = batch.appended
+        val composition = if (batch.hasRevisions) {
             MessageCompositionState.NotComputed
         } else if (existingComposition is MessageCompositionState.Computed &&
             existingComposition.forRevision == current.messageCompositionRevision &&
@@ -645,36 +654,27 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         } else {
             existingComposition
         }
-        val analysis = if (hasReplacements) {
-            current.analysis.copy(
-                tagCounts = nextData.groupingBy(LogEntry::tag).eachCount(),
-                processNames = computeProcessNames(nextData),
-                tagPids = mergeTagPids(emptyMap(), nextData),
-                stackTraceGroups = emptyList(),
-                crashSites = emptyList(),
-                customIssueSites = emptyList(),
-                pending = true,
-                analyzedThroughId = null,
-            )
-        } else {
-            current.analysis.copy(
-                tagCounts = current.analysis.tagCounts.toMutableMap().apply {
-                    appendedEntries.forEach { merge(it.tag, 1, Int::plus) }
-                },
-                processNames = current.analysis.processNames + computeProcessNames(appendedEntries),
-                tagPids = mergeTagPids(current.analysis.tagPids, appendedEntries),
-                analyzedThroughId = if (current.analysis.pending) {
-                    null
-                } else {
-                    current.analysis.analyzedThroughId ?: (current.logData.lastOrNull()?.id ?: 0)
-                },
-            )
+        val changed = batch.changed
+        val previous = current.analysis
+        // The stack, crash and custom-issue results stay; a revised row only lowers how far they are known to
+        // reach, so the rows from the first revised one on read as unanalysed until the debounced refresh lands.
+        val analyzedThrough = when {
+            previous.pending -> null
+            else -> {
+                val reach = previous.analyzedThroughId ?: (current.logData.lastOrNull()?.id ?: 0)
+                if (batch.hasRevisions) minOf(reach, batch.revisedNew.minOf(LogEntry::id) - 1) else reach
+            }
         }
-        val fieldNames = if (hasReplacements) {
-            nextData.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet()
-        } else {
-            current.profileFieldNames + appendedEntries.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet()
-        }
+        val analysis = previous.copy(
+            tagCounts = previous.tagCounts.toMutableMap().apply {
+                batch.revisedOld.forEach { old -> compute(old.tag) { _, count -> if (count == null || count <= 1) null else count - 1 } }
+                changed.forEach { merge(it.tag, 1, Int::plus) }
+            },
+            processNames = previous.processNames + computeProcessNames(changed),
+            tagPids = mergeTagPids(previous.tagPids, changed),
+            analyzedThroughId = analyzedThrough,
+        )
+        val fieldNames = current.profileFieldNames + changed.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet()
         return TailDerivedState(fieldNames, composition, revision, analysis)
     }
 
@@ -682,33 +682,23 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         tabId: String,
         current: LogTab,
         profile: com.indagium.model.LogFormatProfile,
-        changedRows: List<LogEntry>,
-        appendedEntries: List<LogEntry>,
-        replacementsById: Map<Int, LogEntry>,
-        hasReplacements: Boolean,
+        batch: TailBatch,
         clockWasAlreadyIncompatible: Boolean,
     ): TailRowsState {
-        val capabilityChanges = if (hasReplacements) changedRows else appendedEntries
-        val replacedData = if (hasReplacements) {
-            // A tail revision is rare and limited to the already-flushed EOF suffix. Rebuild one
-            // immutable snapshot, then return to O(batch) append sharing on the new backing store.
-            appendMapped(emptyList<LogEntry>(), current.logData) { replacementsById[it.id] ?: it }
+        val changed = batch.changed
+        val replacedData = if (batch.hasRevisions) {
+            // A tail revision is rare and limited to the already-flushed EOF suffix. Swap the revised rows
+            // into one immutable snapshot (the one full copy), then return to O(batch) append sharing on
+            // the new backing store. Everything derived from the rows is updated from [changed] alone.
+            appendMapped(emptyList<LogEntry>(), current.logData) { batch.replacementsById[it.id] ?: it }
         } else {
             current.logData
         }
-        val nextData = appendLogEntries(replacedData, appendedEntries)
-        val clock = resolveTailClock(current, profile, capabilityChanges, nextData, hasReplacements, clockWasAlreadyIncompatible)
-        val batchCapabilities = appState.logCapabilitiesFor(profile, capabilityChanges, current.sourcePath)
-        val baseCapabilities = baseTailCapabilities(current, profile, nextData, batchCapabilities, clock.mismatch, hasReplacements)
-        val evidence = updateTailTimeEvidence(
-            tabId,
-            current,
-            profile,
-            nextData,
-            appendedEntries,
-            hasReplacements,
-            clock.mismatch,
-        )
+        val nextData = appendLogEntries(replacedData, batch.appended)
+        val clock = resolveTailClock(current, profile, changed, clockWasAlreadyIncompatible)
+        val batchCapabilities = appState.logCapabilitiesFor(profile, changed, current.sourcePath)
+        val baseCapabilities = baseTailCapabilities(current, batchCapabilities, clock.mismatch)
+        val evidence = updateTailTimeEvidence(tabId, current, profile, batch, clock.mismatch)
         val nextCapabilities = baseCapabilities + (
             com.indagium.model.LogCapability.DELTA_TIME to cumulativeDeltaStatus(evidence, nextData.size)
         )
@@ -720,29 +710,16 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     private fun resolveTailClock(
         current: LogTab,
         profile: com.indagium.model.LogFormatProfile,
-        capabilityChanges: List<LogEntry>,
-        nextData: List<LogEntry>,
-        hasReplacements: Boolean,
+        changed: List<LogEntry>,
         clockWasAlreadyIncompatible: Boolean,
     ): TailClockResolution {
         val currentSignature = current.profileClockSignature
-        val batchSignature = com.indagium.model.logFormatClockSignature(profile, capabilityChanges, current.sourcePath)
-        val fullSignature = if (hasReplacements) {
-            com.indagium.model.logFormatClockSignature(profile, nextData, current.sourcePath)
-        } else {
-            null
-        }
-        val mismatch = if (hasReplacements) {
-            nextData.any { entryHasTime(it, profile) } &&
-                (fullSignature == null || (currentSignature != null && fullSignature != currentSignature) || clockWasAlreadyIncompatible)
-        } else {
-            capabilityChanges.any { entryHasTime(it, profile) } &&
-                ((currentSignature != null && batchSignature != null && currentSignature != batchSignature) ||
-                    batchSignature == null || clockWasAlreadyIncompatible)
-        }
+        val batchSignature = com.indagium.model.logFormatClockSignature(profile, changed, current.sourcePath)
+        val mismatch = changed.any { entryHasTime(it, profile) } &&
+            ((currentSignature != null && batchSignature != null && currentSignature != batchSignature) ||
+                batchSignature == null || clockWasAlreadyIncompatible)
         val signature = when {
             mismatch -> null
-            hasReplacements -> fullSignature
             batchSignature != null -> batchSignature
             else -> currentSignature
         }
@@ -751,13 +728,9 @@ internal class TailCoordinator(private val appState: AppState, private val scope
 
     private fun baseTailCapabilities(
         current: LogTab,
-        profile: com.indagium.model.LogFormatProfile,
-        nextData: List<LogEntry>,
         batchCapabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus>,
         clockMismatch: Boolean,
-        hasReplacements: Boolean,
     ): Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> = when {
-        hasReplacements -> appState.logCapabilitiesFor(profile, nextData, current.sourcePath)
         current.logData.isEmpty() || current.logCapabilities.isEmpty() -> batchCapabilities
         else -> mergeTailCapabilities(current.logCapabilities, batchCapabilities, clockMismatch)
     }
@@ -766,19 +739,13 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         tabId: String,
         current: LogTab,
         profile: com.indagium.model.LogFormatProfile,
-        nextData: List<LogEntry>,
-        appendedEntries: List<LogEntry>,
-        hasReplacements: Boolean,
+        batch: TailBatch,
         clockMismatch: Boolean,
     ): TailTimeEvidence {
         val evidence = tailTimeEvidence.computeIfAbsent(tabId) { initialTailTimeEvidence(current, profile) }
-        if (hasReplacements) {
-            evidence.timedEntries = nextData.count { entryHasTime(it, profile) }
-            evidence.incompatibleClock = evidence.timedEntries > 0 && clockMismatch
-        } else {
-            evidence.timedEntries += appendedEntries.count { entryHasTime(it, profile) }
-            if (clockMismatch) evidence.incompatibleClock = true
-        }
+        // A revised row was already counted in its old version: only the difference changes the total.
+        evidence.timedEntries += batch.changed.count { entryHasTime(it, profile) } - batch.revisedOld.count { entryHasTime(it, profile) }
+        if (clockMismatch) evidence.incompatibleClock = true
         return evidence
     }
 

@@ -254,7 +254,7 @@ private fun parseClassifiedDlt(
     return parsed.withDltProfile(profile, sourceClockId).copy(sourceClockId = sourceClockId)
 }
 
-private fun ParsedLog.withLogcatProfile(profile: LogFormatProfile): ParsedLog {
+internal fun ParsedLog.withLogcatProfile(profile: LogFormatProfile): ParsedLog {
     // A restored tab's snapshot has no read-only flag, so compare the definition instead: an
     // unmodified built-in must keep plain rows, with no per-row projection.
     if (profile.id == "android-logcat" && !usesCustomLogFormatProjection(profile)) return copy(profile = profile)
@@ -1256,11 +1256,15 @@ private fun parseDltViewerParsedTime(
     val normalized = original.trim().removePrefix("[").removeSuffix("]")
         .replace('/', '-').replace(' ', 'T')
     val identity = "$DLT_VIEWER_SOURCE_PREFIX${sourceClockId ?: ecuId ?: "unknown"}"
-    val offset = runCatching { OffsetDateTime.parse(normalized, DateTimeFormatter.ISO_DATE_TIME) }.getOrNull()
+    // The unresolved parse rules out an attempt that cannot succeed without building an exception for it.
+    val shape = timeParseShape(DateTimeFormatter.ISO_DATE_TIME, normalized)
+    val offset = shape?.takeIf { it.mayHaveOffset }
+        ?.let { runCatching { OffsetDateTime.parse(normalized, DateTimeFormatter.ISO_DATE_TIME) }.getOrNull() }
     if (offset != null) {
         return ParsedTime(original, offset.toInstant().toEpochMilli(), localTime, "absolute-offset")
     }
-    val localDateTime = runCatching { LocalDateTime.parse(normalized, DateTimeFormatter.ISO_DATE_TIME) }.getOrNull()
+    val localDateTime = shape?.takeIf { it.mayHaveDate }
+        ?.let { runCatching { LocalDateTime.parse(normalized, DateTimeFormatter.ISO_DATE_TIME) }.getOrNull() }
     if (localDateTime != null) {
         val wallMillis = localDateTime.toLocalDate().toEpochDay() * MILLIS_PER_LOCAL_DAY +
             localDateTime.toLocalTime().toNanoOfDay() / DLT_NANOS_PER_MILLISECOND

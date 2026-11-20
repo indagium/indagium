@@ -8,6 +8,7 @@ import com.indagium.ui.contextualMessageRuleCandidates
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isLikelyTextStream
 import com.indagium.utils.isUtf16LogFile
+import com.indagium.utils.isUtf16LogFileCached
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.passesFilter
@@ -302,6 +303,25 @@ class LogParserTest {
         assertTrue(isUtf16LogFile(utf16Le))
         assertFalse(isUtf16LogFile(utf8))
         assertTrue(isLikelyTextStream(ByteArrayInputStream(utf16Le.readBytes())))
+    }
+
+    @Test
+    fun cachedUtf16CheckReadsAFileOncePerLengthAndModificationTime() {
+        val text = "06-29 12:34:56.789 1 1 I App: Started\n"
+        val utf16 = text.toByteArray(StandardCharsets.UTF_16LE)
+        val file = createTempFile(prefix = "openlog-utf16-cache", suffix = ".log").toFile().apply { writeBytes(utf16) }
+        val stamp = file.lastModified()
+        assertTrue(isUtf16LogFileCached(file))
+
+        // Same length and modification time: the remembered answer is returned without reading the file again.
+        file.writeBytes("a".repeat(utf16.size).toByteArray(StandardCharsets.UTF_8))
+        file.setLastModified(stamp)
+        assertFalse(isUtf16LogFile(file))
+        assertTrue(isUtf16LogFileCached(file))
+
+        // A rewritten file (new length) is read again.
+        file.writeBytes(("a".repeat(utf16.size + 5)).toByteArray(StandardCharsets.UTF_8))
+        assertFalse(isUtf16LogFileCached(file))
     }
 
     @Test

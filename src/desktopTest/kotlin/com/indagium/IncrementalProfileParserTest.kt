@@ -485,6 +485,35 @@ class IncrementalProfileParserTest {
     }
 
     @Test
+    fun theSeedMapNeverHoldsMoreThanTheOneOpenRecordAcrossManySingleRecordBatches() {
+        val syslog = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.SYSLOG_RFC5424 }
+        val dir = createTempDirectory("incremental-seed-map").toFile()
+        try {
+            val initialLines = listOf("<34>1 2024-11-16T09:59:58Z host app 123 ID1 - first", "<34>1 2024-11-16T09:59:59Z host app 123 ID2 - second")
+            val file = File(dir, "app.log").apply { writeText(initialLines.joinToString("\n", postfix = "\n")) }
+            val rows = whole(syslog, initialLines).toMutableList()
+            val parser = assertNotNull(IncrementalProfileParser.forFile(syslog, CLOCK, file, rows))
+            assertTrue(parser.seedCountForTesting <= 1, "the seeded open record is the only seed")
+
+            var offset = initialLines.size.toLong()
+            repeat(60) { index ->
+                val line = "<34>1 2024-11-16T10:00:%02dZ host app 123 ID$index - message $index".format(index % 60)
+                val result = parser.append(listOf(line), startId = rows.last().id + 1, sourceLineOffset = offset)
+                result.entries.forEach { entry ->
+                    val at = rows.indexOfFirst { it.id == entry.id }
+                    if (at >= 0) rows[at] = entry else rows += entry
+                }
+                offset = checkNotNull(result.sourceLineCount)
+                assertTrue(parser.seedCountForTesting <= 1, "after batch $index the parser holds ${parser.seedCountForTesting} seeds")
+            }
+            assertEquals((1..rows.size).toList(), rows.map { it.id }, "every record keeps one consecutive row")
+            assertEquals(62, rows.size)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun aRecordShownEarlyIsReplacedInPlaceWhenMoreLinesJoinItInALaterBatch() {
         val syslog = BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.SYSLOG_RFC5424 }
         val head = "<34>1 2024-11-16T10:00:00Z host app 123 ID47 - failed"

@@ -160,7 +160,10 @@ class ProfileLogPresentationTest {
         assertEquals(displayed, presentLogLine(tab, entry, settings))
         assertTrue(presentLogLineMarkdown(tab, entry, settings).contains(displayed))
         assertTrue(passesFilter(entry, Filter(mode = FilterMode.KEYWORD, kwText = "trace-17")))
-        assertFalse(passesFilter(entry, Filter(mode = FilterMode.KEYWORD, kwText = "hidden-value")))
+        // A field that is not a visible column is still in the source record, which Find searches; the keyword
+        // filter must keep exactly the rows Find reports, so it matches the record too.
+        assertTrue(passesFilter(entry, Filter(mode = FilterMode.KEYWORD, kwText = "hidden-value")))
+        assertFalse(passesFilter(entry, Filter(mode = FilterMode.KEYWORD, kwText = "not-in-the-record")))
         assertEquals(CapabilityAvailability.AVAILABLE, tab.logCapabilities.getValue(LogCapability.TEXT_SEARCH).availability)
         assertEquals(setOf("trace_id", "secret"), tab.profileFieldNames)
         assertEquals("hidden-value", entry.profileFields.getValue("secret"))

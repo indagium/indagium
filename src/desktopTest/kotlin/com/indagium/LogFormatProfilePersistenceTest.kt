@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
+import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
 import com.indagium.model.LogCapability
 import com.indagium.model.LogDisplayField
@@ -14,15 +15,20 @@ import com.indagium.model.LogProfileValueType
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.ParsedTime
 import com.indagium.model.TabContentState
+import com.indagium.model.deriveLogCapabilities
 import com.indagium.ui.AppState
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.mkTab
+import com.indagium.ui.settingsFromJson
+import com.indagium.ui.settingsJson
 import com.indagium.ui.tabShellFromToken
 import com.indagium.ui.tabToken
+import com.indagium.utils.MAX_PROFILE_NAME_CHARS
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.logFormatProfilesJson
+import com.indagium.utils.validateLogFormatProfile
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -36,6 +42,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class LogFormatProfilePersistenceTest {
@@ -127,6 +134,58 @@ class LogFormatProfilePersistenceTest {
             assertTrue(rows.logCapabilities[LogCapability.TEXT_SEARCH]?.availability?.name == "AVAILABLE")
         } finally {
             restored.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pinnedProfileSnapshotIsDecodedOncePerSnapshotNotOncePerAsk() = runBlocking {
+        val directory = createTempDirectory("log-format-pinned-memo").toFile()
+        val source = File(directory, "service.jsonl").apply { writeText(sampleRows()) }
+        val app = newState(directory)
+        try {
+            val profile = customJsonProfile()
+            assertTrue(app.saveLogFormatProfile(profile).isSuccess)
+            val tabId = assertNotNull(app.openFileWithLogFormatProfile(source, profile.id))
+            awaitLoaded(app, tabId)
+            val first = assertNotNull(app.pinnedLogFormatProfile(tabId))
+            assertEquals(profile, first)
+            // The log view asks on every recomposition: the same decoded profile comes back, not a new parse.
+            assertSame(first, app.pinnedLogFormatProfile(tabId))
+            assertSame(first, app.pinnedLogFormatProfileResult(tabId).getOrThrow())
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun mergingTabsOfOneProfileCarriesCapabilitiesAndFieldNamesDerivedFromTheMergedRows() = runBlocking {
+        val directory = createTempDirectory("log-format-merge-derived").toFile()
+        val first = File(directory, "first.jsonl").apply { writeText(sampleRows()) }
+        val second = File(directory, "second.jsonl").apply {
+            writeText(sampleRows().replace("12:30:0", "12:31:0").replace("trace-", "other-"))
+        }
+        val app = newState(directory)
+        try {
+            val profile = customJsonProfile()
+            assertTrue(app.saveLogFormatProfile(profile).isSuccess)
+            val firstId = assertNotNull(app.openFileWithLogFormatProfile(first, profile.id))
+            val secondId = assertNotNull(app.openFileWithLogFormatProfile(second, profile.id))
+            awaitLoaded(app, firstId)
+            awaitLoaded(app, secondId)
+
+            app.mergeTabs(listOf(firstId, secondId), "Merged JSON")
+            waitUntil("the merged tab should be published") { app.tabs.size == 3 && !app.isLoading }
+            val merged = app.tabs.last()
+            assertEquals(4, merged.logData.size)
+            assertEquals(profile.id, merged.logFormatProfileId)
+            val expected = deriveLogCapabilities(profile, merged.logData, sourceLookupSupported = false)
+            assertEquals(expected.mapValues { it.value.availability }, merged.logCapabilities.mapValues { it.value.availability })
+            assertEquals(merged.logData.flatMap { it.profileFields.keys }.toSet(), merged.profileFieldNames)
+            assertTrue("traceId" in merged.profileFieldNames || merged.profileFieldNames.isNotEmpty())
+        } finally {
+            app.close()
             directory.deleteRecursively()
         }
     }
@@ -385,6 +444,73 @@ class LogFormatProfilePersistenceTest {
             }
         } finally {
             restored.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun oneInvalidProfileInSettingsKeepsTheValidOnesAroundIt() {
+        val settings = AppSettings(
+            customLogFormatProfiles = listOf(
+                customJsonProfile("keep-first").copy(name = "Keep first"),
+                customJsonProfile("bad-one").copy(name = "Bad one"),
+                customJsonProfile("keep-last").copy(name = "Keep last"),
+            ),
+        )
+        val json = settings.settingsJson()
+        val broken = json.replace("\"id\":\"bad-one\"", "\"id\":\"bad one!\"")
+        assertTrue(broken != json, "the fixture must actually break the middle profile")
+        val restored = assertNotNull(settingsFromJson(broken))
+        assertEquals(listOf("keep-first", "keep-last"), restored.customLogFormatProfiles.map { it.id })
+
+        val duplicated = json.replace("\"id\":\"keep-last\"", "\"id\":\"keep-first\"")
+        assertEquals(
+            listOf("keep-first", "bad-one"),
+            assertNotNull(settingsFromJson(duplicated)).customLogFormatProfiles.map { it.id },
+            "a repeated id keeps the first profile and drops the later one",
+        )
+    }
+
+    @Test
+    fun duplicatingALongNamedProfileKeepsEveryCopyValidAndWithinTheNameLimit() {
+        val directory = createTempDirectory("log-format-long-name").toFile()
+        val app = newState(directory)
+        try {
+            val longName = "N".repeat(MAX_PROFILE_NAME_CHARS)
+            app.settings = app.settings.copy(
+                customLogFormatProfiles = listOf(customJsonProfile("long-name").copy(name = longName)),
+            )
+            val first = assertNotNull(app.duplicateLogFormatProfile("long-name"))
+            val second = assertNotNull(app.duplicateLogFormatProfile("long-name"))
+            assertTrue(first.name.length <= MAX_PROFILE_NAME_CHARS && first.name.endsWith(" copy"), first.name)
+            assertTrue(second.name.length <= MAX_PROFILE_NAME_CHARS && second.name.endsWith(" copy 2"), second.name)
+            assertTrue(first.name != second.name && first.name != longName)
+            validateLogFormatProfile(first)
+            validateLogFormatProfile(second)
+            assertNull(app.logFormatProfileError)
+            assertEquals(3, app.settings.customLogFormatProfiles.size)
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun importRenameOfALongNamedProfileStaysWithinTheNameLimit() {
+        val directory = createTempDirectory("log-format-long-import").toFile()
+        val app = newState(directory)
+        try {
+            val longName = "M".repeat(MAX_PROFILE_NAME_CHARS)
+            app.settings = app.settings.copy(
+                customLogFormatProfiles = listOf(customJsonProfile("long-import").copy(name = longName)),
+            )
+            val applied = importProfiles(
+                app, directory, listOf(customJsonProfile("long-import-other").copy(name = longName)), updateConflicts = false,
+            ).single()
+            assertTrue(applied.name.length <= MAX_PROFILE_NAME_CHARS && applied.name != longName, applied.name)
+            validateLogFormatProfile(applied)
+        } finally {
+            app.close()
             directory.deleteRecursively()
         }
     }
