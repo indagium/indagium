@@ -37,9 +37,11 @@ import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatAttribute
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
+import com.indagium.model.LogViewSectionId
 import com.indagium.model.ProfileTimestampKind
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
+import com.indagium.ui.hideLogViewTile
 import com.indagium.ui.logCapabilitiesForTab
 import com.indagium.ui.stripVisualWrapBreaks
 import kotlinx.coroutines.runBlocking
@@ -428,6 +430,63 @@ class LogProfileFeatureAvailabilityUiTest {
         assertEquals(advancePx, layout.getBoundingBox(gap).let { it.right - it.left }, 0.5f)
         // The rows keep the text the user sees and copies.
         assertTrue(rowTextLayout(tabId, "main", entryId, "GET").layoutInput.text.text.contains("GET"))
+    }
+
+    /** The built-in HTTP Common/Combined format on sample lines: the real column set (host, method, path, status, bytes) and widths. */
+    @Test
+    fun theBuiltInHttpHeaderLinesUpWithItsRowsOnEveryLineInANarrowTile() {
+        val state = newState()
+        state.settings = state.settings.copy(autoLogRowWrap = true)
+        val lines = listOf(
+            "192.0.2.10 - sample [16/Nov/2026:12:00:00 +0000] \"GET /checkout?request=req-001 HTTP/1.1\" 200 100",
+            "192.0.2.11 - sample [16/Nov/2026:12:00:01 +0000] \"POST /checkout?request=req-002 HTTP/1.1\" 200 117",
+        )
+        val source = File(requireNotNull(tempDir), "http.access_log").apply { writeText(lines.joinToString("\n") + "\n") }
+        val tabId = requireNotNull(state.openFileWithLogFormatProfile(source, "http-common-combined"))
+        rule.waitUntil(LOAD_TIMEOUT_MS) { state.tab(tabId)?.contentState == com.indagium.model.TabContentState.LOADED }
+        var tileWidth by mutableStateOf(1000.dp)
+        state.annotationVisible = false
+        // The Message details tile would take a share of the width (it does in the app); the test window is smaller than the review one.
+        state.hideLogViewTile(LogViewSectionId.MESSAGE_DETAILS)
+        rule.setContent { Box(Modifier.size(tileWidth, 760.dp)) { state.tab(tabId)?.let { FileView(state, it) } } }
+        rule.waitForIdle()
+        val entryId = requireNotNull(state.tab(tabId)).logData.first().id
+        rule.waitUntil(LOAD_TIMEOUT_MS) {
+            rule.onAllNodesWithTag("log-row-$tabId:main-$entryId").fetchSemanticsNodes().isNotEmpty()
+        }
+        val advancePx = headerTextLayout(tabId, "main").getBoundingBox(0).let { it.right - it.left }
+        // About 50 characters, as the 1115 px review window gives the log tile.
+        walkToFieldChars(
+            target = 50f,
+            fieldChars = { headerTextLayout(tabId, "main").size.width / advancePx },
+            advancePx = advancePx,
+            shrink = { tileWidth -= it },
+        )
+        val header = headerTextLayout(tabId, "main")
+        val shown = header.layoutInput.text.text
+        val row = rowTextLayout(tabId, "main", entryId, "GET")
+        val rowText = row.layoutInput.text.text
+        // HTTP METHOD would end at column 51 of a 50-character field (GET fits, its 11-character label does not): the one label
+        // that is cut, at the field edge, and every other label is whole.
+        assertTrue(shown.lines().first().endsWith("HTTP\u00A0METH…"), "the overrunning label ends in an ellipsis: [$shown]")
+        assertEquals(2, shown.lines().size, "[$shown]")
+        assertEquals(2, row.lineCount, "the row wraps once: [$rowText]")
+        assertEquals(row.lineCount, header.lineCount, "header and row break into different line counts: [$shown] / [$rowText]")
+        val columns = listOf(
+            "TIMESTAMP" to "16/Nov/2026", "HOST" to "192.0.2.10", "HTTP\u00A0METH" to "GET", "HTTP\u00A0PATH" to "/checkout?request=req-001",
+            "STATUS" to "200", "BYTES\u00A0SENT" to "100",
+        )
+        var rowFrom = 0
+        for ((label, value) in columns) {
+            val labelAt = shown.indexOf(label)
+            assertTrue(labelAt >= 0, "$label is in the header: [$shown]")
+            val valueAt = rowText.indexOf(value, rowFrom).also { rowFrom = it }
+            assertEquals(
+                row.getLineForOffset(valueAt), header.getLineForOffset(labelAt),
+                "$label is on another line than its value: [$shown] / [$rowText]",
+            )
+            assertEquals(row.getBoundingBox(valueAt).left, header.getBoundingBox(labelAt).left, 1f, "$label is not over $value: [$shown] / [$rowText]")
+        }
     }
 
     @Test
