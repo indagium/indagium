@@ -2,6 +2,9 @@ package com.indagium
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
@@ -38,6 +41,7 @@ import com.indagium.model.ProfileTimestampKind
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
 import com.indagium.ui.logCapabilitiesForTab
+import com.indagium.ui.stripVisualWrapBreaks
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Rule
@@ -51,6 +55,10 @@ import kotlin.test.assertTrue
 
 private const val LOAD_TIMEOUT_MS = 10_000L
 private const val WIDE_CELL_CHARS = 38
+private const val SQUEEZE_CELL_CHARS = 14
+private const val MAX_NARROWING_STEPS = 25
+private const val SQUEEZE_MESSAGE_START = 3 * (SQUEEZE_CELL_CHARS + 2)
+private const val SQUEEZE_MESSAGE = "Configuration loaded successfully"
 
 @OptIn(ExperimentalTestApi::class)
 class LogProfileFeatureAvailabilityUiTest {
@@ -259,6 +267,70 @@ class LogProfileFeatureAvailabilityUiTest {
             assertEquals(layout.size.width, headerLayout.size.width, "$pane header and rows have different text widths")
             assertEquals(headerLayout.getLineLeft(1), layout.getLineLeft(1), 0.5f, "$pane header and row hang at different indents")
         }
+    }
+
+    /** Three 14-character columns, then the message: the message starts [SQUEEZE_MESSAGE_START] characters into the row. */
+    private fun squeezeProfile(): Pair<LogFormatProfile, String> {
+        val attributes = List(3) { index ->
+            LogFormatAttribute(id = "field_$index", label = "Field $index", source = "field_$index", visibleByDefault = true)
+        }
+        val profile = LogFormatProfile(
+            id = "squeeze-columns", name = "Squeeze columns", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+            visibleColumns = listOf(LogFieldRole.MESSAGE),
+            attributes = attributes,
+        )
+        val header = (attributes.map { it.source } + "message").joinToString(",")
+        val data = (listOf("a", "b", "c").map { it.repeat(SQUEEZE_CELL_CHARS) } + SQUEEZE_MESSAGE).joinToString(",")
+        return profile to "$header\n$data"
+    }
+
+    @Test
+    fun aMessageSqueezedIntoTheLastCharactersMovesToItsOwnLineAndCopiesUnchanged() {
+        val state = newState()
+        state.settings = state.settings.copy(autoLogRowWrap = true)
+        val (profile, data) = squeezeProfile()
+        val tabId = openProfileLog(state, profile, data)
+        var tileWidth by mutableStateOf(1000.dp)
+        state.annotationVisible = false
+        rule.setContent {
+            Box(Modifier.size(tileWidth, 760.dp)) { state.tab(tabId)?.let { FileView(state, it) } }
+        }
+        rule.waitForIdle()
+        val entryId = requireNotNull(state.tab(tabId)).logData.single().id
+        rule.waitUntil(LOAD_TIMEOUT_MS) {
+            rule.onAllNodesWithTag("log-row-$tabId:main-$entryId").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // A wide tile holds the whole row on one line, with no break in it.
+        val wide = rowTextLayout(tabId, "main", entryId, "Configuration")
+        val expected = wide.layoutInput.text.text
+        assertEquals(1, wide.lineCount, "text=[$expected] width=${wide.size.width}")
+        assertTrue('\n' !in expected, "a row that fits has no break: $expected")
+        assertEquals(SQUEEZE_MESSAGE_START, expected.indexOf(SQUEEZE_MESSAGE))
+        val advancePx = wide.getBoundingBox(0).let { it.right - it.left }
+
+        // Narrow the tile until about 12 characters remain after the message column. The text field's share of the tile is not
+        // one to one, so walk there by what the row itself measures.
+        val targetChars = SQUEEZE_MESSAGE_START + 12
+        repeat(MAX_NARROWING_STEPS) {
+            val fieldChars = rowTextLayout(tabId, "main", entryId, "Configuration").size.width / advancePx
+            if (kotlin.math.abs(fieldChars - targetChars) > 1.5f) {
+                tileWidth -= with(rule.density) { ((fieldChars - targetChars) * advancePx).toDp() }
+                rule.waitForIdle()
+            }
+        }
+        val narrow = rowTextLayout(tabId, "main", entryId, "Configuration")
+        val shown = narrow.layoutInput.text.text
+        val messageStart = shown.indexOf(SQUEEZE_MESSAGE)
+        assertEquals('\n', shown[messageStart - 1], "the message starts a line: $shown")
+        assertEquals(1, narrow.getLineForOffset(messageStart), "the message is on the second line")
+        assertEquals(messageStart, narrow.getLineStart(1))
+        assertEquals(expected, stripVisualWrapBreaks(shown), "copying gives the row text as before")
+        // Continuation lines, the message line included, hang after the first column (the room left after the message's own is 12).
+        val secondColumn = shown.indexOf("b".repeat(SQUEEZE_CELL_CHARS))
+        assertEquals(narrow.getBoundingBox(secondColumn).left, narrow.getBoundingBox(messageStart).left, 1f)
+        assertEquals(0f, narrow.getLineLeft(0), 0.5f)
     }
 
     @Test

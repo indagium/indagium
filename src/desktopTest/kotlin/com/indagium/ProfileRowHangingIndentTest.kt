@@ -10,17 +10,23 @@ import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
+import com.indagium.ui.HangingPlan
 import com.indagium.ui.MIN_HANGING_INDENT_CHARS
+import com.indagium.ui.MIN_HANGING_ROOM_CHARS
 import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.chooseHangingIndentChars
 import com.indagium.ui.compactRecordSummary
+import com.indagium.ui.fieldCharsFor
 import com.indagium.ui.hangingContinuationLimit
-import com.indagium.ui.hangingIndentFits
+import com.indagium.ui.hangingIndentLeavesRoom
 import com.indagium.ui.hangingIndentSp
+import com.indagium.ui.messageBreaksOntoOwnLine
 import com.indagium.ui.profileHeaderIndentChars
 import com.indagium.ui.stripVisualWrapBreaks
 import com.indagium.ui.visualLogLineForWrapLimit
+import com.indagium.ui.withBreakBefore
 import com.indagium.ui.withHangingIndent
+import com.indagium.ui.withHangingPlan
 import com.indagium.utils.RegexEvaluationContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -185,12 +191,19 @@ class ProfileRowHangingIndentTest {
     }
 
     @Test
-    fun anIndentThatWouldLeaveLittleRoomIsDropped() {
-        assertTrue(hangingIndentFits(indentPx = 200f, fieldWidthPx = 0), "unmeasured counts as wide enough")
-        assertTrue(hangingIndentFits(indentPx = 200f, fieldWidthPx = 800))
-        assertTrue(hangingIndentFits(indentPx = 400f, fieldWidthPx = 800))
-        assertFalse(hangingIndentFits(indentPx = 401f, fieldWidthPx = 800))
-        assertFalse(hangingIndentFits(indentPx = 163f, fieldWidthPx = 160), "a pane narrower than the indent")
+    fun theFieldIsMeasuredInCharactersAndAnUnmeasuredOneIsZero() {
+        assertEquals(96f, fieldCharsFor(fieldWidthPx = 960, advancePx = 10f))
+        assertEquals(0f, fieldCharsFor(fieldWidthPx = 0, advancePx = 10f))
+        assertEquals(0f, fieldCharsFor(fieldWidthPx = 960, advancePx = 0f))
+    }
+
+    @Test
+    fun anIndentFitsWhenThirtyCharactersRemainAfterIt() {
+        assertEquals(30, MIN_HANGING_ROOM_CHARS)
+        assertTrue(hangingIndentLeavesRoom(66, 96f))
+        assertFalse(hangingIndentLeavesRoom(67, 96f))
+        assertTrue(hangingIndentLeavesRoom(500, 0f), "an unmeasured field counts as wide enough")
+        assertFalse(hangingIndentLeavesRoom(30, 59f))
     }
 
     private fun assertParagraphsDoNotOverlap(text: AnnotatedString) {
@@ -216,17 +229,104 @@ class ProfileRowHangingIndentTest {
 
     @Test
     fun wrappedLinesHangAtTheMessageThenAfterTheFirstColumnThenNowhere() {
-        // The message column fits: wrap under it.
-        assertEquals(40, chooseHangingIndentChars(40, 12) { it <= 50 })
+        // The message column leaves room: wrap under it.
+        assertEquals(40, chooseHangingIndentChars(40, 12, 100f))
         // The message starts too far right (many columns): wrap just after the first column, never under it.
-        assertEquals(12, chooseHangingIndentChars(80, 12) { it <= 50 })
+        assertEquals(12, chooseHangingIndentChars(80, 12, 100f))
         // No message at all: the same fallback.
-        assertEquals(12, chooseHangingIndentChars(0, 12) { it <= 50 })
+        assertEquals(12, chooseHangingIndentChars(0, 12, 100f))
         // A pane too narrow even for that: a short fixed step, so a continuation line still differs from a new row.
-        assertEquals(MIN_HANGING_INDENT_CHARS, chooseHangingIndentChars(80, 30) { it <= 20 })
-        // Narrower still, or a row with no columns to hang from: no indent.
-        assertEquals(0, chooseHangingIndentChars(80, 30) { it < MIN_HANGING_INDENT_CHARS })
-        assertEquals(0, chooseHangingIndentChars(0, 0) { true })
+        assertEquals(MIN_HANGING_INDENT_CHARS, chooseHangingIndentChars(80, 30, 50f))
+        // Narrower still (the step would be over half the field), or a row with no columns to hang from: no indent.
+        assertEquals(0, chooseHangingIndentChars(80, 30, 7f))
+        assertEquals(0, chooseHangingIndentChars(0, 0, 100f))
+        // A field not measured yet takes the message column.
+        assertEquals(80, chooseHangingIndentChars(80, 12, 0f))
+    }
+
+    @Test
+    fun aSqueezedMessageHangsAtTheSecondColumnAndStartsOnItsOwnLine() {
+        // A custom CSV in a 96-character field: the message starts at 83, 13 characters remain, the second column starts at 26.
+        assertEquals(26, chooseHangingIndentChars(83, 26, 96f))
+        assertTrue(messageBreaksOntoOwnLine(messageChars = 83, firstLineChars = 103, fieldChars = 96f))
+    }
+
+    @Test
+    fun aMessageWithRoomLeftIsNotMovedEvenPastHalfTheField() {
+        // Multi-line regex rows: the message at 56 of 96 characters (59%) leaves 40, so it keeps its own column and does not break.
+        assertEquals(56, chooseHangingIndentChars(56, 12, 96f))
+        assertFalse(messageBreaksOntoOwnLine(messageChars = 56, firstLineChars = 150, fieldChars = 96f))
+    }
+
+    @Test
+    fun aNarrowFieldFallsBackToTheShortStep() {
+        assertEquals(MIN_HANGING_INDENT_CHARS, chooseHangingIndentChars(83, 26, 51f))
+        assertTrue(messageBreaksOntoOwnLine(messageChars = 83, firstLineChars = 100, fieldChars = 51f))
+    }
+
+    @Test
+    fun anUnmeasuredFieldTakesTheMessageColumnAndNeverBreaks() {
+        assertEquals(83, chooseHangingIndentChars(83, 26, 0f))
+        assertFalse(messageBreaksOntoOwnLine(messageChars = 83, firstLineChars = 200, fieldChars = 0f))
+    }
+
+    @Test
+    fun aRowThatFitsTheFieldDoesNotBreak() {
+        assertFalse(messageBreaksOntoOwnLine(messageChars = 83, firstLineChars = 96, fieldChars = 96f))
+        assertFalse(messageBreaksOntoOwnLine(messageChars = 83, firstLineChars = 90, fieldChars = 96.4f))
+        assertFalse(messageBreaksOntoOwnLine(messageChars = 0, firstLineChars = 200, fieldChars = 96f), "no message column")
+    }
+
+    @Test
+    fun theBreakIsInsertedBeforeTheMessageAndCopyingGivesTheOriginalText() {
+        val render = render(profileRow("a message that is long enough to need a second line"))
+        val original = render.text
+        val broken = original.withBreakBefore(render.messageIndentChars)
+        assertEquals(original.length + 1, broken.length)
+        assertEquals('\n', broken.text[render.messageIndentChars])
+        assertEquals(original.text, stripVisualWrapBreaks(broken.text))
+        // The first line ends with the separator that was there; the message starts the second line.
+        assertTrue(broken.text.split('\n')[1].startsWith("a message"))
+    }
+
+    @Test
+    fun theBreakKeepsEverySpanOnItsCharacters() {
+        val render = render(profileRow("a message that is long enough to need a second line"))
+        val original = buildAnnotatedString {
+            append(render.text)
+            // A span across the break point, and one in the message.
+            addStyle(SpanStyle(color = Color.Red), render.messageIndentChars - 4, render.messageIndentChars + 4)
+            addStyle(SpanStyle(color = Color.Blue), render.messageIndentChars + 10, render.messageIndentChars + 15)
+        }
+        val broken = original.withBreakBefore(render.messageIndentChars)
+        val originalColors = original.text.indices.map { colorAt(original, it) }
+        val brokenColors = broken.text.indices.filter { broken.text[it] != '\n' }.map { colorAt(broken, it) }
+        assertEquals(originalColors, brokenColors)
+        assertEquals(original.text, stripVisualWrapBreaks(broken.text))
+    }
+
+    @Test
+    fun noBreakIsInsertedOutsideTheText() {
+        val line = AnnotatedString("short row")
+        assertTrue(line === line.withBreakBefore(0))
+        assertTrue(line === line.withBreakBefore(-1))
+        assertTrue(line === line.withBreakBefore(line.length))
+        assertTrue(line === line.withBreakBefore(99))
+    }
+
+    @Test
+    fun aPlanAppliesTheBreakBeforeTheIndentAndKeepsTheOneParagraphOverEverything() {
+        val line = AnnotatedString("first column  second column  the message")
+        val offset = line.text.indexOf("the message")
+        val withBreak = line.withHangingPlan(HangingPlan(40.sp, messageOnOwnLine = true), offset)
+        assertEquals(line.text.substring(0, offset) + "\n" + "the message", withBreak.text)
+        val paragraph = withBreak.paragraphStyles.single()
+        assertEquals(0, paragraph.start)
+        assertEquals(withBreak.length, paragraph.end)
+        assertEquals(40.sp, paragraph.item.textIndent!!.restLine)
+        // Without a break or an indent the text is as it was.
+        assertTrue(line === line.withHangingPlan(HangingPlan(null, messageOnOwnLine = false), offset))
+        assertEquals(line.text, line.withHangingPlan(HangingPlan(40.sp, messageOnOwnLine = false), offset).text)
     }
 
     @Test

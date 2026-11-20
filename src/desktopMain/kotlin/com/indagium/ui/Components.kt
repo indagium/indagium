@@ -774,8 +774,11 @@ private fun ProfileColHeader(
             // cutting the right-most labels off: every column the rows show stays named.
             var widthPx by remember { mutableStateOf(0) }
             val (messageChars, fallbackChars) = remember(header) { profileHeaderIndentChars(header) }
-            val indent = rememberHangingIndent(messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx)
-            val text = remember(header, indent) { AnnotatedString(header).let { if (indent != null) it.withHangingIndent(indent) else it } }
+            // The MESSAGE label goes to its own line exactly when the rows' messages do (see messageBreaksOntoOwnLine).
+            val plan = rememberHangingIndent(
+                messageChars, fallbackChars, family, contentFontSizeSp.sp, widthPx, firstLineChars = header.length,
+            )
+            val text = remember(header, plan, messageChars) { AnnotatedString(header).withHangingPlan(plan, messageChars) }
             BasicText(
                 text,
                 style = style,

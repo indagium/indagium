@@ -3990,15 +3990,29 @@ private fun LogRow(
     // mode wraps a fixed-width grid at the message column.
     val autoIndent = autoWrap && profileLayout != null && (lineRender.messageIndentChars > 0 || lineRender.fallbackIndentChars > 0)
     val manualIndent = !autoWrap && profileLayout?.wrapsMessage == true && lineRender.messageIndentChars > 0
-    val hangingIndent = if (autoIndent || manualIndent) {
+    // A message squeezed into the last few characters of a row that wraps anyway starts a line of its own (see
+    // messageBreaksOntoOwnLine). Only a row whose message is its last column: another column after it would sit on that line too.
+    val rowFirstLineChars = if (autoIndent && profileLayout?.wrapsMessage == true) {
+        compactLine.text.indexOf('\n').let { if (it < 0) compactLine.length else it }
+    } else {
+        0
+    }
+    val hangingPlan = if (autoIndent || manualIndent) {
         rememberHangingIndent(
             lineRender.messageIndentChars, if (autoIndent) lineRender.fallbackIndentChars else 0, mono, fontSize, textFieldWidthPx,
             forceMessage = manualIndent,
+            firstLineChars = rowFirstLineChars,
         )
     } else {
         null
     }
-    val annoLine = if (hangingIndent != null) compactLine.withHangingIndent(hangingIndent) else compactLine
+    // The inserted break is a visual '\n' like manual wrap mode's: copy and drag-selection strip it (stripVisualWrapBreaks), and the
+    // spans keep their characters. The plan depends on the field width alone, so the break never feeds back into it.
+    val annoLine = if (hangingPlan != null) {
+        remember(compactLine, hangingPlan, lineRender.messageIndentChars) { compactLine.withHangingPlan(hangingPlan, lineRender.messageIndentChars) }
+    } else {
+        compactLine
+    }
     val wholeLineHl = lineRender.wholeLine
     val wholeLineBgHl = wholeLineHl?.takeIf { it.backgroundEnabled }
 
