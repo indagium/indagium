@@ -281,7 +281,7 @@ private fun androidIssuesStatus(profile: LogFormatProfile): LogCapabilityStatus 
 
 private fun incrementalTailStatus(profile: LogFormatProfile, incremental: Boolean): LogCapabilityStatus = when {
     incremental -> available("The engine supports complete-record incremental parsing.")
-    profile.engine == LogFormatEngine.DLT -> unavailable("DLT is a framed binary format and cannot be tailed as text.")
+    profile.engine == LogFormatEngine.DLT -> unavailable("Live tail is not available for DLT logs.")
     profile.engine == LogFormatEngine.METADATA_JSON -> unavailable("Sectioned JSON documents are read completely before ordering records by time.")
     else -> unavailable("This engine needs the complete input before parsing.")
 }

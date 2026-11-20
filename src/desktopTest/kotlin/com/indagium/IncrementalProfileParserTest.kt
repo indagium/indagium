@@ -482,6 +482,10 @@ class IncrementalProfileParserTest {
             CapabilityAvailability.UNAVAILABLE,
             tail(BUILTIN_LOG_FORMAT_PROFILES.first { it.engine == LogFormatEngine.DLT }).availability,
         )
+        // The reason is true for a binary .dlt and for a DLT Viewer text/CSV export alike: it does not call the format binary.
+        BUILTIN_LOG_FORMAT_PROFILES.filter { it.engine == LogFormatEngine.DLT }.forEach {
+            assertEquals("Live tail is not available for DLT logs.", tail(it).reason, it.id)
+        }
     }
 
     @Test
