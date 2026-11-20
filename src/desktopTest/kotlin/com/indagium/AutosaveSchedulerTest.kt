@@ -312,9 +312,10 @@ class AutosaveSchedulerTest {
             base.copy(selectedLogSectionId = "Tethered Bluetooth / L2CAP"),
             base.copy(sharedNote = SharedNoteInfo("shared-1", "Pairing bug")),
             base.copy(notesView = "shared-1"),
+            base.copy(dltSplitIdentifiers = true),
         )
 
-        assertEquals(24, base.persistedSnapshot().size)
+        assertEquals(25, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

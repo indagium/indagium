@@ -23,6 +23,7 @@ import com.indagium.ui.setSharedNoteMembers
 import com.indagium.ui.shareTabNote
 import com.indagium.ui.sharedNotesFor
 import com.indagium.ui.stopSharing
+import com.indagium.ui.tokenFieldAt
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
@@ -311,6 +312,48 @@ class SharedNoteOperationsTest {
         state.addNoteBlock(id, "shared afterwards")
         waitUntil { shared.readText().contains("shared afterwards") }
         assertFalse(own.readText().contains("shared afterwards"))
+    }
+
+    @Test
+    fun reopeningTheLogSkipsItsFormerPrivateExportAfterSharing() {
+        val dir = createTempDirectory("shared-ops-reopen-export").toFile()
+        val file = logFile(dir, "a.log")
+        val state = withTabs(dir, autoExport = true)
+        val notes = state.activeNotesDir()
+        try {
+            state.addNoteBlock("a", "now shared")
+            val shared = File(notes, "a_analysis.md")
+            val sharedSidecar = File(notes, "a_analysis.ann")
+            waitUntil { runCatching { sharedSidecar.readText().tokenFieldAt(4) }.getOrNull() == file.absolutePath }
+            val hostId = assertNotNull(state.shareTabNote("a", "Pairing bug", listOf("a")))
+            state.closeTab("a")
+
+            val firstReopen = assertNotNull(state.openFile(file))
+            waitUntil { state.tab(firstReopen)?.analysis?.pending == false }
+
+            val reopened = assertNotNull(state.tab(firstReopen))
+            assertEquals(hostId, reopened.notesView)
+            assertTrue(reopened.annotations.blocks.isEmpty())
+            assertNull(reopened.noteTargetName)
+
+            state.addNoteBlock(firstReopen, "still private")
+            val privateExport = File(notes, "a_analysis_2.md")
+            val privateSidecar = File(notes, "a_analysis_2.ann")
+            waitUntil { runCatching { privateSidecar.readText().tokenFieldAt(4) }.getOrNull() == file.absolutePath }
+            assertTrue(shared.setLastModified(privateExport.lastModified() + 5_000))
+            state.closeTab(firstReopen)
+
+            val secondReopen = assertNotNull(state.openFile(file))
+            waitUntil { state.tab(secondReopen)?.analysis?.pending == false }
+
+            val reloaded = assertNotNull(state.tab(secondReopen))
+            assertEquals(privateExport.name, reloaded.noteTargetName)
+            assertEquals("still private", (reloaded.annotations.blocks.single() as AnnBlock.Note).text)
+            assertEquals("now shared", (state.host(hostId).annotations.blocks.single() as AnnBlock.Note).text)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
     }
 
     @Test

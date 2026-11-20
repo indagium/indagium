@@ -63,6 +63,8 @@ class DltRowPresentationTest {
     fun theSplitDltColumnChoiceSurvivesTabRestore() {
         val tab = mkTab("dlt", "capture.dlt", emptyList(), logFormat = LogFormat.DLT)
             .copy(sourcePath = "/tmp/capture.dlt", dltSplitIdentifiers = true)
-        assertEquals(true, tab.tabToken().tabShellFromToken()?.tab?.dltSplitIdentifiers)
+        val token = tab.tabToken()
+        assertEquals(true, token.tabShellFromToken()?.tab?.dltSplitIdentifiers)
+        assertEquals(false, token.substringBeforeLast('|').tabShellFromToken()?.tab?.dltSplitIdentifiers)
     }
 }

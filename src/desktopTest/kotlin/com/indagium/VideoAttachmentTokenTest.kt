@@ -201,11 +201,9 @@ class VideoAttachmentTokenTest {
     fun tabTokenCarriesAttachedVideoAsFieldIndexEleven() {
         val original = tabFixture(VideoAttachment(path = "/videos/repro.mp4", sourceLabel = "/videos/repro.mp4"))
         val fields = original.tabToken().tokenFields()
-        // Error highlight style and the four log format profile fields are appended after the
-        // existing attachment, mapping, format, and imported capture source fields; attachedVideo
-        // itself remains at index 11.
-        // Fields 22 (shared-note descriptor, host only) and 23 (notes view) follow the selected capture section.
-        assertEquals(24, fields.size, "tab token must carry exactly 24 fields (0..23), including the shared-note fields")
+        // Later fields through the DLT column setting at index 24 leave the attachment at index 11.
+        assertEquals(25, fields.size)
+        assertTrue(fields[11].isNotEmpty())
         assertEquals("/videos/repro.mp4", original.tabToken().tabShellFromToken()?.tab?.attachedVideo?.path)
     }
 

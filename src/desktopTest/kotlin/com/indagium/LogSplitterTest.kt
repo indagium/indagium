@@ -187,6 +187,28 @@ class LogSplitterTest {
     }
 
     @Test
+    fun splitUtf16JsonIgnoresNewlineBytesAcrossCodeUnits() {
+        val profile = LogFormatProfile(id = "utf16-json", name = "UTF-16 JSON", engine = LogFormatEngine.JSON_LINES)
+        val directory = createTempDirectory("openlog-profile-json-code-unit-split").toFile()
+        try {
+            for ((charset, text) in listOf(Charsets.UTF_16BE to "\u0100\u0A01", Charsets.UTF_16LE to "\u0A01\u0100")) {
+                val records = listOf("""{"message":"before $text after"}""", """{"message":"next line"}""")
+                val bytes = records.joinToString("\n", prefix = "\uFEFF", postfix = "\n").toByteArray(charset)
+                val outputs = planSplitOutputs("${charset.name()}.json", directory, "part", 2)
+
+                splitProfileRecordsToFiles(ByteArrayInputStream(bytes), outputs, bytes.size.toLong(), profile)
+
+                val actual = outputs.map { file ->
+                    file.inputStream().use { parseLogContent(it, profile = profile).entries.map { entry -> entry.rawRecord } }
+                }
+                assertEquals(records.map { listOf(it) }, actual, charset.name())
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun multilineRegexProfileSplitCutsOnlyAtConfiguredRecordStarts() {
         val profile = LogFormatProfile(
             id = "split-regex",

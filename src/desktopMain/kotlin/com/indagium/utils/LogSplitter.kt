@@ -239,7 +239,9 @@ private class SplitPhysicalLineReader(
                 val foundNewline = (newlineBytes.size == 1 && value == (newlineBytes[0].toInt() and SPLIT_BYTE_MASK)) ||
                     (
                         newlineBytes.size == 2 && previous == (newlineBytes[0].toInt() and SPLIT_BYTE_MASK) &&
-                            value == (newlineBytes[1].toInt() and SPLIT_BYTE_MASK)
+                            value == (newlineBytes[1].toInt() and SPLIT_BYTE_MASK) &&
+                            // UTF-16 newline bytes can also straddle adjacent code units.
+                            (line.size() + cursor - start) % newlineBytes.size == 0
                     )
                 if (foundNewline) {
                     line.write(buffer, start, cursor - start)

@@ -15833,7 +15833,9 @@ class AppState(
         }
     }
 
-    fun openNoteFile(tabId: String, file: File) {
+    fun openNoteFile(tabId: String, file: File) = openNoteFile(tabId, file, autoLoad = false)
+
+    private fun openNoteFile(tabId: String, file: File, autoLoad: Boolean) {
         if (!file.exists()) {
             removeRecentNote(file)
             recentNotesMenuOpen = false
@@ -15855,9 +15857,9 @@ class AppState(
                 // Pins noteTargetName so this file's .md pair (not the default "<base>_analysis.md")
                 // keeps receiving future auto-exports — fixes the adjacent latent bug where opening
                 // "foo_analysis_2.md" and editing it re-exported to the plain "foo_analysis.md".
-                // Uses upTab, not upAnn: opening a file is not itself an annotation edit, so this
+                // Applies through upTab, not upAnn: opening a file is not itself an annotation edit, so this
                 // must not trigger an immediate (and here, redundant) re-export.
-                upTab(tabId) { t ->
+                applyOpenedNote(tabId, file, autoLoad) { t ->
                     val withRows = t.copy(recoveredNoteRows = recovered)
                     val preferences = legacyLogRefPreferences()
                     val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
@@ -15883,9 +15885,16 @@ class AppState(
         // single Note block never carries a LogRef, so any rows recovered for the PREVIOUS note's
         // LogRef blocks are now orphaned state that belongs to a file this tab no longer shows.
         val text = runCatching { file.readText() }.getOrElse { return }
-        upTab(tabId) { t ->
+        applyOpenedNote(tabId, file, autoLoad) { t ->
             val block = AnnBlock.Note(newId("n"), text)
             t.copy(annotations = t.annotations.copy(blocks = listOf(block)), noteTargetName = pinName, recoveredNoteRows = emptyMap())
+        }
+    }
+
+    private fun applyOpenedNote(tabId: String, file: File, autoLoad: Boolean, update: (LogTab) -> LogTab) {
+        upTab(tabId) { tab ->
+            // The tab or export ownership can change while the note is being read off the UI thread.
+            if (autoLoad && (!canAutoLoadOwnNotes(tab) || isSharedNoteExport(file))) tab else update(tab)
         }
     }
 
@@ -15969,14 +15978,23 @@ class AppState(
     private fun autoLoadOwnNotesIfAny(tabId: String) {
         val current = tab(tabId) ?: return
         val sourcePath = current.sourcePath ?: return
-        if (current.noteTargetName != null || current.annotations.blocks.isNotEmpty()) return
+        if (!canAutoLoadOwnNotes(current)) return
         val match = noteFileCandidateFiles(current.filename, sourcePath)
             .filter { it.exists() }
+            .filterNot(::isSharedNoteExport)
             .filter { readSourceFingerprint(it) == SourceFingerprint.Recorded(sourcePath) }
             .maxByOrNull { it.lastModified() }
             ?: return
-        openNoteFile(tabId, match)
+        openNoteFile(tabId, match, autoLoad = true)
     }
+
+    private fun canAutoLoadOwnNotes(tab: LogTab): Boolean =
+        tab.noteTargetName == null && tab.annotations.blocks.isEmpty()
+
+    // Sharing transfers the export pin immediately. Its existing sidecar may still identify the
+    // original log until the shared note is edited, so the current owner takes precedence.
+    private fun isSharedNoteExport(file: File): Boolean =
+        sharedNoteHosts.any { file.name.equals(it.noteTargetName, ignoreCase = true) } && sameFolder(file.parentFile, activeNotesDir())
 
     // "New Analysis" header action (AnnotationPanel). Auto-load above removed the only route that
     // used to exist for starting a fresh analysis: it pins a tab's own notes the instant a log is
