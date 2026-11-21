@@ -418,22 +418,32 @@ internal fun continuationMachine(
     diagnostics: MutableList<String>,
     sourceLineOffset: Long,
 ): ProfileRecordMachine? {
-    if (!profile.joinUnmatchedLines) return null
+    val parseLine = continuationHeaderParser(profile) ?: return null
+    val diagnostic = if (profile.engine == LogFormatEngine.REGEX) "Regex did not match a record; original text was kept."
+    else "A syslog record with an invalid header was kept as raw text."
+    return ContinuationJoinMachine(diagnostics, sourceLineOffset, diagnostic, parseLine)
+}
+
+internal fun LogFormatProfile.joinsContinuations(): Boolean = joinUnmatchedLines && when (engine) {
+    LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 -> true
+    LogFormatEngine.REGEX -> multilineStartPattern.isBlank()
+    else -> false
+}
+
+internal fun continuationHeaderParser(profile: LogFormatProfile): ((String, Long) -> ProfileRecord)? {
+    if (!profile.joinsContinuations()) return null
     return when (profile.engine) {
         LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 -> {
             val rfc5424 = profile.engine == LogFormatEngine.SYSLOG_RFC5424
-            ContinuationJoinMachine(diagnostics, sourceLineOffset, "A syslog record with an invalid header was kept as raw text.") { raw, line ->
-                syslogLineRecord(raw, line, rfc5424)
-            }
+            val parseLine: (String, Long) -> ProfileRecord = { raw, line -> syslogLineRecord(raw, line, rfc5424) }
+            parseLine
         }
         LogFormatEngine.REGEX -> {
-            if (profile.multilineStartPattern.isNotBlank()) return null
             val matcher = BoundedProfileRegexMatcher(
                 profile.regexPattern.takeIf(String::isNotBlank) ?: error("Choose a record regex before using the Regex engine."),
             )
-            ContinuationJoinMachine(diagnostics, sourceLineOffset, "Regex did not match a record; original text was kept.") { raw, line ->
-                regexRecord(profile, matcher, raw, line, line)
-            }
+            val parseLine: (String, Long) -> ProfileRecord = { raw, line -> regexRecord(profile, matcher, raw, line, line) }
+            parseLine
         }
         else -> null
     }
@@ -539,9 +549,11 @@ internal class JsonRecordMachine(
     private val profile: LogFormatProfile?,
     private val diagnostics: MutableList<String>,
     sourceLineOffset: Long,
+    private val rejectOversizedRecords: Boolean = false,
     private val onArrayBoundary: ((opening: Boolean) -> Unit)? = null,
 ) : ProfileRecordMachine {
     private val current = StringBuilder()
+    private var rawLine: StringBuilder? = null
     private val stack = ArrayList<Char>(16)
     private var arrayMode = false
     private var recordRoot: Char? = null
@@ -554,26 +566,43 @@ internal class JsonRecordMachine(
     private var startLine = 0L
     private var rootIndent = 0
     private var scannedChars = 0
+    private var lineColumn = 0
+    private var discardLine = false
     override var lineNumber: Long = sourceLineOffset
 
     override fun hasPendingRecord(): Boolean = current.isNotEmpty()
 
     override fun pendingReplacementStartLine(): Long? = startLine
 
-    // A character scanner over string, escape, nesting and array state; splitting it would scatter that state.
-    @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements", "ComplexCondition")
-    override fun accept(line: String, out: MutableList<ProfileRecord>) {
-        lineNumber++
-        if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
-        if (current.isNotEmpty() && shouldRecoverAt(line)) emitMalformed(out, lineNumber - 1)
-        if (current.isNotEmpty()) current.append('\n')
+    override fun accept(line: String, out: MutableList<ProfileRecord>) = acceptFragment(line, startsLine = true, endsLine = true, out)
+
+    // The splitter feeds bounded fragments of long lines without inserting extra newlines into records.
+    @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements", "ComplexCondition", "ReturnCount")
+    fun acceptFragment(fragment: String, startsLine: Boolean, endsLine: Boolean, out: MutableList<ProfileRecord>) {
+        if (startsLine) {
+            lineNumber++
+            lineColumn = 0
+            discardLine = false
+            if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
+            if (current.isNotEmpty() && shouldRecoverAt(fragment)) emitMalformed(out, lineNumber - 1)
+            if (current.isNotEmpty()) current.append('\n')
+        }
+        if (discardLine) return
+        rawLine?.let { pending ->
+            require(pending.length + fragment.length <= MAX_PROFILE_RECORD_CHARS) { "A raw JSON line exceeds the safe splitting limit." }
+            pending.append(fragment)
+            if (endsLine) flushRawLine(out)
+            return
+        }
+        val fragmentColumn = lineColumn
+        lineColumn += fragment.length
         var index = 0
-        while (index < line.length) {
+        while (index < fragment.length) {
             if (current.isEmpty()) {
                 val fragmentStart = index
-                while (index < line.length && line[index].isWhitespace()) index++
-                if (index >= line.length) return
-                val first = line[index]
+                while (index < fragment.length && fragment[index].isWhitespace()) index++
+                if (index >= fragment.length) return
+                val first = fragment[index]
                 if (arrayMode && (first == ',' || first == ']')) {
                     if (first == ']') setArrayMode(false)
                     index++
@@ -592,15 +621,14 @@ internal class JsonRecordMachine(
                 }
                 if (!arrayMode && first != '{') {
                     // Keep the unparsed fragment without repeating records already emitted on this line.
-                    out += ProfileRecord(
-                        line.substring(fragmentStart), parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber,
-                    )
+                    val raw = fragment.substring(fragmentStart)
+                    if (endsLine) addRawLine(raw, out) else rawLine = StringBuilder(raw)
                     diagnostics.addLimited("An invalid JSON record was kept as raw text.")
                     return
                 }
-                startRecord(first, lineNumber, index)
+                startRecord(first, lineNumber, fragmentColumn + index)
             }
-            val c = line[index]
+            val c = fragment[index]
             if (arrayMode && !inString && stack.isEmpty() && (c == ',' || c == ']')) {
                 emitCompleteElement(out, lineNumber)
                 if (c == ']') setArrayMode(false)
@@ -613,11 +641,14 @@ internal class JsonRecordMachine(
                 emitMalformed(out, lineNumber)
                 // A malformed closer invalidates this candidate. Do not interpret its suffix as a
                 // second event; the next physical root boundary is the bounded recovery point.
+                discardLine = true
                 return
             }
             if (current.length > MAX_PROFILE_RECORD_CHARS) {
+                require(!rejectOversizedRecords) { "A JSON record exceeds the safe splitting limit." }
                 diagnostics.addLimited("An oversized JSON record was kept as raw text.")
                 emitMalformed(out, lineNumber)
+                discardLine = true
                 return
             }
             if (elementComplete && !arrayMode) {
@@ -638,12 +669,22 @@ internal class JsonRecordMachine(
     override fun finish(out: MutableList<ProfileRecord>) = finish(out, includeIncomplete = true)
 
     override fun finish(out: MutableList<ProfileRecord>, includeIncomplete: Boolean) {
+        flushRawLine(out)
         if (current.isNotEmpty() && includeIncomplete) {
             diagnostics.addLimited("An incomplete JSON record was kept as raw text.")
             emitMalformed(out, lineNumber)
         } else if (!includeIncomplete) {
             resetRecord()
         }
+    }
+
+    private fun flushRawLine(out: MutableList<ProfileRecord>) {
+        rawLine?.let { addRawLine(it.toString(), out) }
+        rawLine = null
+    }
+
+    private fun addRawLine(raw: String, out: MutableList<ProfileRecord>) {
+        out += ProfileRecord(raw, parseFields = false, sourceStartLine = lineNumber, sourceEndLine = lineNumber)
     }
 
     private fun startRecord(first: Char, atLine: Long, indentation: Int) {

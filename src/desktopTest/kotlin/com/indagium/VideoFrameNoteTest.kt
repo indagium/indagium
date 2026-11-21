@@ -6,6 +6,8 @@ import com.indagium.model.VideoAttachment
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
 import com.indagium.ui.AppState
+import com.indagium.ui.createSharedNote
+import com.indagium.ui.mkTab
 import com.indagium.video.VideoDisplayRotationAware
 import com.indagium.video.VideoPlayerController
 import kotlin.test.Test
@@ -84,6 +86,29 @@ class VideoFrameNoteTest {
 
         assertFalse(state.navigateToVideoFrame("tab", oldFrame))
         assertEquals(null, controller.seekedTo)
+    }
+
+    @Test
+    fun sharedFrameNavigationActivatesTheMemberWithTheMatchingVideo() {
+        val controller = FakeVideoController()
+        val source = VideoSource.LocalFile("/videos/shared.mp4")
+        val state = AppState(videoControllerFactory = { controller })
+        try {
+            state.tabs = listOf(
+                mkTab("a", "recorded.log", emptyList()).copy(attachedVideo = VideoAttachment(source, "shared.mp4")),
+                mkTab("b", "viewer.log", emptyList()),
+            )
+            state.createSharedNote("Investigation", listOf("a", "b"))
+            state.activateTab("b")
+            val frame = VideoFrameReference(source, "shared.mp4", 12_345L)
+
+            assertTrue(state.navigateToVideoFrame("b", frame, fromSharedNote = true))
+            assertEquals("a", state.activeTabId)
+            assertEquals(12_345L, controller.seekedTo)
+            assertTrue(state.videoPanelVisible)
+        } finally {
+            state.close()
+        }
     }
 
     @Test

@@ -571,6 +571,44 @@ class SharedNoteOperationsTest {
     // ── stopSharing ──────────────────────────────────────────────────────────────────────────────
 
     @Test
+    fun transferredAutoExportReopensOnlyInTheRecipient() {
+        val dir = createTempDirectory("shared-ops-stop-reopen").toFile()
+        val state = state(dir, autoExport = true)
+        try {
+            val firstLog = logFile(dir, "first.log")
+            val secondLog = logFile(dir, "second.log")
+            val first = assertNotNull(state.openFile(firstLog))
+            val second = assertNotNull(state.openFile(secondLog))
+            waitUntil { state.tab(first) != null && state.tab(second) != null }
+            state.addNoteBlock(first, "handoff finding")
+            val original = File(dir, "notes/first_analysis.ann")
+            waitUntil { original.exists() && original.readText().tokenFieldAt(4) == firstLog.absolutePath }
+
+            val host = assertNotNull(state.shareTabNote(first, "Investigation", listOf(second)))
+            assertTrue(state.stopSharing(host, second))
+            val transferred = File(dir, "notes/second_analysis.ann")
+            waitUntil {
+                transferred.exists() && transferred.readText().tokenFieldAt(4) == secondLog.absolutePath &&
+                    original.readText().tokenFieldAt(4) == null
+            }
+            assertTrue(File(dir, "notes/first_analysis.md").readText().contains("handoff finding"))
+            state.closeTab(first)
+            state.closeTab(second)
+
+            val reopenedFirst = assertNotNull(state.openFile(firstLog))
+            val reopenedSecond = assertNotNull(state.openFile(secondLog))
+            waitUntil { state.tab(reopenedSecond)?.annotations?.blocks?.isNotEmpty() == true }
+            waitUntil { state.tab(reopenedFirst) != null && state.tab(reopenedFirst)?.analysis?.pending == false }
+            assertTrue(state.tab(reopenedFirst)!!.annotations.blocks.isEmpty())
+            val note = state.tab(reopenedSecond)!!.annotations.blocks.single() as AnnBlock.Note
+            assertEquals("handoff finding", note.text)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun stopSharingCopiesTheNoteIntoTheTabAndMovesThePinnedFileBack() {
         val dir = createTempDirectory("shared-ops-stop").toFile()
         val state = withTabs(dir)

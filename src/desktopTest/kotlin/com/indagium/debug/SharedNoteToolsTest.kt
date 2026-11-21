@@ -1,11 +1,17 @@
 package com.indagium.debug
 
+import com.indagium.ai.AiRun
 import com.indagium.ai.AiToolCallBudget
+import com.indagium.ai.AiToolExecutionCoordinator
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
@@ -140,6 +146,47 @@ class SharedNoteToolsTest {
         assertEquals(listOf("private finding"), state.sharedNoteHost(hostId)!!.annotations.blocks.filterIsInstance<AnnBlock.Note>().map { it.text })
         assertTrue(state.tab("a")!!.annotations.blocks.isEmpty(), "the tab gets a fresh private note")
         assertEquals(1, listed().single()["blockCount"])
+    }
+
+    @Test
+    fun inAppNoteCallsCanUseAnExplicitHostOnlyFromAMemberTab() = runBlocking {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        val coordinator = AiToolExecutionCoordinator(gateway)
+        val member = AiRun(tabId = "a", maxToolCalls = 10)
+        val outsider = AiRun(tabId = "c", maxToolCalls = 10)
+
+        val written = coordinator.executeManaged(member, "add_text_note", mapOf("tabId" to hostId, "text" to "shared finding"))
+        val read = coordinator.executeManaged(member, "get_annotation_blocks", mapOf("tabId" to hostId))
+        val rejected = coordinator.executeManaged(outsider, "add_text_note", mapOf("tabId" to hostId, "text" to "wrong owner"))
+
+        assertTrue(written.content.contains("ok=true"), written.content)
+        assertTrue(read.content.contains("shared finding"), read.content)
+        assertTrue(rejected.content.contains("unavailable"), rejected.content)
+        assertEquals(listOf("shared finding"), state.sharedNoteHost(hostId)!!.annotations.blocks.filterIsInstance<AnnBlock.Note>().map { it.text })
+        assertTrue(state.tab("a")!!.annotations.blocks.isEmpty())
+        assertTrue(state.tab("c")!!.annotations.blocks.isEmpty())
+    }
+
+    @Test
+    fun concurrentSharedLogNotesReturnTheirOwnIdsAndLeaveTheOpenDialogAlone() = runBlocking {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        state.requestAddAnn("a", listOf(1))
+        val pending = assertNotNull(state.addAnnRequest)
+
+        val results = (1..12).map { index ->
+            async(Dispatchers.Default) {
+                val caption = "reference $index"
+                val result = gateway.executeSuspending(
+                    "add_log_note",
+                    mapOf("tabId" to hostId, "sourceTabId" to "a", "lineIds" to listOf(1), "caption" to caption),
+                ) as Map<*, *>
+                caption to assertNotNull(result["blockId"], result.toString())
+            }
+        }.awaitAll()
+
+        val actual = state.sharedNoteHost(hostId)!!.annotations.blocks.filterIsInstance<AnnBlock.LogRef>().associate { it.caption to it.id }
+        assertEquals(results.toMap(), actual)
+        assertEquals(pending, state.addAnnRequest)
     }
 
     @Test

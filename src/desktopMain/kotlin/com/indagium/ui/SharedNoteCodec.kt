@@ -6,6 +6,16 @@ import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 
+/** Clear the export's owning log while preserving all other annotation token fields. */
+internal fun String.withoutNoteSourcePath(): String {
+    val sourcePathIndex = 4
+    val fields = split('|').toMutableList()
+    val emptyField = tokenFields("")
+    if (fields.size <= sourcePathIndex || fields[sourcePathIndex] == emptyField) return this
+    fields[sourcePathIndex] = emptyField
+    return fields.joinToString("|")
+}
+
 // Autosave encoding of shared notes (see LogTab.sharedNote / AppState.sharedNoteHosts): the descriptor is field 22 of a
 // tab token (AutosaveCodec.tabToken); the hosts themselves are one `sharedNotes` key line, each host a full tab token.
 

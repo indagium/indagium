@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.io.PushbackInputStream
+import java.io.Reader
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import kotlin.math.max
@@ -100,110 +101,117 @@ internal fun splitStreamToFiles(
     return outputFiles
 }
 
-/** Split CSV/JSON logical rows and multiline-regex records without cutting through a record. */
-@Suppress("CyclomaticComplexMethod", "TooGenericExceptionCaught") // One record state machine; the catch cleans up and rethrows.
+internal fun LogFormatProfile.usesRecordAwareSplit(): Boolean =
+    engine == LogFormatEngine.CSV || engine == LogFormatEngine.JSON_LINES ||
+        engine == LogFormatEngine.REGEX && multilineStartPattern.isNotBlank() || joinsContinuations()
+
+/** Split at the CSV, JSON, regex or syslog record boundaries recognised by the selected profile. */
+@Suppress("TooGenericExceptionCaught") // Remove incomplete parts and propagate the split failure.
 internal fun splitProfileRecordsToFiles(
     input: InputStream,
     outputFiles: List<File>,
     sourceSizeBytes: Long,
     profile: LogFormatProfile,
 ): List<File> {
-    require(profile.engine == LogFormatEngine.CSV || profile.engine == LogFormatEngine.JSON_LINES ||
-        profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank()
-    ) { "This profile does not require record-aware splitting." }
+    require(profile.usesRecordAwareSplit()) { "This profile does not require record-aware splitting." }
     require(outputFiles.isNotEmpty()) { "At least one output file is required" }
-    outputFiles.forEach { file ->
-        file.parentFile?.mkdirs()
-        file.writeBytes(ByteArray(0))
-    }
     val targetBytes = max(1L, (sourceSizeBytes + outputFiles.size - 1) / outputFiles.size)
-    val boundary = profile.multilineStartPattern.takeIf(String::isNotBlank)?.let(::BoundedProfileRegexMatcher)
-    val writer = ProfileRecordSplitWriter(outputFiles, targetBytes)
-    val current = ByteArrayOutputStream()
-    var csvQuoted = false
-    var csvHeader: ByteArray? = null
-    var physicalLine = 0L
+    val created = mutableListOf<File>()
     try {
+        outputFiles.forEach { file ->
+            file.parentFile?.mkdirs()
+            check(file.createNewFile()) { "A split part already exists: ${file.name}" }
+            created += file
+        }
         PushbackInputStream(BufferedInputStream(input, SPLIT_BUFFER_BYTES), SPLIT_ENCODING_SAMPLE_BYTES).use { stream ->
             val prefix = stream.readNBytes(SPLIT_ENCODING_SAMPLE_BYTES)
+            val encoding = detectLogTextEncoding(prefix)
             stream.unread(prefix)
-            val (charset, newlineBytes) = splitEncoding(prefix)
-            val lineReader = SplitPhysicalLineReader(stream, newlineBytes)
-            if (profile.engine == LogFormatEngine.JSON_LINES) {
-                writer.setJsonEncoding(charset)
-                splitJsonRecords(lineReader, charset, writer, profile)
-                return@use
-            }
-            while (true) {
-                val lineBytes = lineReader.next() ?: break
-                physicalLine++
-                val lineText = decodeSplitLine(lineBytes, physicalLine == 1L, charset)
-                if (profile.engine == LogFormatEngine.REGEX &&
-                    current.size() > 0 && boundary?.groups(lineText) != null
-                ) {
-                    writer.writeRecord(current.toByteArray())
-                    current.reset()
-                }
-                current.write(lineBytes)
-                if (profile.engine == LogFormatEngine.CSV) {
-                    csvQuoted = updateSplitCsvQuoteState(lineText, csvQuoted)
-                    if (!csvQuoted) {
-                        val record = current.toByteArray()
-                        if (profile.hasHeader && csvHeader == null) {
-                            csvHeader = record
-                            writer.writeRecord(record)
-                        } else {
-                            writer.writeRecord(record, csvHeader)
-                        }
-                        current.reset()
-                    } else if (current.size() > MAX_PROFILE_SPLIT_RECORD_BYTES) {
-                        val oversized = current.toByteArray()
-                        writer.writeRecord(oversized, csvHeader)
-                        current.reset()
-                        csvQuoted = false
-                    }
-                } else if (current.size() > MAX_PROFILE_SPLIT_RECORD_BYTES) {
-                    // The profile parser has the same bounded-record policy and recovers at a
-                    // physical line after an oversized multiline row.
-                    writer.writeRecord(current.toByteArray())
-                    current.reset()
-                    csvQuoted = false
-                }
-            }
-            if (current.size() > 0) {
-                val record = current.toByteArray()
-                if (profile.engine == LogFormatEngine.CSV && profile.hasHeader && csvHeader == null) {
-                    csvHeader = record
-                    writer.writeRecord(record)
+            ProfileRecordSplitWriter(outputFiles, targetBytes, encoding.charset, encoding == LogTextEncoding.UTF_8_BOM).use { writer ->
+                if (profile.engine == LogFormatEngine.JSON_LINES) {
+                    openLogTextReader(stream).use { splitJsonRecords(it, writer, profile) }
                 } else {
-                    writer.writeRecord(record, csvHeader)
+                    val bomLength = when {
+                        encoding == LogTextEncoding.UTF_8_BOM -> 3
+                        encoding.isUtf16 && prefix.startsWithUtf16Bom() -> 2
+                        else -> 0
+                    }
+                    stream.skipNBytes(bomLength.toLong())
+                    val (charset, newlineBytes) = splitEncoding(encoding)
+                    val lines = SplitPhysicalLineReader(stream, newlineBytes)
+                    if (profile.engine == LogFormatEngine.CSV) splitCsvRecords(lines, charset, writer, profile)
+                    else splitHeaderRecords(lines, charset, writer, profile)
                 }
             }
         }
-        writer.close()
         return outputFiles
     } catch (failure: Throwable) {
-        runCatching { writer.close() }
-        outputFiles.forEach { it.delete() }
+        created.forEach { it.delete() }
         throw failure
     }
 }
 
-private fun splitJsonRecords(
+private fun ByteArray.startsWithUtf16Bom(): Boolean =
+    take(2) == listOf(0xFE.toByte(), 0xFF.toByte()) || take(2) == listOf(0xFF.toByte(), 0xFE.toByte())
+
+private fun splitCsvRecords(
     lines: SplitPhysicalLineReader,
     charset: Charset,
     writer: ProfileRecordSplitWriter,
     profile: LogFormatProfile,
 ) {
+    val machine = CsvRecordMachine(profile, mutableListOf(), initialHeaders = null, sourceLineOffset = 0)
+    val ready = ArrayList<ProfileRecord>(1)
+    val pending = ByteArrayOutputStream()
+    var header: ByteArray? = null
+    while (true) {
+        val bytes = lines.next() ?: break
+        pending.write(bytes)
+        machine.accept(decodeSplitLine(bytes, charset), ready)
+        ready.clear()
+        if (machine.hasPendingRecord()) continue
+        val record = pending.toByteArray()
+        pending.reset()
+        val waitingForHeader = profile.hasHeader && header == null
+        writer.writeRecord(record, header, allowRotation = !waitingForHeader)
+        if (waitingForHeader && machine.headers != null) header = record
+    }
+    if (pending.size() > 0) writer.writeRecord(pending.toByteArray(), header, allowRotation = !profile.hasHeader || header != null)
+}
+
+private fun splitHeaderRecords(
+    lines: SplitPhysicalLineReader,
+    charset: Charset,
+    writer: ProfileRecordSplitWriter,
+    profile: LogFormatProfile,
+) {
+    val boundary = profile.multilineStartPattern.takeIf(String::isNotBlank)?.let(::BoundedProfileRegexMatcher)
+    val parseHeader = continuationHeaderParser(profile)
+    var lineNumber = 0L
+    while (true) {
+        val bytes = lines.next() ?: break
+        val line = decodeSplitLine(bytes, charset)
+        lineNumber++
+        checkParserCancellation()
+        val startsRecord = boundary?.groups(line) != null ||
+            (line.isNotBlank() && parseHeader?.invoke(line, lineNumber)?.parseFields == true)
+        writer.writeLine(bytes, startsRecord)
+    }
+}
+
+private fun splitJsonRecords(
+    reader: Reader,
+    writer: ProfileRecordSplitWriter,
+    profile: LogFormatProfile,
+) {
     val ready = ArrayList<ProfileRecord>(2)
     // Drain the completed records before changing the output envelope, even mid-line.
-    val machine = JsonRecordMachine(profile, mutableListOf(), 0) { opening ->
+    val machine = JsonRecordMachine(profile, mutableListOf(), 0, rejectOversizedRecords = true) { opening ->
         writer.writeJsonRecords(ready)
         if (opening) writer.beginJsonArray() else writer.endJsonArray()
     }
-    while (true) {
-        val bytes = lines.next() ?: break
-        machine.accept(decodeSplitLine(bytes, machine.lineNumber == 0L, charset), ready)
+    readSplitFragments(reader) { fragment, startsLine, endsLine ->
+        machine.acceptFragment(fragment, startsLine, endsLine, ready)
         writer.writeJsonRecords(ready)
     }
     machine.finish(ready)
@@ -211,9 +219,38 @@ private fun splitJsonRecords(
     writer.endJsonArray()
 }
 
+/** Like BufferedReader's line handling, with bounded fragments for long physical lines. */
+private fun readSplitFragments(reader: Reader, accept: (fragment: String, startsLine: Boolean, endsLine: Boolean) -> Unit) {
+    val buffer = CharArray(SPLIT_ENCODING_SAMPLE_BYTES)
+    var startsLine = true
+    var skipLf = false
+    while (true) {
+        val count = reader.read(buffer)
+        if (count < 0) return
+        checkParserCancellation()
+        var start = 0
+        for (index in 0 until count) {
+            val char = buffer[index]
+            if (char == '\n' && skipLf) {
+                start = index + 1
+            } else if (char == '\n' || char == '\r') {
+                accept(String(buffer, start, index - start), startsLine, true)
+                start = index + 1
+                startsLine = true
+            }
+            skipLf = char == '\r'
+        }
+        if (start < count) {
+            accept(String(buffer, start, count - start), startsLine, false)
+            startsLine = false
+        }
+    }
+}
+
 private const val MAX_PROFILE_SPLIT_RECORD_BYTES = 1 shl 20
 private const val SPLIT_ENCODING_SAMPLE_BYTES = 8 * 1024
 private const val SPLIT_BYTE_MASK = 0xff
+private val UTF8_BOM = "\uFEFF".toByteArray(Charsets.UTF_8)
 
 private class SplitPhysicalLineReader(
     private val input: InputStream,
@@ -257,53 +294,32 @@ private class SplitPhysicalLineReader(
     }
 }
 
-private fun splitEncoding(prefix: ByteArray): Pair<Charset, ByteArray> {
-    val charset = detectLogTextEncoding(prefix).charset
-    val newline = when (charset) {
-        StandardCharsets.UTF_16BE -> byteArrayOf(0x00, 0x0A)
-        StandardCharsets.UTF_16LE -> byteArrayOf(0x0A, 0x00)
+private fun splitEncoding(encoding: LogTextEncoding): Pair<Charset, ByteArray> {
+    val newline = when (encoding) {
+        LogTextEncoding.UTF_16_BE -> byteArrayOf(0x00, 0x0A)
+        LogTextEncoding.UTF_16_LE -> byteArrayOf(0x0A, 0x00)
         else -> byteArrayOf('\n'.code.toByte())
     }
-    return charset to newline
+    return encoding.charset to newline
 }
 
-private fun decodeSplitLine(bytes: ByteArray, first: Boolean, charset: Charset): String {
-    var text = bytes.toString(charset)
-    text = text.removeSuffix("\n").removeSuffix("\r")
-    return if (first) text.removePrefix("\uFEFF") else text
-}
-
-private fun updateSplitCsvQuoteState(line: String, initiallyQuoted: Boolean): Boolean {
-    var quoted = initiallyQuoted
-    var index = 0
-    while (index < line.length) {
-        if (line[index] == '"') {
-            if (quoted && line.getOrNull(index + 1) == '"') index++ else quoted = !quoted
-        }
-        index++
-    }
-    return quoted
-}
+private fun decodeSplitLine(bytes: ByteArray, charset: Charset): String =
+    bytes.toString(charset).removeSuffix("\n").removeSuffix("\r")
 
 private class ProfileRecordSplitWriter(
     private val outputFiles: List<File>,
     private val targetBytes: Long,
+    private val textCharset: Charset,
+    private val keepUtf8Bom: Boolean,
 ) : AutoCloseable {
     private var outputIndex = 0
     private var output = outputFiles[0].outputStream().buffered(SPLIT_BUFFER_BYTES)
     private var written = 0L
-    private var textCharset: Charset = StandardCharsets.UTF_8
-    private var jsonPreamble: ByteArray? = null
     private var jsonArrayOpen = false
     private var jsonArrayHasElement = false
-
-    fun setJsonEncoding(charset: Charset) {
-        textCharset = charset
-        // Parts are decoded independently, and Unicode-heavy UTF-16 may have too few NULs to sniff.
-        jsonPreamble = when (charset) {
-            StandardCharsets.UTF_16BE, StandardCharsets.UTF_16LE -> "\uFEFF".toByteArray(charset)
-            else -> null
-        }
+    private val utf16Bom = when (textCharset) {
+        StandardCharsets.UTF_16BE, StandardCharsets.UTF_16LE -> "\uFEFF".toByteArray(textCharset)
+        else -> null
     }
 
     fun writeJsonRecords(records: MutableList<ProfileRecord>) {
@@ -345,13 +361,18 @@ private class ProfileRecordSplitWriter(
         jsonArrayHasElement = false
     }
 
-    fun writeRecord(record: ByteArray, repeatedHeader: ByteArray? = null) {
+    fun writeRecord(record: ByteArray, repeatedHeader: ByteArray? = null, allowRotation: Boolean = true) {
         endJsonArray()
-        if (written > 0 && outputIndex < outputFiles.lastIndex && written + record.size > targetBytes) {
+        if (allowRotation && written > 0 && outputIndex < outputFiles.lastIndex && written + record.size > targetBytes) {
             rotate()
-            repeatedHeader?.let(output::write)
+            repeatedHeader?.let(::writeBytes)
         }
         writeBytes(record)
+    }
+
+    fun writeLine(line: ByteArray, startsRecord: Boolean) {
+        if (startsRecord && written >= targetBytes) rotate()
+        writeBytes(line)
     }
 
     private fun rotate() {
@@ -365,7 +386,13 @@ private class ProfileRecordSplitWriter(
     private fun writeText(text: String) = writeBytes(text.toByteArray(textCharset))
 
     private fun writeBytes(bytes: ByteArray) {
-        if (written == 0L) jsonPreamble?.let(output::write)
+        if (written == 0L) {
+            val bom = utf16Bom ?: UTF8_BOM.takeIf { keepUtf8Bom && outputIndex == 0 }
+            if (bom != null) {
+                output.write(bom)
+                written += bom.size
+            }
+        }
         output.write(bytes)
         written += bytes.size
     }

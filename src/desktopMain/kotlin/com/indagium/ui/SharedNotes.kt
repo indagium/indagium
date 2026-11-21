@@ -26,7 +26,7 @@ import kotlin.math.abs
 
 internal const val DEFAULT_SHARED_NOTE_NAME = "Shared note"
 
-private const val SHARED_NOTE_ID_PREFIX = "shared-"
+internal const val SHARED_NOTE_ID_PREFIX = "shared-"
 
 // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
@@ -302,15 +302,14 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
         val pending = pendingNoteOverwrite
         if (pending != null && (pending.tabId == hostId || pending.tabId == intoTabId)) return false
         if (!replaceExisting && privateNoteHasContent(tab)) return false
-        updateTabsLocked(setOf(intoTabId)) {
-            it.copy(
-                annotations = host.annotations.returnedTo(intoTabId),
-                // A host that holds nothing never wrote its file, so the tab keeps its own pin then.
-                noteTargetName = host.noteTargetName?.takeIf { host.annotations.blocks.isNotEmpty() } ?: it.noteTargetName,
-                recoveredNoteRows = host.recoveredNoteRows.ifEmpty { it.recoveredNoteRows },
-            )
-        }
+        val recipient = tab.copy(
+            annotations = host.annotations.returnedTo(intoTabId),
+            noteTargetName = stoppedSharedNotePin(host, tab),
+            recoveredNoteRows = host.recoveredNoteRows.ifEmpty { tab.recoveredNoteRows },
+        )
+        updateTabsLocked(setOf(intoTabId)) { recipient }
         deleteSharedNote(hostId)
+        persistStoppedSharedNote(host, recipient)
         true
     }
 

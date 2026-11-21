@@ -394,13 +394,13 @@ internal class IndagiumToolOperations(
                 withLoadedRows(tabId) { addLogNoteRoute(it.id, lineIds, caption) }
             }
         },
-        "export_analysis" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+        "export_analysis" to { a -> withLoadedNote(a.str("tabId") ?: "") {
             exportAnalysisRoute(it.id, a.str("path") ?: "")
         } },
         "export_filtered_log" to { a -> withLoadedRows(a.str("tabId") ?: "") {
             exportFilteredRoute(it.id, a.str("path") ?: "", a.str("format") ?: "txt")
         } },
-        "save_annotations" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+        "save_annotations" to { a -> withLoadedNote(a.str("tabId") ?: "") {
             saveAnnotationsRoute(it.id, a.str("path") ?: "")
         } },
         "start_tailing" to { a -> withLoadedRows(a.str("tabId") ?: "") {
@@ -433,6 +433,9 @@ internal class IndagiumToolOperations(
             )
         } },
     )
+
+    private suspend fun <T> withLoadedNote(tabId: String, action: (LogTab) -> T): Any? =
+        appState.sharedNoteHost(tabId)?.let(action) ?: withLoadedRows(tabId, action)
 
     private suspend fun <T> withLoadedRows(tabId: String, action: (LogTab) -> T): Any? {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
@@ -478,6 +481,7 @@ internal class IndagiumToolOperations(
         MCP_TOOLS,
         operationHandlers,
         rowDependentSuspendHandlers + testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
+        sharedNoteMembership = { hostId, tabId -> tabId in appState.sharedNoteHost(hostId)?.sharedNote?.memberTabIds.orEmpty() },
         externalServiceCall = { name, args ->
             sendsToExternalService(name, args) || if (name == "draft_test_steps" || name == "rewrite_test_recording" || name == "improve_test_case") {
                 val profileId = args["profileId"] as? String
@@ -2264,8 +2268,7 @@ internal class IndagiumToolOperations(
     }
 
     // The rows of [source] copied into the shared note [hostId], the way "Add to notes" does from a member tab: the block names the
-    // source tab, its file label and its log section, and freezes the rows. confirmAddAnn does not return the new block's id, so it
-    // is the one block that was not there before.
+    // source tab, its file label and its log section, and freezes the rows.
     private fun addSharedLogNoteRoute(hostId: String, source: LogTab, lineIds: List<Int>, caption: String): Map<String, Any?> {
         if (source.isCaptureLauncher) return mapOf("error" to "no such tab: ${source.id}")
         // As in the app, only a member tab writes into a shared note.
@@ -2274,10 +2277,8 @@ internal class IndagiumToolOperations(
         }
         val ids = lineIds.distinct().sorted().filter { it in source.rmap }
         if (ids.isEmpty()) return mapOf("error" to "none of lineIds exist in tab ${source.id}")
-        val before = appState.noteTab(hostId)?.annotations?.blocks?.mapTo(HashSet()) { it.id }.orEmpty()
         val label = appState.displaySourceLabel(source.sourcePath, source.filename, appState.noteTab(hostId)?.filename)
-        appState.confirmAddAnn(hostId, source.id, ids, caption, label)
-        val id = appState.noteTab(hostId)?.annotations?.blocks?.lastOrNull { it.id !in before }?.id
+        val id = appState.addCapturedLogRef(hostId, source, ids, caption, label)
             ?: return mapOf("error" to noteNotCreatedMessage(hostId, "log note"))
         return mapOf("ok" to true, "tabId" to hostId, "blockId" to id, "sourceTabId" to source.id)
     }

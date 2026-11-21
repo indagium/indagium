@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
@@ -99,7 +100,7 @@ class LogSplitterTest {
             engine = LogFormatEngine.CSV,
             fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
         )
-        val source = "time,message\n1,\"first line\nsecond line\"\n2,plain\n3,last\n"
+        val source = "\ntime,message\n1,\"first line\nsecond line\"\n2,plain\n3,last\n"
         val directory = createTempDirectory("openlog-profile-csv-split").toFile()
         val outputs = planSplitOutputs("sample.csv", directory, "part", 3)
 
@@ -108,6 +109,82 @@ class LogSplitterTest {
         assertTrue(outputs.drop(1).all { it.readLines().first() == "time,message" })
         val entries = outputs.flatMap { file -> parseProfileLines(file.readLines(), profile).entries }
         assertEquals(listOf("first line\nsecond line", "plain", "last"), entries.map { it.msg })
+    }
+
+    @Test
+    fun largeMinifiedJsonArraySplitsAtCompleteEvents() {
+        val profile = LogFormatProfile(id = "minified-json", name = "Minified JSON", engine = LogFormatEngine.JSON_LINES)
+        val records = List(1100) { """{"message":"event-$it ${"x".repeat(1024)}","nested":[1,{"ok":true}]}""" }
+        val bytes = records.joinToString(",", "[", "]").toByteArray()
+        val directory = createTempDirectory("openlog-minified-split").toFile()
+        try {
+            val outputs = planSplitOutputs("events.json", directory, "part", 3)
+            splitProfileRecordsToFiles(bytes.inputStream(), outputs, bytes.size.toLong(), profile)
+
+            val actual = outputs.map { file -> file.inputStream().use { parseLogContent(it, profile = profile).entries } }
+            assertTrue(actual.all { it.isNotEmpty() })
+            assertEquals(records, actual.flatten().map { it.rawRecord })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun continuationProfilesSplitWithoutOrphaningTheirStackTraces() {
+        val syslog = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "syslog-rfc3164" }
+        val regex = LogFormatProfile(
+            id = "regex-continuation",
+            name = "Regex with continuations",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "^(\\d+): (.*)$",
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "2"),
+            joinUnmatchedLines = true,
+        )
+        val directory = createTempDirectory("openlog-continuation-split").toFile()
+        try {
+            for ((profile, header) in listOf(syslog to "<34>Oct 11 22:14:15 host app: ", regex to "1: ")) {
+                val source = (1..10).joinToString("") { "$header$it\n  stack trace line $it\n" }
+                val bytes = source.toByteArray()
+                val outputs = planSplitOutputs("${profile.id}.log", directory, "part", 2)
+                splitProfileRecordsToFiles(bytes.inputStream(), outputs, bytes.size.toLong(), profile)
+
+                assertTrue(outputs.all { it.length() > 0 })
+                assertEquals(source, outputs.joinToString("") { it.readText() })
+                val actual = outputs.flatMap { parseProfileLines(it.readLines(), profile).entries }
+                assertEquals(parseProfileLines(source.lines(), profile).entries.map { it.rawRecord }, actual.map { it.rawRecord })
+                assertEquals(10, actual.size)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun laterHeaderlessCsvAndRegexPartsRetainUtf16Encoding() {
+        val csv = LogFormatProfile(id = "utf16-csv", name = "UTF-16 CSV", engine = LogFormatEngine.CSV, hasHeader = false)
+        val regex = LogFormatProfile(
+            id = "utf16-regex",
+            name = "UTF-16 Regex",
+            engine = LogFormatEngine.REGEX,
+            regexPattern = "^漢(.*)$",
+            multilineStartPattern = "^漢",
+        )
+        val record = "漢".repeat(5000)
+        val directory = createTempDirectory("openlog-profile-utf16-split").toFile()
+        try {
+            for (profile in listOf(csv, regex)) {
+                val bytes = "\uFEFF$record\n$record\n".toByteArray(Charsets.UTF_16LE)
+                val outputs = planSplitOutputs("${profile.id}.log", directory, "part", 2)
+                splitProfileRecordsToFiles(bytes.inputStream(), outputs, bytes.size.toLong(), profile)
+
+                val actual = outputs.map { file ->
+                    file.inputStream().use { parseLogContent(it, profile = profile).entries.map { entry -> entry.rawRecord } }
+                }
+                assertEquals(listOf(listOf(record), listOf(record)), actual, profile.name)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test

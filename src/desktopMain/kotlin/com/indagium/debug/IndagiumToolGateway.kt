@@ -29,6 +29,7 @@ internal class IndagiumToolGateway(
     private val extraConfirmationRequired: Set<String> = emptySet(),
     private val confirmationDescriptions: Map<String, String> = emptyMap(),
     private val externalServiceCall: (name: String, arguments: Map<String, Any?>) -> Boolean = ::sendsToExternalService,
+    private val sharedNoteMembership: (hostId: String, tabId: String) -> Boolean = { _, _ -> false },
 ) {
     init {
         require(catalog.map { it.name }.distinct().size == catalog.size) { "tool names must be unique" }
@@ -37,6 +38,8 @@ internal class IndagiumToolGateway(
     }
 
     val tools: List<IndagiumToolDescriptor> get() = catalog
+
+    fun isSharedNoteMember(hostId: String, tabId: String): Boolean = sharedNoteMembership(hostId, tabId)
 
     /**
      * Synchronous entry point for callers that cannot suspend. A tool with a suspending handler is run to

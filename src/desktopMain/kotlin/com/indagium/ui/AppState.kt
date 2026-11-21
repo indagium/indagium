@@ -219,9 +219,11 @@ import com.indagium.utils.suggestedSplitPartCount
 import com.indagium.utils.tagMatchesPrefix
 import com.indagium.utils.truncateAtSeparator
 import com.indagium.utils.unrollLogTimeline
+import com.indagium.utils.usesRecordAwareSplit
 import com.indagium.utils.validateLogFormatProfile
 import com.indagium.utils.viewDefiningKey
 import com.indagium.utils.visibleEntries
+import com.indagium.utils.writeFileAtomically
 import com.indagium.video.FailedVideoPlayerController
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.defaultVideoPlayerController
@@ -241,7 +243,9 @@ import java.awt.datatransfer.StringSelection
 import java.awt.datatransfer.Transferable
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
+import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -3396,6 +3400,7 @@ class AppState(
     // Keyed by absolute path rather than tab: two tabs can intentionally write to the same pinned
     // note, and they need the same ordering guarantee as rapid edits within one tab.
     private val noteExportWriters = ConcurrentHashMap<String, NoteExportWriter>()
+    private val retiringNoteExports = ConcurrentHashMap<String, PendingExportTarget>()
 
     // Debounce jobs backing in-view search recompute (openSearch/setSearchQuery/... below) — keyed
     // by tabId, same cancel-and-relaunch shape as TailCoordinator's tailAnalysisJobs and AppState's
@@ -5806,7 +5811,7 @@ class AppState(
                 // adb preflight is in flight. Treat that as lifecycle cancellation, not a capture
                 // failure shown to the user.
                 throw cancelled
-            } catch (failure: java.io.IOException) {
+            } catch (failure: IOException) {
                 captureService.reportError(failure.message ?: "Capture could not start")
             } catch (failure: IllegalArgumentException) {
                 captureService.reportError(failure.message ?: "Capture could not start")
@@ -11009,10 +11014,17 @@ class AppState(
      * prevents a saved frame from seeking a different video that happened to replace the tab's
      * original attachment after the note was created.
      */
-    fun navigateToVideoFrame(tabId: String, frame: VideoFrameReference): Boolean {
-        val attachment = tab(tabId)?.attachedVideo ?: return false
-        if (attachment.source != frame.source || frame.positionMs < 0L) return false
-        val controller = videoController(tabId) ?: return false
+    fun navigateToVideoFrame(tabId: String, frame: VideoFrameReference, fromSharedNote: Boolean = false): Boolean {
+        if (frame.positionMs < 0L) return false
+        val target = tab(tabId)?.takeIf { it.attachedVideo?.source == frame.source }
+            ?: (if (fromSharedNote) tabs.firstOrNull { it.attachedVideo?.source == frame.source } else null)
+            ?: return false
+        val controller = videoController(target.id) ?: return false
+        if (tab(target.id)?.attachedVideo?.source != frame.source) return false
+        if (target.id != tabId) {
+            if (compareMode && target.id != activeTabId) compareTabId = target.id
+            else activateTab(target.id)
+        }
         videoPanelVisible = true
         controller.seek(frame.positionMs)
         return true
@@ -12159,7 +12171,10 @@ class AppState(
         annotationManager.requestAddAnn(sourceTabId, capture.rows.map { it.id }, capture)
 
     fun confirmAddAnn(targetTabId: String, sourceTabId: String, logIds: List<Int>, caption: String, sourceFilename: String?) =
-        annotationManager.confirmAddAnn(targetTabId, sourceTabId, logIds, caption, sourceFilename)
+        tab(sourceTabId)?.let { addCapturedLogRef(targetTabId, it, logIds, caption, sourceFilename) }
+
+    internal fun addCapturedLogRef(targetTabId: String, sourceTab: LogTab, logIds: List<Int>, caption: String, sourceFilename: String?) =
+        annotationManager.addCapturedLogRef(targetTabId, sourceTab, logIds, caption, sourceFilename)
 
     fun confirmAddAnn(request: AddAnnRequest, caption: String, options: AnnBlock.LogRefPresentationOptions) =
         annotationManager.confirmAddAnn(request, caption, options)
@@ -15215,7 +15230,12 @@ class AppState(
                 )
             }
             val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
-            val written = writeSplitParts(stream, outputs, source.sizeBytes, kind, sample, selected.profile, selected.parseAsDlt)
+            val written = runCatching {
+                writeSplitParts(stream, outputs, source.sizeBytes, kind, sample, selected.profile, selected.parseAsDlt)
+            }.getOrElse { failure ->
+                rethrowFileLoadCancellation(failure)
+                return splitFailed(source, "Could not split log", failure.message ?: "The split parts could not be written.")
+            }
             written to selected.profile
         }
         val openedIds = mutableListOf<String>()
@@ -15246,8 +15266,7 @@ class AppState(
             splitDltStreamToFiles(stream, outputs, sourceSizeBytes, kind)
         parseAsDlt && kind == LogContentKind.DLT_VIEWER_CSV ->
             splitStreamToFiles(stream, outputs, sourceSizeBytes, partPreamble = leadingLineBytes(sample))
-        profile.engine == LogFormatEngine.CSV || profile.engine == LogFormatEngine.JSON_LINES ||
-            profile.engine == LogFormatEngine.REGEX && profile.multilineStartPattern.isNotBlank() ->
+        profile.usesRecordAwareSplit() ->
             splitProfileRecordsToFiles(stream, outputs, sourceSizeBytes, profile)
         else -> splitStreamToFiles(stream, outputs, sourceSizeBytes)
     }
@@ -15970,7 +15989,7 @@ class AppState(
     private fun applyOpenedNote(tabId: String, file: File, autoLoad: Boolean, update: (LogTab) -> LogTab) {
         upTab(tabId) { tab ->
             // The tab or export ownership can change while the note is being read off the UI thread.
-            if (autoLoad && (!canAutoLoadOwnNotes(tab) || isSharedNoteExport(file))) tab else update(tab)
+            if (autoLoad && (!canAutoLoadOwnNotes(tab) || isAutoLoadExcludedNote(file))) tab else update(tab)
         }
     }
 
@@ -16057,7 +16076,7 @@ class AppState(
         if (!canAutoLoadOwnNotes(current)) return
         val match = noteFileCandidateFiles(current.filename, sourcePath)
             .filter { it.exists() }
-            .filterNot(::isSharedNoteExport)
+            .filterNot(::isAutoLoadExcludedNote)
             .filter { readSourceFingerprint(it) == SourceFingerprint.Recorded(sourcePath) }
             .maxByOrNull { it.lastModified() }
             ?: return
@@ -16069,8 +16088,63 @@ class AppState(
 
     // Sharing transfers the export pin immediately. Its existing sidecar may still identify the
     // original log until the shared note is edited, so the current owner takes precedence.
-    private fun isSharedNoteExport(file: File): Boolean =
-        sharedNoteHosts.any { file.name.equals(it.noteTargetName, ignoreCase = true) } && sameFolder(file.parentFile, activeNotesDir())
+    private fun isAutoLoadExcludedNote(file: File): Boolean =
+        retiringNoteExports.containsKey(file.absolutePath) ||
+            sharedNoteHosts.any { file.name.equals(it.noteTargetName, ignoreCase = true) } && sameFolder(file.parentFile, activeNotesDir())
+
+    /** Give an auto-exported private note a name the recipient's ordinary open path can find. */
+    internal fun stoppedSharedNotePin(host: LogTab, recipient: LogTab): String? {
+        val oldPin = host.noteTargetName
+        if (!shouldExportStoppedSharedNote(host, recipient)) {
+            return oldPin?.takeIf { host.annotations.blocks.isNotEmpty() } ?: recipient.noteTargetName
+        }
+        val heldByAnotherNote = (tabs.asSequence() + sharedNoteHosts.asSequence()).any {
+            it.id != host.id && it.id != recipient.id && oldPin != null && oldPin.equals(it.noteTargetName, ignoreCase = true)
+        }
+        return oldPin?.takeIf { !heldByAnotherNote && it in noteFileCandidateNames(recipient.filename, recipient.sourcePath) }
+            ?: freeNoteTargetName(analysisNoteMarkdownName(recipient.filename, recipient.sourcePath))
+    }
+
+    private fun shouldExportStoppedSharedNote(host: LogTab, recipient: LogTab): Boolean =
+        autoExportNotes && settings.autoExportNotes && recipient.sourcePath != null && privateNoteHasContent(host)
+
+    /** The caller holds stateLock so an edit after the handoff always reserves a newer revision. */
+    internal fun persistStoppedSharedNote(host: LogTab, recipient: LogTab) {
+        if (!shouldExportStoppedSharedNote(host, recipient)) return
+        val name = recipient.noteTargetName ?: return
+        val directory = activeNotesDir()
+        val target = reserveExportTarget(File(directory, name))
+        val reserved = reservedNoteTargetNames(exceptNoteId = recipient.id)
+        val retiring = host.noteTargetName
+            ?.takeUnless { it.equals(name, ignoreCase = true) || it.lowercase() in reserved }
+            ?.let { oldName -> reserveExportTarget(File(directory, oldName)).also { retiringNoteExports[it.mdFile.absolutePath] = it } }
+        launchPinned(pinRows(recipient)) {
+            try {
+                target.writer.mutex.withLock {
+                    if (target.revision == target.writer.revision.get()) writeNoteExport(recipient, target.mdFile)
+                }
+                if (retiring != null) retireNoteSourceAssociation(retiring)
+                // A recipient reopened while the export was queued may have missed the new file.
+                tabs.filter { it.sourcePath == recipient.sourcePath && canAutoLoadOwnNotes(it) }
+                    .forEach { autoLoadOwnNotesIfAny(it.id) }
+            } catch (failure: java.io.IOException) {
+                showOpenError("Could not save the transferred note", target.mdFile.absolutePath, failure.message.orEmpty())
+            } finally {
+                if (retiring != null) retiringNoteExports.remove(retiring.mdFile.absolutePath, retiring)
+            }
+        }
+    }
+
+    private suspend fun retireNoteSourceAssociation(target: PendingExportTarget) = target.writer.mutex.withLock {
+        if (target.revision != target.writer.revision.get()) return@withLock
+        val sidecar = File(target.mdFile.parentFile, "${target.mdFile.nameWithoutExtension}.ann")
+        if (sidecar.isFile) {
+            val original = sidecar.readText()
+            val detached = original.withoutNoteSourcePath()
+            if (original != detached) writeFileAtomically(sidecar) { it.write(detached) }
+        }
+        Files.deleteIfExists(legacySourceFingerprintFile(target.mdFile).toPath())
+    }
 
     // "New Analysis" header action (AnnotationPanel). Auto-load above removed the only route that
     // used to exist for starting a fresh analysis: it pins a tab's own notes the instant a log is
@@ -17037,19 +17111,20 @@ class AppState(
                 // write lane. Only the latest snapshot may be written; otherwise an old annotation
                 // state could finish after and clobber the newer one.
                 if (revision != writer.revision.get()) return@withLock
-                runCatching {
-                    targetDir.mkdirs()
-                    mdFile.writeText(buildMd(tab, settings))
-                    // Sidecar stores full block state for restoration, plus the sourcePath
-                    // fingerprint (5th token field) used to disambiguate same-named notes.
-                    File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                        .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter))
-                    legacySourceFingerprintFile(mdFile).delete()
-                    writeAnnotationFrameImages(tab, mdFile)
-                    rememberRecentNote(mdFile)
-                }
+                runCatching { writeNoteExport(tab, mdFile) }
             }
         }
+    }
+
+    private fun writeNoteExport(tab: LogTab, mdFile: File) {
+        val directory = mdFile.parentFile
+        directory.mkdirs()
+        mdFile.writeText(buildMd(tab, settings))
+        File(directory, "${mdFile.nameWithoutExtension}.ann")
+            .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter))
+        legacySourceFingerprintFile(mdFile).delete()
+        writeAnnotationFrameImages(tab, mdFile)
+        rememberRecentNote(mdFile)
     }
 
     // Fingerprint recording which sourcePath a saved note "<name>_analysis.md" actually belongs

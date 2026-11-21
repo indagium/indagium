@@ -28,7 +28,7 @@ internal fun BoundAnnotationPanel(
     copyFeedbackState: CopyFeedbackState? = null,
 ) {
     // The note the panel shows and edits: the tab's own, or the shared note it views (every edit below goes to `noteId`). What
-    // belongs to the log the user is looking at (the relink notice, diagram lines, video frames) stays on `tab`.
+    // belongs to the log the user is looking at (the relink notice, diagram lines) stays on `tab`.
     val note = state.shownNoteOf(tab)
     val noteId = note.id
     val ownNote = noteId == tab.id
@@ -63,7 +63,7 @@ internal fun BoundAnnotationPanel(
         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
         // Every reference goes through go-to-rows, which also switches the source tab's section (a private note's references name no source tab).
         onNavigateLogRef = { state.launchGoToLogRefRows(it, tab.id) },
-        onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
+        onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it, fromSharedNote = !ownNote) },
         onUpdateLogRefPresentation = { blockId, caption, presentation ->
             state.updateLogRefPresentation(noteId, blockId, caption, presentation)
         },

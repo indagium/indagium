@@ -2,6 +2,7 @@ package com.indagium.ai
 
 import com.indagium.debug.IndagiumToolActionPolicy
 import com.indagium.debug.IndagiumToolGateway
+import com.indagium.ui.SHARED_NOTE_ID_PREFIX
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -69,8 +70,13 @@ internal class AiToolExecutionCoordinator(
         // Only external MCP clients still gate device tools behind a per-session approval — see
         // ControlServer.executeExternalDeviceTool / AppState.executeExternalDeviceAiAction, which
         // this coordinator is never used for.
-        val prepared = prepareCallArguments(run, call, arguments)
-        when (awaitConfirmationIfRequired(run, call, arguments)) {
+        val hostId = (arguments["tabId"] as? String)?.takeIf { call.name in NOTE_CONTENT_TOOL_NAMES && it.startsWith(SHARED_NOTE_ID_PREFIX) }
+        if (hostId != null && !toolGateway.isSharedNoteMember(hostId, run.tabId)) {
+            val result = AiToolExecutionResult.error("Shared note $hostId is unavailable to the tab for this run.")
+            return completeCountedResult(run, call, result)
+        }
+        val prepared = prepareCallArguments(run, call, arguments, hostId)
+        when (awaitConfirmationIfRequired(run, call, prepared.arguments)) {
             ConfirmationOutcome.ACCEPTED -> Unit
             ConfirmationOutcome.DECLINED ->
                 return completeCountedResult(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
@@ -81,6 +87,9 @@ internal class AiToolExecutionCoordinator(
         }
 
         val result = try {
+            if (hostId != null && !toolGateway.isSharedNoteMember(hostId, run.tabId)) {
+                return completeCountedResult(run, call, AiToolExecutionResult.error("Shared note $hostId is unavailable to the tab for this run."))
+            }
             run.emit(AiRunEvent.ToolExecutionStarted(call))
             val rawResult = toolGateway.executeSuspending(call.name, prepared.arguments)
             AiToolExecutionResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
@@ -95,7 +104,7 @@ internal class AiToolExecutionCoordinator(
 
     /** Resolves the arguments actually sent to the gateway: `tabId` pinning for device/tab-scoped
      *  tools, and `deviceSerial` auto-fill/invalidation for the run's currently bound device. */
-    private fun prepareCallArguments(run: AiRun, call: LlmToolCall, arguments: Map<String, Any?>): PreparedCall {
+    private fun prepareCallArguments(run: AiRun, call: LlmToolCall, arguments: Map<String, Any?>, hostId: String?): PreparedCall {
         val deviceScoped = call.name in DEVICE_CAPTURE_TOOL_NAMES
         val requestedDeviceSerial = (arguments["deviceSerial"] as? String)?.trim()?.takeIf(String::isNotBlank)
         if (
@@ -108,6 +117,7 @@ internal class AiToolExecutionCoordinator(
         }
         val pinnedArguments = when {
             deviceScoped -> arguments + ("tabId" to run.deviceCaptureTabId)
+            call.name in NOTE_CONTENT_TOOL_NAMES -> arguments + ("tabId" to (hostId ?: run.tabId))
             call.name in TAB_SCOPED_TOOL_NAMES || (call.name == "resolve_log_source" && "tabId" in arguments) ->
                 arguments + ("tabId" to run.tabId)
             else -> arguments
@@ -254,19 +264,21 @@ internal class AiToolExecutionCoordinator(
     private companion object {
         const val DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000
         const val CONFIRMATION_TIMED_OUT_MESSAGE = "No decision was made in time, so this action was denied; no changes were made."
+        val NOTE_CONTENT_TOOL_NAMES = setOf(
+            "get_issue_description",
+            "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
+            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "update_note_caption", "move_note_block",
+            "delete_note_block", "clear_all_notes", "export_analysis", "save_annotations", "load_annotations", "set_case_metadata",
+        )
         val TAB_SCOPED_TOOL_NAMES = setOf(
             "build_sequence_diagram",
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
-            "get_tags", "get_packages", "get_log_composition", "get_crash_sites", "get_issue_description",
-            "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
-            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "update_note_caption", "move_note_block",
-            "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations",
-            "load_annotations", "apply_filter_preset", "start_tailing", "stop_tailing",
+            "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
+            "export_filtered_log", "apply_filter_preset", "start_tailing", "stop_tailing",
             // search_similar_cases/get_case are deliberately NOT pinned — search_similar_cases is
             // tab-independent (it searches the whole notes corpus) and get_case takes a case `id`,
             // not a tabId, so pinning either would silently inject an unused/wrong argument.
-            "set_case_metadata",
         )
 
         // Tab-pinned for in-app runs: the coordinator always injects the run's bound capture tab

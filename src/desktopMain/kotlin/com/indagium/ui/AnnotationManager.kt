@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import com.indagium.model.AddAnnRequest
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
+import com.indagium.model.LogTab
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
 import com.indagium.utils.asLogEntryView
@@ -13,6 +14,7 @@ import com.indagium.utils.captureAnnotationLogRef
 import com.indagium.utils.captureFilteredAnnotationLogRef
 import com.indagium.utils.computeItems
 import com.indagium.utils.downscaleAndEncodeJpeg
+import com.indagium.utils.newId
 import com.indagium.utils.withSelectedRecordSnapshot
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -65,15 +67,21 @@ internal class AnnotationManager(private val appState: AppState) {
     }
 
     fun confirmAddAnn(request: AddAnnRequest, caption: String, options: AnnBlock.LogRefPresentationOptions) {
+        appendLogRef(request, caption, options)
+        addAnnRequest = null
+    }
+
+    private fun appendLogRef(request: AddAnnRequest, caption: String, options: AnnBlock.LogRefPresentationOptions): String? {
         val crossFile = request.sourceTabId != request.targetTabId
         val capture = request.capture ?: appState.tab(request.sourceTabId)?.let {
             captureFilteredAnnotationLogRef(it, request.logIds, appState.settings)
         }
         val rows = capture?.rows.orEmpty()
         val ids = request.logIds.distinct().sorted()
+        val id = newId("r")
         appState.upAnn(request.targetTabId) { t ->
             val block = AnnBlock.LogRef(
-                id = "r${System.nanoTime()}",
+                id = id,
                 logIds = ids,
                 caption = caption,
                 sourceTabId = if (crossFile) request.sourceTabId else null,
@@ -87,20 +95,19 @@ internal class AnnotationManager(private val appState: AppState) {
             ).withSelectedRecordSnapshot()
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
-        addAnnRequest = null
+        return id.takeIf { appState.noteTab(request.targetTabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
     }
 
-    fun confirmAddAnn(
+    fun addCapturedLogRef(
         targetTabId: String,
-        sourceTabId: String,
+        sourceTab: LogTab,
         logIds: List<Int>,
         caption: String,
         sourceFilename: String?
-    ) {
-        val sourceTab = appState.tab(sourceTabId)
-        val capture = sourceTab?.let { captureFilteredAnnotationLogRef(it, logIds, appState.settings) }
-        val req = AddAnnRequest(targetTabId, sourceTabId, logIds, sourceFilename, capture, sourceTab?.selectedLogSectionId)
-        confirmAddAnn(req, caption, capture?.presentation?.options ?: AnnBlock.LogRefPresentationOptions())
+    ): String? {
+        val capture = captureFilteredAnnotationLogRef(sourceTab, logIds, appState.settings)
+        val req = AddAnnRequest(targetTabId, sourceTab.id, logIds, sourceFilename, capture, sourceTab.selectedLogSectionId)
+        return appendLogRef(req, caption, capture.presentation.options)
     }
 
     fun addNoteBlock(tabId: String, afterId: String? = null) {
