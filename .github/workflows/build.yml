@@ -78,7 +78,8 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
-          java-version: '21.0.9+10.0.LTS'
+          # Adoptium's API encodes the fourth version component of 21.0.13.1+2 in the build metadata.
+          java-version: '21.0.13+100000002.0.LTS'
           distribution: 'temurin'
 
       - name: Restore Gradle cache
@@ -191,7 +192,7 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
-          java-version: '21.0.9+10.0.LTS'
+          java-version: '21.0.13+100000002.0.LTS'
           distribution: 'temurin'
 
       # Restore-only: this workflow triggers on tag pushes, and GitHub scopes a *saved* cache to

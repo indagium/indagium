@@ -38,7 +38,7 @@ Paths in the application table are relative to `licenses/` in the repository and
 | AppImage type 2 runtime | As embedded by the pinned appimagetool | Linux AppImage packages only | `MIT` | `application/texts/appimage-type2-runtime-license.txt` |
 | `whisper.cpp` | 1.9.5 | Statically linked into the generated native voice bridge | `MIT` | `whisper.cpp-LICENSE.txt` (upstream `LICENSE`, generated at build time) |
 | OpenAI Whisper model weights distributed through `ggerganov/whisper.cpp` | Pinned Hugging Face model repository | Downloaded only after an explicit user action | `MIT` | Model repository licence |
-| Temurin/OpenJDK bundled runtime | 21.0.9+10-LTS in new official release CI | Supplied with native packages; complete source and build recipes pinned in the application source lock | `GPL-2.0-only WITH Classpath-exception-2.0` | Runtime `legal/` directory and packaged runtime manifest |
+| Temurin/OpenJDK bundled runtime | 21.0.13.1+2-LTS | Supplied with native packages; complete source and build recipes pinned in the application source lock | `GPL-2.0-only WITH Classpath-exception-2.0` | Runtime `legal/` directory and packaged runtime manifest |
 
 The FFmpeg native libraries use the shared LGPL 3.0-or-later build of FFmpeg 8.0.1 (`org.bytedeco:ffmpeg` 8.0.1-1.5.13). The inspected four platform configurations include `--enable-version3`, omit `--enable-gpl` and `--enable-nonfree`, and do not link x264 or x265. FFmpeg is distributed as replaceable classifier JARs. LGPL-covered modifications and reverse engineering to debug those modifications remain permitted under the applicable licence terms. See [the source instructions](licenses/third-party/SOURCE-BUNDLE.md), which describe the replacement layout and source archive preparation task.
 

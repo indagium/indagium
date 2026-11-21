@@ -97,24 +97,25 @@ class DistributionLicensingTest(unittest.TestCase):
                 ensure_sources([item], cache, False)
 
     def test_runtime_notices_and_vendor_mapping_are_checked(self):
+        pin = sources.validate_lock()["runtime"]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             image = self.fake_package(root, "eula")
             runtime = image / "runtime"
             (runtime / "lib").mkdir(parents=True)
             (runtime / "legal/java.base").mkdir(parents=True)
-            (runtime / "release").write_text('JAVA_VERSION="21.0.9"\nMODULES="java.base"\n')
+            (runtime / "release").write_text(f'JAVA_VERSION="{pin["javaVersion"]}"\nMODULES="java.base"\n')
             (runtime / "lib/modules").write_bytes(b"synthetic module image")
             notice = runtime / "legal/java.base/LICENSE"
             notice.write_text("synthetic upstream notice")
             jdk = root / "jdk"; jdk.mkdir()
-            (jdk / "release").write_text('IMPLEMENTOR="Eclipse Adoptium"\nJAVA_RUNTIME_VERSION="21.0.9+10-LTS"\n')
+            (jdk / "release").write_text(f'IMPLEMENTOR="{pin["vendor"]}"\nJAVA_RUNTIME_VERSION="{pin["runtimeVersion"]}"\n')
             sources.record_runtime(image, jdk, "macos-arm64", image / "legal/runtime-license-manifest.json")
             legal.validate_package(image, "eula")
             notice.write_text("changed")
             with self.assertRaisesRegex(BundleError, "notices differ"):
                 legal.validate_package(image, "eula")
-            (jdk / "release").write_text('IMPLEMENTOR="Other"\nJAVA_RUNTIME_VERSION="21.0.9+10-LTS"\n')
+            (jdk / "release").write_text(f'IMPLEMENTOR="Other"\nJAVA_RUNTIME_VERSION="{pin["runtimeVersion"]}"\n')
             with self.assertRaisesRegex(BundleError, "exact Temurin"):
                 sources.record_runtime(image, jdk, "macos-arm64", image / "legal/runtime-license-manifest.json")
 
