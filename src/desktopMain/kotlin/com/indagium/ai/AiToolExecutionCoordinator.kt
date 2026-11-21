@@ -117,6 +117,8 @@ internal class AiToolExecutionCoordinator(
         }
         val pinnedArguments = when {
             deviceScoped -> arguments + ("tabId" to run.deviceCaptureTabId)
+            // An in-app run is pinned to its own tab: a shared note's log rows come from that tab, whatever sourceTabId the model sent.
+            call.name == "add_log_note" && hostId != null -> arguments + ("tabId" to hostId) + ("sourceTabId" to run.tabId)
             call.name in NOTE_CONTENT_TOOL_NAMES -> arguments + ("tabId" to (hostId ?: run.tabId))
             call.name in TAB_SCOPED_TOOL_NAMES || (call.name == "resolve_log_source" && "tabId" in arguments) ->
                 arguments + ("tabId" to run.tabId)

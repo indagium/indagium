@@ -168,6 +168,30 @@ class SharedNoteToolsTest {
     }
 
     @Test
+    fun anInAppSharedLogNoteTakesItsRowsFromTheRunsOwnTabWhateverSourceTabIdTheModelSent() = runBlocking {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        val coordinator = AiToolExecutionCoordinator(gateway)
+        val run = AiRun(tabId = "a", maxToolCalls = 10)
+
+        // Leaving sourceTabId out works (it would be an error for an external client) ...
+        val omitted = coordinator.executeManaged(run, "add_log_note", mapOf("tabId" to hostId, "lineIds" to listOf(1), "caption" to "omitted"))
+        // ... and another member's tab is replaced by the run's own.
+        val other = coordinator.executeManaged(
+            run, "add_log_note",
+            mapOf("tabId" to hostId, "sourceTabId" to "b", "lineIds" to listOf(1), "caption" to "from the other member"),
+        )
+
+        assertTrue(omitted.content.contains("ok=true"), omitted.content)
+        assertTrue(other.content.contains("ok=true"), other.content)
+        val refs = state.sharedNoteHost(hostId)!!.annotations.blocks.filterIsInstance<AnnBlock.LogRef>().associateBy { it.caption }
+        assertEquals(setOf("omitted", "from the other member"), refs.keys)
+        assertTrue(refs.values.all { it.sourceTabId == "a" }, refs.values.map { it.sourceTabId }.toString())
+        // An external client keeps its explicit, required sourceTabId.
+        val external = gateway.executeSuspending("add_log_note", mapOf("tabId" to hostId, "lineIds" to listOf(1), "caption" to "external")) as Map<*, *>
+        assertTrue(external["error"].toString().contains("sourceTabId"), external.toString())
+    }
+
+    @Test
     fun concurrentSharedLogNotesReturnTheirOwnIdsAndLeaveTheOpenDialogAlone() = runBlocking {
         val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
         state.requestAddAnn("a", listOf(1))
