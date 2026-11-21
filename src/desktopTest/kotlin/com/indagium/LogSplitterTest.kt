@@ -419,4 +419,52 @@ class LogSplitterTest {
             directory.deleteRecursively()
         }
     }
+
+    private val numberedRecords = LogFormatProfile(
+        id = "split-rare-starts",
+        name = "Split rare starts",
+        engine = LogFormatEngine.REGEX,
+        regexPattern = "^(\\d+): (.*)$",
+        multilineStartPattern = "^\\d+: ",
+        fieldMappings = mapOf(LogFieldRole.MESSAGE to "2"),
+    )
+
+    @Test
+    fun aFileWhoseOnlyRecordStartIsItsFirstLineStillSplitsIntoBoundedParts() {
+        val line = "  continuation ${"c".repeat(984)}\n"
+        val source = ("1: only header\n" + line.repeat(10_000)).toByteArray()
+        val directory = createTempDirectory("openlog-split-rare-starts").toFile()
+        try {
+            val parts = 5
+            val outputs = planSplitOutputs("sample.log", directory, "part", parts)
+            splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), numberedRecords)
+
+            val target = (source.size + parts - 1) / parts
+            val sizes = outputs.map { it.length() }
+            assertEquals(source.toList(), outputs.flatMap { it.readBytes().toList() }, "no byte lost or repeated")
+            // Cut a megabyte past the target at the latest, so the file is spread over several parts, not left in the first.
+            assertTrue(sizes.dropLast(1).all { it <= target + (1 shl 20) + line.length }, sizes.toString())
+            assertTrue(sizes.count { it > 0 } >= 3, "the parts: $sizes")
+            assertTrue(outputs.drop(1).filter { it.length() > 0 }.all { it.readText().startsWith("  continuation") }, "cut at line boundaries")
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recordsThatStartOftenStillCutOnlyBeforeAHeader() {
+        val source = (1..400).joinToString("") { "$it: record $it\n  detail a\n  detail b\n  detail c\n" }.toByteArray()
+        val directory = createTempDirectory("openlog-split-frequent-starts").toFile()
+        try {
+            val outputs = planSplitOutputs("sample.log", directory, "part", 4)
+            splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), numberedRecords)
+
+            assertEquals(source.toList(), outputs.flatMap { it.readBytes().toList() })
+            assertTrue(outputs.all { it.length() > 0 })
+            assertTrue(outputs.all { it.readText().matches(Regex("(?s)^\\d+: record.*")) }, "every part starts at a record header")
+            assertEquals(400, outputs.sumOf { file -> parseProfileLines(file.readLines(), numberedRecords).entries.size })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
 }

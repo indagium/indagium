@@ -370,8 +370,13 @@ private class ProfileRecordSplitWriter(
         writeBytes(record)
     }
 
+    /**
+     * Writes one physical line. A part is cut before a line that starts a record once it has reached its target; when no record
+     * starts for a long time (a profile that seldom matches, or one record of a million lines) it is cut at a line boundary anyway,
+     * [MAX_PROFILE_SPLIT_RECORD_BYTES] past the target, so the whole file never lands in one part. The last part takes the rest.
+     */
     fun writeLine(line: ByteArray, startsRecord: Boolean) {
-        if (startsRecord && written >= targetBytes) rotate()
+        if (written >= targetBytes && (startsRecord || written >= targetBytes + MAX_PROFILE_SPLIT_RECORD_BYTES)) rotate()
         writeBytes(line)
     }
 
