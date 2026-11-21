@@ -208,4 +208,37 @@ class LogRelinkStateTest {
         assertTrue(state.tab("logless")!!.logData.isEmpty())
         assertEquals(listOf(AnnBlock.Note("n1", "unsaved observation")), state.tab("logless")!!.annotations.blocks)
     }
+
+    @Test
+    fun locateLogForTabMovesTheNotePinToTheNewTabSoItsNextEditKeepsTheSameFile() {
+        val notesDir = createTempDirectory("openlog-relink-pin-notes").toFile()
+        val logDir = createTempDirectory("openlog-relink-pin-logs").toFile()
+        val original = writeLogFile(logDir, "original.log", threadtimeLines("DeviceManager", 20))
+        val state = newState(notesDir)
+        val pin = "original_analysis.md"
+        val loglessTab = mkTab("logless", "Some case", emptyList()).copy(
+            logData = emptyList(),
+            annotations = Annotations(
+                blocks = listOf(AnnBlock.Note("n1", "unsaved observation")),
+                fingerprint = computeLogFingerprint(parseLogcat(original)),
+            ),
+            noteTargetName = pin,
+        )
+        state.tabs = listOf(loglessTab)
+
+        state.locateLogForTab("logless", writeLogFile(logDir, "renamed.log", threadtimeLines("DeviceManager", 20)))
+
+        waitUntil { state.tabs.size == 2 && state.tabs.any { it.id != "logless" && it.annotations.blocks.isNotEmpty() } }
+        val newTabId = state.tabs.first { it.id != "logless" }.id
+        // The pin moved: the new tab owns the note file, the log-less tab keeps its notes in memory and no pin.
+        assertEquals(pin, state.tab(newTabId)!!.noteTargetName)
+        assertNull(state.tab("logless")!!.noteTargetName)
+        assertEquals(listOf(AnnBlock.Note("n1", "unsaved observation")), state.tab("logless")!!.annotations.blocks)
+
+        // An edit in the new tab keeps writing the original note file, not a "_2" copy.
+        assertTrue(state.addNoteBlock(newTabId, "x") != null)
+        waitUntil { File(notesDir, pin).exists() }
+        assertEquals(pin, state.tab(newTabId)!!.noteTargetName)
+        assertTrue(notesDir.listFiles().orEmpty().none { it.name.contains("_2") }, notesDir.list().orEmpty().toList().toString())
+    }
 }

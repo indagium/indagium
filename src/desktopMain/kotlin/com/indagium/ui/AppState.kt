@@ -16789,8 +16789,14 @@ class AppState(
         when (attach) {
             is LogRelinkAttach.CaseLibraryNote -> openNoteFile(newTabId, attach.noteFile)
             is LogRelinkAttach.TabAnnotations -> {
-                val source = tab(attach.sourceTabId) ?: return
-                upTab(newTabId) { it.copy(annotations = source.annotations, noteTargetName = source.noteTargetName) }
+                // The note and its file pin move to the new tab, in one step: both tabs holding one pin would make the first edit
+                // in the new tab re-pin it to another file name. The log-less tab keeps its notes in memory but no pin, so a later edit
+                // there takes the normal unpinned path (an "Existing notes found" prompt when the file exists). upTab, not upAnn: no export.
+                synchronized(stateLock) {
+                    val source = tab(attach.sourceTabId) ?: return
+                    upTab(newTabId) { it.copy(annotations = source.annotations, noteTargetName = source.noteTargetName) }
+                    upTab(source.id) { it.copy(noteTargetName = null) }
+                }
             }
         }
     }
