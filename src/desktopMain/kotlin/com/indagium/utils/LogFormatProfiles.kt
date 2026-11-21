@@ -779,9 +779,15 @@ internal class JsonRecordMachine(
         if (indent < 0 || indent > rootIndent) return false
         val first = line[indent]
         if (first != '{' && first != '[') return false
-        // Nested children normally indent beyond the root. If the held prefix is already invalid,
-        // this same-level root is the next recoverable event after a truncated/malformed object.
-        return runCatching { Json.parseToJsonElement(current.toString()) }.isFailure
+        // A same-level opener can be a value after a property colon or inside an array.
+        // Recover only when the opener cannot continue the held record at this position.
+        val previous = current.lastOrNull { !it.isWhitespace() }
+        val expectsValue = when (stack.lastOrNull()) {
+            '{' -> previous == ':'
+            '[' -> previous == '[' || previous == ','
+            else -> false
+        }
+        return inString || !expectsValue
     }
 
     private fun resetRecord() {

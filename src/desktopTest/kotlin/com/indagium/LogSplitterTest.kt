@@ -233,6 +233,8 @@ class LogSplitterTest {
         )
         val source = """
             {
+              "context":
+            {"nested":true},
               "message": "before"
             } [{"message":"array-one"}] [{"message":"array-two"}] {
               "message": "after"

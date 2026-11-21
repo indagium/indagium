@@ -482,6 +482,7 @@ internal class IndagiumToolOperations(
         operationHandlers,
         rowDependentSuspendHandlers + testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
         sharedNoteMembership = { hostId, tabId -> tabId in appState.sharedNoteHost(hostId)?.sharedNote?.memberTabIds.orEmpty() },
+        sharedNoteWriteForTab = sharedNoteOperations::executeWriteForTab,
         externalServiceCall = { name, args ->
             sendsToExternalService(name, args) || if (name == "draft_test_steps" || name == "rewrite_test_recording" || name == "improve_test_case") {
                 val profileId = args["profileId"] as? String

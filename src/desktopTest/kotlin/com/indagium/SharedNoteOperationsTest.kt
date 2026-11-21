@@ -1020,6 +1020,43 @@ class SharedNoteOperationsTest {
     // ── Autosave ─────────────────────────────────────────────────────────────────────────────────
 
     @Test
+    fun restoredPrivateAndSharedReferencesReserveIdsOfClosedSources() {
+        val dir = createTempDirectory("shared-ops-restore-source-ids").toFile()
+        val cache = File(dir, "state.cache")
+        try {
+            state(dir).let { state ->
+                try {
+                    state.tabs = listOf(
+                        mkTab("t1", "member.log", listOf(entry(1))).copy(sourcePath = logFile(dir, "member.log").absolutePath),
+                        mkTab("t2", "merged.log", listOf(entry(1))),
+                        mkTab("t3", "archived.log", listOf(entry(1))).copy(sourcePath = File(dir, "logs.zip").absolutePath + "!archived.log"),
+                    )
+                    val host = assertNotNull(state.createSharedNote("Investigation", listOf("t1", "t2")))
+                    state.putBlocks(host, logRef("shared", "t2", 1))
+                    state.putBlocks("t1", logRef("private", "t3", 1))
+                    state.closeTab("t2")
+                    state.closeTab("t3")
+                    assertTrue(state.host(host).sharedNote!!.closedMembers.isEmpty())
+                    state.autosaveNow()
+                } finally {
+                    state.close()
+                }
+            }
+            val restored = AppState(cache, restoreOnCreate = true)
+            try {
+                restored.addTab()
+                assertEquals(listOf("t1", "t4"), restored.tabs.map { it.id })
+                assertEquals("t3", (restored.tab("t1")!!.annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
+                assertEquals("t2", (restored.sharedNoteHosts.single().annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
+            } finally {
+                restored.close()
+            }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun autosaveRoundTripKeepsTheResultOfSeveralOperations() {
         val dir = createTempDirectory("shared-ops-autosave").toFile()
         val state = withTabs(dir)

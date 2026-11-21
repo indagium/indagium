@@ -18537,11 +18537,15 @@ class AppState(
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
         if (!canCompare) compareMode = false
-        // Closed source IDs remain meaningful to restored row references.
-        val savedTabIds = tabs.asSequence().map { it.id } + sharedNoteHosts.asSequence().flatMap { host ->
+        // A saved reference can outlive an archive or merged tab that has no reopenable source.
+        val referenceSourceIds = (tabs.asSequence() + sharedNoteHosts.asSequence()).flatMap { note ->
+            note.annotations.blocks.asSequence().mapNotNull { (it as? AnnBlock.LogRef)?.sourceTabId }
+        }
+        val closedSourceIds = sharedNoteHosts.asSequence().flatMap { host ->
             val note = requireNotNull(host.sharedNote)
             (note.closedMembers.asSequence() + note.closedReferenceSources.asSequence()).map { it.tabId }
         }
+        val savedTabIds = tabs.asSequence().map { it.id } + closedSourceIds + referenceSourceIds
         tabCounter.set((savedTabIds.mapNotNull { it.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
         // Shells restore synchronously with every user-visible piece of metadata (filter,
         // annotations, expanded/manual blocks). The file contents are queued and started by App()

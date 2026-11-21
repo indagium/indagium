@@ -91,7 +91,7 @@ internal class AiToolExecutionCoordinator(
                 return completeCountedResult(run, call, AiToolExecutionResult.error("Shared note $hostId is unavailable to the tab for this run."))
             }
             run.emit(AiRunEvent.ToolExecutionStarted(call))
-            val rawResult = toolGateway.executeSuspending(call.name, prepared.arguments)
+            val rawResult = toolGateway.executeSuspending(call.name, prepared.arguments, inAppTabId = run.tabId)
             AiToolExecutionResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
         } catch (cancelled: CancellationException) {
             throw cancelled

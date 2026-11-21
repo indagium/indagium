@@ -1,6 +1,8 @@
 package com.indagium.utils
 
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
+import com.indagium.model.LogFormatProfile
 import org.apache.commons.compress.compressors.CompressorStreamFactory
 import java.io.BufferedInputStream
 import java.io.File
@@ -14,8 +16,8 @@ import java.io.InputStream
 data class CompressedLogParse(
     val entries: List<LogEntry>,
     val uncompressedBytes: Long,
-    val format: com.indagium.model.LogFormat = com.indagium.model.LogFormat.LOGCAT,
-    val profile: com.indagium.model.LogFormatProfile? = null,
+    val format: LogFormat = LogFormat.LOGCAT,
+    val profile: LogFormatProfile? = null,
     val diagnostics: List<String> = emptyList(),
     val sourceClockId: String? = null,
     val sections: List<ParsedLogSection> = emptyList(),
@@ -62,24 +64,35 @@ fun parseCompressedLogWithProfile(
     file: File,
     compressorName: String,
     maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
-    profile: com.indagium.model.LogFormatProfile? = null,
-    profiles: List<com.indagium.model.LogFormatProfile> = emptyList(),
+    profile: LogFormatProfile? = null,
+    profiles: List<LogFormatProfile> = emptyList(),
 ): CompressedLogParse {
-    val bounded = BoundedInputStream(openCompressedLogStream(file, compressorName), maxBytes)
-    val counting = CountingInputStream(bounded)
-    // file.nameWithoutExtension strips only the compressor suffix ("capture.dlt.gz" -> "capture.dlt"),
-    // recovering the logical filename the classifier's DLT-v2 name gate cares about.
-    val parsed = parseLogContent(
-        counting,
-        fileName = file.nameWithoutExtension,
-        profile = profile,
-        profiles = profiles,
-        sourceClockId = file.absolutePath,
-    )
+    val (parsed, uncompressedBytes) = parseCompressed(file, compressorName, maxBytes, profile, profiles)
     return CompressedLogParse(
-        parsed.entries, counting.count, parsed.format, parsed.profile, parsed.diagnostics, parsed.sourceClockId,
+        parsed.entries, uncompressedBytes, parsed.format, parsed.profile, parsed.diagnostics, parsed.sourceClockId,
         parsed.sections, parsed.selectedSectionId,
     )
+}
+
+private fun parseCompressed(
+    file: File,
+    compressorName: String,
+    maxBytes: Long,
+    profile: LogFormatProfile?,
+    profiles: List<LogFormatProfile>,
+): Pair<ParsedLog, Long> {
+    val bounded = BoundedInputStream(openCompressedLogStream(file, compressorName), maxBytes)
+    return CountingInputStream(bounded).use { counting ->
+        // Strip only the compressor suffix, e.g. capture.dlt.gz becomes capture.dlt.
+        val parsed = parseLogContent(
+            counting,
+            fileName = file.nameWithoutExtension,
+            profile = profile,
+            profiles = profiles,
+            sourceClockId = file.absolutePath,
+        )
+        parsed to counting.count
+    }
 }
 
 /** Parsed compressed-file result used by AppState so content detection is never inferred from a name. */
@@ -87,19 +100,15 @@ fun parseCompressedLogResult(
     file: File,
     compressorName: String,
     maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
-): ParsedLog = parseCompressedLog(file, compressorName, maxBytes).let {
-    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId, sections = it.sections, selectedSectionId = it.selectedSectionId)
-}
+): ParsedLog = parseCompressed(file, compressorName, maxBytes, null, emptyList()).first
 
 fun parseCompressedLogResultWithProfiles(
     file: File,
     compressorName: String,
-    profiles: List<com.indagium.model.LogFormatProfile>,
-    profile: com.indagium.model.LogFormatProfile? = null,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile? = null,
     maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
-): ParsedLog = parseCompressedLogWithProfile(file, compressorName, maxBytes, profile, profiles).let {
-    ParsedLog(it.format, it.entries, it.profile, it.diagnostics, it.sourceClockId, sections = it.sections, selectedSectionId = it.selectedSectionId)
-}
+): ParsedLog = parseCompressed(file, compressorName, maxBytes, profile, profiles).first
 
 /** Content-aware file parser. The List-returning [parseLogFile] remains the compatibility seam. */
 fun parseLogFileResult(file: File): ParsedLog {
@@ -111,8 +120,8 @@ fun parseLogFileResult(file: File): ParsedLog {
 
 fun parseLogFileResultWithProfiles(
     file: File,
-    profiles: List<com.indagium.model.LogFormatProfile>,
-    profile: com.indagium.model.LogFormatProfile? = null,
+    profiles: List<LogFormatProfile>,
+    profile: LogFormatProfile? = null,
 ): ParsedLog {
     return when (val format = detectArchiveFormat(file)) {
         is ArchiveFormat.CompressedFile -> parseCompressedLogResultWithProfiles(file, format.compressorName, profiles, profile)

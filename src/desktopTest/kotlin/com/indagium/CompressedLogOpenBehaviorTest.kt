@@ -1,6 +1,9 @@
 package com.indagium
 
 import com.indagium.model.LogFormat
+import com.indagium.model.LogFormatDetection
+import com.indagium.model.LogFormatEngine
+import com.indagium.model.LogFormatProfile
 import com.indagium.ui.AppState
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
 import java.io.File
@@ -9,6 +12,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -48,6 +52,36 @@ class CompressedLogOpenBehaviorTest {
         assertNull(state.pendingZipPicker)
         assertEquals(2, tab.logData.size)
         assertEquals("boom", tab.logData[1].msg)
+    }
+
+    @Test
+    fun ambiguousCompressedLogOffersTheSameProfileChoicesAsPlainText() {
+        val dir = createTempDirectory("compressed-profile-choice").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        try {
+            for (id in listOf("tie-a", "tie-b")) {
+                val profile = LogFormatProfile(
+                    id = id,
+                    name = id,
+                    engine = LogFormatEngine.PLAIN_TEXT,
+                    detection = LogFormatDetection(headerContains = listOf("HDR")),
+                )
+                assertTrue(state.saveLogFormatProfile(profile).isSuccess)
+            }
+            val gz = buildGzipLog(dir, "events.txt.gz", "HDR first\nsecond\n")
+            val tabId = assertNotNull(state.openPath(gz))
+            waitUntil { state.tab(tabId) != null && !state.isLoading }
+            assertEquals(listOf("tie-a", "tie-b"), state.tab(tabId)?.logFormatCandidateIds)
+
+            state.resolveLogFormatCandidate(tabId, "tie-b")
+            waitUntil { state.tabs.any { it.logFormatProfileId == "tie-b" } }
+            val reparsed = state.tabs.single { it.logFormatProfileId == "tie-b" }
+            assertTrue(reparsed.logFormatCandidateIds.isEmpty())
+            assertEquals(listOf("HDR first", "second"), reparsed.logData.map { it.msg })
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
     }
 
     @Test

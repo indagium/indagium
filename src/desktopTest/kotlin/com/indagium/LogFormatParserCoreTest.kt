@@ -120,6 +120,30 @@ class LogFormatParserCoreTest {
     }
 
     @Test
+    fun sameIndentJsonValuesStayInsideTheirParentRecord() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "json-lines" }
+        val record = """
+            {"message":"parent","context":
+            {"items":
+            [
+            {"nested":true},
+            [1,2]
+            ]
+            }
+            }
+        """.trimIndent()
+        val broken = """{"message":"truncated""""
+        val after = """{"message":"next record"}"""
+        val source = "$record\n$broken\n$after"
+
+        val parsed = parseLogContent(source.byteInputStream(), profile = profile)
+
+        assertEquals(listOf("parent", broken, "next record"), parsed.entries.map { it.msg })
+        assertEquals(record, parsed.entries.first().rawRecord)
+        assertEquals(8L, parsed.entries.first().sourceEndLine)
+    }
+
+    @Test
     fun rootJsonArrayEmitsOneRecordPerObjectAndKeepsSameLineSpans() {
         val first = """{"timestamp":"2026-11-16T12:00:00Z","message":"first","nested":{"items":[1,{"x":true}]}}"""
         val second = """{"timestamp":"2026-11-16T12:00:01Z","message":"second"}"""

@@ -30,6 +30,7 @@ internal class IndagiumToolGateway(
     private val confirmationDescriptions: Map<String, String> = emptyMap(),
     private val externalServiceCall: (name: String, arguments: Map<String, Any?>) -> Boolean = ::sendsToExternalService,
     private val sharedNoteMembership: (hostId: String, tabId: String) -> Boolean = { _, _ -> false },
+    private val sharedNoteWriteForTab: ((name: String, arguments: Map<String, Any?>, tabId: String) -> Any?)? = null,
 ) {
     init {
         require(catalog.map { it.name }.distinct().size == catalog.size) { "tool names must be unique" }
@@ -52,8 +53,12 @@ internal class IndagiumToolGateway(
         return runBlocking { suspending.invoke(arguments) } ?: unknownOperation(name)
     }
 
-    /** Runs a synchronous handler directly and a suspending handler as a suspension; same results as [execute]. */
-    suspend fun executeSuspending(name: String, arguments: Map<String, Any?>): Any? {
+    /** Runs a handler without blocking. An in-app tab can scope shared-note writes at the point of mutation. */
+    suspend fun executeSuspending(name: String, arguments: Map<String, Any?>, inAppTabId: String? = null): Any? {
+        if (inAppTabId != null && (name == "create_shared_note" || name == "set_shared_note_members")) {
+            return sharedNoteWriteForTab?.invoke(name, arguments, inAppTabId)
+                ?: mapOf("error" to "Shared-note membership writes are unavailable to the tab for this run.")
+        }
         handlers[name]?.let { handler -> return handler.invoke(arguments) ?: unknownOperation(name) }
         val suspending = suspendHandlers[name] ?: return unknownOperation(name)
         return suspending.invoke(arguments) ?: unknownOperation(name)

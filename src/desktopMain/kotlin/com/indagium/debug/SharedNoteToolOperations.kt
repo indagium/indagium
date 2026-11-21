@@ -18,6 +18,16 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
         "set_shared_note_members" to { a -> setMembers(a.str("hostId") ?: "", a) },
     )
 
+    /** Membership must still hold when the write commits. The tab ID comes from the run, outside tool arguments. */
+    fun executeWriteForTab(name: String, arguments: Map<String, Any?>, tabId: String): Map<String, Any?> =
+        synchronized(appState.stateLock) {
+            when (name) {
+                "create_shared_note" -> create(arguments, inAppTabId = tabId)
+                "set_shared_note_members" -> setMembers(arguments.str("hostId") ?: "", arguments, inAppTabId = tabId)
+                else -> error("unknown shared-note write: $name")
+            }
+        }
+
     private fun list(tabId: String?): Map<String, Any?> {
         if (!tabId.isNullOrBlank() && openTab(tabId) == null) return error("no such tab: $tabId")
         val notes = appState.sharedNoteHosts.filter { host ->
@@ -26,11 +36,18 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
         return mapOf("sharedNotes" to notes.mapNotNull { host -> host.sharedNote?.let { describe(host.id, it, host.annotations.blocks.size) } })
     }
 
-    private fun create(a: Map<String, Any?>): Map<String, Any?> {
+    private fun create(a: Map<String, Any?>, inAppTabId: String? = null): Map<String, Any?> {
         val members = a.strList("memberTabIds").orEmpty().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-        if (members.isEmpty()) return error("memberTabIds must name at least one open tab")
         val fromTabId = a.str("fromTabId")?.trim()?.takeIf { it.isNotEmpty() }
-        unknownTabs((members + listOfNotNull(fromTabId)).distinct())?.let { return it }
+        val problem = when {
+            members.isEmpty() -> error("memberTabIds must name at least one open tab")
+            inAppTabId != null && fromTabId != null && fromTabId != inAppTabId ->
+                error("An in-app run can only share the private note of its own tab.")
+            inAppTabId != null && fromTabId == null && inAppTabId !in members ->
+                error("A shared note created by an in-app run must include its tab.")
+            else -> unknownTabs((members + listOfNotNull(fromTabId)).distinct())
+        }
+        if (problem != null) return problem
         val name = a.str("name").orEmpty()
         val hostId = if (fromTabId != null) {
             appState.shareTabNote(fromTabId, name, members) ?: return error(
@@ -44,11 +61,13 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
         return mapOf("ok" to true, "hostId" to hostId, "name" to info.name, "members" to members(info))
     }
 
-    private fun setMembers(hostId: String, a: Map<String, Any?>): Map<String, Any?> {
+    private fun setMembers(hostId: String, a: Map<String, Any?>, inAppTabId: String? = null): Map<String, Any?> {
         val members = a.strList("memberTabIds").orEmpty().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val host = appState.sharedNoteHost(hostId)?.sharedNote
         val problem = when {
             hostId.isBlank() -> error("missing hostId")
-            appState.sharedNoteHost(hostId) == null -> error("no such shared note: $hostId")
+            host == null -> error("no such shared note: $hostId")
+            inAppTabId != null && inAppTabId !in host.memberTabIds -> error("Shared note $hostId is unavailable to the tab for this run.")
             a["memberTabIds"] !is List<*> -> error("missing memberTabIds (an array of open tab ids; empty removes every open member)")
             else -> unknownTabs(members)
         }

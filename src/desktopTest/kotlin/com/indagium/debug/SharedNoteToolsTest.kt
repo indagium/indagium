@@ -168,6 +168,39 @@ class SharedNoteToolsTest {
     }
 
     @Test
+    fun inAppMembershipWritesRequireAnExistingMembershipOrTheRunsOwnPrivateNote() = runBlocking {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        call("add_text_note", "tabId" to "c", "text" to "private finding")
+        val coordinator = AiToolExecutionCoordinator(gateway)
+        val member = AiRun(tabId = "a", maxToolCalls = 10)
+        val outsider = AiRun(tabId = "c", maxToolCalls = 10)
+
+        val change = mapOf("hostId" to hostId, "memberTabIds" to listOf("a", "c"))
+        val rejected = coordinator.executeManaged(outsider, "set_shared_note_members", change)
+        assertTrue(rejected.content.contains("unavailable"), rejected.content)
+        assertEquals(listOf("a", "b"), state.sharedNoteHost(hostId)?.sharedNote?.memberTabIds)
+        assertTrue(coordinator.executeManaged(outsider, "get_annotation_blocks", mapOf("tabId" to hostId)).content.contains("unavailable"))
+
+        val rejectedMove = coordinator.executeManaged(
+            member, "create_shared_note", mapOf("fromTabId" to " c ", "memberTabIds" to listOf("a")),
+        )
+        assertTrue(rejectedMove.content.contains("own tab"), rejectedMove.content)
+        val rejectedCreate = coordinator.executeManaged(member, "create_shared_note", mapOf("memberTabIds" to listOf("b", "c")))
+        assertTrue(rejectedCreate.content.contains("must include its tab"), rejectedCreate.content)
+        assertEquals(1, state.sharedNoteHosts.size)
+        assertEquals("private finding", (state.tab("c")!!.annotations.blocks.single() as AnnBlock.Note).text)
+
+        val allowed = coordinator.executeManaged(member, "set_shared_note_members", change)
+        assertTrue(allowed.content.contains("ok=true"), allowed.content)
+        assertEquals(listOf("a", "c"), state.sharedNoteHost(hostId)?.sharedNote?.memberTabIds)
+        val moved = coordinator.executeManaged(
+            outsider, "create_shared_note", mapOf("fromTabId" to "c", "memberTabIds" to listOf("a")),
+        )
+        assertTrue(moved.content.contains("ok=true"), moved.content)
+        assertTrue(state.tab("c")!!.annotations.blocks.isEmpty())
+    }
+
+    @Test
     fun anInAppSharedLogNoteTakesItsRowsFromTheRunsOwnTabWhateverSourceTabIdTheModelSent() = runBlocking {
         val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
         val coordinator = AiToolExecutionCoordinator(gateway)
