@@ -160,21 +160,35 @@ private fun splitCsvRecords(
     writer: ProfileRecordSplitWriter,
     profile: LogFormatProfile,
 ) {
-    val machine = CsvRecordMachine(profile, mutableListOf(), initialHeaders = null, sourceLineOffset = 0)
+    // The full machine only until the header row is found (blank lines and invalid rows before it keep their exact behaviour);
+    // after that only record ends matter, so the cells are not parsed (CsvRecordBoundaryTracker follows the machine's own rule).
+    val machine = if (profile.hasHeader) CsvRecordMachine(profile, mutableListOf(), initialHeaders = null, sourceLineOffset = 0) else null
+    val tracker = CsvRecordBoundaryTracker(profile.delimiter)
     val ready = ArrayList<ProfileRecord>(1)
     val pending = ByteArrayOutputStream()
     var header: ByteArray? = null
     while (true) {
         val bytes = lines.next() ?: break
-        pending.write(bytes)
-        machine.accept(decodeSplitLine(bytes, charset), ready)
-        ready.clear()
-        if (machine.hasPendingRecord()) continue
-        val record = pending.toByteArray()
-        pending.reset()
-        val waitingForHeader = profile.hasHeader && header == null
+        val waitingForHeader = machine != null && header == null
+        val recordEnded = if (machine != null && waitingForHeader) {
+            machine.accept(decodeSplitLine(bytes, charset), ready)
+            ready.clear()
+            !machine.hasPendingRecord()
+        } else {
+            tracker.acceptLine(decodeSplitLine(bytes, charset))
+        }
+        if (!recordEnded) {
+            pending.write(bytes)
+            continue
+        }
+        val record = if (pending.size() == 0) {
+            bytes
+        } else {
+            pending.write(bytes)
+            pending.toByteArray().also { pending.reset() }
+        }
         writer.writeRecord(record, header, allowRotation = !waitingForHeader)
-        if (waitingForHeader && machine.headers != null) header = record
+        if (waitingForHeader && machine?.headers != null) header = record
     }
     if (pending.size() > 0) writer.writeRecord(pending.toByteArray(), header, allowRotation = !profile.hasHeader || header != null)
 }
@@ -190,11 +204,13 @@ private fun splitHeaderRecords(
     var lineNumber = 0L
     while (true) {
         val bytes = lines.next() ?: break
-        val line = decodeSplitLine(bytes, charset)
         lineNumber++
         checkParserCancellation()
-        val startsRecord = boundary?.groups(line) != null ||
-            (line.isNotBlank() && parseHeader?.invoke(line, lineNumber)?.parseFields == true)
+        // A line is decoded and tested for a record start only when the writer could cut before it; a forced cut needs no test.
+        val startsRecord = writer.rotationDue && !writer.cutForced && run {
+            val line = decodeSplitLine(bytes, charset)
+            boundary?.groups(line) != null || (line.isNotBlank() && parseHeader?.invoke(line, lineNumber)?.parseFields == true)
+        }
         writer.writeLine(bytes, startsRecord)
     }
 }
@@ -369,6 +385,12 @@ private class ProfileRecordSplitWriter(
         }
         writeBytes(record)
     }
+
+    /** The current part has reached its target and a later one exists: a line that starts a record cuts here. */
+    val rotationDue: Boolean get() = outputIndex < outputFiles.lastIndex && written >= targetBytes
+
+    /** The part is so far past its target without a record start that the next line cuts regardless (no start test needed). */
+    val cutForced: Boolean get() = rotationDue && written >= targetBytes + MAX_PROFILE_SPLIT_RECORD_BYTES
 
     /**
      * Writes one physical line. A part is cut before a line that starts a record once it has reached its target; when no record

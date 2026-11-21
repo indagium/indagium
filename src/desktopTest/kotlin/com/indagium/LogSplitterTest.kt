@@ -4,6 +4,8 @@ import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
+import com.indagium.utils.CsvRecordBoundaryTracker
+import com.indagium.utils.CsvRecordMachine
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
 import com.indagium.utils.JsonRecordMachine
 import com.indagium.utils.MAX_SPLIT_RECORD_CHARS
@@ -463,6 +465,71 @@ class LogSplitterTest {
             assertTrue(outputs.all { it.length() > 0 })
             assertTrue(outputs.all { it.readText().matches(Regex("(?s)^\\d+: record.*")) }, "every part starts at a record header")
             assertEquals(400, outputs.sumOf { file -> parseProfileLines(file.readLines(), numberedRecords).entries.size })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    /** After which of [lines] CsvRecordMachine has no record open (a record ended there, or a blank line stood alone). */
+    private fun machineBoundaries(profile: LogFormatProfile, lines: List<String>): List<Int> {
+        val machine = CsvRecordMachine(profile, mutableListOf(), initialHeaders = null, sourceLineOffset = 0)
+        val sink = ArrayList<ProfileRecord>()
+        return lines.indices.filter { index ->
+            machine.accept(lines[index], sink)
+            sink.clear()
+            !machine.hasPendingRecord()
+        }
+    }
+
+    private fun trackerBoundaries(delimiter: Char, lines: List<String>): List<Int> {
+        val tracker = CsvRecordBoundaryTracker(delimiter)
+        return lines.indices.filter { tracker.acceptLine(lines[it]) }
+    }
+
+    @Test
+    fun theCsvBoundaryTrackerCutsWhereTheRecordMachineDoes() {
+        val tricky = listOf(
+            "a,b,c", "", "1,\"quoted\nnewline\",3", "2,\"escaped \"\"quote\"\" here\",x", "3,\"open", "still open", "", "closes\",z",
+            "4,mid\"quote,field", "5,\"after\"quote,x", "6,\"after\"x\",y", "7,,,", ",,", "\"\"\"\",\"\"", "8,\"ends open",
+            "",
+            "9,\"a\"\"", "b\",c", "last,row",
+        )
+        for (delimiter in listOf(',', ';', '\t', '|')) {
+            val lines = tricky.map { it.replace(',', delimiter) }
+            val profile = LogFormatProfile(id = "csv-$delimiter", name = "CSV", engine = LogFormatEngine.CSV, delimiter = delimiter, hasHeader = false)
+            assertEquals(machineBoundaries(profile, lines), trackerBoundaries(delimiter, lines), "delimiter '$delimiter'")
+            val withHeader = profile.copy(hasHeader = true)
+            assertEquals(machineBoundaries(withHeader, lines), trackerBoundaries(delimiter, lines), "delimiter '$delimiter' with a header")
+        }
+    }
+
+    @Test
+    fun theCsvBoundaryTrackerKeepsTheMachinesOversizedRecordCap() {
+        val profile = LogFormatProfile(id = "csv-big", name = "CSV", engine = LogFormatEngine.CSV, hasHeader = false)
+        val chunk = "q".repeat(60_000)
+        // A quoted record that stays open past the 256K cap ends there, and the next record starts fresh.
+        val lines = listOf("1,\"$chunk") + List(6) { chunk } + listOf("tail\",end", "2,two", "3,\"three", "x\",y")
+        assertEquals(machineBoundaries(profile, lines), trackerBoundaries(',', lines))
+        assertTrue(trackerBoundaries(',', lines).first() < lines.indexOf("tail\",end"), "the oversized record ended early")
+    }
+
+    @Test
+    fun csvSplitWritesTheSamePartsWhateverTheRecordLayout() {
+        val profile = LogFormatProfile(
+            id = "split-csv-fast", name = "Split CSV", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+        )
+        val rows = (1..300).map { i -> if (i % 7 == 0) "$i,\"line one\nline \"\"two\"\"\nthree $i\"" else "$i,plain $i" }
+        val source = ("\ntime,message\n" + rows.joinToString("\n", postfix = "\n")).toByteArray()
+        val directory = createTempDirectory("openlog-csv-fast-split").toFile()
+        try {
+            val outputs = planSplitOutputs("rows.csv", directory, "part", 4)
+            splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), profile)
+
+            assertTrue(outputs.drop(1).all { it.readLines().first() == "time,message" })
+            val entries = outputs.flatMap { parseProfileLines(it.readLines(), profile).entries }
+            assertEquals(rows.size, entries.size)
+            assertEquals(rows, entries.map { it.rawRecord })
         } finally {
             directory.deleteRecursively()
         }

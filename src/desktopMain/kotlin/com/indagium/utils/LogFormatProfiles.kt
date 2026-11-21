@@ -938,6 +938,34 @@ internal class CsvRecordMachine(
     }
 }
 
+/**
+ * Finds where CSV records end without parsing their cells: [CsvRecordMachine]'s own boundary rule (the same quote-state scan, the same
+ * [MAX_PROFILE_RECORD_CHARS] cap, a blank line outside a record being a record of its own), for the splitter, which only needs
+ * the cut points. Feed it one decoded physical line at a time.
+ */
+internal class CsvRecordBoundaryTracker(private val delimiter: Char) {
+    private var quoteState = CsvQuoteState.FIELD_START
+    private var pendingChars = 0
+    private var pending = false
+
+    /** Whether the record in progress, if any, is still open after the lines so far. */
+    val hasPendingRecord: Boolean get() = pending
+
+    /** Takes the next physical [line]; true when it ends a record (or is a blank line between records). */
+    fun acceptLine(line: String): Boolean {
+        if (line.isEmpty() && !pending) return true
+        pendingChars += if (pending) line.length + 1 else line.length
+        pending = true
+        val scan = updateCsvQuoteState(line, quoteState, delimiter)
+        quoteState = scan.state
+        if (pendingChars <= MAX_PROFILE_RECORD_CHARS && scan.valid && quoteState == CsvQuoteState.QUOTED) return false
+        quoteState = CsvQuoteState.FIELD_START
+        pendingChars = 0
+        pending = false
+        return true
+    }
+}
+
 /** Reads the header row from the start of a CSV source; null when the profile has none or none is found early. */
 internal fun readCsvHeaderRow(lines: Sequence<String>, profile: LogFormatProfile): List<String>? {
     if (profile.engine != LogFormatEngine.CSV || !profile.hasHeader) return null
