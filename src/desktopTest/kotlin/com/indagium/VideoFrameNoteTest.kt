@@ -8,6 +8,8 @@ import com.indagium.model.VideoSource
 import com.indagium.ui.AppState
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.mkTab
+import com.indagium.ui.openNoteVideoFrame
+import com.indagium.ui.videoNotOpenNotice
 import com.indagium.video.VideoDisplayRotationAware
 import com.indagium.video.VideoPlayerController
 import kotlin.test.Test
@@ -106,6 +108,48 @@ class VideoFrameNoteTest {
             assertEquals("a", state.activeTabId)
             assertEquals(12_345L, controller.seekedTo)
             assertTrue(state.videoPanelVisible)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun clickingAFrameWhoseVideoIsNotOpenSaysSoAndAMatchingOneDoesNot() {
+        val controller = FakeVideoController()
+        val source = VideoSource.LocalFile("/videos/repro.mp4")
+        val state = AppState(videoControllerFactory = { controller })
+        try {
+            state.tabs = listOf(
+                LogTab(
+                    id = "tab", filename = "app.log", logData = emptyList(), rmap = emptyMap(),
+                    attachedVideo = VideoAttachment(source, "repro.mp4"),
+                ),
+            )
+            // A frame of a video no tab has attached: the notice, the same wording for private and shared notes.
+            val other = VideoFrameReference(VideoSource.LocalFile("/videos/other.mp4"), "other.mp4", 1_000L)
+            assertFalse(state.openNoteVideoFrame("tab", other, fromSharedNote = false))
+            assertEquals(videoNotOpenNotice(), state.pendingDiagramNotice)
+            assertEquals("Video not open", state.pendingDiagramNotice?.title)
+            assertEquals(
+                "The video this frame came from is not attached to an open tab. Attach it to the log to jump to this frame.",
+                state.pendingDiagramNotice?.body,
+            )
+            state.pendingDiagramNotice = null
+            assertFalse(state.openNoteVideoFrame("tab", other, fromSharedNote = true))
+            assertEquals(videoNotOpenNotice(), state.pendingDiagramNotice)
+            // A negative position is the same failure.
+            state.pendingDiagramNotice = null
+            assertFalse(state.openNoteVideoFrame("tab", VideoFrameReference(source, "repro.mp4", -1L), fromSharedNote = false))
+            assertEquals(videoNotOpenNotice(), state.pendingDiagramNotice)
+
+            // A frame of the attached video seeks and raises nothing.
+            state.pendingDiagramNotice = null
+            assertTrue(state.openNoteVideoFrame("tab", VideoFrameReference(source, "repro.mp4", 5_000L), fromSharedNote = false))
+            assertEquals(5_000L, controller.seekedTo)
+            assertEquals(null, state.pendingDiagramNotice)
+            // The tool-facing navigateToVideoFrame never raises a notice by itself.
+            assertFalse(state.navigateToVideoFrame("tab", other))
+            assertEquals(null, state.pendingDiagramNotice)
         } finally {
             state.close()
         }

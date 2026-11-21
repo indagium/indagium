@@ -4,6 +4,7 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.LogFormat
 import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteInfo
+import com.indagium.model.VideoFrameReference
 
 // What the Notes header's New ▾ and Open ▾ menus need to offer shared notes (see SharedNotes.kt for the operations), kept apart from
 // NotesActionModel so a panel used without a tab (and every test that builds the model) simply passes none and keeps its plain buttons.
@@ -70,6 +71,22 @@ internal class LogRefActions(
 private fun AppState.rowsGoneNotice(block: AnnBlock.LogRef, viewingTabId: String) {
     val file = block.sourceFilename ?: tab(viewingTabId)?.filename ?: "this file"
     pendingDiagramNotice = DiagramNotice("Rows not found", "These rows are no longer in $file.")
+}
+
+/** The notice a note's video frame shows when its video is not attached to any open tab (a negative position counts as that too). */
+internal fun videoNotOpenNotice() = DiagramNotice(
+    "Video not open",
+    "The video this frame came from is not attached to an open tab. Attach it to the log to jump to this frame.",
+)
+
+/**
+ * A click on a note's video frame: jumps to it ([AppState.navigateToVideoFrame]), or tells the user the frame's video is not open.
+ * The UI entry point; tool callers use navigateToVideoFrame alone, with no notice.
+ */
+internal fun AppState.openNoteVideoFrame(tabId: String, frame: VideoFrameReference, fromSharedNote: Boolean): Boolean {
+    val opened = navigateToVideoFrame(tabId, frame, fromSharedNote)
+    if (!opened) pendingDiagramNotice = videoNotOpenNotice()
+    return opened
 }
 
 /** [LogRefActions] for the Notes tile shown in [viewingTabId], wired to [AppState]. */

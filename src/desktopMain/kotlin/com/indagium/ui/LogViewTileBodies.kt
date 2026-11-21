@@ -63,7 +63,7 @@ internal fun BoundAnnotationPanel(
         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
         // Every reference goes through go-to-rows, which also switches the source tab's section (a private note's references name no source tab).
         onNavigateLogRef = { state.launchGoToLogRefRows(it, tab.id) },
-        onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it, fromSharedNote = !ownNote) },
+        onNavigateVideoFrame = { state.openNoteVideoFrame(tab.id, it, fromSharedNote = !ownNote) },
         onUpdateLogRefPresentation = { blockId, caption, presentation ->
             state.updateLogRefPresentation(noteId, blockId, caption, presentation)
         },
