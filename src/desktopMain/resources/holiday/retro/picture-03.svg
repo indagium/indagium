@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="rt-sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe14d" /><stop offset=".5" stop-color="#ff8a3d" /><stop offset="1" stop-color="#ff2fa0" /></linearGradient>
+              <mask id="rt-sunmask"><rect width="300" height="420" fill="#ffffff" /><rect y="178" width="300" height="3" fill="#000000" /><rect y="192" width="300" height="4" fill="#000000" /><rect y="206" width="300" height="5" fill="#000000" /><rect y="221" width="300" height="6" fill="#000000" /><rect y="236" width="300" height="7" fill="#000000" /></mask>
+              <linearGradient id="rt-floor" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a0b4a" /><stop offset="1" stop-color="#0e0420" /></linearGradient>
+              <clipPath id="rt-fclip"><rect x="0" y="250" width="300" height="170" rx="8" /></clipPath>
+              <radialGradient id="rt-glow"><stop offset="0" stop-color="#ff4fd8" stop-opacity=".5" /><stop offset="1" stop-color="#ff4fd8" stop-opacity="0" /></radialGradient>
+            </defs>
+            <g><circle cx="150" cy="200" r="120" fill="url(#rt-glow)" /></g></svg>

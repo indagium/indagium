@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="dv-case" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f1e9d2" /><stop offset="1" stop-color="#c4b791" /></linearGradient>
+              <radialGradient id="dv-screen" cx="50%" cy="45%" r="70%"><stop offset="0" stop-color="#0f3d1a" /><stop offset="1" stop-color="#031006" /></radialGradient>
+              <radialGradient id="dv-glow"><stop offset="0" stop-color="#39ff6a" stop-opacity=".3" /><stop offset="1" stop-color="#39ff6a" stop-opacity="0" /></radialGradient>
+              <linearGradient id="dv-mug" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2f6fb8" /><stop offset="1" stop-color="#1b3f6b" /></linearGradient>
+              <radialGradient id="dv-shadow"><stop offset="0" stop-color="#000" stop-opacity=".35" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+              <clipPath id="dv-clip"><rect x="66" y="114" width="168" height="124" rx="8" /></clipPath>
+              <pattern id="dv-scan" width="4" height="3" patternUnits="userSpaceOnUse"><rect width="4" height="1" fill="#000000" opacity=".35" /></pattern>
+            </defs>
+            <ellipse cx="150" cy="396" rx="140" ry="14" fill="url(#dv-shadow)" />
+            <rect x="40" y="92" width="220" height="190" rx="16" fill="url(#dv-case)" />
+            <rect x="56" y="104" width="188" height="144" rx="12" fill="#2b2b2b" />
+            <rect x="66" y="114" width="168" height="124" rx="8" fill="url(#dv-screen)" />
+            </svg>

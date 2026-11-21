@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import com.indagium.model.HolidayPack
 import com.indagium.model.TabStripPosition
 import com.indagium.ui.LOG_VIEW_CHROME_SPEC
 import com.indagium.ui.holiday.*
@@ -127,9 +128,11 @@ class HolidayChromeTest {
     @Test
     fun theWideBandsMiddleStaysClear() {
         // Every scene keeps its pieces in the right half of a 1600 band (the candy bunting runs the whole width but leaves the middle).
-        HOLIDAY_THEMES.values.mapNotNull { it.tabScene }.forEach { painter ->
+        HOLIDAY_THEMES.values.mapNotNull { theme -> theme.tabScene?.let { theme to it } }.forEach { (theme, painter) ->
             val layout = painter.layout(band(1600f))
-            assertTrue(layout.elementBounds.isNotEmpty())
+            // Cozy Christmas' title bar is only its string of lights and New Year's Eve's only a skyline stretched over the bar: backdrops,
+            // not placed elements.
+            if (theme.pack != HolidayPack.COZY_CHRISTMAS && theme.pack != HolidayPack.NEW_YEARS_EVE) assertTrue(layout.elementBounds.isNotEmpty())
             layout.elementBounds.forEach { assertTrue(it.right <= 800f || it.left >= 800f, "an element sits over the middle: $it") }
         }
     }

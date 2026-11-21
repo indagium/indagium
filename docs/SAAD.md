@@ -5926,6 +5926,30 @@ animated pack shares (`easeInOut`, `cycle`, `alternateEase`, `keyframes`, the fl
 `drawSteamWisp`, `holidaySvg` and `drawSvg`) live in `ui/holiday/HolidayKeyframes.kt`; `muertos/` and `thanksgiving/` keep only their own
 shapes (monarchs and flags, leaves and geese). The tile divider is the three-segment `tileDividerColors` (rust, gold, olive).
 
+The three winter packs, Classic Christmas, Cozy Christmas and First snow, are Automatic holidays registered after Thanksgiving in that order, so Classic wins
+December 10 to 27 unless the user selected another open pack; First snow runs December 1 to January 7 (the window crosses the new year) and is the only one
+open outside the Christmas window. Their picture, companion and title bar are *generated layers* (`ui/holiday/{snow,cozy,xmas}/…ArtData.kt`, emitted from
+the design canvas): ordered SVG layers and text runs in `resources/holiday/<folder>/`, each with the stack of canvas animation classes that moves it
+(`HolidayArtLayers.kt`), evaluated from the design's keyframe table (`HolidayKeyframes.kt`) and drawn by `HolidaySvgLayers.kt`; `HolidayLayerPicture` and
+`HolidayLayerCompanion` turn a layer list into the two backdrop arts and `HolidayBandScene` a title-bar item list into a scene. What the three share is in
+`snow/`: the toolbar kit (`WinterIcons`), the effects (`Snowfall`, `SnowSettling` as a landing effect, `SantasSleigh`), `StringOfLights` and the tab
+ornaments (`SnowCap`, `ChristmasBow`, `ChristmasBowAndStar`). The string of lights is a `HolidaySceneEffect`: `LitTabScene` draws it behind the tabs over
+the pack's title art (Cozy has none: its design title bar is only the garland), its twinkle follows the scene clock and it stays up, unmoving, under Off
+intensity. Cozy's tab is a gift tag (`GiftTagShape`, a point and a hole punched through the outline; `tabLabelPrefix` is two no-break spaces that keep the
+label clear of them). Two small contract members serve Classic Christmas: `HolidayTheme.tabEdgeLine` (a line along every tab's outer edge, pine green idle
+and red active, drawn by `holidayTabChrome`) and `HolidayTabOrnament.drawFrame` (an ornament that moves, the twinkling star, gets the frame clock from the tab).
+Its tile rule is the uneven ribbon, `HolidayDividerBlocks.widthsDp`.
+
+New Year's Eve, Programmers' Day and Retro are built the same way (generated layers in `ui/holiday/{newyear,devday,retro}/`, the pack's own effects and a
+`HolidayBandScene` title bar). New Year's Eve is an Automatic holiday on December 28 to January 2 (it crosses the new year), registered before First snow
+so it wins those days unless First snow is the selected pack; Programmers' Day is September 12 to 14, clear of every other window. Retro is a Playful
+pack chosen by hand (`supportsAutomatic = false`, like Ready prompt) and is registered last. New Year's Eve's confetti is a `HolidayParticleEffect` and
+its settling confetti a `SettlingEffect` (the base of `SnowSettling`); its fireworks are small `hol-burst` sprites near the top of the window (grow and
+fade, no window flash, so they sit outside the flash limits); its tabs are pills with the twinkling star of `drawTabStar`. Programmers' Day has square
+corners, monospace labels with `tabLabelPrefix` `~/ `, the blinking tab cursor (`activeTabCursor`), a dashed accent tile rule, binary rain (Skia text) and
+static CRT scanlines (a non-moving particle effect, like Ready prompt's). Retro has shooting stars, a neon car (`flightPosition`, shared with Santa's
+sleigh), VHS scanlines, `NeonGlow` (the active tab's ring, glow and cyan inner bar as a tab ornament) and a neon-to-cyan gradient tile rule.
+
 A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
 pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
 changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.

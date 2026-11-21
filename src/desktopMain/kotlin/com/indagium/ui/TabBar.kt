@@ -458,9 +458,13 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     val descriptors = renderOrder.mapNotNull { ref -> describe(ref)?.let { ref.rawId() to it } }.toMap()
 
     // FIT only: each tab as wide as its label (the equal-share maths of FIXED needs none of this).
+    val labelPrefix = LocalHoliday.current?.theme?.tabLabelPrefix.orEmpty()
+    val labelInsetDp = LocalHoliday.current?.takeUnless { it.ownTabStyle }?.theme?.tabLabelInsetDp ?: 0f
+
     fun itemFitDp(item: TabStripItem): Float = when (item) {
         is TabStripItem.Tab -> descriptors[item.ref.rawId()]?.let { descriptor ->
-            tabFitContentDp(descriptor.label, descriptor.appearance)
+            // A pack's label prefix ("~/ ") takes room too, so a FIT tab still shows the whole label.
+            tabFitContentDp(labelPrefix + descriptor.label, descriptor.appearance) + labelInsetDp
         } ?: FIT_TAB_MIN_DP
         is TabStripItem.GroupHeader -> (groupHeaderWidthsPx[item.group.id] ?: 64 * density).div(density)
     }

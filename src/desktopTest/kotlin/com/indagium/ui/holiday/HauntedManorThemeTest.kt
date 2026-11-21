@@ -39,7 +39,8 @@ class HauntedManorThemeTest {
             listOf(
                 HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW,
                 HolidayPack.BEER_TIME_GREEN, HolidayPack.READY_PROMPT, HolidayPack.TULIPS, HolidayPack.COFFEE_BEAR,
-                HolidayPack.DIA_DE_MUERTOS, HolidayPack.THANKSGIVING,
+                HolidayPack.DIA_DE_MUERTOS, HolidayPack.THANKSGIVING, HolidayPack.PROGRAMMERS_DAY, HolidayPack.CLASSIC_CHRISTMAS, HolidayPack.COZY_CHRISTMAS,
+                HolidayPack.NEW_YEARS_EVE, HolidayPack.FIRST_SNOW, HolidayPack.RETRO,
             ),
             HOLIDAY_THEMES.keys.toList(),
         )

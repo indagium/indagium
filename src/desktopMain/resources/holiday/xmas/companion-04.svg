@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240"><defs>
+              <radialGradient id="cr-fur" cx="45%" cy="35%" r="75%"><stop offset="0" stop-color="#c1834a" /><stop offset=".6" stop-color="#93582c" /><stop offset="1" stop-color="#5e3418" /></radialGradient>
+              <radialGradient id="cr-muzzle" cx="45%" cy="35%" r="70%"><stop offset="0" stop-color="#f6dcb8" /><stop offset="1" stop-color="#d2a26e" /></radialGradient>
+              <radialGradient id="cr-nose" cx="38%" cy="32%" r="70%"><stop offset="0" stop-color="#ff9a90" /><stop offset=".5" stop-color="#e0141e" /><stop offset="1" stop-color="#8e0b12" /></radialGradient>
+              <radialGradient id="cr-glow"><stop offset="0" stop-color="#ff3b3b" stop-opacity=".6" /><stop offset="1" stop-color="#ff3b3b" stop-opacity="0" /></radialGradient>
+            </defs>
+            <g><ellipse cx="102" cy="146" rx="9" ry="11" fill="#ffffff" /></g><g><ellipse cx="138" cy="146" rx="9" ry="11" fill="#ffffff" />
+              </g><g><circle cx="104" cy="148" r="5.4" fill="#1b1410" /></g><g><circle cx="136" cy="148" r="5.4" fill="#1b1410" />
+            </g></svg>

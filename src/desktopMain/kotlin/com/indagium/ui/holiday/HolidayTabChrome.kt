@@ -78,13 +78,16 @@ internal fun holidayOuterEdgeInset(inset: PaddingValues, position: TabStripPosit
 
 /**
  * How a pack draws its tabs' edges: the active tab's accent [wash], whether the active tab is [inverse] (accent fill, as on an 8-bit
- * screen), the outline [borderWidth], and an accent line of [underlineWidth] on the active tab's content edge (none at zero).
+ * screen), the outline [borderWidth], an accent line of [underlineWidth] on the active tab's content edge (none at zero) and an
+ * [edgeLine] of [edgeLineWidth] along its outer edge (none for a null colour or zero width).
  */
 internal data class HolidayTabEdges(
     val wash: Float? = null,
     val inverse: Boolean = false,
     val borderWidth: Dp = 1.dp,
     val underlineWidth: Dp = 0.dp,
+    val edgeLine: Color? = null,
+    val edgeLineWidth: Dp = 0.dp,
 )
 
 /**
@@ -115,6 +118,14 @@ internal fun Modifier.holidayTabChrome(
     val wash = edges.wash
     return fill
         .then(if (active && wash != null) Modifier.drawBehind { drawWash(shape, tc.ac, wash, position) } else Modifier)
+        .then(
+            if (edges.edgeLine != null && edges.edgeLineWidth > 0.dp) {
+                val inside = if (active) maxOf(ACTIVE_BORDER, edges.borderWidth) else if (texture != HolidayTabTexture.RIBS) edges.borderWidth else 0.dp
+                Modifier.drawBehind { drawTabEdgeLine(shape, edges.edgeLine, edges.edgeLineWidth.toPx(), inside.toPx(), position) }
+            } else {
+                Modifier
+            },
+        )
         .then(if (tint == null) Modifier else Modifier.background(tint, shape))
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
         .then(
@@ -153,6 +164,20 @@ private fun DrawScope.drawActiveUnderline(accent: Color, width: Float, position:
         TabStripPosition.BOTTOM -> drawRect(accent, Offset.Zero, Size(size.width, width))
         TabStripPosition.LEFT -> drawRect(accent, Offset(size.width - width, 0f), Size(width, size.height))
         TabStripPosition.RIGHT -> drawRect(accent, Offset.Zero, Size(width, size.height))
+    }
+}
+
+// A line of [width] on the tab's outer edge (the side away from the content), [inside] in from it (the outline is drawn over that part),
+// cut to the tab's outline.
+private fun DrawScope.drawTabEdgeLine(shape: Shape, color: Color, width: Float, inside: Float, position: TabStripPosition) {
+    val outline = Path().apply { addOutline(shape.createOutline(size, layoutDirection, this@drawTabEdgeLine)) }
+    clipPath(outline) {
+        when (position) {
+            TabStripPosition.TOP -> drawRect(color, Offset(0f, inside), Size(size.width, width))
+            TabStripPosition.BOTTOM -> drawRect(color, Offset(0f, size.height - inside - width), Size(size.width, width))
+            TabStripPosition.LEFT -> drawRect(color, Offset(inside, 0f), Size(width, size.height))
+            TabStripPosition.RIGHT -> drawRect(color, Offset(size.width - inside - width, 0f), Size(width, size.height))
+        }
     }
 }
 
@@ -202,18 +227,38 @@ internal fun HolidayDashedDivider(dashes: HolidayDividerDashes) {
     )
 }
 
+/** One block of a [HolidayDividerBlocks] divider: its [color], and where it starts and how wide it is, in dp from the left edge. */
+internal data class HolidayDividerSegment(val color: Color, val startDp: Float, val widthDp: Float)
+
+/**
+ * The blocks of [blocks] across [totalDp]: colours in turn, each as wide as its `widthsDp` entry (else `blockDp`), repeating, the last one cut
+ * at the right edge. A block of no width is skipped, and there are none when no width is positive.
+ */
+internal fun holidayDividerSegments(blocks: HolidayDividerBlocks, totalDp: Float): List<HolidayDividerSegment> {
+    val widths = blocks.widthsDp?.takeIf { it.isNotEmpty() } ?: listOf(blocks.blockDp)
+    if (blocks.colors.isEmpty() || widths.none { it > 0f }) return emptyList()
+    val segments = ArrayList<HolidayDividerSegment>()
+    var x = 0f
+    var i = 0
+    while (x < totalDp) {
+        val width = widths[i % widths.size]
+        if (width > 0f) {
+            segments.add(HolidayDividerSegment(blocks.colors[i % blocks.colors.size], x, minOf(width, totalDp - x)))
+            x += width
+        }
+        i++
+    }
+    return segments
+}
+
 /** The theme's block divider ([HolidayDividerBlocks]): its colours repeat as hard blocks from the left edge, the last one cut at the right. */
 @Composable
 internal fun HolidayBlockDivider(blocks: HolidayDividerBlocks) {
     Box(
         Modifier.fillMaxWidth().height(blocks.heightDp.dp).drawBehind {
-            val block = blocks.blockDp.dp.toPx()
-            var x = 0f
-            var i = 0
-            while (x < size.width && block > 0f && blocks.colors.isNotEmpty()) {
-                drawRect(blocks.colors[i % blocks.colors.size], Offset(x, 0f), Size(minOf(block, size.width - x), size.height))
-                x += block
-                i++
+            val density = this.density
+            holidayDividerSegments(blocks, size.width / density).forEach {
+                drawRect(it.color, Offset(it.startDp * density, 0f), Size(it.widthDp * density, size.height))
             }
         },
     )

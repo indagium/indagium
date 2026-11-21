@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -477,6 +478,15 @@ internal fun TabShell(
         tabShape(style, position)
     }
     val ornament = packTabs?.theme?.tabOrnament?.takeIf { isActive }
+    // A moving ornament (a twinkling star) reads the frame clock in its draw lambda only, so the tab itself never recomposes with it.
+    val ornamentClock: State<Float>? = if (ornament?.animated == true) {
+        val shared = LocalHolidayEffectClock.current
+        val running = holidayPicturesRunning(animate = packTabs.effects.animatePicture && packTabs.effects.speedScale > 0f)
+        val fallback = rememberHolidayClock(running = running && shared == null)
+        if (running) shared ?: fallback else null
+    } else {
+        null
+    }
     val drawSourceContour = appearance.showStripe && shape != RectangleShape
     val sourceColor = if (appearance.showStripe) tabSourceColor(appearance.kind, tc) else Color.Transparent
     val lit = isActive || dragging
@@ -501,7 +511,8 @@ internal fun TabShell(
                     val edgeDp = holidayOuterEdgeInset(inset, position)
                     Modifier.testTag("tab-stem-$pointerKey").drawWithContent {
                         drawContent()
-                        ornament.draw(this, position, edgeDp.toPx(), packTabs.isDark)
+                        val time = ornamentClock?.value?.times(packTabs.effects.speedScale) ?: HOLIDAY_STILL_TIME
+                        ornament.drawFrame(this, position, edgeDp.toPx(), packTabs.isDark, time)
                     }
                 } else {
                     Modifier
@@ -531,6 +542,8 @@ internal fun TabShell(
                                     inverse = packTabs.theme.inverseActiveTab,
                                     borderWidth = packTabs.theme.borderWidthDp.dp,
                                     underlineWidth = packTabs.theme.activeTabUnderlineDp.dp,
+                                    edgeLine = packTabs.theme.tabEdgeLine(isActive, packTabs.isDark),
+                                    edgeLineWidth = packTabs.theme.tabEdgeLineDp.dp,
                                 ),
                                 // Over the scene behind the tab bar an idle tab is opaque, so the picture never shows through a tab.
                                 idleAlpha = if (holidaySceneShown(packTabs.effects.tabScene, position)) 1f else HOLIDAY_IDLE_TAB_ALPHA,
@@ -602,10 +615,22 @@ internal fun TabShell(
                     Box(Modifier.testTag("tab-dot-$pointerKey").size(SEGMENT_DOT).background(tc.ac, CircleShape))
                 }
                 if (appearance.showBadge) TabBadge(tabKindBadge(appearance.kind), "tab-badge-$pointerKey")
+                // Only where the pack's own tab shape is drawn: the inset clears that shape (Cozy's tag hole), not the user's tab style.
+                packTabs?.theme?.tabLabelInsetDp?.takeIf { it > 0f }?.let { inset ->
+                    Spacer(Modifier.width(inset.dp).testTag("tab-inset-$pointerKey"))
+                }
                 TooltipArea(tooltip = { TabTooltipBody(tooltip) }, modifier = Modifier.weight(1f).testTag("tab-label-$pointerKey")) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Box(Modifier.weight(1f, fill = false)) {
-                            TabLabelText(if (holiday?.theme?.uppercaseLabels == true) label.uppercase() else label, appearance.secondLine, labelStyle)
+                            TabLabelText(
+                                if (holiday?.theme?.uppercaseLabels == true) label.uppercase() else label,
+                                appearance.secondLine,
+                                labelStyle,
+                                // The pack's `~/ ` before the label (kept under "My tab style" like the pack's label font), dim like the design's `--dim`.
+                                prefix = holiday?.theme?.tabLabelPrefix,
+                                prefixColor = tc.td,
+                                prefixTag = "tab-prefix-$pointerKey",
+                            )
                         }
                         if (isActive && packTabs?.theme?.activeTabCursor == true) {
                             val shared = LocalHolidayEffectClock.current
@@ -613,7 +638,7 @@ internal fun TabShell(
                             val fallback = rememberHolidayClock(running = running && shared == null)
                             val clock = shared ?: fallback
                             Box(Modifier.width(8.dp).height(9.dp).testTag("tab-cursor-$pointerKey").drawBehind {
-                                if (!running || clock.value % 1f < .5f) drawRect(tc.onAc)
+                                if (!running || clock.value % 1f < .5f) drawRect(if (packTabs.theme.inverseActiveTab) tc.onAc else tc.ac)
                             })
                         }
                     }
@@ -703,18 +728,45 @@ private fun TabSourceStripe(pointerKey: Any, position: TabStripPosition, metrics
 
 // One line of label, or (TWO_LINE) the label over a dim second line.
 @Composable
-private fun TabLabelText(label: String, secondLine: String?, style: TabLabelStyle) {
+private fun TabLabelText(
+    label: String,
+    secondLine: String?,
+    style: TabLabelStyle,
+    prefix: String? = null,
+    prefixColor: Color = Color.Unspecified,
+    prefixTag: String = "tab-prefix",
+) {
     val tc = tc()
     val primary: @Composable () -> Unit = {
-        AppText(
-            label,
-            color = style.color,
-            fontSize = style.size,
-            fontFamily = style.family,
-            fontWeight = style.weight,
-            overflow = TextOverflow.Ellipsis,
-            maxLines = 1,
-        )
+        val text: @Composable (Modifier) -> Unit = { modifier ->
+            AppText(
+                label,
+                color = style.color,
+                fontSize = style.size,
+                fontFamily = style.family,
+                fontWeight = style.weight,
+                modifier = modifier,
+                overflow = TextOverflow.Ellipsis,
+                maxLines = 1,
+            )
+        }
+        if (prefix.isNullOrEmpty()) {
+            text(Modifier)
+        } else {
+            // Drawn inside the label's own row so no width maths changes: the label gives way to it, never the other way round.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AppText(
+                    prefix,
+                    color = prefixColor,
+                    fontSize = style.size,
+                    fontFamily = style.family,
+                    fontWeight = style.weight,
+                    modifier = Modifier.testTag(prefixTag),
+                    maxLines = 1,
+                )
+                text(Modifier.weight(1f, fill = false))
+            }
+        }
     }
     if (secondLine == null) {
         primary()

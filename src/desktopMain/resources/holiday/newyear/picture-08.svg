@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="ny-gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff1b8" /><stop offset=".5" stop-color="#e0a526" /><stop offset="1" stop-color="#8a6a10" /></linearGradient>
+              <radialGradient id="ny-face" cx="45%" cy="40%" r="65%"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#efe8d6" /></radialGradient>
+              <linearGradient id="ny-bottle" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2f7a52" /><stop offset=".45" stop-color="#16452c" /><stop offset="1" stop-color="#0a2617" /></linearGradient>
+              <linearGradient id="ny-fizz" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff3c4" /><stop offset="1" stop-color="#f2c14e" /></linearGradient>
+              <radialGradient id="ny-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+              <path id="ny-rays" d="M0-.38L0-1M.19-.33L.5-.87M.33-.19L.87-.5M.38 0L1 0M.33.19L.87.5M.19.33L.5.87M0 .38L0 1M-.19.33L-.5.87M-.33.19L-.87.5M-.38 0L-1 0M-.33-.19L-.87-.5M-.19-.33L-.5-.87" fill="none" vector-effect="non-scaling-stroke" stroke-linecap="round" />
+            </defs>
+            <path d="M110 300v14" stroke="#d94040" stroke-width="2" stroke-linecap="round" />
+            <circle cx="110" cy="300" r="5" fill="url(#ny-gold)" />
+            <path d="M74 252a64 64 0 0 1 40-16" stroke="#ffffff" stroke-width="5" stroke-linecap="round" opacity=".7" fill="none" />
+            <path d="M206 392V284c0-20 8-28 12-40v-40h18v40c4 12 12 20 12 40v108z" fill="url(#ny-bottle)" />
+            <path d="M216 198h20v40h-20z" fill="url(#ny-gold)" />
+            <path d="M213 236h26" stroke="#8a6a10" stroke-width="3" />
+            <rect x="210" y="300" width="34" height="44" rx="3" fill="#f4efe2" />
+            <rect x="210" y="308" width="34" height="5" fill="#e0a526" />
+            <circle cx="227" cy="326" r="7" fill="none" stroke="#8a6a10" stroke-width="1.5" />
+            <path d="M214 290v90" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" opacity=".28" />
+            <path d="M256 300h40c-2 18-10 26-20 26s-18-8-20-26z" fill="#ffffff" opacity=".22" stroke="#cfd6e4" stroke-width="1.5" />
+            <path d="M259 306h34c-3 12-9 17-17 17s-14-5-17-17z" fill="url(#ny-fizz)" />
+            <path d="M276 326v42M262 370h28" stroke="#cfd6e4" stroke-width="3" stroke-linecap="round" />
+            </svg>

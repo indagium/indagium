@@ -1123,8 +1123,11 @@ Indagium uses the corresponding default while retaining the selected name.
 shape; choosing one of the five shapes there gives the toolbar its own. An existing setup whose toolbar
 already differed from its tiles keeps that look.
 
-Under **Appearance › Theme › Special themes**, you can choose **Ready prompt**, **Tulips** or **Coffee bear**
-at any time. **Día de Muertos** and **Thanksgiving** also have automatic dates. Use **My tab style** in a pack's
+Under **Appearance › Theme › Special themes**, you can choose **Ready prompt**, **Tulips**, **Coffee bear** or **Retro**
+at any time. **Día de Muertos**, **Thanksgiving**, **Classic Christmas**, **Cozy Christmas** (both December 10 to 27),
+**First snow** (December 1 to January 7), **New Year's Eve** (December 28 to January 2) and **Programmers' Day**
+(September 12 to 14) also have automatic dates; when two are open, the one you selected wins, else the first in the list
+(Classic Christmas before Cozy Christmas, New Year's Eve before First snow). Retro never switches on by itself. Use **My tab style** in a pack's
 tab settings to keep your usual tabs while its other effects are active.
 
 Use the Settings search field to find a setting by name or task; results are grouped by page and show

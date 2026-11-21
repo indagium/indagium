@@ -2201,6 +2201,12 @@ enum class HolidayPack {
     COFFEE_BEAR,
     DIA_DE_MUERTOS,
     THANKSGIVING,
+    CLASSIC_CHRISTMAS,
+    COZY_CHRISTMAS,
+    FIRST_SNOW,
+    NEW_YEARS_EVE,
+    PROGRAMMERS_DAY,
+    RETRO,
 }
 
 /** Whether a pack renders its light or dark palette; FOLLOW_PRESET takes the family of the user's own theme preset. */

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240"><defs>
+              <linearGradient id="cf-body" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a4e68" /><stop offset="1" stop-color="#121a26" /></linearGradient>
+              <radialGradient id="cf-belly" cx="40%" cy="35%" r="70%"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#d6e2ee" /></radialGradient>
+              <linearGradient id="cf-beak" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffc062" /><stop offset="1" stop-color="#e8630f" /></linearGradient>
+              <linearGradient id="cf-snow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#c9dbec" /></linearGradient>
+            </defs>
+            <ellipse cx="120" cy="176" rx="36" ry="46" fill="url(#cf-belly)" />
+            <circle cx="120" cy="98" r="38" fill="url(#cf-body)" />
+            <path d="M120 130c-22 0-30-14-30-26 0-12 8-20 16-20 6 0 10 4 14 8 4-4 8-8 14-8 8 0 16 8 16 20 0 12-8 26-30 26z" fill="url(#cf-belly)" />
+            <circle cx="108" cy="102" r="4.6" fill="#141414" /><circle cx="132" cy="102" r="4.6" fill="#141414" />
+            <circle cx="109.6" cy="100.4" r="1.5" fill="#ffffff" /><circle cx="133.6" cy="100.4" r="1.5" fill="#ffffff" />
+            <ellipse cx="99" cy="114" rx="6" ry="3" fill="#ff9fb2" opacity=".6" /><ellipse cx="141" cy="114" rx="6" ry="3" fill="#ff9fb2" opacity=".6" />
+            <path d="M111 110l9 10 9-10z" fill="url(#cf-beak)" />
+            <path d="M84 132q36 14 72 0v11q-36 14-72 0z" fill="#d94040" />
+            <path d="M96 137v11M110 140v11M124 140v11M138 138v11" stroke="#ffffff" stroke-width="3" />
+            </svg>

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="ny-gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff1b8" /><stop offset=".5" stop-color="#e0a526" /><stop offset="1" stop-color="#8a6a10" /></linearGradient>
+              <radialGradient id="ny-face" cx="45%" cy="40%" r="65%"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#efe8d6" /></radialGradient>
+              <linearGradient id="ny-bottle" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2f7a52" /><stop offset=".45" stop-color="#16452c" /><stop offset="1" stop-color="#0a2617" /></linearGradient>
+              <linearGradient id="ny-fizz" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff3c4" /><stop offset="1" stop-color="#f2c14e" /></linearGradient>
+              <radialGradient id="ny-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+              <path id="ny-rays" d="M0-.38L0-1M.19-.33L.5-.87M.33-.19L.87-.5M.38 0L1 0M.33.19L.87.5M.19.33L.5.87M0 .38L0 1M-.19.33L-.5.87M-.33.19L-.87.5M-.38 0L-1 0M-.33-.19L-.87-.5M-.19-.33L-.5-.87" fill="none" vector-effect="non-scaling-stroke" stroke-linecap="round" />
+            </defs>
+            <ellipse cx="150" cy="394" rx="140" ry="14" fill="url(#ny-shadow)" />
+            <path d="M20 392c20-14 30 6 48-6M232 396c16-12 30 4 46-8" stroke="#ff6fae" stroke-width="3" stroke-linecap="round" fill="none" />
+            <path d="M60 398c10-10 24-2 30-10" stroke="#5ad1c8" stroke-width="3" stroke-linecap="round" fill="none" />
+            <rect x="102" y="214" width="16" height="12" rx="3" fill="url(#ny-gold)" />
+            <circle cx="110" cy="208" r="7" fill="none" stroke="url(#ny-gold)" stroke-width="4" />
+            <circle cx="110" cy="300" r="76" fill="url(#ny-gold)" />
+            <circle cx="110" cy="300" r="64" fill="url(#ny-face)" />
+            <g stroke="#8a6a10" stroke-width="3" stroke-linecap="round">
+              <path d="M110 242v10" /><path d="M110 348v10" /><path d="M52 300h10" /><path d="M158 300h10" />
+              <path d="M139 250l-4 7" /><path d="M160 271l-7 4" /><path d="M160 329l-7-4" /><path d="M139 350l-4-7" />
+              <path d="M81 350l4-7" /><path d="M60 329l7-4" /><path d="M60 271l7 4" /><path d="M81 250l4 7" />
+            </g>
+            </svg>

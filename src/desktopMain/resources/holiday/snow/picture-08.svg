@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <radialGradient id="fr-ball" cx="36%" cy="30%" r="75%"><stop offset="0" stop-color="#ffffff" /><stop offset=".55" stop-color="#eaf2fa" /><stop offset="1" stop-color="#a9c1d8" /></radialGradient>
+              <linearGradient id="fr-carrot" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#e8630f" /><stop offset="1" stop-color="#ffb347" /></linearGradient>
+              <linearGradient id="fr-tree" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4fae75" /><stop offset=".5" stop-color="#2f8a56" /><stop offset="1" stop-color="#1b5a36" /></linearGradient>
+              <linearGradient id="fr-ground" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#c9dbec" /></linearGradient>
+              <linearGradient id="fr-hat" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4a5058" /><stop offset="1" stop-color="#1c1f24" /></linearGradient>
+            </defs>
+            <g fill="#ffffff"><g><circle cx="180" cy="60" r="2" /></g></g></svg>

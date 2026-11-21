@@ -6,12 +6,14 @@ package com.indagium.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -309,6 +311,152 @@ class HolidayTabSceneUiTest {
         assertTrue(sameColour(low, high), "no hill in a vertical tab bar")
     }
 
+    private fun winterLook(pack: HolidayPack, lightness: HolidayLightness) = look(pack) { it.copy(lightness = lightness) }
+
+    // Nothing moves: the twinkling star and the blinking cursor are at their still pose (full strength, on), whatever the test clock does.
+    private fun stillLook(pack: HolidayPack) = look(pack) { it.copy(lightness = HolidayLightness.DARK, animatePicture = false) }
+
+    @Test
+    fun theWinterPacksRenderTheirChromeInBothPalettes() {
+        for (pack in listOf(HolidayPack.FIRST_SNOW, HolidayPack.COZY_CHRISTMAS, HolidayPack.CLASSIC_CHRISTMAS)) {
+            for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
+                if (::state.isInitialized) state.close()
+                setup(winterLook(pack, lightness)) { fit(it) }
+                rule.onNodeWithTag("tab-b").assertExists()
+                rule.onNodeWithTag("tab-stem-b").assertExists()
+                dump("${pack.name.lowercase()}-${lightness.name.lowercase()}")
+            }
+        }
+    }
+
+    @Test
+    fun theSnowCapSitsOverTheActiveTabAndNotOverAnIdleOne() {
+        val look = winterLook(HolidayPack.FIRST_SNOW, HolidayLightness.DARK)
+        setup(look)
+        val snow = androidx.compose.ui.graphics.Color(0xFFeef5fc)
+        val active = rule.onNodeWithTag("tab-b").getUnclippedBoundsInRoot()
+        val idle = rule.onNodeWithTag("tab-a").getUnclippedBoundsInRoot()
+        val centre = { b: androidx.compose.ui.unit.DpRect -> (b.left.value + b.right.value) / 2f }
+        assertTrue(sameColour(pixelAt(centre(active), active.top.value - 1f), snow), "snow sits on top of the active tab")
+        assertTrue(!sameColour(pixelAt(centre(idle), idle.top.value - 1f), snow), "an idle tab has no cap")
+    }
+
+    @Test
+    fun classicTabsHaveAPineLineAndTheActiveOneARedLineWithAStarAndABowAbove() {
+        val look = stillLook(HolidayPack.CLASSIC_CHRISTMAS)
+        setup(look)
+        val active = rule.onNodeWithTag("tab-b").getUnclippedBoundsInRoot()
+        val idle = rule.onNodeWithTag("tab-a").getUnclippedBoundsInRoot()
+        val theme = look.theme
+        // 2.5 dp under the tab's top edge: inside the 3 dp line, clear of the 1 to 1.5 dp outline and the label.
+        val activeLine = pixelAt(active.left.value + active.width.value * .3f, active.top.value + 2.8f)
+        val idleLine = pixelAt(idle.left.value + idle.width.value * .3f, idle.top.value + 2.5f)
+        assertTrue(sameColour(activeLine, checkNotNull(theme.tabEdgeLine(true, true))), "red line on the active tab: $activeLine")
+        assertTrue(sameColour(idleLine, checkNotNull(theme.tabEdgeLine(false, true))), "pine line on an idle tab: $idleLine")
+        val below = pixelAt(idle.left.value + idle.width.value * .3f, idle.top.value + 12f)
+        assertTrue(!sameColour(below, idleLine), "the line is only 3 dp thick")
+        // The bow is above the active tab's top edge, in the middle; the twinkling star at its corner (still pose here: full gold).
+        val bow = pixelAt((active.left.value + active.right.value) / 2f - 4f, active.top.value - 3f)
+        assertTrue(bow.green > bow.red && bow.green > .4f, "a green bow loop over the tab: $bow")
+        val star = pixelAt(active.right.value - 7.5f, active.top.value - 2.5f)
+        assertTrue(star.red > .7f && star.green > .6f && star.blue < .5f, "a gold star at the corner: $star")
+        assertTrue(abs(star.red - GOLD.red) < STAR_TOLERANCE && abs(star.green - GOLD.green) < STAR_TOLERANCE, "the still star is the design's gold: $star")
+    }
+
+    @Test
+    fun cozyTabsAreGiftTagsWithAHolePunchedThroughAndTheLabelClearOfIt() {
+        val look = winterLook(HolidayPack.COZY_CHRISTMAS, HolidayLightness.DARK).let { it.copy(effects = it.effects.copy(activeEffects = emptyList())) }
+        setup(look) { fit(it) }
+        val tab = rule.onNodeWithTag("tab-a").getUnclippedBoundsInRoot()
+        val midY = (tab.top.value + tab.bottom.value) / 2f
+        val barColour = look.chrome.tabBar
+        // The hole shows the tab bar through the tab, the tag around it is the tab fill.
+        assertTrue(sameColour(pixelAt(tab.left.value + 14.5f, midY), barColour), "the hole is open to the bar: ${pixelAt(tab.left.value + 14.5f, midY)}")
+        assertTrue(sameColour(pixelAt(tab.left.value + 24f, tab.top.value + 3f), look.chrome.tabBg), "the tag is solid beside it")
+        // The point: the top-left corner is cut away, so the bar shows there too.
+        assertTrue(sameColour(pixelAt(tab.left.value + 2f, tab.top.value + 2f), barColour), "the corner is cut by the point")
+        val label = rule.onNodeWithTag("tab-label-a", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val density = rule.density.density
+        val labelStartDp = label.left / density - tab.left.value
+        assertTrue(labelStartDp >= 25.5f, "the label starts past the tag's hole, as the design's 26 dp: $labelStartDp dp")
+        dump("cozy-hole")
+    }
+
+    @Test
+    fun theThreePartyPacksRenderTheirChromeInBothPalettes() {
+        for (pack in listOf(HolidayPack.NEW_YEARS_EVE, HolidayPack.PROGRAMMERS_DAY, HolidayPack.RETRO)) {
+            for (lightness in listOf(HolidayLightness.DARK, HolidayLightness.LIGHT)) {
+                if (::state.isInitialized) state.close()
+                setup(winterLook(pack, lightness)) { fit(it) }
+                rule.onNodeWithTag("tab-b").assertExists()
+                dump("${pack.name.lowercase()}-${lightness.name.lowercase()}")
+            }
+        }
+    }
+
+    @Test
+    fun programmersDayTabsHaveTheTildePrefixASquareCornerAndABlinkingCursorOnTheActiveOne() {
+        val look = stillLook(HolidayPack.PROGRAMMERS_DAY)
+        setup(look)
+        rule.onNodeWithTag("tab-prefix-a", useUnmergedTree = true).assertTextEquals("~/ ")
+        rule.onNodeWithTag("tab-prefix-b", useUnmergedTree = true).assertTextEquals("~/ ")
+        assertTrue(rule.onNodeWithTag("tab-cursor-b", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot.width > 0f, "the active tab has the cursor")
+        rule.onNodeWithTag("tab-cursor-a", useUnmergedTree = true).assertDoesNotExist()
+        val tab = rule.onNodeWithTag("tab-a").getUnclippedBoundsInRoot()
+        // Square: the very corner of the tab is the tab's own border or fill, not the bar showing through a rounded corner.
+        assertTrue(!sameColour(pixelAt(tab.left.value + .6f, tab.top.value + .6f), look.chrome.tabBar), "square corner")
+        // The cursor blinks in the accent colour (the clock is not running here, so it is on).
+        val cursor = rule.onNodeWithTag("tab-cursor-b", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val density = rule.density.density
+        val inCursor = pixelAt((cursor.left + cursor.right) / 2f / density, (cursor.top + cursor.bottom) / 2f / density)
+        assertTrue(sameColour(inCursor, look.colors.ac), "accent cursor")
+    }
+
+    @Test
+    fun theDashedAccentRuleIsDrawnAsDashesWithOpenGaps() {
+        val dashes = checkNotNull(winterLook(HolidayPack.PROGRAMMERS_DAY, HolidayLightness.DARK).theme.tileDividerDashes(true))
+        rule.setContent { Box(Modifier.width(60.dp).testTag("rule")) { HolidayDashedDivider(dashes) } }
+        val pixels = rule.onNodeWithTag("rule").captureToImage().toPixelMap()
+        val density = rule.density.density
+
+        fun at(xDp: Float) = pixels[(xDp * density).toInt(), 0]
+        assertEquals(dashes.dash.toArgb(), at(1.5f).toArgb(), "a dash")
+        assertEquals(0f, at(4.5f).alpha, "an open gap")
+        assertEquals(dashes.dash.toArgb(), at(7.5f).toArgb(), "the next dash")
+        assertEquals(pixels.height, density.toInt(), "one dp tall")
+    }
+
+    @Test
+    fun newYearsEveTabsArePillsWithATwinklingStarOnTheActiveOne() {
+        val look = stillLook(HolidayPack.NEW_YEARS_EVE)
+        setup(look)
+        val idle = rule.onNodeWithTag("tab-a").getUnclippedBoundsInRoot()
+        val active = rule.onNodeWithTag("tab-b").getUnclippedBoundsInRoot()
+        assertTrue(sameColour(pixelAt(idle.left.value + 1.2f, idle.top.value + 1.2f), look.chrome.tabBar), "the pill's corner is cut away")
+        val middle = pixelAt(idle.left.value + idle.width.value / 2f, idle.top.value + idle.height.value / 2f)
+        assertTrue(sameColour(middle, look.chrome.tabBg), "and its middle is the tab's fill")
+        val star = pixelAt(active.right.value - 5.5f, active.top.value - .5f)
+        val gold = abs(star.red - ACCENT_GOLD.red) < STAR_TOLERANCE && abs(star.green - ACCENT_GOLD.green) < STAR_TOLERANCE
+        assertTrue(gold, "an accent-gold star on the corner: $star")
+        val idleCorner = pixelAt(idle.right.value - 7.5f, idle.top.value - 2.5f)
+        assertTrue(idleCorner.green < ACCENT_GOLD.green - STAR_TOLERANCE, "no star on an idle tab: $idleCorner")
+    }
+
+    @Test
+    fun retroTabsGlowInNeonWithACyanInnerBarOnTheActiveOne() {
+        val look = winterLook(HolidayPack.RETRO, HolidayLightness.DARK)
+        setup(look)
+        val active = rule.onNodeWithTag("tab-b").getUnclippedBoundsInRoot()
+        val idle = rule.onNodeWithTag("tab-a").getUnclippedBoundsInRoot()
+        val centre = { b: androidx.compose.ui.unit.DpRect -> (b.left.value + b.right.value) / 2f }
+        val neon = androidx.compose.ui.graphics.Color(0xFFff4fd8)
+        val cyan = androidx.compose.ui.graphics.Color(0xFF00f0ff)
+        assertTrue(sameColour(pixelAt(centre(active), active.top.value - .5f), neon), "the neon ring above the active tab")
+        assertTrue(sameColour(pixelAt(centre(active), active.bottom.value - 2.5f), cyan), "the cyan bar along its inner edge")
+        assertTrue(!sameColour(pixelAt(centre(idle), idle.top.value - .5f), neon), "an idle tab has no ring")
+        assertTrue(!sameColour(pixelAt(centre(idle), idle.bottom.value - 2.5f), cyan), "and no bar")
+    }
+
     private companion object {
         const val HOST_WIDTH = 1000
         const val HOST_HEIGHT = 640
@@ -324,5 +472,8 @@ class HolidayTabSceneUiTest {
         const val FOAM_TOP_ROOM_DP = 6f
         const val EXPECTED_TOOLBAR_GROUPS = 4
         val FOAM = androidx.compose.ui.graphics.Color(0xFFfff4dc)
+        val GOLD = androidx.compose.ui.graphics.Color(0xFFe8b84a)
+        val ACCENT_GOLD = androidx.compose.ui.graphics.Color(0xFFf0c75e)
+        const val STAR_TOLERANCE = .1f
     }
 }

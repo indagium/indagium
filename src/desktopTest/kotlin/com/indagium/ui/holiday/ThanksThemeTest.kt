@@ -18,8 +18,8 @@ import kotlin.test.assertTrue
 class ThanksThemeTest {
     private val theme get() = HOLIDAY_THEMES.getValue(HolidayPack.THANKSGIVING)
 
-    @Test fun isTheLastRegisteredPackAndAnAutomaticHoliday() {
-        assertEquals(HolidayPack.THANKSGIVING, HOLIDAY_THEMES.keys.last())
+    @Test fun isRegisteredBeforeTheWinterPacksAndIsAnAutomaticHoliday() {
+        assertTrue(HOLIDAY_THEMES.keys.toList().let { it.indexOf(HolidayPack.THANKSGIVING) < it.indexOf(HolidayPack.CLASSIC_CHRISTMAS) })
         assertEquals("Thanksgiving", theme.label)
         assertEquals("Thanksgiving", theme.occasion)
         assertTrue(theme.supportsAutomatic)
@@ -32,8 +32,8 @@ class ThanksThemeTest {
         assertEquals(HolidayPack.THANKSGIVING, activeHolidayPack(settings, LocalDate.of(2026, 11, 21)))
         assertEquals(HolidayPack.THANKSGIVING, activeHolidayPack(settings, LocalDate.of(2026, 11, 26)))
         assertEquals(HolidayPack.THANKSGIVING, activeHolidayPack(settings, LocalDate.of(2026, 11, 30)))
-        // No other pack's window opens on December 1 in this registry, so the Automatic holiday simply ends.
-        assertNull(activeHolidayPack(settings, LocalDate.of(2026, 12, 1)))
+        // First snow's window opens on December 1, the day after this one closes: it takes over (a selected Thanksgiving is closed by then).
+        assertEquals(HolidayPack.FIRST_SNOW, activeHolidayPack(settings, LocalDate.of(2026, 12, 1)))
         // It is the only pack open in its window, so another selected pack does not hide it.
         val other = settings.copy(pack = HolidayPack.TULIPS)
         assertEquals(HolidayPack.THANKSGIVING, activeHolidayPack(other, LocalDate.of(2026, 11, 26)))

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="rt-sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe14d" /><stop offset=".5" stop-color="#ff8a3d" /><stop offset="1" stop-color="#ff2fa0" /></linearGradient>
+              <mask id="rt-sunmask"><rect width="300" height="420" fill="#ffffff" /><rect y="178" width="300" height="3" fill="#000000" /><rect y="192" width="300" height="4" fill="#000000" /><rect y="206" width="300" height="5" fill="#000000" /><rect y="221" width="300" height="6" fill="#000000" /><rect y="236" width="300" height="7" fill="#000000" /></mask>
+              <linearGradient id="rt-floor" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a0b4a" /><stop offset="1" stop-color="#0e0420" /></linearGradient>
+              <clipPath id="rt-fclip"><rect x="0" y="250" width="300" height="170" rx="8" /></clipPath>
+              <radialGradient id="rt-glow"><stop offset="0" stop-color="#ff4fd8" stop-opacity=".5" /><stop offset="1" stop-color="#ff4fd8" stop-opacity="0" /></radialGradient>
+            </defs>
+            <circle cx="150" cy="190" r="74" fill="url(#rt-sun)" mask="url(#rt-sunmask)" />
+            <path d="M0 250L40 212 70 232 110 194 150 250ZM150 250L196 202 228 230 262 198 300 250Z" fill="#1a0838" stroke="#00f0ff" stroke-width="1.6" stroke-linejoin="round" />
+            <path d="M40 212L52 250M110 194L96 250M110 194L126 250M196 202L184 250M262 198L276 250M262 198L246 250" stroke="#00f0ff" stroke-width=".8" opacity=".6" />
+            <rect x="0" y="250" width="300" height="170" rx="8" fill="url(#rt-floor)" />
+            <g clip-path="url(#rt-fclip)" stroke="#ff4fd8" stroke-width="1.4"><path d="M150 250L-300 420M150 250L-160 420M150 250L-40 420M150 250L60 420M150 250L150 420M150 250L240 420M150 250L340 420M150 250L460 420M150 250L600 420" opacity=".85" />
+              </g></svg>

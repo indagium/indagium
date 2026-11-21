@@ -28,16 +28,29 @@ internal data class HolidayCorners(val tabDp: Float = DEFAULT_TAB_DP, val toolba
     }
 }
 
-/** An ornament drawn on the active tab (the pumpkin's stem), at the tab's outer edge [outerEdgePx] in from its cell's side away from the content. */
+/**
+ * An ornament drawn on the active tab (the pumpkin's stem), at the tab's outer edge [outerEdgePx] in from its cell's side away from the content.
+ * One that moves ([animated], a twinkling star) is given the clock through [drawFrame]; the others only implement [draw].
+ */
 internal fun interface HolidayTabOrnament {
     fun draw(scope: DrawScope, position: TabStripPosition, outerEdgePx: Float, dark: Boolean)
+
+    /** Whether [drawFrame] depends on its time (the tab then runs a frame clock while pictures run). */
+    val animated: Boolean get() = false
+
+    /** Draws the ornament at [time] seconds (the still pose at HOLIDAY_STILL_TIME); the default is the unmoving [draw]. */
+    fun drawFrame(scope: DrawScope, position: TabStripPosition, outerEdgePx: Float, dark: Boolean, time: Float) = draw(scope, position, outerEdgePx, dark)
 }
 
 /** A dashed divider: [dash] runs of [dashDp] separated by [gap] runs of [gapDp], [heightDp] tall. */
 internal data class HolidayDividerDashes(val dash: Color, val gap: Color, val dashDp: Float = 18f, val gapDp: Float = 2f, val heightDp: Float = 2f)
 
-/** A divider of repeating hard-edged blocks: each of [colors] in turn, [blockDp] wide, [heightDp] tall (the papel picado stripe). */
-internal data class HolidayDividerBlocks(val colors: List<Color>, val blockDp: Float, val heightDp: Float)
+/**
+ * A divider of repeating hard-edged blocks: each of [colors] in turn, [blockDp] wide, [heightDp] tall (the papel picado stripe). With [widthsDp]
+ * block i is `widthsDp[i]` wide instead (an uneven ribbon: red 7, green 6, gold 1 ...) and the pattern repeats; [colors] and [widthsDp] are
+ * walked independently, so they need not be the same length.
+ */
+internal data class HolidayDividerBlocks(val colors: List<Color>, val blockDp: Float, val heightDp: Float, val widthsDp: List<Float>? = null)
 
 /** Optional pack-specific tab silhouette (for example, a tombstone with a rounded crown and a flat base). */
 internal fun interface HolidayTabShape {
@@ -157,6 +170,12 @@ internal interface HolidayTheme {
     val labelSizeSp: Float? get() = null
     val uppercaseLabels: Boolean get() = false
     val activeTabCursor: Boolean get() = false
+
+    /** Text drawn before every tab's label in the theme's dim text colour (`"~/ "`); not part of the tab's name. */
+    val tabLabelPrefix: String? get() = null
+
+    /** Room kept before every tab's label, past the tab's own start padding, where the pack's [tabShape] needs it (Cozy's tag point and hole). */
+    val tabLabelInsetDp: Float get() = 0f
     val borderWidthDp: Float get() = 1f
     val tabShape: HolidayTabShape? get() = null
 
@@ -179,6 +198,14 @@ internal interface HolidayTheme {
 
     /** Accent line on the content edge of the active tab. */
     val activeTabUnderlineDp: Float get() = 0f
+
+    /**
+     * Optional line along the outer edge of every tab, inside its outline and [tabEdgeLineDp] thick (Classic Christmas: pine green on an idle tab,
+     * red on the active one). Null draws none.
+     */
+    fun tabEdgeLine(active: Boolean, dark: Boolean): Color? = null
+
+    val tabEdgeLineDp: Float get() = 3f
 
     /** Optional dashed divider under an open tile's header (replaces the plain line; ignored when [tileDividerColors] is given). */
     fun tileDividerDashes(dark: Boolean): HolidayDividerDashes? = null

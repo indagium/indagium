@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotSelected
@@ -21,6 +22,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.dp
 import com.indagium.model.AppSettings
 import com.indagium.model.HolidayIntensity
@@ -78,8 +80,9 @@ class SeasonalThemesSettingsUiTest {
         rule.waitForIdle()
     }
 
+    // Through the semantics, not the mouse: the cards fill several rows, so a row can sit below the test window's bottom edge.
     private fun choose(group: String, label: String) {
-        rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(group))).performClick()
+        rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(group))).performSemanticsAction(SemanticsActions.OnClick)
         rule.waitForIdle()
     }
 
@@ -234,11 +237,14 @@ class SeasonalThemesSettingsUiTest {
     fun theTwoSwitchesFlipTheirFieldsAndTheRowsStayEditableWithNoSpecialThemeOn() {
         setup()
         openSeasonalTab()
-        // No special theme is on and nothing is dimmed: the rows take clicks, so a choice can be made before switching it on.
-        rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).assertIsOn().assertIsEnabled().performClick()
+        // No special theme is on and nothing is dimmed: the rows take clicks, so a choice can be made before switching it on. The cards fill several
+        // rows now, so these rows can sit below the test window's bottom edge: they are clicked through their semantics.
+        rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).assertIsOn().assertIsEnabled().performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
         assertTrue(!state.settings.holiday.funIcons)
         rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).assertIsOff()
-        rule.onNodeWithTag(SEASONAL_PAUSE_TAG).assertIsEnabled().performClick()
+        rule.onNodeWithTag(SEASONAL_PAUSE_TAG).assertIsEnabled().performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
         assertTrue(!state.settings.holiday.pauseWhileBusy)
         assertEquals(HolidayMode.OFF, state.settings.holiday.mode)
     }
@@ -341,7 +347,10 @@ class SeasonalThemesSettingsUiTest {
 
         filter(HolidayCategory.FUN.label).performClick()
         rule.waitForIdle()
-        assertEquals(setOf(HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN, HolidayPack.READY_PROMPT), HOLIDAY_THEMES.keys.filter(shown).toSet())
+        assertEquals(
+            setOf(HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN, HolidayPack.READY_PROMPT, HolidayPack.RETRO),
+            HOLIDAY_THEMES.keys.filter(shown).toSet(),
+        )
 
         filter(HolidayCategory.HOLIDAY.label).performClick()
         rule.waitForIdle()

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240"><defs>
+              <radialGradient id="cg-ginger" cx="40%" cy="30%" r="80%"><stop offset="0" stop-color="#e09a58" /><stop offset=".55" stop-color="#b8692e" /><stop offset="1" stop-color="#7a4218" /></radialGradient>
+              <radialGradient id="cg-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+            </defs>
+            <g><path d="M40 90l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" fill="#ffe08a" /></g></svg>

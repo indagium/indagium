@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="xm-tier" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fb67a" /><stop offset=".55" stop-color="#257f4b" /><stop offset="1" stop-color="#155c34" /></linearGradient>
+              <linearGradient id="xm-trunk" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8a5a3b" /><stop offset="1" stop-color="#4f2f1b" /></linearGradient>
+              <radialGradient id="xm-halo"><stop offset="0" stop-color="#ffe9a0" stop-opacity=".9" /><stop offset="1" stop-color="#ffe9a0" stop-opacity="0" /></radialGradient>
+              <linearGradient id="xm-star" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff6c8" /><stop offset="1" stop-color="#e0a526" /></linearGradient>
+              <radialGradient id="xm-skirt" cx="50%" cy="30%" r="70%"><stop offset="0" stop-color="#ef4a52" /><stop offset=".6" stop-color="#c41e2a" /><stop offset="1" stop-color="#7e1019" /></radialGradient>
+              <radialGradient id="xm-shadow"><stop offset="0" stop-color="#000" stop-opacity=".35" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+              <linearGradient id="xm-gbox" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3fa46a" /><stop offset="1" stop-color="#1f6b3f" /></linearGradient>
+              <linearGradient id="xm-rbox" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ef4a52" /><stop offset="1" stop-color="#a51722" /></linearGradient>
+              <linearGradient id="xm-gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffe08a" /><stop offset="1" stop-color="#c9952a" /></linearGradient>
+            </defs>
+            <ellipse cx="150" cy="392" rx="140" ry="16" fill="url(#xm-shadow)" />
+            </svg>

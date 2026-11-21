@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240"><defs>
+              <radialGradient id="cg-ginger" cx="40%" cy="30%" r="80%"><stop offset="0" stop-color="#e09a58" /><stop offset=".55" stop-color="#b8692e" /><stop offset="1" stop-color="#7a4218" /></radialGradient>
+              <radialGradient id="cg-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+            </defs>
+            <g><path d="M120 88c-20 0-28 8-28 18l-30 8c-14 4-10 24 4 22l26-4v16l-14 52c-4 14 14 20 20 8l22-44 22 44c6 12 24 6 20-8l-14-52v-16l26 4c14 2 18-18 4-22l-30-8c0-10-8-18-28-18z" fill="url(#cg-ginger)" />
+              </g><g><circle cx="120" cy="62" r="30" fill="url(#cg-ginger)" />
+              </g><g><path d="M74 116q3 5 0 10t0 10M166 116q-3 5 0 10t0 10M92 208q5-4 10 0t10 0M128 208q5-4 10 0t10 0" stroke="#ffffff" stroke-width="3" stroke-linecap="round" fill="none" />
+              </g><g><path d="M96 40q24-16 48 0" stroke="#ffffff" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9" />
+              </g><g><circle cx="109" cy="58" r="5" fill="#ffffff" /></g><g><circle cx="131" cy="58" r="5" fill="#ffffff" />
+              </g><g><circle cx="109" cy="58.5" r="2.6" fill="#2a1a12" /></g><g><circle cx="131" cy="58.5" r="2.6" fill="#2a1a12" />
+              </g><g><ellipse cx="100" cy="70" rx="5" ry="3" fill="#ff8a8e" opacity=".7" /></g><g><ellipse cx="140" cy="70" rx="5" ry="3" fill="#ff8a8e" opacity=".7" />
+              </g><g><path d="M108 72q12 10 24 0" stroke="#ffffff" stroke-width="3" stroke-linecap="round" fill="none" />
+              </g><g><path d="M106 92l14 6 14-6v12l-14-6-14 6z" fill="#e5484d" />
+              </g><g><circle cx="120" cy="98" r="3" fill="#b3261e" />
+              </g><g><circle cx="120" cy="116" r="6" fill="#3fa46a" /></g><g><circle cx="120" cy="136" r="6" fill="#e5484d" /></g><g><circle cx="120" cy="156" r="6" fill="#f2c14e" />
+              </g><g><circle cx="118" cy="114" r="1.8" fill="#ffffff" opacity=".8" /></g><g><circle cx="118" cy="134" r="1.8" fill="#ffffff" opacity=".8" /></g><g><circle cx="118" cy="154" r="1.8" fill="#ffffff" opacity=".8" />
+            </g></svg>

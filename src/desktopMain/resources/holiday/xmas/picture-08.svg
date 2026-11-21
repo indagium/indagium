@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="420" viewBox="0 0 300 420"><defs>
+              <linearGradient id="xm-tier" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4fb67a" /><stop offset=".55" stop-color="#257f4b" /><stop offset="1" stop-color="#155c34" /></linearGradient>
+              <linearGradient id="xm-trunk" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8a5a3b" /><stop offset="1" stop-color="#4f2f1b" /></linearGradient>
+              <radialGradient id="xm-halo"><stop offset="0" stop-color="#ffe9a0" stop-opacity=".9" /><stop offset="1" stop-color="#ffe9a0" stop-opacity="0" /></radialGradient>
+              <linearGradient id="xm-star" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff6c8" /><stop offset="1" stop-color="#e0a526" /></linearGradient>
+              <radialGradient id="xm-skirt" cx="50%" cy="30%" r="70%"><stop offset="0" stop-color="#ef4a52" /><stop offset=".6" stop-color="#c41e2a" /><stop offset="1" stop-color="#7e1019" /></radialGradient>
+              <radialGradient id="xm-shadow"><stop offset="0" stop-color="#000" stop-opacity=".35" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+              <linearGradient id="xm-gbox" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3fa46a" /><stop offset="1" stop-color="#1f6b3f" /></linearGradient>
+              <linearGradient id="xm-rbox" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ef4a52" /><stop offset="1" stop-color="#a51722" /></linearGradient>
+              <linearGradient id="xm-gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffe08a" /><stop offset="1" stop-color="#c9952a" /></linearGradient>
+            </defs>
+            <ellipse cx="140" cy="360" rx="112" ry="18" fill="url(#xm-skirt)" />
+            <ellipse cx="140" cy="360" rx="112" ry="18" fill="none" stroke="#ffffff" stroke-width="5" />
+            <ellipse cx="140" cy="361" rx="113" ry="19" fill="none" stroke="#f1f1f1" stroke-width="7" stroke-dasharray="0.01 9" stroke-linecap="round" />
+            <path d="M30 346h52v40h-52z" fill="url(#xm-gbox)" />
+            <path d="M82 346l10-7v40l-10 7z" fill="#164f2e" />
+            <path d="M30 346l10-7h52l-10 7z" fill="#5cc285" />
+            <rect x="52" y="346" width="8" height="40" fill="#d42a33" /><rect x="30" y="361" width="52" height="8" fill="#d42a33" />
+            <path d="M52 346l10-7h8l-10 7z" fill="#ff6b6f" />
+            <path d="M58 340c-11-11-24-4-15 4 5 3 11 1 15-4zm0 0c9-13 23-10 15 0-5 3-11 3-15 0z" fill="#e0343c" stroke="#9e1520" stroke-width="1" />
+            <path d="M188 332h58v54h-58z" fill="url(#xm-rbox)" />
+            <path d="M246 332l14-10v54l-14 10z" fill="#7e1019" />
+            <path d="M188 332l14-10h58l-14 10z" fill="#ff7a7e" />
+            <rect x="213" y="332" width="9" height="54" fill="url(#xm-gold)" /><rect x="188" y="355" width="58" height="9" fill="url(#xm-gold)" />
+            <path d="M213 332l14-10h9l-14 10z" fill="#ffe08a" />
+            <path d="M226 324c-15-15-32-6-21 5 7 4 15 2 21-5zm0 0c11-17 30-13 21 0-7 4-15 4-21 0z" fill="#ffe08a" stroke="#c9952a" stroke-width="1.2" />
+            <path d="M98 366h34v24h-34z" fill="url(#xm-gold)" />
+            <path d="M132 366l7-5v24l-7 5z" fill="#a87b12" />
+            <path d="M98 366l7-5h34l-7 5z" fill="#fff0b8" />
+            <rect x="112" y="366" width="6" height="24" fill="#d42a33" />
+            <path d="M268 392v-62a11 11 0 0 1 22 0" stroke="#ffffff" stroke-width="7" stroke-linecap="round" fill="none" />
+            <path d="M268 392v-62a11 11 0 0 1 22 0" stroke="#d42a33" stroke-width="7" stroke-dasharray="5 6" fill="none" />
+            </svg>

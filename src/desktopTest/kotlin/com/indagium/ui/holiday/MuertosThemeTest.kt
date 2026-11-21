@@ -107,7 +107,9 @@ class MuertosThemeTest {
             assertNull(theme.tileDividerGradient(dark))
             assertNull(theme.tileDividerDashes(dark))
         }
-        assertTrue(HOLIDAY_THEMES.values.filter { it.pack != HolidayPack.DIA_DE_MUERTOS }.all { it.tileDividerBlocks(true) == null })
+        // Only the packs with a block rule have one: the papel picado stripe and the two Christmas rules.
+        val withBlocks = setOf(HolidayPack.DIA_DE_MUERTOS, HolidayPack.COZY_CHRISTMAS, HolidayPack.CLASSIC_CHRISTMAS)
+        assertTrue(HOLIDAY_THEMES.values.filter { it.pack !in withBlocks }.all { it.tileDividerBlocks(true) == null })
     }
 
     @Test fun blockDividerPaintsHardBlocksThatRepeat() {

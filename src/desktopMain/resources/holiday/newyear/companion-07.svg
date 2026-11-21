@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240"><defs>
+              <linearGradient id="cn-gold" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#fff4c4" /><stop offset=".45" stop-color="#e8b53a" /><stop offset=".7" stop-color="#fff0b0" /><stop offset="1" stop-color="#a87b12" /></linearGradient>
+              <linearGradient id="cn-silver" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#ffffff" /><stop offset=".45" stop-color="#c3cad4" /><stop offset=".7" stop-color="#f4f6f9" /><stop offset="1" stop-color="#7d858f" /></linearGradient>
+            </defs>
+            <g fill="#ff6fae"><rect x="40" y="200" width="6" height="3" transform="rotate(30 43 201)" /><rect x="180" y="206" width="6" height="3" fill="#5ad1c8" transform="rotate(-20 183 207)" /><rect x="70" y="222" width="5" height="3" fill="#f0c75e" /><rect x="164" y="226" width="5" height="3" fill="#7c5cff" /></g>
+          </svg>
