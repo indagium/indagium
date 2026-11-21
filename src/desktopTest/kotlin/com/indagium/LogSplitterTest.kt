@@ -8,6 +8,7 @@ import com.indagium.utils.CsvRecordBoundaryTracker
 import com.indagium.utils.CsvRecordMachine
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
 import com.indagium.utils.JsonRecordMachine
+import com.indagium.utils.MAX_CSV_HEADER_SCAN_LINES
 import com.indagium.utils.MAX_SPLIT_RECORD_CHARS
 import com.indagium.utils.ProfileRecord
 import com.indagium.utils.SPLIT_PROMPT_BYTES
@@ -15,6 +16,7 @@ import com.indagium.utils.parseLogContent
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseProfileLines
 import com.indagium.utils.planSplitOutputs
+import com.indagium.utils.readCsvHeaderRow
 import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.splitProfileRecordsToFiles
 import com.indagium.utils.splitStreamToFiles
@@ -28,6 +30,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private const val OVERSIZED_EVENT_CHARS = 300_000
@@ -545,6 +548,27 @@ class LogSplitterTest {
         val lines = listOf("1,\"$chunk") + List(6) { chunk } + listOf("tail\",end", "2,two", "3,\"three", "x\",y")
         assertEquals(machineBoundaries(profile, lines), trackerBoundaries(',', lines))
         assertTrue(trackerBoundaries(',', lines).first() < lines.indexOf("tail\",end"), "the oversized record ended early")
+    }
+
+    @Test
+    fun csvSplitStopsWaitingForAHeaderRowThatIsNeverRecognised() {
+        val profile = LogFormatProfile(id = "split-csv-no-header", name = "Split CSV", engine = LogFormatEngine.CSV, hasHeader = true)
+        // A quote inside an unquoted field makes every row invalid, so none of them can become the header.
+        val rows = (1..(MAX_CSV_HEADER_SCAN_LINES * 3)).map { "$it,mid\"quote,field number $it" }
+        assertNull(readCsvHeaderRow(rows.asSequence(), profile), "the rows must not read as a header")
+        val source = rows.joinToString("\n", postfix = "\n").toByteArray()
+        val directory = createTempDirectory("openlog-csv-no-header-split").toFile()
+        try {
+            val outputs = planSplitOutputs("rows.csv", directory, "part", 4)
+            splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), profile)
+
+            assertTrue(outputs.all { it.length() > 0L }, "every part gets rows: ${outputs.map { it.length() }}")
+            // No header was found, so none is repeated: the parts are the source cut at record ends.
+            assertEquals(source.toList(), outputs.flatMap { it.readBytes().toList() })
+            assertTrue(outputs.all { it.readText().endsWith("\n") })
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test

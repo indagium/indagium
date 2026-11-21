@@ -8057,11 +8057,13 @@ class AppState(
 
     internal fun deleteLogFormatProfile(id: String): Boolean {
         if (BUILTIN_LOG_FORMAT_PROFILES.any { it.id == id }) return false
-        val old = settings.customLogFormatProfiles
-        val next = old.filterNot { it.id == id }
-        if (next.size == old.size) return false
-        updateSettings { it.copy(customLogFormatProfiles = next) }
-        return true
+        var removed = false
+        updateSettings { current ->
+            val next = current.customLogFormatProfiles.filterNot { it.id == id }
+            removed = next.size != current.customLogFormatProfiles.size
+            if (removed) current.copy(customLogFormatProfiles = next) else current
+        }
+        return removed
     }
 
     internal data class PendingLogFormatProfileImport(val file: File, val profiles: List<LogFormatProfile>)
@@ -11017,7 +11019,7 @@ class AppState(
     fun navigateToVideoFrame(tabId: String, frame: VideoFrameReference, fromSharedNote: Boolean = false): Boolean {
         if (frame.positionMs < 0L) return false
         val target = tab(tabId)?.takeIf { it.attachedVideo?.source == frame.source }
-            ?: (if (fromSharedNote) tabs.firstOrNull { it.attachedVideo?.source == frame.source } else null)
+            ?: (if (fromSharedNote) sharedNoteVideoTarget(tabId, frame) else null)
             ?: return false
         val controller = videoController(target.id) ?: return false
         if (tab(target.id)?.attachedVideo?.source != frame.source) return false
@@ -11028,6 +11030,17 @@ class AppState(
         videoPanelVisible = true
         controller.seek(frame.positionMs)
         return true
+    }
+
+    /**
+     * The tab a shared note's video frame should seek: a member of the note [viewingTabId] shows first, else any tab with that
+     * video. Null when no open tab has it attached.
+     */
+    private fun sharedNoteVideoTarget(viewingTabId: String, frame: VideoFrameReference): LogTab? {
+        val hostId = tab(viewingTabId)?.notesView ?: viewingTabId
+        val members = sharedNoteHost(hostId)?.sharedNote?.memberTabIds.orEmpty()
+        val hasVideo = { candidate: LogTab -> candidate.attachedVideo?.source == frame.source }
+        return tabs.firstOrNull { it.id in members && hasVideo(it) } ?: tabs.firstOrNull(hasVideo)
     }
 
     /**
@@ -16102,8 +16115,9 @@ class AppState(
         val heldByAnotherNote = (tabs.asSequence() + sharedNoteHosts.asSequence()).any {
             it.id != host.id && it.id != recipient.id && oldPin != null && oldPin.equals(it.noteTargetName, ignoreCase = true)
         }
-        return oldPin?.takeIf { !heldByAnotherNote && it in noteFileCandidateNames(recipient.filename, recipient.sourcePath) }
-            ?: freeNoteTargetName(analysisNoteMarkdownName(recipient.filename, recipient.sourcePath))
+        return oldPin?.takeIf { pin ->
+            !heldByAnotherNote && noteFileCandidateNames(recipient.filename, recipient.sourcePath).any { it.equals(pin, ignoreCase = true) }
+        } ?: freeNoteTargetName(analysisNoteMarkdownName(recipient.filename, recipient.sourcePath))
     }
 
     private fun shouldExportStoppedSharedNote(host: LogTab, recipient: LogTab): Boolean =
@@ -16121,18 +16135,30 @@ class AppState(
             ?.let { oldName -> reserveExportTarget(File(directory, oldName)).also { retiringNoteExports[it.mdFile.absolutePath] = it } }
         launchPinned(pinRows(recipient)) {
             try {
-                target.writer.mutex.withLock {
-                    if (target.revision == target.writer.revision.get()) writeNoteExport(recipient, target.mdFile)
+                reportTransferredNoteFailure(target.mdFile) {
+                    target.writer.mutex.withLock {
+                        if (target.revision == target.writer.revision.get()) writeNoteExport(recipient, target.mdFile)
+                    }
+                    if (retiring != null) retireNoteSourceAssociation(retiring)
+                    // A recipient reopened while the export was queued may have missed the new file.
+                    tabs.filter { it.sourcePath == recipient.sourcePath && canAutoLoadOwnNotes(it) }
+                        .forEach { autoLoadOwnNotesIfAny(it.id) }
                 }
-                if (retiring != null) retireNoteSourceAssociation(retiring)
-                // A recipient reopened while the export was queued may have missed the new file.
-                tabs.filter { it.sourcePath == recipient.sourcePath && canAutoLoadOwnNotes(it) }
-                    .forEach { autoLoadOwnNotesIfAny(it.id) }
-            } catch (failure: java.io.IOException) {
-                showOpenError("Could not save the transferred note", target.mdFile.absolutePath, failure.message.orEmpty())
             } finally {
                 if (retiring != null) retiringNoteExports.remove(retiring.mdFile.absolutePath, retiring)
             }
+        }
+    }
+
+    /** Runs [block]; any failure but a cancellation (not just an I/O one) shows the "Could not save the transferred note" error. */
+    @Suppress("TooGenericExceptionCaught") // Whatever the export throws must reach the user, not vanish in a launched job.
+    internal suspend fun reportTransferredNoteFailure(mdFile: File, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            showOpenError("Could not save the transferred note", mdFile.absolutePath, failure.message ?: failure.javaClass.simpleName)
         }
     }
 

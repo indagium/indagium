@@ -40,6 +40,7 @@ import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -526,6 +527,30 @@ class LogFormatProfilePersistenceTest {
         logFormatProfilesJson(profiles),
         updateConflicts,
     ).getOrThrow()
+
+    @Test
+    fun deletingACustomProfileRemovesOnlyThatOneAndReportsWhetherAnythingWentAway() {
+        val directory = createTempDirectory("log-format-delete").toFile()
+        val app = newState(directory)
+        try {
+            val keep = customJsonProfile("keep-profile").copy(name = "Keep me")
+            val drop = customJsonProfile("drop-profile").copy(name = "Drop me")
+            assertTrue(app.saveLogFormatProfile(keep).isSuccess)
+            assertTrue(app.saveLogFormatProfile(drop).isSuccess)
+            val before = app.settings
+
+            assertFalse(app.deleteLogFormatProfile("missing-profile"))
+            assertFalse(app.deleteLogFormatProfile("plain-text"), "built-in formats cannot be deleted")
+            assertSame(before, app.settings, "a refused delete changes no settings")
+
+            assertTrue(app.deleteLogFormatProfile(drop.id))
+            assertEquals(listOf("keep-profile"), app.settings.customLogFormatProfiles.map { it.id })
+            assertFalse(app.deleteLogFormatProfile(drop.id), "already gone")
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
 
     private fun importProfileJson(
         state: AppState,

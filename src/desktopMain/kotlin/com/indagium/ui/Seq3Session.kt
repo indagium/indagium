@@ -189,6 +189,8 @@ data class Seq3WorkspaceSession(
     val hasTicket: Boolean = true,
     /** An explicit note owner when edits belong somewhere other than the source log's private note. */
     internal val noteOwnerTabId: String? = null,
+    /** True once the shared note this diagram was opened from was deleted; [Seq3Session.confirm] then says so when no note is left to write to. */
+    internal val noteDeleted: Boolean = false,
 ) {
     internal val noteTargetTabId: String? get() = noteOwnerTabId ?: sourceTabId
 
@@ -613,6 +615,21 @@ class Seq3Session(
         sessions = sessions.map { session ->
             if (session.noteTargetTabId == fromTabId && session.confirmedBlockId in movedIds) {
                 session.copy(noteOwnerTabId = toTabId.takeUnless { it == session.sourceTabId })
+            } else {
+                session
+            }
+        }
+    }
+
+    /**
+     * Caller holds stateLock while deleting shared note [hostId]. A session that wrote to it no longer has a note to write to:
+     * it goes back to its source log's private note (the deleted note's block is no longer its own, so the next confirm adds a
+     * fresh one), or has no note target when it has no source log.
+     */
+    internal fun noteDeleted(hostId: String) {
+        sessions = sessions.map { session ->
+            if (session.noteTargetTabId == hostId) {
+                session.copy(noteOwnerTabId = null, confirmedBlockId = null, noteDeleted = true)
             } else {
                 session
             }
@@ -1748,8 +1765,17 @@ class Seq3Session(
      */
     fun confirm(id: String): String? {
         val current = session(id) ?: return null
-        val tabId = current.noteTargetTabId ?: return null
-        if (current.document.lifelines.isEmpty() || appState.noteTab(tabId) == null) return null
+        val tabId = current.noteTargetTabId?.takeIf { appState.noteTab(it) != null }
+        if (tabId == null) {
+            if (current.noteDeleted && current.document.lifelines.isNotEmpty()) {
+                appState.pendingDiagramNotice = DiagramNotice(
+                    title = "Note not found",
+                    body = "The note this diagram belonged to was deleted.",
+                )
+            }
+            return null
+        }
+        if (current.document.lifelines.isEmpty()) return null
         // W3: run any still-pending debounced draft save now rather than leaving it to fire later
         // against whatever session state exists AFTER this confirm — avoids a redundant write
         // chasing this one a moment later, and guarantees the library draft never lags behind an

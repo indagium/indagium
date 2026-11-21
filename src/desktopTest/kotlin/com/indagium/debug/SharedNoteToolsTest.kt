@@ -203,6 +203,22 @@ class SharedNoteToolsTest {
     }
 
     @Test
+    fun loadAnnotationsAddressedAtASharedNoteHostReplacesTheHostsNote() {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        call("add_text_note", "tabId" to hostId, "text" to "original")
+        call("add_text_note", "tabId" to "c", "text" to "from the sidecar")
+        val sidecar = File(dir, "from-c.ann")
+        assertTrue(state.saveAnnotationsTo("c", sidecar))
+
+        val result = call("load_annotations", "tabId" to hostId, "path" to sidecar.absolutePath)
+
+        assertEquals(true, result["ok"], result.toString())
+        assertEquals("from the sidecar", (state.sharedNoteHost(hostId)!!.annotations.blocks.single() as AnnBlock.Note).text)
+        assertTrue(state.tabs.none { it.id == hostId }, "the host never enters the tab list")
+        assertEquals("annotations were not loaded", call("load_annotations", "tabId" to "nope", "path" to sidecar.absolutePath)["error"])
+    }
+
+    @Test
     fun revokingMembershipBeforeAContentWriteCommitsPreventsTheWrite() = runBlocking {
         val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
         call("add_text_note", "tabId" to hostId, "text" to "original")

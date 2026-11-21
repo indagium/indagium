@@ -167,10 +167,15 @@ private fun splitCsvRecords(
     val pending = ByteArrayOutputStream()
     var header: ByteArray? = null
     var allowRotation = !profile.hasHeader
+    // Like readCsvHeaderRow, give up on the header after MAX_CSV_HEADER_SCAN_LINES physical lines: a file whose header is never
+    // recognised then splits with rotation allowed (and no repeated header) instead of landing whole in the first part.
+    var scannedLines = 0
+    var gaveUpOnHeader = false
     while (true) {
         val bytes = lines.next() ?: break
         val line = decodeSplitLine(bytes, charset)
-        val waitingForHeader = machine != null && header == null
+        val waitingForHeader = machine != null && header == null && !gaveUpOnHeader
+        if (waitingForHeader) scannedLines++
         val recordEnded = if (waitingForHeader) {
             machine.accept(line, ready)
             ready.clear()
@@ -192,7 +197,13 @@ private fun splitCsvRecords(
         // Keep the first data record with its header even if together they exceed the target.
         writer.writeRecord(record, header, allowRotation)
         if (waitingForHeader) {
-            if (machine.headers != null) header = record
+            if (machine.headers != null) {
+                header = record
+            } else if (scannedLines >= MAX_CSV_HEADER_SCAN_LINES) {
+                // Only at a record end, so the boundary tracker takes over between records.
+                gaveUpOnHeader = true
+                allowRotation = true
+            }
         } else if (multiline || line.isNotEmpty()) {
             allowRotation = true
         }

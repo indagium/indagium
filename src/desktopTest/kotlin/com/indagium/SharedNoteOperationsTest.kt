@@ -24,11 +24,14 @@ import com.indagium.ui.shareTabNote
 import com.indagium.ui.sharedNotesFor
 import com.indagium.ui.stopSharing
 import com.indagium.ui.tokenFieldAt
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -630,6 +633,61 @@ class SharedNoteOperationsTest {
             assertTrue(state.tab(reopenedFirst)!!.annotations.blocks.isEmpty())
             val note = state.tab(reopenedSecond)!!.annotations.blocks.single() as AnnBlock.Note
             assertEquals("handoff finding", note.text)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aTransferredPinThatDiffersOnlyInCaseStaysThePinOfTheRecipient() {
+        val dir = createTempDirectory("shared-ops-pin-case").toFile()
+        val state = withTabs(dir, autoExport = true)
+        try {
+            val id = assertNotNull(state.createSharedNote("Main", listOf("a", "b")))
+            state.putBlocks(id, noteBlock())
+            val recipient = state.tab("a")!!
+
+            state.upTab(id) { it.copy(noteTargetName = "a_analysis.md") }
+            assertEquals("a_analysis.md", state.stoppedSharedNotePin(state.host(id), recipient), "the plain candidate is kept")
+
+            state.upTab(id) { it.copy(noteTargetName = "A_Analysis.MD") }
+            assertEquals(
+                "A_Analysis.MD", state.stoppedSharedNotePin(state.host(id), recipient),
+                "a pin that differs only in case is still the recipient's own file name",
+            )
+
+            state.upTab(id) { it.copy(noteTargetName = "unrelated_analysis.md") }
+            assertEquals("a_analysis.md", state.stoppedSharedNotePin(state.host(id), recipient), "another file's name is replaced")
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun anyFailureOfTheTransferredNoteExportShowsTheSaveErrorButACancellationDoesNot() {
+        val dir = createTempDirectory("shared-ops-transfer-failure").toFile()
+        val state = state(dir)
+        try {
+            val target = File(dir, "notes/a_analysis.md")
+
+            runBlocking { state.reportTransferredNoteFailure(target) { error("not an I/O failure") } }
+
+            val error = assertNotNull(state.openError)
+            assertEquals("Could not save the transferred note", error.title)
+            assertEquals(target.absolutePath, error.path)
+            assertEquals("not an I/O failure", error.message)
+            state.dismissOpenError()
+
+            runBlocking { state.reportTransferredNoteFailure(target) { throw java.io.IOException("disk full") } }
+            assertEquals("disk full", state.openError?.message)
+            state.dismissOpenError()
+
+            assertFailsWith<CancellationException> {
+                runBlocking { state.reportTransferredNoteFailure(target) { throw CancellationException("stopped") } }
+            }
+            assertNull(state.openError, "a cancelled export is not an error to show")
         } finally {
             state.close()
             dir.deleteRecursively()

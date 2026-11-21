@@ -347,6 +347,7 @@ internal fun AppState.deleteSharedNote(hostId: String): Boolean = synchronized(s
     sharedNoteHosts = sharedNoteHosts.filterNot { it.id == hostId }
     tabs = tabs.map { if (it.notesView == hostId) it.copy(notesView = null) else it }
     if (pendingNoteOverwrite?.tabId == hostId) pendingNoteOverwrite = null
+    seq3Sessions.noteDeleted(hostId)
     true
 }
 

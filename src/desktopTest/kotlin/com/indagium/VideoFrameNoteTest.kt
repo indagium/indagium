@@ -114,6 +114,50 @@ class VideoFrameNoteTest {
     }
 
     @Test
+    fun sharedFrameNavigationPrefersAMemberOfTheShownNoteOverAnyOtherTabWithTheVideo() {
+        val controller = FakeVideoController()
+        val source = VideoSource.LocalFile("/videos/shared.mp4")
+        val state = AppState(videoControllerFactory = { controller })
+        try {
+            state.tabs = listOf(
+                // Not in the note, and first in the tab list: the old "first tab with this video" pick.
+                mkTab("stranger", "other.log", emptyList()).copy(attachedVideo = VideoAttachment(source, "shared.mp4")),
+                mkTab("member", "recorded.log", emptyList()).copy(attachedVideo = VideoAttachment(source, "shared.mp4")),
+                mkTab("viewer", "viewer.log", emptyList()),
+            )
+            state.createSharedNote("Investigation", listOf("member", "viewer"))
+            state.activateTab("viewer")
+            val frame = VideoFrameReference(source, "shared.mp4", 4_321L)
+
+            assertTrue(state.navigateToVideoFrame("viewer", frame, fromSharedNote = true))
+            assertEquals("member", state.activeTabId)
+            assertEquals(4_321L, controller.seekedTo)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun sharedFrameNavigationFallsBackToAnyTabWithTheVideoWhenNoMemberHasIt() {
+        val controller = FakeVideoController()
+        val source = VideoSource.LocalFile("/videos/shared.mp4")
+        val state = AppState(videoControllerFactory = { controller })
+        try {
+            state.tabs = listOf(
+                mkTab("stranger", "other.log", emptyList()).copy(attachedVideo = VideoAttachment(source, "shared.mp4")),
+                mkTab("viewer", "viewer.log", emptyList()),
+            )
+            state.createSharedNote("Investigation", listOf("viewer"))
+            state.activateTab("viewer")
+
+            assertTrue(state.navigateToVideoFrame("viewer", VideoFrameReference(source, "shared.mp4", 1_000L), fromSharedNote = true))
+            assertEquals("stranger", state.activeTabId)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
     fun clickingAFrameWhoseVideoIsNotOpenSaysSoAndAMatchingOneDoesNot() {
         val controller = FakeVideoController()
         val source = VideoSource.LocalFile("/videos/repro.mp4")
