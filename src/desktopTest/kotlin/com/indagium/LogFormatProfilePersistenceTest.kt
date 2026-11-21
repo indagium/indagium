@@ -516,6 +516,83 @@ class LogFormatProfilePersistenceTest {
         }
     }
 
+    // The saved copy of an update takes max(imported revision, stored revision + 1); that can leave the valid
+    // range even though the imported profile was valid, and it has to fail like any other invalid profile.
+    @Test
+    fun anUpdateImportWhoseBumpedRevisionIsInvalidFailsAndStoresNothing() {
+        val directory = createTempDirectory("log-format-import-revision").toFile()
+        val app = newState(directory)
+        try {
+            val stored = customJsonProfile("revision-limit").copy(revision = 100_000)
+            val bystander = customJsonProfile("revision-bystander").copy(name = "Bystander")
+            app.settings = app.settings.copy(customLogFormatProfiles = listOf(stored, bystander))
+            val before = app.settings.customLogFormatProfiles.toList()
+
+            val failed = app.applyImportedLogFormatProfiles(
+                listOf(customJsonProfile("revision-bystander").copy(name = "Renamed bystander"), stored.copy(name = "Renamed")),
+                updateConflicts = true,
+            )
+
+            assertTrue(failed.isFailure)
+            assertEquals("Invalid profile revision.", failed.exceptionOrNull()?.message)
+            assertEquals(before, app.settings.customLogFormatProfiles, "nothing of a failed import is stored, not even the earlier items")
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    // saveLogFormatProfile refuses a name another custom format already uses; an update import follows the same rule.
+    @Test
+    fun anUpdateImportCannotTakeAnotherCustomFormatsName() {
+        val directory = createTempDirectory("log-format-import-name").toFile()
+        val app = newState(directory)
+        try {
+            val first = customJsonProfile("name-first").copy(name = "First format")
+            val second = customJsonProfile("name-second").copy(name = "Second format")
+            app.settings = app.settings.copy(customLogFormatProfiles = listOf(first, second))
+            val before = app.settings.customLogFormatProfiles.toList()
+
+            val clash = app.applyImportedLogFormatProfiles(listOf(first.copy(name = "SECOND FORMAT")), updateConflicts = true)
+            assertTrue(clash.isFailure)
+            assertEquals("Another custom format already uses that name.", clash.exceptionOrNull()?.message)
+            assertEquals(before, app.settings.customLogFormatProfiles)
+
+            // Keeping its own name, even in another case, is not a clash with itself.
+            val own = app.applyImportedLogFormatProfiles(listOf(first.copy(name = "first FORMAT")), updateConflicts = true).getOrThrow().single()
+            assertEquals("first FORMAT", own.name)
+            assertEquals(2, own.revision)
+            assertEquals(listOf("first FORMAT", "Second format"), app.settings.customLogFormatProfiles.map { it.name })
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    // The merge works on the settings updateSettings hands over, and the size limit is checked there too.
+    @Test
+    fun anImportThatOverflowsTheLibraryFailsAndLeavesTheSettingsAlone() {
+        val directory = createTempDirectory("log-format-import-limit").toFile()
+        val app = newState(directory)
+        try {
+            val full = (1..200).map { customJsonProfile("full-$it").copy(name = "Full $it") }
+            app.settings = app.settings.copy(customLogFormatProfiles = full)
+            val failed = app.applyImportedLogFormatProfiles(listOf(customJsonProfile("one-too-many")), updateConflicts = false)
+            assertTrue(failed.isFailure)
+            assertEquals(full, app.settings.customLogFormatProfiles)
+
+            // An update of a stored profile does not grow the library, so it is still allowed.
+            val updated = app.applyImportedLogFormatProfiles(
+                listOf(full.first().copy(description = "Changed")), updateConflicts = true,
+            ).getOrThrow().single()
+            assertEquals("Changed", updated.description)
+            assertEquals(200, app.settings.customLogFormatProfiles.size)
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
     private fun importProfiles(
         state: AppState,
         directory: File,

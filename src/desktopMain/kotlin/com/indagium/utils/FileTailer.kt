@@ -49,6 +49,12 @@ class FileTailer(
     /** Byte offset to begin from. null (default) = current end-of-file, the v1 behaviour: only
      *  new growth is emitted. 0 replays the whole file from the start. */
     private val startOffset: Long? = null,
+    /** Called once each time the file is found shorter than the position already read (rotated or
+     *  truncated), after the position has moved back to the start and BEFORE the first batch of the
+     *  new content reaches [onNewLines]. Runs on whichever thread is reading: the tailer's own
+     *  coroutine, or the caller of [drainToEndOfFile]/[readToEndOfFile]. A consumer keeping state
+     *  that spans lines (a parsed header, an open record) resets it here. */
+    private val onRestart: () -> Unit = {},
 ) {
     // moreAvailable: the chunk cap (MAX_TAIL_READ_BYTES) held back data still waiting beyond
     // newOffset — start()'s poll loop uses this to keep draining without waiting a full extra
@@ -185,7 +191,17 @@ class FileTailer(
         // `adb logcat > out.log` restarting) typically completes faster than one poll interval:
         // by the time this is noticed, the "new" file may already be fully written, and jumping
         // to its EOF would silently discard all of it instead of showing the new session.
-        val readFrom = if (length < fromOffset) 0L else fromOffset
+        //
+        // The restart is announced here, in the one place every read passes through, with the offset
+        // already moved back so a second read of the same shrunken file does not announce it again.
+        // Done before any line of the new content is returned, so a consumer resets its state first.
+        val readFrom = if (length < fromOffset) {
+            offset = 0L
+            onRestart()
+            0L
+        } else {
+            fromOffset
+        }
         if (length == readFrom) return ReadResult(emptyList(), readFrom, moreAvailable = false)
 
         val cappedTo = minOf(length, readFrom + MAX_TAIL_READ_BYTES)

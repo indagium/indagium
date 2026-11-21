@@ -11,6 +11,7 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -193,6 +194,73 @@ class FileTailerTest {
             job.cancel()
             scope.cancel()
         }
+    }
+
+    // A consumer that keeps state across lines resets it in onRestart, so the callback must come
+    // exactly once per shrink and before the first line of the rewritten file.
+    @Test
+    fun onRestartFiresOnceWhenTheFileIsRewrittenAndBeforeTheNewLines() {
+        val dir = createTempDirectory("openlog-tail-restart").toFile()
+        val file = File(dir, "out.log").apply { writeText("old one\nold two\n") }
+        val events = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(
+            file,
+            onNewLines = { lines -> events.add("lines:" + lines.joinToString(",")) },
+            pollIntervalMs = 50,
+            onRestart = { events.add("restart") },
+        )
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            file.appendText("more old\n")
+            waitUntil { events.isNotEmpty() }
+            file.writeText("new a\nnew b\n")
+            waitUntil { events.any { it == "lines:new a,new b" } }
+            Thread.sleep(300)
+            assertEquals(listOf("lines:more old", "restart", "lines:new a,new b"), events.toList())
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
+    // Truncating to nothing leaves no line to deliver, so the offset has to move back on its own or
+    // every following poll would announce the same shrink again.
+    @Test
+    fun onRestartFiresOnlyOnceForATruncationToAnEmptyFile() {
+        val dir = createTempDirectory("openlog-tail-restart-empty").toFile()
+        val file = File(dir, "out.log").apply { writeText("old one\nold two\n") }
+        val restarts = AtomicInteger()
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { received.addAll(it) }, pollIntervalMs = 50, onRestart = { restarts.incrementAndGet() })
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            file.writeText("")
+            waitUntil { restarts.get() >= 1 }
+            Thread.sleep(400)
+            assertEquals(1, restarts.get())
+            file.appendText("fresh\n")
+            waitUntil { received.isNotEmpty() }
+            assertEquals(listOf("fresh"), received.toList())
+            assertEquals(1, restarts.get())
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
+    // The final catch-up read of a stopping tail goes through the same restart announcement.
+    @Test
+    fun drainToEndOfFileAnnouncesARestartBeforeTheRewrittenLines() {
+        val dir = createTempDirectory("openlog-tail-restart-drain").toFile()
+        val file = File(dir, "out.log").apply { writeText("old one\nold two\n") }
+        val events = mutableListOf<String>()
+        val tailer = FileTailer(file, onNewLines = {}, pollIntervalMs = 50, startOffset = 0L, onRestart = { events.add("restart") })
+        tailer.drainToEndOfFile { events.add("lines:" + it.joinToString(",")) }
+        file.writeText("new\n")
+        tailer.drainToEndOfFile { events.add("lines:" + it.joinToString(",")) }
+        assertEquals(listOf("lines:old one,old two", "restart", "lines:new"), events)
     }
 
     // P-04: readNewLines() caps a single read at a few MB instead of allocating one buffer sized

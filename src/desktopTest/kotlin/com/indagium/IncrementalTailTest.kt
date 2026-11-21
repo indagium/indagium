@@ -103,6 +103,81 @@ class IncrementalTailTest {
         }
     }
 
+    // The tailer reads a rewritten file from byte 0, so the new header row must be taken as the header again
+    // (the old parser would keep the old one and turn it into a row) and the lines numbered from 1.
+    @Test
+    fun aRewrittenCsvTakesItsNewHeaderRowAndNeverShowsItAsARow() {
+        val app = newState()
+        val profile = LogFormatProfile(
+            id = "tail-csv-rewrite",
+            name = "Tail CSV rewrite",
+            engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(
+                LogFieldRole.TIMESTAMP to "time",
+                LogFieldRole.SEVERITY to "level",
+                LogFieldRole.MESSAGE to "message",
+            ),
+            timestampKind = ProfileTimestampKind.ISO_8601,
+        )
+        val file = File(requireNotNull(dir), "rewrite.csv").apply {
+            writeText("time,level,message\n2024-01-01T00:00:00Z,INFO,one\n2024-01-01T00:00:01Z,INFO,two\n")
+        }
+        val tabId = openWith(app, profile, file)
+        app.startTailing(tabId)
+        assertTrue(app.tab(tabId)!!.tailing)
+        try {
+            file.appendText("2024-01-01T00:00:02Z,INFO,three\n")
+            waitUntil { app.tab(tabId)!!.logData.size == 3 }
+
+            file.writeText("time,level,message\n2024-02-02T00:00:00Z,WARN,fresh\n")
+            waitUntil { app.tab(tabId)!!.logData.size == 4 }
+            // A late, wrongly parsed header row would be a fifth row; give it a moment to show up.
+            Thread.sleep(300)
+
+            val tab = app.tab(tabId)!!
+            assertEquals(listOf("one", "two", "three", "fresh"), tab.logData.map { it.msg })
+            assertTrue(tab.logData.none { it.msg == "message" }, "the new header row is not a data row")
+            assertEquals(2L, tab.logData.last().sourceStartLine, "the new file's lines are numbered from 1")
+            assertEquals(2L, tab.profileSourceLineCount)
+        } finally {
+            app.stopTailing(tabId)
+        }
+    }
+
+    // A syslog record is held while later lines may still continue it. After a rewrite the new file's
+    // first line must not be taken as a continuation of the old file's record.
+    @Test
+    fun aRewrittenSyslogFileDoesNotContinueTheOldFilesHeldRecord() {
+        val app = newState()
+        val profileId = "syslog-rfc5424"
+
+        fun record(second: Int, text: String) = "<34>1 2024-11-16T10:00:%02dZ host app 1 ID$second - $text".format(second)
+        val file = File(requireNotNull(dir), "rotated.log").apply {
+            writeText(listOf(record(1, "one"), record(2, "two"), record(3, "three")).joinToString("\n", postfix = "\n"))
+        }
+        val tabId = requireNotNull(app.openFileWithLogFormatProfile(file, profileId))
+        waitUntil { app.tab(tabId)?.contentState == TabContentState.LOADED }
+        app.startTailing(tabId)
+        waitUntil { app.tab(tabId)!!.tailing }
+        try {
+            file.appendText("  at frame.one(One.java:1)\n")
+            waitUntil { app.tab(tabId)!!.logData.last().msg.endsWith("frame.one(One.java:1)") }
+
+            file.writeText("orphan line\n" + record(9, "nine") + "\n")
+            waitUntil { app.tab(tabId)!!.logData.size == 5 }
+            Thread.sleep(300)
+
+            val rows = app.tab(tabId)!!.logData
+            assertEquals(5, rows.size)
+            assertTrue(rows[2].msg.endsWith("frame.one(One.java:1)") && !rows[2].msg.contains("orphan"), "the old record stays as it was")
+            assertEquals("orphan line", rows[3].rawRecord, "the new file's first line is a record of its own")
+            assertEquals(1L, rows[3].sourceStartLine)
+            assertEquals(2L, rows[4].sourceStartLine)
+        } finally {
+            app.stopTailing(tabId)
+        }
+    }
+
     @Test
     fun stoppingTheTailFlushesAHeldMultilineRecord() {
         val app = newState()

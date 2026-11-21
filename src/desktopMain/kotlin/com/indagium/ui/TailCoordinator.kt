@@ -140,6 +140,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             onNewLines = { newLines -> appendTailedLines(tabId, newLines) },
             pollIntervalMs = pollIntervalMs,
             startOffset = startOffset,
+            onRestart = { restartParserForRewrittenFile(tabId) },
         )
         synchronized(ownership) {
             if (isTailOwned(tabId)) return
@@ -153,6 +154,25 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             appState.upTab(tabId) { it.copy(tailing = true) }
         }
         AppLogger.info("tail", "Started tailing tab")
+    }
+
+    // The tailed file shrank and the tailer now reads it from byte 0 (rotated or truncated and rewritten).
+    // Runs on the tailer's reading thread BEFORE the first batch of the new content is appended, so
+    // the old file's state never meets the new file's lines. Under stateLock throughout, so no other
+    // append interleaves between the flush and the swap. Logcat tabs have no parser and need nothing.
+    //  - the record the old parser still holds is appended first (it is complete as far as the old file went);
+    //  - the parser is replaced by one WITHOUT pre-read CSV headers, so a header-row CSV takes the new
+    //    file's first row, which the tailer now delivers, as its header;
+    //  - the line counter restarts so the new file's lines are numbered from 1.
+    private fun restartParserForRewrittenFile(tabId: String) {
+        synchronized(appState.stateLock) {
+            val old = parsers[tabId] ?: return
+            val tab = appState.tab(tabId) ?: return
+            val profile = appState.pinnedLogFormatProfile(tabId) ?: return
+            appendTailedLines(tabId, emptyList(), flushing = old)
+            parsers[tabId] = IncrementalProfileParser(profile, tab.sourcePath)
+            appState.upTab(tabId) { it.copy(profileSourceLineCount = 0L) }
+        }
     }
 
     private fun profileParserForTail(

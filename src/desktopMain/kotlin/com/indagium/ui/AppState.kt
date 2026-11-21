@@ -8094,44 +8094,57 @@ class AppState(
         pendingLogFormatImport = null
     }
 
+    // The whole merge runs inside updateSettings on the settings it receives, so it is computed from the
+    // library as it is at that moment and written back as one value. A require failing in the lambda
+    // propagates out of updateSettings before it assigns anything: no partial import is ever stored.
     internal fun applyImportedLogFormatProfiles(imported: List<LogFormatProfile>, updateConflicts: Boolean): Result<List<LogFormatProfile>> = runCatching {
         require(imported.isNotEmpty()) { "The import contains no profiles." }
         imported.forEach(::validateLogFormatProfile)
         val builtInIds = BUILTIN_LOG_FORMAT_PROFILES.map { it.id }.toSet()
-        val custom = settings.customLogFormatProfiles.toMutableList()
-        val applied = imported.map { candidate ->
-            val existingIndex = custom.indexOfFirst { it.id == candidate.id }
-            if (updateConflicts && existingIndex >= 0 && candidate.id !in builtInIds) {
-                // An imported file never switches an extension association on by itself: an update
-                // keeps this library's own choice, a new profile starts with it off.
-                val saved = candidate.copy(
-                    readOnly = false,
-                    revision = maxOf(candidate.revision, custom[existingIndex].revision + 1),
-                    detection = candidate.detection.copy(
-                        alwaysUseForExtensions = custom[existingIndex].detection.alwaysUseForExtensions &&
-                            candidate.detection.extensions.isNotEmpty(),
-                    ),
-                )
-                custom[existingIndex] = saved
-                saved
-            } else {
-                val idCollision = candidate.id in builtInIds || custom.any { it.id == candidate.id }
-                val copy = candidate.copy(
-                    id = if (idCollision) newId("lf") else candidate.id,
-                    name = uniqueLogFormatProfileName(candidate.name, custom.map { it.name }),
-                    revision = if (idCollision) 1 else candidate.revision,
-                    readOnly = false,
-                    detection = candidate.detection.copy(alwaysUseForExtensions = false),
-                )
-                validateLogFormatProfile(copy)
-                custom += copy
-                copy
+        var applied: List<LogFormatProfile> = emptyList()
+        updateSettings { current ->
+            val custom = current.customLogFormatProfiles.toMutableList()
+            applied = imported.map { candidate ->
+                val existingIndex = custom.indexOfFirst { it.id == candidate.id }
+                if (updateConflicts && existingIndex >= 0 && candidate.id !in builtInIds) {
+                    // An imported file never switches an extension association on by itself: an update
+                    // keeps this library's own choice, a new profile starts with it off.
+                    val saved = candidate.copy(
+                        readOnly = false,
+                        revision = maxOf(candidate.revision, custom[existingIndex].revision + 1),
+                        detection = candidate.detection.copy(
+                            alwaysUseForExtensions = custom[existingIndex].detection.alwaysUseForExtensions &&
+                                candidate.detection.extensions.isNotEmpty(),
+                        ),
+                    )
+                    // The bumped revision can leave the valid range, and the incoming name can belong to
+                    // another custom format: the same rule saveLogFormatProfile applies.
+                    validateLogFormatProfile(saved)
+                    val nameConflict = custom.withIndex().any { (index, other) ->
+                        index != existingIndex && other.name.equals(saved.name, true)
+                    }
+                    require(!nameConflict) { "Another custom format already uses that name." }
+                    custom[existingIndex] = saved
+                    saved
+                } else {
+                    val idCollision = candidate.id in builtInIds || custom.any { it.id == candidate.id }
+                    val copy = candidate.copy(
+                        id = if (idCollision) newId("lf") else candidate.id,
+                        name = uniqueLogFormatProfileName(candidate.name, custom.map { it.name }),
+                        revision = if (idCollision) 1 else candidate.revision,
+                        readOnly = false,
+                        detection = candidate.detection.copy(alwaysUseForExtensions = false),
+                    )
+                    validateLogFormatProfile(copy)
+                    custom += copy
+                    copy
+                }
             }
+            require(custom.size <= MAX_CUSTOM_LOG_FORMAT_PROFILES) {
+                "The profile library is limited to $MAX_CUSTOM_LOG_FORMAT_PROFILES custom formats."
+            }
+            current.copy(customLogFormatProfiles = custom)
         }
-        require(custom.size <= MAX_CUSTOM_LOG_FORMAT_PROFILES) {
-            "The profile library is limited to $MAX_CUSTOM_LOG_FORMAT_PROFILES custom formats."
-        }
-        updateSettings { it.copy(customLogFormatProfiles = custom) }
         pendingLogFormatImport = null
         applied
     }
