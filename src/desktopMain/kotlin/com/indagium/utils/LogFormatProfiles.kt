@@ -26,6 +26,12 @@ import java.time.temporal.WeekFields
 import java.util.Locale
 
 private const val MAX_PROFILE_RECORD_CHARS = 256 * 1024
+
+/**
+ * What the log splitter accepts for one JSON event or one non-JSON raw line: far beyond [MAX_PROFILE_RECORD_CHARS], since
+ * splitting only copies the text (a part must carry an event whole, never cut it) and never keeps it as rows.
+ */
+internal const val MAX_SPLIT_RECORD_CHARS = 16 * 1024 * 1024
 private const val MAX_JSON_RECORD_DEPTH = 128
 private const val MAX_PROFILE_FIELDS = 128
 private const val JSON_SCAN_CANCELLATION_CHARS = 4096
@@ -549,10 +555,13 @@ internal class JsonRecordMachine(
     private val profile: LogFormatProfile?,
     private val diagnostics: MutableList<String>,
     sourceLineOffset: Long,
-    private val rejectOversizedRecords: Boolean = false,
+    // Splitting copies events instead of keeping them as rows: an event over MAX_PROFILE_RECORD_CHARS is carried whole, and only one
+    // over MAX_SPLIT_RECORD_CHARS fails the split.
+    private val splitMode: Boolean = false,
     private val onArrayBoundary: ((opening: Boolean) -> Unit)? = null,
 ) : ProfileRecordMachine {
     private val current = StringBuilder()
+    private val recordLimitChars = if (splitMode) MAX_SPLIT_RECORD_CHARS else MAX_PROFILE_RECORD_CHARS
     private var rawLine: StringBuilder? = null
     private val stack = ArrayList<Char>(16)
     private var arrayMode = false
@@ -589,7 +598,9 @@ internal class JsonRecordMachine(
         }
         if (discardLine) return
         rawLine?.let { pending ->
-            require(pending.length + fragment.length <= MAX_PROFILE_RECORD_CHARS) { "A raw JSON line exceeds the safe splitting limit." }
+            require(pending.length + fragment.length <= recordLimitChars) {
+                "A line that is not JSON exceeds the $MAX_SPLIT_RECORD_CHARS-character limit for splitting a log."
+            }
             pending.append(fragment)
             if (endsLine) flushRawLine(out)
             return
@@ -644,8 +655,8 @@ internal class JsonRecordMachine(
                 discardLine = true
                 return
             }
-            if (current.length > MAX_PROFILE_RECORD_CHARS) {
-                require(!rejectOversizedRecords) { "A JSON record exceeds the safe splitting limit." }
+            if (current.length > recordLimitChars) {
+                require(!splitMode) { "A JSON event exceeds the $MAX_SPLIT_RECORD_CHARS-character limit for splitting a log." }
                 diagnostics.addLimited("An oversized JSON record was kept as raw text.")
                 emitMalformed(out, lineNumber)
                 discardLine = true

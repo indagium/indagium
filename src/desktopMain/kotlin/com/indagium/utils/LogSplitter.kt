@@ -206,7 +206,7 @@ private fun splitJsonRecords(
 ) {
     val ready = ArrayList<ProfileRecord>(2)
     // Drain the completed records before changing the output envelope, even mid-line.
-    val machine = JsonRecordMachine(profile, mutableListOf(), 0, rejectOversizedRecords = true) { opening ->
+    val machine = JsonRecordMachine(profile, mutableListOf(), 0, splitMode = true) { opening ->
         writer.writeJsonRecords(ready)
         if (opening) writer.beginJsonArray() else writer.endJsonArray()
     }

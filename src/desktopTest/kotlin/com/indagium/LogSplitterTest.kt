@@ -5,6 +5,9 @@ import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
+import com.indagium.utils.JsonRecordMachine
+import com.indagium.utils.MAX_SPLIT_RECORD_CHARS
+import com.indagium.utils.ProfileRecord
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.parseLogContent
 import com.indagium.utils.parseLogcat
@@ -14,13 +17,18 @@ import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.splitProfileRecordsToFiles
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import java.io.ByteArrayInputStream
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+
+private const val OVERSIZED_EVENT_CHARS = 300_000
 
 class LogSplitterTest {
     @Test
@@ -332,6 +340,83 @@ class LogSplitterTest {
             assertEquals(12, entries.size, name)
             assertTrue(entries.all { it.tag == "App" }, name)
             assertEquals("line 5 — π", entries[5].msg, name)
+        }
+    }
+
+    private val bigJsonProfile = LogFormatProfile(id = "big-json", name = "Big JSON", engine = LogFormatEngine.JSON_LINES)
+
+    /** Events around two over-256K ones: one on a single line, one pretty-printed over several lines. */
+    private fun bigJsonEvents(): List<String> {
+        val big = "y".repeat(OVERSIZED_EVENT_CHARS)
+        return listOf(
+            """{"message":"small-1"}""",
+            """{"message":"$big","n":1}""",
+            """{"message":"small-2"}""",
+            "{\n  \"message\": \"$big\",\n  \"nested\": {\n    \"ok\": true\n  }\n}",
+            """{"message":"small-3"}""",
+        )
+    }
+
+    /** The events a split part holds, read the way the splitter reads (the normal parser would cut the oversized ones). */
+    private fun eventsOf(text: String): List<String> {
+        val machine = JsonRecordMachine(bigJsonProfile, mutableListOf(), 0, splitMode = true)
+        val records = ArrayList<ProfileRecord>()
+        text.lines().forEach { machine.accept(it, records) }
+        machine.finish(records)
+        return records.map { it.raw }
+    }
+
+    @Test
+    fun anOversizedEventInAJsonLinesFileIsCarriedWholeIntoItsPart() {
+        val events = bigJsonEvents()
+        val source = events.joinToString("\n", postfix = "\n").toByteArray()
+        val directory = createTempDirectory("openlog-big-json-lines").toFile()
+        try {
+            val outputs = planSplitOutputs("events.jsonl", directory, "part", 3)
+            splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), bigJsonProfile)
+
+            // Not one byte lost or repeated: the parts are the source, cut between events.
+            assertEquals(source.toList(), outputs.flatMap { it.readBytes().toList() })
+            assertEquals(events, outputs.flatMap { eventsOf(it.readText()) })
+            // The normal parser's 256K policy is its own: every part still opens, and the small events read as before.
+            val opened = outputs.flatMap { file -> file.inputStream().use { parseLogContent(it, profile = bigJsonProfile).entries } }
+            assertTrue(opened.map { it.rawRecord }.containsAll(listOf("""{"message":"small-1"}""", """{"message":"small-3"}""")))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun anOversizedEventInARootArrayIsCarriedWholeIntoAnArrayPart() {
+        val events = bigJsonEvents()
+        val source = events.joinToString(",\n", "[", "]\n").toByteArray()
+        val directory = createTempDirectory("openlog-big-json-array").toFile()
+        try {
+            val outputs = planSplitOutputs("events.json", directory, "part", 3)
+            splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), bigJsonProfile)
+
+            val parts = outputs.map { it.readText() }
+            assertTrue(parts.all { it.trimStart().startsWith("[") && it.trimEnd().endsWith("]") }, "every part is an array")
+            assertEquals(events.size, parts.sumOf { Json.parseToJsonElement(it).jsonArray.size }, "every event is in exactly one part")
+            assertEquals(events, parts.flatMap { eventsOf(it) })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun anEventOverTheSplitLimitFailsTheSplitNamingTheLimitAndLeavesNoParts() {
+        val source = ("{\"message\":\"" + "z".repeat(MAX_SPLIT_RECORD_CHARS + 10) + "\"}\n").toByteArray()
+        val directory = createTempDirectory("openlog-huge-json").toFile()
+        try {
+            val outputs = planSplitOutputs("events.jsonl", directory, "part", 2)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                splitProfileRecordsToFiles(source.inputStream(), outputs, source.size.toLong(), bigJsonProfile)
+            }
+            assertTrue(failure.message.orEmpty().contains(MAX_SPLIT_RECORD_CHARS.toString()), failure.message)
+            assertTrue(outputs.none { it.exists() })
+        } finally {
+            directory.deleteRecursively()
         }
     }
 }
