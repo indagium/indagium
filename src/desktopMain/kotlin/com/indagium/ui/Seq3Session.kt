@@ -548,7 +548,7 @@ class Seq3Session(
         val isSnapshot = parsed.attachment?.mode == Seq3AttachmentMode.SNAPSHOT
         val sharedNote = tab.sharedNote
         val storedSource = attachmentLibraryId?.let(libraryStore::get)?.source
-        val sourceId = if (sharedNote != null) sharedDiagramSourceTabId(parsed, storedSource, sharedNote) else tabId
+        val sourceId = if (sharedNote != null) sharedDiagramSourceTabId(parsed, storedSource, sharedNote, tab) else tabId
         val existing = synchronized(appState.stateLock) { sessions.firstOrNull { existing ->
             existing.noteTargetTabId == tabId &&
                 (!isSnapshot || existing.document == openedDocument) &&
@@ -583,13 +583,24 @@ class Seq3Session(
         return id
     }
 
-    private fun sharedDiagramSourceTabId(parsed: ParsedSeq3, storedSource: DiagramSourceIdentity?, sharedNote: SharedNoteInfo): String? {
+    private fun sharedDiagramSourceTabId(
+        parsed: ParsedSeq3,
+        storedSource: DiagramSourceIdentity?,
+        sharedNote: SharedNoteInfo,
+        host: LogTab,
+    ): String? {
         if (storedSource != null) {
             if (storedSource.isNone) return null
             return appState.tabs.singleOrNull { (it.sourcePath ?: it.filename) == storedSource.sourcePath }?.id
         }
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
-        val candidate = appState.tabs.singleOrNull { !it.isCaptureLauncher && File(it.filename).name == filename } ?: return null
+        // Without a library record only the log's file name says which log it was, so only tabs the shared note is about may match: a
+        // member, or a log one of its references names. An unrelated open log called "logcat.txt" must not be picked by its name alone.
+        val related = HashSet(sharedNote.memberTabIds)
+        host.annotations.blocks.forEach { block -> (block as? AnnBlock.LogRef)?.sourceTabId?.let(related::add) }
+        val candidate = appState.tabs.singleOrNull {
+            !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename
+        } ?: return null
         val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
         return candidate.id.takeUnless {
             closedSources.any { source -> File(source.filename).name == filename && source.sourcePath != candidate.sourcePath }

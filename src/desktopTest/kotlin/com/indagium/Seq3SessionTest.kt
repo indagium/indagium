@@ -1738,6 +1738,45 @@ class Seq3SessionTest {
         }
     }
 
+    @Test
+    fun aSharedDiagramWithoutALibraryRecordOnlyMatchesItsLogByNameAmongTheNotesOwnTabs() {
+        val root = createTempDirectory("indagium-seq3-shared-name").toFile()
+        val store = DiagramLibraryStore(File(root, "library.cache"))
+        val state = AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = store,
+        ).also {
+            // A member and an unrelated open log with the very same file name.
+            it.tabs = listOf(mkTab("log", "sample.log", twoTagEntries()), mkTab("stranger", "sample.log", twoTagEntries()))
+            it.activateTab("log")
+        }
+        try {
+            val coordinator = state.seq3Sessions
+            val original = assertNotNull(coordinator.begin("log", setOf(1, 2)))
+            awaitGenerated(state, original)
+            val blockId = assertNotNull(coordinator.confirm(original))
+            val hostId = assertNotNull(state.shareTabNote("log", "Investigation", listOf("log")))
+            coordinator.close(original)
+            // No library record: only the file name says which log the diagram came from.
+            val hostBlock = assertIs<AnnBlock.Note>(state.sharedNoteHost(hostId)!!.annotations.blocks.single())
+            parseSeq3Note(hostBlock.text)?.attachment?.diagramId?.let(store::delete)
+
+            // The member is chosen although another open tab has the same name (which alone would make the name ambiguous).
+            val first = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            assertEquals("log", coordinator.sessions.single().sourceTabId)
+            coordinator.close(first)
+
+            // The member no longer has that name: the same-named stranger is not chosen, and regeneration is unavailable.
+            state.upTab("log") { it.copy(filename = "renamed.log") }
+            assertNotNull(coordinator.beginEdit(hostId, blockId))
+            assertNull(coordinator.sessions.single().sourceTabId)
+            assertNotNull(coordinator.sessions.single().logUnavailableReason())
+        } finally {
+            state.close()
+        }
+    }
+
     // WP14 regression guard: the hand-edit drift gate added to confirm() must never engage on the
     // COMMON path, where nothing was ever hand-edited. Model this directly on
     // confirmWritesANoteAndASecondConfirmUpdatesTheSameBlock above (also a same-session, two-confirm
