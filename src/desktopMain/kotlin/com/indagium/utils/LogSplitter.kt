@@ -137,10 +137,9 @@ internal fun splitProfileRecordsToFiles(
                         else -> 0
                     }
                     stream.skipNBytes(bomLength.toLong())
-                    val (charset, newlineBytes) = splitEncoding(encoding)
-                    val lines = SplitPhysicalLineReader(stream, newlineBytes)
-                    if (profile.engine == LogFormatEngine.CSV) splitCsvRecords(lines, charset, writer, profile)
-                    else splitHeaderRecords(lines, charset, writer, profile)
+                    val lines = SplitPhysicalLineReader(stream, encoding)
+                    if (profile.engine == LogFormatEngine.CSV) splitCsvRecords(lines, encoding.charset, writer, profile)
+                    else splitHeaderRecords(lines, encoding.charset, writer, profile)
                 }
             }
         }
@@ -167,30 +166,38 @@ private fun splitCsvRecords(
     val ready = ArrayList<ProfileRecord>(1)
     val pending = ByteArrayOutputStream()
     var header: ByteArray? = null
+    var allowRotation = !profile.hasHeader
     while (true) {
         val bytes = lines.next() ?: break
+        val line = decodeSplitLine(bytes, charset)
         val waitingForHeader = machine != null && header == null
-        val recordEnded = if (machine != null && waitingForHeader) {
-            machine.accept(decodeSplitLine(bytes, charset), ready)
+        val recordEnded = if (waitingForHeader) {
+            machine.accept(line, ready)
             ready.clear()
             !machine.hasPendingRecord()
         } else {
-            tracker.acceptLine(decodeSplitLine(bytes, charset))
+            tracker.acceptLine(line)
         }
         if (!recordEnded) {
             pending.write(bytes)
             continue
         }
-        val record = if (pending.size() == 0) {
+        val multiline = pending.size() != 0
+        val record = if (!multiline) {
             bytes
         } else {
             pending.write(bytes)
             pending.toByteArray().also { pending.reset() }
         }
-        writer.writeRecord(record, header, allowRotation = !waitingForHeader)
-        if (waitingForHeader && machine?.headers != null) header = record
+        // Keep the first data record with its header even if together they exceed the target.
+        writer.writeRecord(record, header, allowRotation)
+        if (waitingForHeader) {
+            if (machine.headers != null) header = record
+        } else if (multiline || line.isNotEmpty()) {
+            allowRotation = true
+        }
     }
-    if (pending.size() > 0) writer.writeRecord(pending.toByteArray(), header, allowRotation = !profile.hasHeader || header != null)
+    if (pending.size() > 0) writer.writeRecord(pending.toByteArray(), header, allowRotation)
 }
 
 private fun splitHeaderRecords(
@@ -270,53 +277,61 @@ private val UTF8_BOM = "\uFEFF".toByteArray(Charsets.UTF_8)
 
 private class SplitPhysicalLineReader(
     private val input: InputStream,
-    private val newlineBytes: ByteArray,
+    private val encoding: LogTextEncoding,
 ) {
     private val buffer = ByteArray(SPLIT_BUFFER_BYTES)
+    private val unitSize = if (encoding.isUtf16) 2 else 1
     private var cursor = 0
     private var count = 0
 
     fun next(): ByteArray? {
         val line = ByteArrayOutputStream()
-        var previous = -1
-        while (true) {
-            if (cursor >= count) {
-                count = input.read(buffer)
-                cursor = 0
-                if (count < 0) return line.toByteArray().takeIf(ByteArray::isNotEmpty)
-            }
+        while (hasCodeUnit()) {
             val start = cursor
-            while (cursor < count) {
-                val value = buffer[cursor].toInt() and SPLIT_BYTE_MASK
-                cursor++
-                val foundNewline = (newlineBytes.size == 1 && value == (newlineBytes[0].toInt() and SPLIT_BYTE_MASK)) ||
-                    (
-                        newlineBytes.size == 2 && previous == (newlineBytes[0].toInt() and SPLIT_BYTE_MASK) &&
-                            value == (newlineBytes[1].toInt() and SPLIT_BYTE_MASK) &&
-                            // UTF-16 newline bytes can also straddle adjacent code units.
-                            (line.size() + cursor - start) % newlineBytes.size == 0
-                    )
-                if (foundNewline) {
-                    line.write(buffer, start, cursor - start)
+            while (cursor + unitSize <= count) {
+                val value = codeUnit()
+                cursor += unitSize
+                if (value == '\n'.code || value == '\r'.code) {
+                    append(line, start, cursor)
+                    // A CRLF may straddle two buffers. Keep both units in the same line.
+                    if (value == '\r'.code && hasCodeUnit() && codeUnit() == '\n'.code) {
+                        append(line, cursor, cursor + unitSize)
+                        cursor += unitSize
+                    }
                     return line.toByteArray()
                 }
-                previous = value
             }
-            line.write(buffer, start, cursor - start)
-            require(line.size() <= MAX_PROFILE_SPLIT_RECORD_BYTES) {
-                "A physical line exceeds the 1 MiB safe splitting limit."
-            }
+            append(line, start, cursor)
         }
+        // Preserve a final incomplete UTF-16 code unit, just like the rest of the raw bytes.
+        append(line, cursor, count)
+        cursor = count
+        return line.toByteArray().takeIf(ByteArray::isNotEmpty)
     }
-}
 
-private fun splitEncoding(encoding: LogTextEncoding): Pair<Charset, ByteArray> {
-    val newline = when (encoding) {
-        LogTextEncoding.UTF_16_BE -> byteArrayOf(0x00, 0x0A)
-        LogTextEncoding.UTF_16_LE -> byteArrayOf(0x0A, 0x00)
-        else -> byteArrayOf('\n'.code.toByte())
+    private fun hasCodeUnit(): Boolean {
+        if (cursor + unitSize <= count) return true
+        val remaining = count - cursor
+        buffer.copyInto(buffer, endIndex = count, startIndex = cursor)
+        count = remaining + input.readNBytes(buffer, remaining, buffer.size - remaining)
+        cursor = 0
+        return count >= unitSize
     }
-    return encoding.charset to newline
+
+    private fun codeUnit(): Int = when (encoding) {
+        LogTextEncoding.UTF_16_BE -> ((buffer[cursor].toInt() and SPLIT_BYTE_MASK) shl Byte.SIZE_BITS) +
+            (buffer[cursor + 1].toInt() and SPLIT_BYTE_MASK)
+        LogTextEncoding.UTF_16_LE -> (buffer[cursor].toInt() and SPLIT_BYTE_MASK) +
+            ((buffer[cursor + 1].toInt() and SPLIT_BYTE_MASK) shl Byte.SIZE_BITS)
+        else -> buffer[cursor].toInt() and SPLIT_BYTE_MASK
+    }
+
+    private fun append(line: ByteArrayOutputStream, start: Int, end: Int) {
+        require(line.size() + end - start <= MAX_PROFILE_SPLIT_RECORD_BYTES) {
+            "A physical line exceeds the 1 MiB safe splitting limit."
+        }
+        line.write(buffer, start, end - start)
+    }
 }
 
 private fun decodeSplitLine(bytes: ByteArray, charset: Charset): String =

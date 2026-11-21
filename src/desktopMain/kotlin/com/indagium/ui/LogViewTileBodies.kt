@@ -67,7 +67,7 @@ internal fun BoundAnnotationPanel(
         onUpdateLogRefPresentation = { blockId, caption, presentation ->
             state.updateLogRefPresentation(noteId, blockId, caption, presentation)
         },
-        onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(noteId, blockId) },
+        onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(noteId, blockId, TabRef.Log(tab.id)) },
         onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
         onImportLinkedDiagram = { blockId, source, dialect, confirm ->
             val diagramId = note.annotations.blocks

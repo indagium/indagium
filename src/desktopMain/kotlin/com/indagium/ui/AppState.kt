@@ -15785,6 +15785,7 @@ class AppState(
         // Loading a sidecar is not an edit: migrate resolvable legacy rows in memory, but do not
         // trigger an immediate auto-export that would rewrite the user's file on open.
         upTab(tabId) { t ->
+            t.requireSharedNoteWriteAccess()
             loaded = true
             val withRows = t.copy(recoveredNoteRows = recovered)
             val preferences = legacyLogRefPreferences()
@@ -17398,15 +17399,14 @@ class AppState(
 
     /** Mirrors autoExportAnnotations' own exists()-check line for line, but against a tab that
      *  hasn't been (and, for [AutoExportDecision.Conflict], will not be) written into `tabs` yet. */
-    private fun autoExportDecision(next: LogTab): AutoExportDecision {
+    private fun autoExportDecision(next: LogTab, allowConflictPrompt: Boolean): AutoExportDecision {
         if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return AutoExportDecision.Skip
         next.noteTargetName?.let { name ->
-            val otherNotes = if (next.sharedNote == null) sharedNoteHosts else tabs
-            if (otherNotes.none { name.equals(it.noteTargetName, ignoreCase = true) }) return AutoExportDecision.Skip
-            // Older sessions could already have pinned a private note and a shared note to the
-            // same file. Give this edit a free target before it reaches the writer.
+            if (name.lowercase() !in reservedNoteTargetNames(exceptNoteId = next.id)) return AutoExportDecision.Skip
+            // Opening a saved file can leave more than one note pointing to it. Claim a separate target.
             return AutoExportDecision.ReadyToPin(File(activeNotesDir(), freeNoteTargetName(name)))
         }
+        if (!allowConflictPrompt) return AutoExportDecision.Skip
         val mdFile = resolveNoteTarget(activeNotesDir(), next)
         return if (mdFile.exists()) AutoExportDecision.Conflict(mdFile) else AutoExportDecision.ReadyToPin(mdFile)
     }
@@ -17492,6 +17492,8 @@ class AppState(
     // ioScope, so holding stateLock across it would serialize unrelated tabs' exports for no benefit.
     internal fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
         val committed = synchronized(stateLock) {
+            val live = noteTab(tabId) ?: return
+            live.requireSharedNoteWriteAccess()
             // WP14: `it.handEdit == null` excludes a Seq3Session.confirm() hand-edit conflict
             // (PendingNoteOverwrite.handEdit) from this fold — unlike the file-conflict case, that
             // pending never stashed an uncommitted mutation to begin with (the protected block
@@ -17502,15 +17504,13 @@ class AppState(
             // written expecting anything to be stashed there). An unrelated edit arriving on this
             // same tab while that prompt is up therefore just commits normally, like any other tab.
             val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId && it.handEdit == null }
-            val current = pendingForThisTab?.pendingTab ?: noteTab(tabId) ?: return
+            val current = pendingForThisTab?.pendingTab ?: live
             val next = fn(current)
             if (pendingForThisTab != null) {
                 pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
                 null
             } else {
-                // Only consulted when no OTHER tab's prompt is already up — see the accepted
-                // limitation above.
-                when (val decision = if (pendingNoteOverwrite == null) autoExportDecision(next) else AutoExportDecision.Skip) {
+                when (val decision = autoExportDecision(next, allowConflictPrompt = pendingNoteOverwrite == null)) {
                     is AutoExportDecision.Conflict -> {
                         pendingNoteOverwrite = PendingNoteOverwrite(tabId, decision.mdFile.absolutePath, decision.mdFile.name, pendingTab = next)
                         null

@@ -38,6 +38,7 @@ import com.indagium.diagram3.seq3NoteHasHandEdit
 import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
+import com.indagium.model.SharedNoteInfo
 import com.indagium.utils.computeLogFingerprint
 import com.indagium.utils.expandSelectionThroughCollapsedBlocks
 import kotlinx.coroutines.CancellationException
@@ -105,9 +106,7 @@ fun LogTab.seq3DiagramNotes(): List<Pair<String, ParsedSeq3>> =
  */
 data class Seq3WorkspaceSession(
     val id: String,
-    /** Null exactly when the source tab has been closed — see [Seq3Session.sourceTabClosed]. The
-     *  cached [document] and [undoStack] are unaffected; only [Seq3Session.requestGenerate] and
-     *  [Seq3Session.confirm] require this to be non-null. */
+    /** The log to read for regeneration and evidence, or null when it is unavailable. */
     val sourceTabId: String?,
     val document: Seq3Document,
     val range: Seq3Range = Seq3Range.VisibleView,
@@ -188,7 +187,11 @@ data class Seq3WorkspaceSession(
      * log rows asks [logUnavailableReason] instead of testing either field.
      */
     val hasTicket: Boolean = true,
+    /** An explicit note owner when edits belong somewhere other than the source log's private note. */
+    internal val noteOwnerTabId: String? = null,
 ) {
+    internal val noteTargetTabId: String? get() = noteOwnerTabId ?: sourceTabId
+
     /** True for a diagram that never had a log: nothing log-backed (regenerate, evidence, row
      *  insertion from the log, the guided pass) is offered at all, rather than offered and disabled. */
     val logFree: Boolean get() = sourceTabId == null && !hasTicket
@@ -543,23 +546,27 @@ class Seq3Session(
         val openedDocument = normalizeSeq3FragmentSpans(parsed.document)
         val attachmentLibraryId = parsed.attachment?.diagramId
         val isSnapshot = parsed.attachment?.mode == Seq3AttachmentMode.SNAPSHOT
+        val sharedNote = tab.sharedNote
+        val storedSource = attachmentLibraryId?.let(libraryStore::get)?.source
+        val sourceId = if (sharedNote != null) sharedDiagramSourceTabId(parsed, storedSource, sharedNote) else tabId
         val existing = synchronized(appState.stateLock) { sessions.firstOrNull { existing ->
-            existing.sourceTabId == tabId &&
+            existing.noteTargetTabId == tabId &&
                 (!isSnapshot || existing.document == openedDocument) &&
                 (existing.confirmedBlockId == blockId ||
                     (attachmentLibraryId != null && existing.libraryItemId == attachmentLibraryId))
         } }
         existing?.let {
+            if (it.sourceTabId == null && sourceId != null) relink(it.id, sourceId)
             activate(it.id)
             return it.id
         }
         val id = "seq3-${UUID.randomUUID()}"
         val session = Seq3WorkspaceSession(
             id = id,
-            sourceTabId = tabId,
+            sourceTabId = sourceId,
             document = openedDocument,
             range = parsed.document.range,
-            generateOptions = Seq3GenerateOptions(sourceFile = parsed.document.sourceFile ?: File(tab.filename).name),
+            generateOptions = Seq3GenerateOptions(sourceFile = parsed.document.sourceFile ?: sourceId?.let(appState::tab)?.filename?.let { File(it).name }),
             confirmedBlockId = blockId,
             // Only live links retain the library id. Snapshot notes remain independent from the
             // library item that produced them; assigning their id here would make later edits of
@@ -569,9 +576,36 @@ class Seq3Session(
                 ?.diagramId,
             exportMode = parsed.exportMode,
             dialect = parsed.dialect,
+            hasTicket = sharedNote == null || (storedSource?.let { !it.isNone } ?: !parsed.document.sourceFile.isNullOrBlank()),
+            noteOwnerTabId = tabId.takeIf { sharedNote != null },
         )
         publishSession(session, originGroupId, openedDocument)
         return id
+    }
+
+    private fun sharedDiagramSourceTabId(parsed: ParsedSeq3, storedSource: DiagramSourceIdentity?, sharedNote: SharedNoteInfo): String? {
+        if (storedSource != null) {
+            if (storedSource.isNone) return null
+            return appState.tabs.singleOrNull { (it.sourcePath ?: it.filename) == storedSource.sourcePath }?.id
+        }
+        val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
+        val candidate = appState.tabs.singleOrNull { !it.isCaptureLauncher && File(it.filename).name == filename } ?: return null
+        val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
+        return candidate.id.takeUnless {
+            closedSources.any { source -> File(source.filename).name == filename && source.sourcePath != candidate.sourcePath }
+        }
+    }
+
+    /** Caller holds stateLock while moving these blocks to their new note. */
+    internal fun moveNoteOwner(fromTabId: String, toTabId: String, blocks: List<AnnBlock>) {
+        val movedIds = blocks.mapTo(HashSet()) { it.id }
+        sessions = sessions.map { session ->
+            if (session.noteTargetTabId == fromTabId && session.confirmedBlockId in movedIds) {
+                session.copy(noteOwnerTabId = toTabId.takeUnless { it == session.sourceTabId })
+            } else {
+                session
+            }
+        }
     }
 
     /** Selects an existing workspace without touching [AppState.tabs] — the v3 counterpart of
@@ -639,7 +673,7 @@ class Seq3Session(
      * their cached evidence"), the exact contract [SeqDiagramCoordinator.sourceTabClosed]
      * (`ui/SeqDiagramCoordinator.kt:385`) already implements for v1/v2. The generated [Seq3Document]
      * and the whole [Seq3WorkspaceSession.undoStack] are left untouched; only [sourceTabId] clears,
-     * which in turn makes [requestGenerate] and [confirm] no-ops until [relink].
+     * which pauses log-backed actions until [relink].
      */
     fun sourceTabClosed(tabId: String) {
         val affected = synchronized(appState.stateLock) { sessions.filter { it.sourceTabId == tabId } }
@@ -1558,7 +1592,7 @@ class Seq3Session(
         // debounced sync runs; the hash now matches and subsequent ordinary syncs remain guarded.
         val after = session(id)
         val blockId = after?.confirmedBlockId
-        val tabId = after?.sourceTabId
+        val tabId = after?.noteTargetTabId
         if (blockId != null && tabId != null) {
             val note = appState.noteTab(tabId)?.annotations?.blocks?.filterIsInstance<AnnBlock.Note>()?.firstOrNull { it.id == blockId }
             val parsed = note?.text?.let(::parseSeq3Note)
@@ -1690,12 +1724,12 @@ class Seq3Session(
     // ── Confirm: write the document into a note ─────────────────────────────────────────────────
 
     /**
-     * Writes [id]'s current document into its source tab's notes as an ordinary [com.indagium.
+     * Writes [id]'s current document into its owning note as an ordinary [com.indagium.
      * model.AnnBlock.Note] — [encodeSeq3Note] plus [AppState.addNoteBlock], the v3 equivalent of
      * [SeqDiagramCoordinator.confirm] (`ui/SeqDiagramCoordinator.kt:1304`). A later confirm on the
      * SAME session updates that same block ([Seq3WorkspaceSession.confirmedBlockId]) instead of
-     * appending a second note. Returns null (writing nothing) when the source tab is closed
-     * (matches v1/v2: confirming requires a live tab) or the document has no lifelines yet.
+     * appending a second note. Returns null when the owning note is unavailable or the document
+     * has no lifelines yet.
      *
      * Also refreshes the library record ([Seq3WorkspaceSession.libraryItemId]). Library drafts are
      * already created by generation and updated by edits; confirm additionally writes the note and
@@ -1703,8 +1737,8 @@ class Seq3Session(
      */
     fun confirm(id: String): String? {
         val current = session(id) ?: return null
-        val tabId = current.sourceTabId ?: return null
-        if (current.document.lifelines.isEmpty()) return null
+        val tabId = current.noteTargetTabId ?: return null
+        if (current.document.lifelines.isEmpty() || appState.noteTab(tabId) == null) return null
         // W3: run any still-pending debounced draft save now rather than leaving it to fire later
         // against whatever session state exists AFTER this confirm — avoids a redundant write
         // chasing this one a moment later, and guarantees the library draft never lags behind an
@@ -1786,7 +1820,7 @@ class Seq3Session(
      */
     internal fun resolveHandEditOverwrite(id: String): String? {
         val current = session(id) ?: return null
-        val tabId = current.sourceTabId ?: return null
+        val tabId = current.noteTargetTabId ?: return null
         val existingBlock = current.confirmedBlockId
             ?.let { blockId -> appState.noteTab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
         return writeConfirmedNote(id, current, tabId, existingBlock)
@@ -1921,8 +1955,8 @@ class Seq3Session(
 
     private fun attach(id: String, mode: Seq3AttachmentMode): String? {
         val current = session(id)
-        val tabId = current?.sourceTabId
-        val tab = current?.sourceTabId?.let(appState::tab)
+        val tabId = current?.noteTargetTabId
+        val tab = tabId?.let(appState::noteTab)
         if (current == null || tabId == null || tab == null || current.document.lifelines.isEmpty()) return null
         flush(id) // W3: see confirm()'s identical call for why.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
@@ -1987,7 +2021,7 @@ class Seq3Session(
     /** Refreshes all live-link notes owned by this session after a document/library mutation. */
     private fun syncLiveLinkedNote(id: String) {
         val current = session(id) ?: return
-        val tabId = current.sourceTabId ?: return
+        val tabId = current.noteTargetTabId ?: return
         val libraryItemId = current.libraryItemId ?: return
         val tab = appState.noteTab(tabId) ?: return
         val linkedNotes = tab.annotations.blocks.mapNotNull { block ->

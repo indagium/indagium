@@ -8,10 +8,12 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
@@ -201,6 +203,41 @@ class SharedNoteToolsTest {
     }
 
     @Test
+    fun revokingMembershipBeforeAContentWriteCommitsPreventsTheWrite() = runBlocking {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        call("add_text_note", "tabId" to hostId, "text" to "original")
+        call("add_text_note", "tabId" to "c", "text" to "replacement")
+        val sidecar = File(dir, "replacement.ann")
+        assertTrue(state.saveAnnotationsTo("c", sidecar))
+
+        val started = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        val descriptor = gateway.tools.single { it.name == "load_annotations" }
+        val pausedGateway = IndagiumToolGateway(
+            catalog = listOf(descriptor),
+            handlers = emptyMap(),
+            suspendHandlers = mapOf(descriptor.name to {
+                started.complete(Unit)
+                resume.await()
+                withContext(Dispatchers.Default) { state.loadAnnotationsFrom(hostId, sidecar) }
+            }),
+        )
+        val args = mapOf("tabId" to hostId, "path" to sidecar.absolutePath)
+        val loading = async { pausedGateway.executeSuspending(descriptor.name, args, inAppTabId = "a") }
+        started.await()
+        call("set_shared_note_members", "hostId" to hostId, "memberTabIds" to listOf("b"))
+        resume.complete(Unit)
+
+        assertTrue((loading.await() as Map<*, *>)["error"].toString().contains("unavailable"))
+        assertEquals("original", (state.sharedNoteHost(hostId)!!.annotations.blocks.single() as AnnBlock.Note).text)
+        val deniedEdit = gateway.executeSuspending("add_text_note", mapOf("tabId" to hostId, "text" to "denied"), inAppTabId = "a")
+        assertTrue((deniedEdit as Map<*, *>)["error"].toString().contains("unavailable"))
+        val allowedLoad = gateway.executeSuspending(descriptor.name, args, inAppTabId = "b")
+        assertEquals(true, (allowedLoad as Map<*, *>)["ok"])
+        assertEquals("replacement", (state.sharedNoteHost(hostId)!!.annotations.blocks.single() as AnnBlock.Note).text)
+    }
+
+    @Test
     fun anInAppSharedLogNoteTakesItsRowsFromTheRunsOwnTabWhateverSourceTabIdTheModelSent() = runBlocking {
         val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
         val coordinator = AiToolExecutionCoordinator(gateway)
@@ -319,6 +356,19 @@ class SharedNoteToolsTest {
         assertTrue(state.tab("a")!!.annotations.blocks.isEmpty(), "nothing lands in the source tab's private note")
         val stored = state.sharedNoteHost(hostId)!!.annotations.blocks.single() as AnnBlock.LogRef
         assertEquals(listOf(2, 3), stored.sourceEntries?.map { it.id }, "the rows are frozen into the block")
+    }
+
+    @Test
+    fun privateLogNoteCapturesTheSectionAlongWithTheRows() {
+        state.upTab("a") { it.copy(selectedLogSectionId = "first") }
+        val added = call("add_log_note", "tabId" to "a", "lineIds" to listOf(2, 99))
+        assertNull(added["error"], added.toString())
+        state.upTab("a") { it.copy(selectedLogSectionId = "second") }
+
+        val stored = state.tab("a")!!.annotations.blocks.single() as AnnBlock.LogRef
+        assertEquals("first", stored.sourceSectionId)
+        assertNull(stored.sourceTabId)
+        assertEquals(listOf(2), stored.sourceEntries?.map { it.id })
     }
 
     @Test

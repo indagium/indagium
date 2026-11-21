@@ -41,6 +41,7 @@ import com.indagium.ui.Seq3ZoomMode
 import com.indagium.ui.defaultSeq3Title
 import com.indagium.ui.mkTab
 import com.indagium.ui.seq3ViewToken
+import com.indagium.ui.shareTabNote
 import com.indagium.utils.computeLogFingerprint
 import com.indagium.utils.parseLogFileResult
 import java.io.File
@@ -1698,6 +1699,43 @@ class Seq3SessionTest {
 
         assertEquals(blockId, secondBlockId)
         assertEquals(1, state.tab("log")!!.annotations.blocks.size, "a second confirm must update, not append, the note")
+    }
+
+    @Test
+    fun editingASharedDiagramUsesItsLogAndWritesBackToTheSharedNote() {
+        val state = state()
+        try {
+            state.upTab("log") { it.copy(sourcePath = File("original/sample.log").absolutePath) }
+            val coordinator = state.seq3Sessions
+            val original = assertNotNull(coordinator.begin("log", setOf(1, 2)))
+            awaitGenerated(state, original)
+            val blockId = assertNotNull(coordinator.confirm(original))
+            val hostId = assertNotNull(state.shareTabNote("log", "Investigation", listOf("log")))
+            assertEquals(hostId, coordinator.sessions.single().noteTargetTabId)
+            coordinator.close(original)
+
+            val editing = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            val session = coordinator.sessions.single()
+            assertEquals("log", session.sourceTabId)
+            assertEquals(hostId, session.noteTargetTabId)
+            coordinator.requestRegenReview(editing, session.range, session.generateOptions)
+            await { coordinator.sessions.single().pendingRegenReview != null }
+
+            coordinator.updateTitle(editing, "Edited shared diagram")
+            assertEquals(blockId, coordinator.confirm(editing))
+            val block = assertIs<AnnBlock.Note>(state.sharedNoteHost(hostId)?.annotations?.blocks?.single())
+            assertEquals("Edited shared diagram", parseSeq3Note(block.text)?.document?.title)
+            assertTrue(state.tab("log")!!.annotations.blocks.isEmpty())
+
+            state.closeTab("log")
+            coordinator.close(editing)
+            state.tabs = listOf(mkTab("other", "sample.log", twoTagEntries()).copy(sourcePath = File("other/sample.log").absolutePath))
+            assertNotNull(coordinator.beginEdit(hostId, blockId))
+            assertNull(coordinator.sessions.single().sourceTabId)
+            assertNotNull(coordinator.sessions.single().logUnavailableReason())
+        } finally {
+            state.close()
+        }
     }
 
     // WP14 regression guard: the hand-edit drift gate added to confirm() must never engage on the

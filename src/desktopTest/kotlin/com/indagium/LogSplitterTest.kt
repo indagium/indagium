@@ -122,6 +122,38 @@ class LogSplitterTest {
     }
 
     @Test
+    fun csvProfileSplitPreservesCrAndCrLfAcrossEncodings() {
+        val profile = LogFormatProfile(
+            id = "split-csv-cr",
+            name = "CR-delimited rows",
+            engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "message"),
+        )
+        val header = "time,message\r\n"
+        val records = listOf("1,\"first\rsecond\"\r", "2,\u0D41\u4100\u0D41\r\n", "3,third\r", "4,fourth\r")
+        val source = header + records.joinToString("")
+        val directory = createTempDirectory("openlog-profile-csv-cr").toFile()
+        try {
+            for (charset in listOf(Charsets.UTF_8, Charsets.UTF_16LE, Charsets.UTF_16BE)) {
+                val bom = if (charset == Charsets.UTF_8) "" else "\uFEFF"
+                val bytes = (bom + source).toByteArray(charset)
+                val outputs = planSplitOutputs("${charset.name()}.csv", directory, "part", 2)
+                splitProfileRecordsToFiles(bytes.inputStream(), outputs, bytes.size.toLong(), profile)
+                val parts = outputs.map { it.readText(charset).removePrefix(bom) }
+
+                assertTrue(parts.all { it.startsWith(header) && it.length > header.length }, charset.name())
+                assertEquals(records.joinToString(""), parts.joinToString("") { it.removePrefix(header) })
+                val messages = outputs.flatMap { file ->
+                    file.inputStream().use { parseLogContent(it, profile = profile).entries }.map { it.msg }
+                }
+                assertEquals(listOf("first\nsecond", "\u0D41\u4100\u0D41", "third", "fourth"), messages)
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun largeMinifiedJsonArraySplitsAtCompleteEvents() {
         val profile = LogFormatProfile(id = "minified-json", name = "Minified JSON", engine = LogFormatEngine.JSON_LINES)
         val records = List(1100) { """{"message":"event-$it ${"x".repeat(1024)}","nested":[1,{"ok":true}]}""" }

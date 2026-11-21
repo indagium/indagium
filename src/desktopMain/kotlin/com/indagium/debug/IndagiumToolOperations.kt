@@ -391,7 +391,7 @@ internal class IndagiumToolOperations(
                     withLoadedRows(sourceTabId) { addSharedLogNoteRoute(tabId, it, lineIds, caption) }
                 }
             } else {
-                withLoadedRows(tabId) { addLogNoteRoute(it.id, lineIds, caption) }
+                withLoadedRows(tabId) { addLogNoteRoute(it, lineIds, caption) }
             }
         },
         "export_analysis" to { a -> withLoadedNote(a.str("tabId") ?: "") {
@@ -2262,9 +2262,11 @@ internal class IndagiumToolOperations(
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 
-    private fun addLogNoteRoute(tabId: String, lineIds: List<Int>, caption: String): Map<String, Any?> {
-        if (appState.noteTab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
-        val id = appState.addLogRefBlock(tabId, lineIds, caption) ?: return mapOf("error" to noteNotCreatedMessage(tabId, "log note"))
+    private fun addLogNoteRoute(source: LogTab, lineIds: List<Int>, caption: String): Map<String, Any?> {
+        val tabId = source.id
+        val ids = lineIds.filter { it in source.rmap }
+        val id = ids.takeIf { it.isNotEmpty() }?.let { appState.addCapturedLogRef(tabId, source, it, caption, null) }
+            ?: return mapOf("error" to noteNotCreatedMessage(tabId, "log note"))
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 

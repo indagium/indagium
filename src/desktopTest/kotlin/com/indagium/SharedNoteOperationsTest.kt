@@ -432,6 +432,34 @@ class SharedNoteOperationsTest {
     }
 
     @Test
+    fun openingAnotherSharedNotesExportKeepsSubsequentEditsInSeparateFiles() {
+        val dir = createTempDirectory("shared-ops-shared-duplicate-pin").toFile()
+        val state = withTabs(dir, autoExport = true)
+        try {
+            val original = assertNotNull(state.createSharedNote("Original", listOf("a")))
+            val copy = assertNotNull(state.createSharedNote("Copy", listOf("b")))
+            val exported = File(dir, "notes/Original_analysis.md")
+            val sidecar = File(dir, "notes/Original_analysis.ann")
+            state.addNoteBlock(original, "original finding")
+            waitUntil { sidecar.isFile && sidecar.length() > 0 }
+            val originalSidecar = sidecar.readText()
+            state.openNoteFile(copy, exported)
+            assertEquals(exported.name, state.host(copy).noteTargetName)
+
+            state.addNoteBlock(copy, "copy finding")
+
+            val separate = File(dir, "notes/Original_analysis_2.md")
+            assertEquals(separate.name, state.host(copy).noteTargetName)
+            waitUntil { separate.isFile && separate.readText().contains("copy finding") }
+            assertFalse(exported.readText().contains("copy finding"))
+            assertEquals(originalSidecar, sidecar.readText())
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun shareTabNoteRefusesWhileAnOverwritePromptIsPendingForTheTab() {
         val dir = createTempDirectory("shared-ops-share-pending").toFile()
         val state = withTabs(dir)

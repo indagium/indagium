@@ -1,6 +1,9 @@
 package com.indagium.debug
 
 import com.indagium.ai.LlmToolDefinition
+import com.indagium.ui.SHARED_NOTE_ID_PREFIX
+import com.indagium.ui.SharedNoteWriteDenied
+import com.indagium.ui.withSharedNoteWriteAuthor
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -59,6 +62,17 @@ internal class IndagiumToolGateway(
             return sharedNoteWriteForTab?.invoke(name, arguments, inAppTabId)
                 ?: mapOf("error" to "Shared-note membership writes are unavailable to the tab for this run.")
         }
+        if (inAppTabId != null && (arguments["tabId"] as? String)?.startsWith(SHARED_NOTE_ID_PREFIX) == true) {
+            return try {
+                withSharedNoteWriteAuthor(inAppTabId) { dispatchSuspending(name, arguments) }
+            } catch (denied: SharedNoteWriteDenied) {
+                mapOf("error" to denied.message)
+            }
+        }
+        return dispatchSuspending(name, arguments)
+    }
+
+    private suspend fun dispatchSuspending(name: String, arguments: Map<String, Any?>): Any? {
         handlers[name]?.let { handler -> return handler.invoke(arguments) ?: unknownOperation(name) }
         val suspending = suspendHandlers[name] ?: return unknownOperation(name)
         return suspending.invoke(arguments) ?: unknownOperation(name)

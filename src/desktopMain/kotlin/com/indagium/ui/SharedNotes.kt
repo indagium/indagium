@@ -10,6 +10,7 @@ import com.indagium.model.resolveRows
 import com.indagium.utils.logFormatProfileFromJson
 import com.indagium.utils.recordFingerprint
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -27,6 +28,21 @@ import kotlin.math.abs
 internal const val DEFAULT_SHARED_NOTE_NAME = "Shared note"
 
 internal const val SHARED_NOTE_ID_PREFIX = "shared-"
+
+private val sharedNoteWriteAuthor = ThreadLocal<String>()
+
+internal suspend fun <T> withSharedNoteWriteAuthor(tabId: String, write: suspend () -> T): T =
+    withContext(sharedNoteWriteAuthor.asContextElement(tabId)) { write() }
+
+internal class SharedNoteWriteDenied(hostId: String) :
+    IllegalStateException("Shared note $hostId is unavailable to the tab for this run.")
+
+/** Check the live membership while holding stateLock, immediately before changing the note. */
+internal fun LogTab.requireSharedNoteWriteAccess() {
+    val author = sharedNoteWriteAuthor.get() ?: return
+    val note = sharedNote ?: return
+    if (author !in note.memberTabIds) throw SharedNoteWriteDenied(id)
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
@@ -255,6 +271,7 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
             member.copy(notesView = host.id)
         }
     }
+    seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks)
     host.id
 }
 
@@ -308,6 +325,7 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
             recoveredNoteRows = host.recoveredNoteRows.ifEmpty { tab.recoveredNoteRows },
         )
         updateTabsLocked(setOf(intoTabId)) { recipient }
+        seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks)
         deleteSharedNote(hostId)
         persistStoppedSharedNote(host, recipient)
         true
