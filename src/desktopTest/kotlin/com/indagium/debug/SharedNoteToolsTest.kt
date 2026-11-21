@@ -1,6 +1,7 @@
 package com.indagium.debug
 
 import com.indagium.ai.AiRun
+import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiToolCallBudget
 import com.indagium.ai.AiToolExecutionCoordinator
 import com.indagium.model.AnnBlock
@@ -12,6 +13,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -25,6 +28,9 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** The shared-note MCP tools (list/create/set members) and the existing Notes tools addressed at a shared note's host id. */
+private const val CONFIRMATION_WAIT_NANOS = 10_000_000_000L
+private const val CONFIRMATION_POLL_MS = 10L
+
 class SharedNoteToolsTest {
     private lateinit var dir: File
     private lateinit var state: AppState
@@ -63,7 +69,9 @@ class SharedNoteToolsTest {
         val names = listOf("list_shared_notes", "create_shared_note", "set_shared_note_members")
         names.forEach { name ->
             assertTrue(gateway.tools.any { it.name == name }, "$name missing from the catalogue")
-            assertEquals(IndagiumToolActionPolicy.AUTOMATIC, gateway.actionPolicy(name), name)
+            // Reading is automatic; sharing a note or changing its members asks the user first in the in-app panel.
+            val expected = if (name == "list_shared_notes") IndagiumToolActionPolicy.AUTOMATIC else IndagiumToolActionPolicy.CONFIRMATION_REQUIRED
+            assertEquals(expected, gateway.actionPolicy(name), name)
             assertTrue(name !in PER_CALL_APPROVAL_MCP_TOOLS, name)
         }
         // Notes reads and writes never spend an AI run's analysis budget (the budget here is one call, already spent below).
@@ -178,28 +186,73 @@ class SharedNoteToolsTest {
         val outsider = AiRun(tabId = "c", maxToolCalls = 10)
 
         val change = mapOf("hostId" to hostId, "memberTabIds" to listOf("a", "c"))
-        val rejected = coordinator.executeManaged(outsider, "set_shared_note_members", change)
+        val rejected = confirmedCall(coordinator, outsider, "set_shared_note_members", change)
         assertTrue(rejected.content.contains("unavailable"), rejected.content)
         assertEquals(listOf("a", "b"), state.sharedNoteHost(hostId)?.sharedNote?.memberTabIds)
         assertTrue(coordinator.executeManaged(outsider, "get_annotation_blocks", mapOf("tabId" to hostId)).content.contains("unavailable"))
 
-        val rejectedMove = coordinator.executeManaged(
-            member, "create_shared_note", mapOf("fromTabId" to " c ", "memberTabIds" to listOf("a")),
+        val rejectedMove = confirmedCall(
+            coordinator, member, "create_shared_note", mapOf("fromTabId" to " c ", "memberTabIds" to listOf("a")),
         )
         assertTrue(rejectedMove.content.contains("own tab"), rejectedMove.content)
-        val rejectedCreate = coordinator.executeManaged(member, "create_shared_note", mapOf("memberTabIds" to listOf("b", "c")))
+        val rejectedCreate = confirmedCall(coordinator, member, "create_shared_note", mapOf("memberTabIds" to listOf("b", "c")))
         assertTrue(rejectedCreate.content.contains("must include its tab"), rejectedCreate.content)
         assertEquals(1, state.sharedNoteHosts.size)
         assertEquals("private finding", (state.tab("c")!!.annotations.blocks.single() as AnnBlock.Note).text)
 
-        val allowed = coordinator.executeManaged(member, "set_shared_note_members", change)
+        val allowed = confirmedCall(coordinator, member, "set_shared_note_members", change)
         assertTrue(allowed.content.contains("ok=true"), allowed.content)
         assertEquals(listOf("a", "c"), state.sharedNoteHost(hostId)?.sharedNote?.memberTabIds)
-        val moved = coordinator.executeManaged(
-            outsider, "create_shared_note", mapOf("fromTabId" to "c", "memberTabIds" to listOf("a")),
+        val moved = confirmedCall(
+            coordinator, outsider, "create_shared_note", mapOf("fromTabId" to "c", "memberTabIds" to listOf("a")),
         )
         assertTrue(moved.content.contains("ok=true"), moved.content)
         assertTrue(state.tab("c")!!.annotations.blocks.isEmpty())
+    }
+
+    /** Runs an in-app membership call, which asks first, and accepts its confirmation as the user would. */
+    private suspend fun confirmedCall(
+        coordinator: AiToolExecutionCoordinator,
+        run: AiRun,
+        name: String,
+        arguments: Map<String, Any?>,
+    ) = answeredCall(coordinator, run, name, arguments, accept = true)
+
+    private suspend fun answeredCall(
+        coordinator: AiToolExecutionCoordinator,
+        run: AiRun,
+        name: String,
+        arguments: Map<String, Any?>,
+        accept: Boolean,
+    ) = coroutineScope {
+        val result = async(Dispatchers.Default) { coordinator.executeManaged(run, name, arguments) }
+        val deadline = System.nanoTime() + CONFIRMATION_WAIT_NANOS
+        while (run.confirmations.isEmpty() && !result.isCompleted) {
+            check(System.nanoTime() < deadline) { "$name never asked for confirmation" }
+            delay(CONFIRMATION_POLL_MS)
+        }
+        run.confirmations.values.firstOrNull()?.complete(accept)
+        result.await()
+    }
+
+    @Test
+    fun inAppMembershipChangesAskFirstAndADeclineChangesNothing() = runBlocking {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+        val coordinator = AiToolExecutionCoordinator(gateway)
+        val member = AiRun(tabId = "a", maxToolCalls = 10)
+        assertEquals(IndagiumToolActionPolicy.CONFIRMATION_REQUIRED, gateway.actionPolicy("set_shared_note_members"))
+        assertEquals(IndagiumToolActionPolicy.CONFIRMATION_REQUIRED, gateway.actionPolicy("create_shared_note"))
+
+        val declined = answeredCall(
+            coordinator, member, "set_shared_note_members", mapOf("hostId" to hostId, "memberTabIds" to listOf("a")), accept = false,
+        )
+        assertTrue(declined.content.contains("declined"), declined.content)
+        assertTrue(member.history.any { it is AiRunEvent.ConfirmationRequired })
+        assertEquals(listOf("a", "b"), state.sharedNoteHost(hostId)?.sharedNote?.memberTabIds)
+
+        val declinedCreate = answeredCall(coordinator, member, "create_shared_note", mapOf("memberTabIds" to listOf("a", "c")), accept = false)
+        assertTrue(declinedCreate.content.contains("declined"), declinedCreate.content)
+        assertEquals(1, state.sharedNoteHosts.size)
     }
 
     @Test
