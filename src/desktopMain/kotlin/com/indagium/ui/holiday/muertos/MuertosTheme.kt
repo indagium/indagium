@@ -16,6 +16,7 @@ import java.time.MonthDay
 internal object MuertosTheme : HolidayTheme {
     override val pack = HolidayPack.DIA_DE_MUERTOS
     override val label = "Día de Muertos"
+    override val category = HolidayCategory.HOLIDAY
     override val occasion = "Día de Muertos"
     override val dates = HolidayDates(MonthDay.of(10, 31), MonthDay.of(11, 2))
     override val keywords = listOf(

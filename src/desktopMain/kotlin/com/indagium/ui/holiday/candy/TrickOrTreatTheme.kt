@@ -59,6 +59,7 @@ else listOf(Color(0xFFF5B800), Color(0xFFFF8A2A), Color(0xFFE9D9C4))
 internal object TrickOrTreatTheme : HolidayTheme {
     override val pack = HolidayPack.TRICK_OR_TREAT
     override val label = "Trick or treat"
+    override val category = HolidayCategory.HOLIDAY
     override val occasion = "Halloween"
     override val dates = HolidayDates(MonthDay.of(10, 24), MonthDay.of(11, 1))
     override val keywords = listOf("halloween", "trick", "treat", "candy", "cauldron", "potion", "lollipop", "pail", "lightning")

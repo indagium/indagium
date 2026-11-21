@@ -31,6 +31,7 @@ internal object FakeHolidayTheme : HolidayTheme {
     override val pack = HolidayPack.PUMPKIN_PATCH
     override val label = "Fake fest"
     override val occasion = "Testing"
+    override val category = HolidayCategory.HOLIDAY
     override val dates = HolidayDates(MonthDay.of(6, 1), MonthDay.of(6, 30))
     override val effects = listOf<HolidayEffectSpec>(FakeSparkles)
 

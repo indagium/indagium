@@ -65,6 +65,7 @@ internal const val SEASONAL_PAUSE_TAG = "seasonal-pause"
 internal const val THEME_TABS_TAG = "theme-tabs"
 internal const val SEASONAL_TABS_TAG = "seasonal-tabs"
 internal const val SEASONAL_STATUS_TAG = "seasonal-status"
+internal const val SEASONAL_CATEGORY_TAG = "seasonal-category"
 
 /** The settings anchors of the rows on the Special themes tab: a search or jump to one of them opens that tab first. */
 internal const val SEASONAL_ANCHOR_WHEN = "When it applies"
@@ -186,7 +187,13 @@ private fun SeasonalThemeRows(state: AppState, themes: Map<HolidayPack, HolidayT
     SettingsStackedRow(SEASONAL_ANCHOR_PACK, SEASONAL_PACK_HINT) {
         // While no special theme is on no card is chosen, but the one Always or its dates would turn on is outlined, so the row below never names a
         // pack the cards do not show.
-        PackCards(themes, holiday.pack.takeIf { on }, remembered = holiday.pack.takeIf { !on }) { pack -> update { withPackOn(pack) } }
+        var category by remember { mutableStateOf<HolidayCategory?>(null) }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            CategoryFilter(themes, category) { category = it }
+            PackCards(holidayThemesIn(themes, category), holiday.pack.takeIf { on }, remembered = holiday.pack.takeIf { !on }) { pack ->
+                update { withPackOn(pack) }
+            }
+        }
     }
     if (selected != null) WhenRow(selected, holiday.mode, state.settings.theme.label) { mode -> update { copy(mode = mode, pack = selected.pack) } }
     SettingsRow(SEASONAL_ANCHOR_LIGHTNESS, SEASONAL_LIGHTNESS_HINT) {
@@ -272,13 +279,32 @@ private fun SeasonalSwitchRow(label: String, hint: String, checked: Boolean, tag
     }
 }
 
-// One selectable card per registered theme: a small thumbnail of its tab-strip scene with some of its icons, its name and dates. Two equal
+/** The filter buttons over the cards: All, then each category that has a theme, in [HolidayCategory] order. */
+internal fun holidayCategoryFilters(themes: Map<HolidayPack, HolidayTheme>): List<HolidayCategory?> {
+    val present = themes.values.mapTo(HashSet()) { it.category }
+    return listOf(null) + HolidayCategory.entries.filter { it in present }
+}
+
+// All | Holidays | Playful | Painted: which cards show. Only a view filter, never persisted, and hidden while the themes fit one group.
+@Composable
+private fun CategoryFilter(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayCategory?, onSelect: (HolidayCategory?) -> Unit) {
+    val filters = holidayCategoryFilters(themes)
+    if (filters.size <= 2) return
+    SettingsSegmented(
+        options = filters.map { it?.label ?: "All" },
+        selectedIndices = setOfNotNull(filters.indexOf(selected).takeIf { it >= 0 }),
+        onToggle = { onSelect(filters[it]) },
+        modifier = Modifier.testTag(SEASONAL_CATEGORY_TAG),
+    )
+}
+
+// One selectable card per given theme: a small thumbnail of its tab-strip scene with some of its icons, its name and dates. Two equal
 // columns that fill the row, one column in a narrow window.
 @Composable
-private fun PackCards(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayPack?, remembered: HolidayPack?, onSelect: (HolidayPack) -> Unit) {
+private fun PackCards(themes: List<HolidayTheme>, selected: HolidayPack?, remembered: HolidayPack?, onSelect: (HolidayPack) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         WorkspaceCardGrid(
-            cards = themes.values.map { theme ->
+            cards = themes.map { theme ->
                 { cardModifier: Modifier ->
                     PackCard(theme, theme.pack == selected, modifier = cardModifier, remembered = theme.pack == remembered, onClick = { onSelect(theme.pack) })
                 }

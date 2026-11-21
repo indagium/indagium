@@ -23,6 +23,7 @@ import kotlin.random.Random
 internal object TulipsTheme : HolidayTheme {
     override val pack = HolidayPack.TULIPS
     override val label = "Tulips"
+    override val category = HolidayCategory.PAINTING
     override val occasion = "Any time"
     override val dates = HolidayDates(MonthDay.of(1, 1), MonthDay.of(12, 31))
 

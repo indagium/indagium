@@ -326,4 +326,36 @@ class SeasonalThemesSettingsUiTest {
         assertEquals(HolidayMode.AUTOMATIC, HolidaySettings(mode = HolidayMode.AUTOMATIC).withPackOn(HolidayPack.PUMPKIN_PATCH).mode)
         assertEquals(HolidayMode.ALWAYS, HolidaySettings(mode = HolidayMode.ALWAYS).withPackOn(HolidayPack.PUMPKIN_PATCH).mode)
     }
+
+    @Test
+    fun categoryFilterShowsOnlyThatGroupsCards() {
+        setup()
+        openSeasonalTab()
+        val filter = { label: String -> rule.onNode(hasText(label) and hasAnyAncestor(hasTestTag(SEASONAL_CATEGORY_TAG))) }
+        val shown = { pack: HolidayPack -> rule.onAllNodesWithTag(seasonalPackTag(pack)).fetchSemanticsNodes().isNotEmpty() }
+        assertTrue(HOLIDAY_THEMES.keys.all(shown), "All shows every card")
+
+        filter(HolidayCategory.PAINTING.label).performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(HolidayPack.TULIPS, HolidayPack.COFFEE_BEAR), HOLIDAY_THEMES.keys.filter(shown).toSet())
+
+        filter(HolidayCategory.FUN.label).performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN, HolidayPack.READY_PROMPT), HOLIDAY_THEMES.keys.filter(shown).toSet())
+
+        filter(HolidayCategory.HOLIDAY.label).performClick()
+        rule.waitForIdle()
+        assertTrue(shown(HolidayPack.PUMPKIN_PATCH) && !shown(HolidayPack.TULIPS))
+
+        filter("All").performClick()
+        rule.waitForIdle()
+        assertTrue(HOLIDAY_THEMES.keys.all(shown))
+        assertEquals(AppSettings().holiday, state.settings.holiday, "filtering changes no setting")
+    }
+
+    @Test
+    fun categoryFilterListsOnlyGroupsThatHaveThemes() {
+        assertEquals(listOf(null, HolidayCategory.HOLIDAY, HolidayCategory.FUN, HolidayCategory.PAINTING), holidayCategoryFilters(HOLIDAY_THEMES))
+        assertEquals(listOf(null, HolidayCategory.HOLIDAY), holidayCategoryFilters(FAKE_THEMES))
+    }
 }

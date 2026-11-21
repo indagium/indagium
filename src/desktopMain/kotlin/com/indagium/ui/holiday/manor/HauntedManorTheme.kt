@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import com.indagium.model.HolidayPack
 import com.indagium.ui.ThemeColors
+import com.indagium.ui.holiday.HolidayCategory
 import com.indagium.ui.holiday.HolidayChromeColors
 import com.indagium.ui.holiday.HolidayCorners
 import com.indagium.ui.holiday.HolidayDates
@@ -67,6 +68,7 @@ internal fun manorSceneColors(dark: Boolean): ManorSceneColors = if (dark) MANOR
 internal object HauntedManorTheme : HolidayTheme {
     override val pack = HolidayPack.HAUNTED_MANOR
     override val label = "Haunted manor"
+    override val category = HolidayCategory.HOLIDAY
     override val occasion = "Halloween"
     override val dates = HolidayDates(MonthDay.of(10, 24), MonthDay.of(11, 1))
     override val keywords = listOf("halloween", "haunted", "manor", "ghost", "cobweb", "candle", "spider", "tombstone", "fog", "lightning")

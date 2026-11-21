@@ -6031,7 +6031,7 @@ when nothing is on, the app is capturing or playing video, or the window has no 
 ### 27.5 Adding a theme
 
 1. Add the enum entry to `HolidayPack` (`model/Model.kt`).
-2. Create `ui/holiday/<name>/` with an `object <Name>Theme : HolidayTheme`: `pack`, `label`, `occasion`, `dates`, `palette(dark)`, `chrome(dark)`,
+2. Create `ui/holiday/<name>/` with an `object <Name>Theme : HolidayTheme`: `pack`, `label`, `category` (Holidays, Playful or Painted: the Settings card filter), `occasion`, `dates`, `palette(dark)`, `chrome(dark)`,
    and whichever optional parts it has (`tabShape`, `labelFontFamily`, `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`, `keywords`).
 3. Put its art in the same package (the art kit in `HolidayArtKit.kt` has the path, gradient and ellipse helpers; `holidayIconMap` builds icons).
 4. Register it in `HOLIDAY_THEMES` (`HolidayRegistry.kt`).

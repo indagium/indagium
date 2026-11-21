@@ -8,6 +8,7 @@ import com.indagium.model.HolidayPack
 import com.indagium.ui.*
 import com.indagium.ui.ALPHA_HOVER
 import com.indagium.ui.ThemeColors
+import com.indagium.ui.holiday.HolidayCategory
 import com.indagium.ui.holiday.HolidayChromeColors
 import com.indagium.ui.holiday.HolidayDates
 import com.indagium.ui.holiday.HolidayTheme
@@ -76,6 +77,7 @@ internal fun pumpkinSceneColors(dark: Boolean): PumpkinSceneColors = if (dark) P
 internal object PumpkinPatchTheme : HolidayTheme {
     override val pack = HolidayPack.PUMPKIN_PATCH
     override val label = "Pumpkin patch"
+    override val category = HolidayCategory.HOLIDAY
     override val occasion = "Halloween"
     override val dates = HolidayDates(MonthDay.of(10, 24), MonthDay.of(11, 1))
     override val keywords = listOf("halloween", "pumpkin", "spooky", "orange", "bats", "embers", "lightning", "cat")

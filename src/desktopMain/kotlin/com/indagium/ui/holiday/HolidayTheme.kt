@@ -103,11 +103,30 @@ internal interface HolidayCompanionPainter {
     fun draw(scope: DrawScope, t: Float, dark: Boolean)
 }
 
+/** The group a theme's card is filed under on the Special themes tab; [label] is its filter button. Declaration order is the filter's order. */
+internal enum class HolidayCategory(val label: String) {
+    /** A dated celebration (Halloween, Thanksgiving). */
+    HOLIDAY("Holidays"),
+
+    /** A playful any-time look (beer, the retro prompt). */
+    FUN("Playful"),
+
+    /** Made from the app author's own paintings (tulips, the coffee bear). */
+    PAINTING("Painted"),
+}
+
+/** The themes of [themes] in [category] (all of them for null), in registry order. */
+internal fun holidayThemesIn(themes: Map<HolidayPack, HolidayTheme>, category: HolidayCategory?): List<HolidayTheme> =
+    themes.values.filter { category == null || it.category == category }
+
 /** One seasonal theme. See the file comment; the optional parts default to "not provided". */
 internal interface HolidayTheme {
     /** The persisted id (the enum stays the stored value). */
     val pack: HolidayPack
     val label: String
+
+    /** The filter group its card is shown under in Settings. Not persisted. */
+    val category: HolidayCategory
 
     /** The holiday it celebrates, for its card ("Halloween"). */
     val occasion: String

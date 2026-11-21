@@ -25,6 +25,7 @@ import kotlin.math.cos
 internal object ReadyTheme : HolidayTheme {
     override val pack = HolidayPack.READY_PROMPT
     override val label = "Ready prompt"
+    override val category = HolidayCategory.FUN
     override val occasion = "Any time"
     override val dates = HolidayDates(MonthDay.of(1, 1), MonthDay.of(12, 31))
 

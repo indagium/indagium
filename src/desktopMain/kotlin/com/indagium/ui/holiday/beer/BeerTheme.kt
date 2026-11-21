@@ -87,6 +87,7 @@ private class BeerFoam(private val green: Boolean) : HolidayTabOrnament {
 
 internal class BeerTheme(override val pack: HolidayPack, private val green: Boolean) : HolidayTheme {
     override val label = if (green) "Beer time · Green" else "Beer time · Yellow"
+    override val category = HolidayCategory.FUN
     override val occasion = "Beer time"
     override val dates = HolidayDates(MonthDay.of(1, 1), MonthDay.of(12, 31))
     override val automaticLabel = "Fridays from 17:00"

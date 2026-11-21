@@ -24,6 +24,7 @@ import kotlin.random.Random
 internal object CoffeeBearTheme : HolidayTheme {
     override val pack = HolidayPack.COFFEE_BEAR
     override val label = "Coffee bear"
+    override val category = HolidayCategory.PAINTING
     override val occasion = "Any time"
     override val dates = HolidayDates(MonthDay.of(1, 1), MonthDay.of(12, 31))
 

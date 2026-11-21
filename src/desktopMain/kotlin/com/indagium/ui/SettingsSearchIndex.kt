@@ -235,7 +235,7 @@ private fun appearance() = buildList {
 // the registry, so a new theme is found by its words without touching this index.
 private val SEASONAL_THEMES = HOLIDAY_THEMES.values
 private val SEASONAL_KEYWORDS = listOf("special", "seasonal", "holiday", "theme pack") +
-    SEASONAL_THEMES.flatMap { listOf(it.label.lowercase(), it.occasion.lowercase()) + it.keywords }.distinct()
+    SEASONAL_THEMES.flatMap { listOf(it.label.lowercase(), it.occasion.lowercase(), it.category.label.lowercase()) + it.keywords }.distinct()
 private val SEASONAL_DATES = SEASONAL_THEMES.joinToString("; ") { "${it.label} runs ${holidayDatesLabel(it)}" }
 
 private fun seasonalThemes() = listOf(

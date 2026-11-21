@@ -16,6 +16,7 @@ import java.time.MonthDay
 internal object ThanksTheme : HolidayTheme {
     override val pack = HolidayPack.THANKSGIVING
     override val label = "Thanksgiving"
+    override val category = HolidayCategory.HOLIDAY
     override val occasion = "Thanksgiving"
     override val dates = HolidayDates(MonthDay.of(11, 21), MonthDay.of(11, 30))
     override val keywords = listOf(
