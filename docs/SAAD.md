@@ -2829,7 +2829,11 @@ paths. A member tab's `LogTab.notesView` names the note its Notes tile shows (it
 **Lifecycle.** Closing a member records it in `closedMembers` (`detachSharedNoteMembersLocked`); if another open tab shows
 the same file it takes over the membership instead, so a reparse into a new tab keeps the note. Opening a file that matches a
 closed member or a closed reference source rebinds the references to the new tab and, for a member, restores the membership
-(`attachReopenedTabToSharedNotesLocked`). Stopping sharing hands the blocks to one tab's private note; deleting removes the host.
+(`attachReopenedTabToSharedNotesLocked`). Stopping sharing hands the blocks to one tab's private note and copies the host's
+closed sources that those blocks cite into that tab's `LogTab.noteClosedSources` (tab token field 26, `TAB_TOKEN_NOTE_CLOSED_SOURCES_INDEX`,
+encoded like a host's closed sources), so the citations can still reopen and rebind: a private note records a cited log that closes
+later the same way, and opening a matching file rebinds the citations of every tab holding such an entry. The `.ann` export carries
+only the references (`sourceTabId`, file name, frozen rows), not these entries. Deleting a note removes the host.
 
 **Row references.** `AnnBlock.LogRef` carries `sourceTabId`, `sourceFilename`, `sourceSectionId` (the metadata-JSON section) and,
 for a reference made from chosen fields of a JSON record, `recordFields` (each a path and its JSON, at most 64 KiB in all,

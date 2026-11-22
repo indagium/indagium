@@ -89,6 +89,22 @@ private fun SharedNoteClosedSource.matches(tab: LogTab): Boolean {
 private fun SharedNoteInfo.closedSource(tabId: String): SharedNoteClosedSource? =
     closedMembers.firstOrNull { it.tabId == tabId } ?: closedReferenceSources.firstOrNull { it.tabId == tabId }
 
+/** The ids of the tabs whose rows [blocks] cite as another file's (a shared note's references, or a private note that stopped being shared). */
+private fun List<AnnBlock>.citedSourceTabIds(): Set<String> =
+    asSequence().filterIsInstance<AnnBlock.LogRef>().mapNotNullTo(HashSet()) { it.sourceTabId }
+
+/** [added] joined to this list, replacing an entry of the same tab. */
+private fun List<SharedNoteClosedSource>.withClosedSources(added: List<SharedNoteClosedSource>): List<SharedNoteClosedSource> =
+    if (added.isEmpty()) this else filterNot { old -> added.any { it.tabId == old.tabId } } + added
+
+/**
+ * The closed source that [ownerId] recorded for the citations of [tabId]: [ownerId] is a shared note's host id, or the id of a
+ * tab whose private note cites it ([LogTab.noteClosedSources]).
+ */
+private fun AppState.closedSourceOf(ownerId: String, tabId: String): SharedNoteClosedSource? =
+    sharedNoteHost(ownerId)?.sharedNote?.closedSource(tabId)
+        ?: tabs.firstOrNull { it.id == ownerId }?.noteClosedSources?.firstOrNull { it.tabId == tabId }
+
 /** Open ordinary tabs only: never a shared-note host (not in `tabs`) and never the New-tab launcher. Caller holds stateLock. */
 private fun AppState.eligibleMemberIds(ids: List<String>): List<String> =
     ids.distinct().filter { id -> tabs.any { it.id == id && !it.isCaptureLauncher } }
@@ -153,13 +169,16 @@ private fun LogTab.withReopenedSource(tab: LogTab, addMember: Boolean = false): 
 
 private fun LogTab.withMember(tab: LogTab): LogTab = withReopenedSource(tab, addMember = true)
 
+/** What a note must remember to reopen this tab's file later; null when it has no plain file to open (an archive entry, a capture). */
+private fun LogTab.asClosedSource(): SharedNoteClosedSource? =
+    sourcePath?.takeIf { plainSourcePathKey(it) != null }?.let { SharedNoteClosedSource(id, filename, it, logFormatProfileSnapshot) }
+
 /** Keeps reopen information for a closing member or a file cited by this note. */
 private fun LogTab.withSourceClosed(tab: LogTab): LogTab {
     val info = sharedNote ?: return this
     val wasMember = tab.id in info.memberTabIds
     if (!wasMember && annotations.blocks.none { it is AnnBlock.LogRef && it.sourceTabId == tab.id }) return this
-    val path = tab.sourcePath?.takeIf { plainSourcePathKey(it) != null }
-    val closed = path?.let { SharedNoteClosedSource(tab.id, tab.filename, it, tab.logFormatProfileSnapshot) }
+    val closed = tab.asClosedSource()
     return copy(
         sharedNote = if (wasMember) info.copy(
             memberTabIds = info.memberTabIds - tab.id,
@@ -254,6 +273,10 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
             // The tab's pinned file goes with its note; a tab that had none leaves the host the free pin it was made with.
             noteTargetName = tab.noteTargetName ?: it.noteTargetName,
             recoveredNoteRows = tab.recoveredNoteRows,
+            // The closed logs the note cites go with it, so its citations can still reopen them (stopSharing hands them back).
+            sharedNote = it.sharedNote?.let { info ->
+                info.copy(closedReferenceSources = info.closedReferenceSources.withClosedSources(tab.noteClosedSources))
+            },
         )
     }
     addSharedNoteHost(host)
@@ -265,6 +288,7 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
                 annotations = Annotations(prefix = defaultNotePrefix(member)),
                 noteTargetName = freshPin,
                 recoveredNoteRows = emptyMap(),
+                noteClosedSources = emptyList(),
                 notesView = host.id,
             )
         } else {
@@ -319,10 +343,16 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
         val pending = pendingNoteOverwrite
         if (pending != null && (pending.tabId == hostId || pending.tabId == intoTabId)) return false
         if (!replaceExisting && privateNoteHasContent(tab)) return false
+        // The host's record of closed logs goes with the citations: without it the transferred note could no longer reopen them.
+        val cited = host.annotations.blocks.citedSourceTabIds()
+        val carriedSources = host.sharedNote?.let { (it.closedMembers + it.closedReferenceSources) }.orEmpty()
+            .filter { it.tabId in cited }
+            .distinctBy { it.tabId }
         val recipient = tab.copy(
             annotations = host.annotations.returnedTo(intoTabId),
             noteTargetName = stoppedSharedNotePin(host, tab),
             recoveredNoteRows = host.recoveredNoteRows.ifEmpty { tab.recoveredNoteRows },
+            noteClosedSources = carriedSources,
         )
         updateTabsLocked(setOf(intoTabId)) { recipient }
         seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks)
@@ -372,7 +402,7 @@ internal fun AppState.setNotesView(tabId: String, hostId: String?): Boolean = sy
  * references follow it immediately. Caller holds stateLock.
  */
 internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
-    if (closing.isEmpty() || sharedNoteHosts.isEmpty()) return
+    if (closing.isEmpty()) return
     val closingIds = closing.mapTo(HashSet()) { it.id }
     // A closing source can hand off to another tab showing the same file with the same profile.
     val successors = closing.associate { tab ->
@@ -384,6 +414,8 @@ internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
             }
         }
     }
+    recordPrivateNoteClosedSourcesLocked(closing, closingIds, successors)
+    if (sharedNoteHosts.isEmpty()) return
     val viewHandOver = HashMap<String, String>()
     val updated = sharedNoteHosts.map { host ->
         closing.fold(host) { acc, tab ->
@@ -403,11 +435,41 @@ internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
 }
 
 /**
+ * A private note that cites a closing tab (a note that stopped being shared keeps its cross-file references) either follows an
+ * equivalent open tab or records how to reopen the file ([LogTab.noteClosedSources]). Caller holds stateLock.
+ */
+private fun AppState.recordPrivateNoteClosedSourcesLocked(
+    closing: List<LogTab>,
+    closingIds: Set<String>,
+    successors: Map<String, LogTab?>,
+) {
+    val closingById = closing.associateBy { it.id }
+    var changed = false
+    val updated = tabs.map { owner ->
+        val cited = if (owner.id in closingIds) emptyList() else owner.annotations.blocks.citedSourceTabIds().filter { it in closingById }
+        if (cited.isEmpty()) return@map owner
+        changed = true
+        cited.fold(owner) { acc, id ->
+            val successor = successors[id]
+            val closed = closingById.getValue(id).asClosedSource()
+            when {
+                successor != null -> acc.copy(annotations = acc.annotations.retargetLogRefSource(id, successor.id))
+                closed != null -> acc.copy(noteClosedSources = acc.noteClosedSources.withClosedSources(listOf(closed)))
+                else -> acc
+            }
+        }
+    }
+    if (changed) tabs = updated
+}
+
+/**
  * Rebinds closed references when their source opens. A returning member also rejoins its notes
  * and shows the first one. Returns the tab to publish. Caller holds stateLock.
  */
 internal fun AppState.attachReopenedTabToSharedNotesLocked(opened: LogTab): LogTab {
-    if (plainSourcePathKey(opened.sourcePath) == null || sharedNoteHosts.isEmpty()) return opened
+    if (plainSourcePathKey(opened.sourcePath) == null) return opened
+    rebindPrivateNotesToReopenedTabLocked(opened)
+    if (sharedNoteHosts.isEmpty()) return opened
     var firstHostId: String? = null
     val updated = sharedNoteHosts.map { host ->
         if (firstHostId == null && host.sharedNote?.closedMembers?.any { it.matches(opened) } == true) firstHostId = host.id
@@ -418,16 +480,35 @@ internal fun AppState.attachReopenedTabToSharedNotesLocked(opened: LogTab): LogT
 }
 
 /**
+ * Every open tab whose private note cites a closed file that [opened] is again ([LogTab.noteClosedSources]) points those
+ * citations at [opened] and forgets the entry. Caller holds stateLock.
+ */
+private fun AppState.rebindPrivateNotesToReopenedTabLocked(opened: LogTab) {
+    if (tabs.none { owner -> owner.noteClosedSources.any { it.matches(opened) } }) return
+    tabs = tabs.map { owner ->
+        val reopened = owner.noteClosedSources.filter { it.matches(opened) }
+        if (reopened.isEmpty()) {
+            owner
+        } else {
+            owner.copy(
+                annotations = reopened.fold(owner.annotations) { notes, closed -> notes.retargetLogRefSource(closed.tabId, opened.id) },
+                noteClosedSources = owner.noteClosedSources - reopened.toSet(),
+            )
+        }
+    }
+}
+
+/**
  * Opens a closed member's file again through the normal open path (no dialog); the open hook above re-attaches it. A file
  * that is already open is attached and shown instead. A missing or unknown file is reported through the open-error notice.
  * Returns whether the file was opened (or was already open).
  */
 internal fun AppState.reopenSharedNoteMember(hostId: String, closedTabId: String): Boolean {
     val closed = sharedNoteHost(hostId)?.sharedNote?.closedMembers?.firstOrNull { it.tabId == closedTabId } ?: return false
-    return reopenSharedNoteSource(closed) != null
+    return reopenClosedSource(closed) != null
 }
 
-private fun AppState.reopenSharedNoteSource(closed: SharedNoteClosedSource): String? {
+private fun AppState.reopenClosedSource(closed: SharedNoteClosedSource): String? {
     val path = closed.sourcePath?.takeIf { plainSourcePathKey(it) != null }
     if (path == null) {
         showOpenError("Could not reopen ${closed.filename}", null, "The shared note has no file recorded for this tab.")
@@ -465,8 +546,11 @@ internal sealed interface GoToRowsResult {
     /** The source tab is shown with [rowIds] selected and revealed; [missing] frozen rows could not be found in it any more. */
     data class Navigated(val tabId: String, val rowIds: List<Int>, val missing: Int = 0) : GoToRowsResult
 
-    /** The source was saved by [hostId]'s note: ask the user, then [goToLogRefRowsAfterReopen]. */
-    data class NeedsReopen(val hostId: String, val closedTabId: String) : GoToRowsResult
+    /**
+     * The source was saved by [ownerId]'s note (a shared note's host id, or the id of the tab whose private note cites it): ask the
+     * user, then [goToLogRefRowsAfterReopen].
+     */
+    data class NeedsReopen(val ownerId: String, val closedTabId: String) : GoToRowsResult
 
     /** The source tab is open but none of the rows (or the section) could be found in it; nothing was selected. */
     data object RowsNotFound : GoToRowsResult
@@ -492,45 +576,99 @@ private fun resolveSelectedRecordId(block: AnnBlock.LogRef, rows: List<LogEntry>
     return rows.asSequence().filter(::matches).minByOrNull { abs(it.id - id) }?.id
 }
 
+/** Frozen rows of one content that no longer sit under their saved id, and the ids of the rows that now carry that content. */
+private class LostRowGroup(val saved: LogEntry, val targetIds: List<Int>) {
+    val candidates = ArrayList<Int>()
+}
+
 /**
  * The ids in [rows] that stand for [block]'s rows. A saved id is kept when the row now under it is the frozen one (same time,
- * message, tag and JSON when available); an id that changed (a reparse, a reopened file) is looked up by content, taking the closest id when the
- * content repeats. A reference without frozen rows keeps the ids that still exist. One pass over [rows] serves every changed id.
+ * message, tag and JSON when available); an id that changed (a reparse, a reopened file) is looked up by content. Rows that are
+ * already matched at their saved id are reserved, and the changed ids take distinct rows (see [assignLostRows]): identical
+ * citations never collapse onto one row. A reference without frozen rows keeps the ids that still exist. One pass over [rows]
+ * serves every changed id.
  */
 internal fun resolveLogRefRowIds(block: AnnBlock.LogRef, rows: List<LogEntry>, rmap: Map<Int, LogEntry>): List<Int> {
     block.sourceRecordFingerprint?.let { return listOfNotNull(resolveSelectedRecordId(block, rows, rmap, it)) }
     val frozen = block.sourceEntries?.associateBy { it.id }.orEmpty()
     val found = LinkedHashSet<Int>()
-    val lost = ArrayList<LogEntry>()
+    val lost = LinkedHashMap<Int, LogEntry>()
     for (id in block.logIds) {
         val saved = frozen[id]
         when {
             saved == null -> if (id in rmap) found += id
             rmap[id]?.sameRowContent(saved) == true -> found += id
-            else -> lost += saved
+            else -> lost[id] = saved
         }
     }
     if (lost.isNotEmpty()) {
-        val wanted = lost.groupBy { it.msg }
-        val best = HashMap<LogEntry, Int>()
+        val groups = lost.values
+            .groupBy { listOf(it.ts, it.msg, it.tag, it.rawRecord) }
+            .values.map { same -> LostRowGroup(same.first(), same.map(LogEntry::id).sorted()) }
+        val byMessage = groups.groupBy { it.saved.msg }
         for (row in rows) {
-            val candidates = wanted[row.msg] ?: continue
-            for (target in candidates) {
-                if (!row.sameRowContent(target)) continue
-                val current = best[target]
-                if (current == null || abs(row.id - target.id) < abs(current - target.id)) best[target] = row.id
-            }
+            if (row.id in found) continue
+            byMessage[row.msg]?.forEach { group -> if (row.sameRowContent(group.saved)) group.candidates += row.id }
         }
-        lost.forEach { target -> best[target]?.let { found += it } }
+        assignLostRows(groups, found)
     }
     return found.sorted()
 }
 
-/** Offers to reopen a source recorded by a shared note. */
-private fun AppState.reopenOfferFor(sourceTabId: String, preferredHostId: String?): GoToRowsResult {
-    val hosts = sharedNoteHosts.sortedByDescending { it.id == preferredHostId }
-    val host = hosts.firstOrNull { it.sharedNote?.closedSource(sourceTabId) != null }
-    return host?.let { GoToRowsResult.NeedsReopen(it.id, sourceTabId) } ?: GoToRowsResult.NoSource
+/**
+ * Gives every lost saved id its own row. Groups of different content never compete for a row. Inside a group the ids, in ascending
+ * order, take the closest unused candidate that keeps the order (a row after the one the previous id took) while leaving enough
+ * rows after it for the ids still to come; when no ordered choice exists they take the closest unused row at all. [taken] holds the
+ * reserved rows and receives the chosen ones.
+ */
+private fun assignLostRows(groups: List<LostRowGroup>, taken: MutableSet<Int>) {
+    for (group in groups.sortedBy { it.targetIds.first() }) {
+        val rows = group.candidates.sorted()
+        var previous = -1
+        group.targetIds.forEachIndexed { index, target ->
+            val stillToCome = group.targetIds.size - index - 1
+            val chosen = closestUnusedRow(rows, target, previous + 1, rows.size - 1 - stillToCome, taken)
+                ?: closestUnusedRow(rows, target, 0, rows.lastIndex, taken)
+            if (chosen != null) {
+                taken += rows[chosen]
+                previous = chosen
+            }
+        }
+    }
+}
+
+/** The index in [from]..[to] of [rows] (ascending ids) whose id is closest to [target] and not in [taken]; the earlier row wins a tie. */
+private fun closestUnusedRow(rows: List<Int>, target: Int, from: Int, to: Int, taken: Set<Int>): Int? {
+    if (from > to) return null
+    var low = from
+    var high = to + 1
+    while (low < high) {
+        val middle = (low + high) ushr 1
+        if (rows[middle] < target) low = middle + 1 else high = middle
+    }
+    var right = low
+    var left = low - 1
+    while (right <= to && rows[right] in taken) right++
+    while (left >= from && rows[left] in taken) left--
+    val hasRight = right <= to
+    val hasLeft = left >= from
+    return when {
+        !hasRight && !hasLeft -> null
+        !hasLeft -> right
+        !hasRight -> left
+        rows[right] - target < target - rows[left] -> right
+        else -> left
+    }
+}
+
+/**
+ * Offers to reopen a source recorded by a note: the note being viewed first (the shared note shown, else the viewing tab's own
+ * private note), then any other shared note.
+ */
+private fun AppState.reopenOfferFor(sourceTabId: String, viewingTabId: String, viewedHostId: String?): GoToRowsResult {
+    val owners = listOf(viewedHostId ?: viewingTabId) + sharedNoteHosts.map { it.id }
+    val owner = owners.firstOrNull { closedSourceOf(it, sourceTabId) != null }
+    return owner?.let { GoToRowsResult.NeedsReopen(it, sourceTabId) } ?: GoToRowsResult.NoSource
 }
 
 /**
@@ -552,12 +690,12 @@ private suspend fun AppState.loadedSourceShowing(sourceTabId: String, sectionId:
  *
  * The source tab is the block's [AnnBlock.LogRef.sourceTabId], or, for a private note, the tab [viewingTabId] itself (which owns
  * the note); a shared note's row reference with no source tab has [GoToRowsResult.NoSource]. A source tab that is not open but
- * has a saved file in a shared note gives [GoToRowsResult.NeedsReopen].
+ * has a saved file in a note (a shared note, or the viewing tab's own private note) gives [GoToRowsResult.NeedsReopen].
  */
 internal suspend fun AppState.goToLogRefRows(block: AnnBlock.LogRef, viewingTabId: String): GoToRowsResult {
     val viewedHostId = notesTargetFor(viewingTabId).takeIf { it != viewingTabId }
     val sourceTabId = block.sourceTabId ?: viewingTabId.takeIf { viewedHostId == null } ?: return GoToRowsResult.NoSource
-    if (tab(sourceTabId) == null) return reopenOfferFor(sourceTabId, viewedHostId)
+    if (tab(sourceTabId) == null) return reopenOfferFor(sourceTabId, viewingTabId, viewedHostId)
     val shown = loadedSourceShowing(sourceTabId, block.sourceSectionId) ?: return GoToRowsResult.RowsNotFound
     val ids = withContext(Dispatchers.Default) { resolveLogRefRowIds(block, shown.logData, shown.rmap) }
     if (ids.isEmpty()) return GoToRowsResult.RowsNotFound
@@ -572,13 +710,13 @@ internal suspend fun AppState.goToLogRefRows(block: AnnBlock.LogRef, viewingTabI
  * goes to the rows. Returns [GoToRowsResult.NoSource] if the source cannot be reopened.
  */
 internal suspend fun AppState.goToLogRefRowsAfterReopen(
-    hostId: String,
+    ownerId: String,
     closedTabId: String,
     block: AnnBlock.LogRef,
     viewingTabId: String,
 ): GoToRowsResult {
-    val closed = sharedNoteHost(hostId)?.sharedNote?.closedSource(closedTabId) ?: return GoToRowsResult.NoSource
-    val reopenedId = reopenSharedNoteSource(closed) ?: return GoToRowsResult.NoSource
+    val closed = closedSourceOf(ownerId, closedTabId) ?: return GoToRowsResult.NoSource
+    val reopenedId = reopenClosedSource(closed) ?: return GoToRowsResult.NoSource
     val published = withTimeoutOrNull(REOPEN_WAIT_MS) {
         while (isLoadInFlight(reopenedId)) delay(REOPEN_POLL_MS)
         tab(reopenedId)?.let(closed::matches) == true

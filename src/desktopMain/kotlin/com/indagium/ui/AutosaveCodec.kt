@@ -55,6 +55,7 @@ private const val TAB_TOKEN_LOG_FORMAT_PROFILE_ID_INDEX = 17
 internal const val TAB_TOKEN_SHARED_NOTE_INDEX = 22
 private const val TAB_TOKEN_NOTES_VIEW_INDEX = 23
 private const val TAB_TOKEN_HELD_FILTER_INDEX = 25
+private const val TAB_TOKEN_NOTE_CLOSED_SOURCES_INDEX = 26
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
 internal fun String.jsonStr(): String = buildString {
@@ -1802,7 +1803,7 @@ internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
     logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
-    selectedLogSectionId, sharedNote, notesView, dltSplitIdentifiers, heldFilterCriteria,
+    selectedLogSectionId, sharedNote, notesView, dltSplitIdentifiers, heldFilterCriteria, noteClosedSources,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1978,6 +1979,9 @@ internal fun LogTab.tabToken(): String {
         // `filter` (LogTab.heldFilterCriteria), as the same SavedFilter token as field 3. Blank when nothing is held, so
         // tokens written before this field existed restore with null (tabShellFromToken reads it via getOrNull).
         heldFilterCriteria?.asSavedFilterForToken()?.savedFilterToken().orEmpty(),
+        // Trailing field (26): the closed logs this tab's private note cites (LogTab.noteClosedSources), encoded as a shared
+        // note's closed sources are (SharedNoteCodec.closedSourcesToken). Blank when none, so older tokens restore with none.
+        noteClosedSources.closedSourcesToken(),
     )
 }
 
@@ -2095,6 +2099,8 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             dltSplitIdentifiers = p.getOrNull(24)?.toBooleanStrictOrNull() == true,
             // Field index 25 (append-only); blank or missing means no criteria are held.
             heldFilterCriteria = p.getOrNull(TAB_TOKEN_HELD_FILTER_INDEX)?.takeIf { it.isNotBlank() }?.savedFilterFromToken()?.toFilter(),
+            // Field index 26 (append-only); blank or missing means the private note cites no closed log.
+            noteClosedSources = p.getOrNull(TAB_TOKEN_NOTE_CLOSED_SOURCES_INDEX).closedSourcesFromToken(),
         ),
         source,
     )

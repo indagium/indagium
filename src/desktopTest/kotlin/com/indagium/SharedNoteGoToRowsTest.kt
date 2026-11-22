@@ -226,6 +226,40 @@ class SharedNoteGoToRowsTest {
     }
 
     @Test
+    fun identicalCitationsThatMovedKeepOneRowEach() {
+        // Two identical lines were cited at 10 and 11; two lines were inserted before them, so they now sit at 12 and 13.
+        val twin = entry(0, "twin", ts = "09:00:00.000")
+        val rows = (1..20).map { if (it == 12 || it == 13) twin.copy(id = it) else entry(it, "row $it", ts = "10:00:%02d.000".format(it)) }
+        val block = ref(source = "a", ids = listOf(10, 11), frozen = listOf(twin.copy(id = 10), twin.copy(id = 11)))
+
+        assertEquals(listOf(12, 13), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
+    }
+
+    @Test
+    fun aRemappedCitationNeverTakesARowAnotherCitationIsAlreadyMatchedOn() {
+        val twin = entry(0, "twin", ts = "09:00:00.000")
+        // Id 5 still holds the twin; the citation that was at 6 is lost, and the closest twin to it is the reserved row 5.
+        val rows = (1..12).map { if (it == 5 || it == 9) twin.copy(id = it) else entry(it, "row $it", ts = "10:00:%02d.000".format(it)) }
+        val block = ref(source = "a", ids = listOf(5, 6), frozen = listOf(twin.copy(id = 5), twin.copy(id = 6)))
+
+        assertEquals(listOf(5, 9), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
+    }
+
+    @Test
+    fun moreIdenticalCitationsThanRowsTakeEveryRowOnceAndKeepTheirOrder() {
+        val twin = entry(0, "twin", ts = "09:00:00.000")
+        val rows = (1..12).map { if (it == 3 || it == 11) twin.copy(id = it) else entry(it, "row $it", ts = "10:00:%02d.000".format(it)) }
+        val block = ref(source = "a", ids = listOf(6, 7, 8), frozen = listOf(6, 7, 8).map { twin.copy(id = it) })
+
+        assertEquals(listOf(3, 11), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
+
+        // With room for an ordered choice, the second citation takes a row after the first one's, not the nearer row before it.
+        val spread = (1..30).map { if (it in setOf(5, 8, 30)) twin.copy(id = it) else entry(it, "row $it", ts = "10:00:%02d.000".format(it)) }
+        val two = ref(source = "a", ids = listOf(9, 10), frozen = listOf(9, 10).map { twin.copy(id = it) })
+        assertEquals(listOf(8, 30), resolveLogRefRowIds(two, spread, spread.associateBy { it.id }))
+    }
+
+    @Test
     fun structuredRowsWithIdenticalSummariesAreMatchedByTheirOriginalJson() {
         val saved = entry(1, "packet").copy(recordMetadata = LogRecordMetadata(rawRecord = """{"payload":17}"""))
         val current = listOf(saved.copy(recordMetadata = LogRecordMetadata(rawRecord = """{"payload":21}""")), saved.copy(id = 2))

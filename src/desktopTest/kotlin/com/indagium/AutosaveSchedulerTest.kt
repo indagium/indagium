@@ -6,6 +6,7 @@ import com.indagium.model.Filter
 import com.indagium.model.LogLevel
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
+import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 import com.indagium.model.VideoAttachment
 import com.indagium.ui.AppState
@@ -316,9 +317,10 @@ class AutosaveSchedulerTest {
             base.copy(notesView = "shared-1"),
             base.copy(dltSplitIdentifiers = true),
             base.copy(heldFilterCriteria = Filter(levels = setOf(LogLevel.E))),
+            base.copy(noteClosedSources = listOf(SharedNoteClosedSource("gone", "gone.log", "/tmp/gone.log"))),
         )
 
-        assertEquals(26, base.persistedSnapshot().size)
+        assertEquals(27, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

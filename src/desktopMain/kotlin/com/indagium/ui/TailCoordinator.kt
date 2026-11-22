@@ -776,11 +776,16 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     private fun scheduleTailAnalysisRefresh(tabId: String) = analysisDebouncer.onBatch(tabId)
 
     private suspend fun refreshAnalysis(tabId: String) {
-        val logData = synchronized(appState.stateLock) { appState.tab(tabId)?.logData } ?: return
+        // Rows, format and pinned profile come from one tab snapshot: the profile decides which analyzers apply
+        // (Logcat crash analysis only for Logcat-compatible profiles) and contributes its own issue rules.
+        val (logData, logFormat, profile) = synchronized(appState.stateLock) {
+            val tab = appState.tab(tabId) ?: return
+            Triple(tab.logData, tab.logFormat, appState.pinnedLogFormatProfile(tabId))
+        }
         val issueRules = appState.settings.customIssueRules
         // includeCounts = false: tagCounts/processNames/tagPids are maintained per batch and mergeTailAnalysis
         // takes the live maps, so computing them here again would be thrown away.
-        val full = buildLogAnalysis(logData, issueRules, includeCounts = false)
+        val full = buildLogAnalysis(logData, issueRules, logFormat, includeCounts = false, profile = profile)
         currentCoroutineContext().ensureActive()
         var discarded = false
         appState.upTab(tabId) { current ->

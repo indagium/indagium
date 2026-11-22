@@ -103,7 +103,7 @@ internal fun AppState.logRefActionsFor(viewingTabId: String): LogRefActions = Lo
     },
     reopenAndGoToRows = { offer, block ->
         launchInBackground {
-            if (goToLogRefRowsAfterReopen(offer.hostId, offer.closedTabId, block, viewingTabId) == GoToRowsResult.RowsNotFound) {
+            if (goToLogRefRowsAfterReopen(offer.ownerId, offer.closedTabId, block, viewingTabId) == GoToRowsResult.RowsNotFound) {
                 rowsGoneNotice(block, viewingTabId)
             }
         }

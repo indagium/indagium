@@ -1161,6 +1161,13 @@ data class LogTab(
      * appended last; null on a tab that has nothing held.
      */
     val heldFilterCriteria: Filter? = null,
+    /**
+     * Closed logs that this tab's OWN (private) note cites by [AnnBlock.LogRef.sourceTabId], with the path and profile snapshot
+     * needed to reopen them. A shared note keeps these in [SharedNoteInfo]; this is the same record for a note that stopped being
+     * shared (its citations move to the recipient's private note) or that cites a log closed since. Opening a matching file
+     * rebinds the citations to the new tab and drops the entry. Persisted in the tab token (AutosaveCodec), appended last.
+     */
+    val noteClosedSources: List<SharedNoteClosedSource> = emptyList(),
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */

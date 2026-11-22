@@ -8503,6 +8503,9 @@ class AppState(
 
     private fun publishReparsedProfileTab(sourceTab: LogTab, profile: LogFormatProfile, result: ParsedLog): String {
         val newId = "t${tabCounter.getAndIncrement()}"
+        // The prefix comes from the tab that was reparsed: it already carries the user's prefix label and
+        // an archive entry's qualified name, exactly as the ordinary open path made it.
+        val prefix = sourceTab.annotations.prefix.ifBlank { "From ${sourceTab.filename}" }
         val newTab = mkTab(
             newId,
             "${sourceTab.filename} · ${profile.name}",
@@ -8517,12 +8520,18 @@ class AppState(
             sourcePath = sourceTab.sourcePath,
             largeFileMode = sourceTab.largeFileMode,
             archiveCandidate = sourceTab.archiveCandidate,
-            annotations = Annotations(prefix = "From ${sourceTab.filename}"),
+            annotations = Annotations(prefix = prefix),
+            showUnfiltered = settings.openNewFilesWithUnfiltered,
             logFormatDiagnostics = result.diagnostics,
+            logSections = result.sections.map { it.description() },
+            selectedLogSectionId = result.selectedSectionId,
+            logFormatCandidateIds = result.candidateProfileIds,
             profileSourceLineCount = result.sourceLineCount,
         )
-        publishOpenedTab(newTab, originLauncherId = null)
-        rememberLogSectionIndex(newId, result.metadataSectionIndex)
+        synchronized(stateLock) {
+            publishOpenedTab(newTab, originLauncherId = null)
+            rememberLogSectionIndex(newId, result.metadataSectionIndex)
+        }
         ioScope.launch {
             val full = buildLogAnalysis(result.entries, settings.customIssueRules, result.format, profile = profile)
             upTab(newId) { it.copy(analysis = full) }
@@ -8585,13 +8594,15 @@ class AppState(
         val snapshots = synchronized(stateLock) {
             tabs.asSequence()
                 .filter { it.contentState == TabContentState.LOADED && it.logData.isNotEmpty() }
-                .map { it to pinRows(it) }
+                // The tab's pinned profile is read with its rows: its own issue rules apply beside the global ones, as in buildLogAnalysis.
+                .map { Triple(it, pinRows(it), runCatching { pinnedLogFormatProfile(it) }.getOrNull()) }
                 .toList()
         }
-        snapshots.forEach { (snapshot, pin) ->
+        snapshots.forEach { (snapshot, pin, profile) ->
             launchPinned(pin) {
+                val applicableRules = (rules + profile?.issueRules.orEmpty()).distinctBy { it.id }
                 val customSites = withContext(Dispatchers.Default) {
-                    customIssueSitesComputer(snapshot.logData, rules)
+                    customIssueSitesComputer(snapshot.logData, applicableRules)
                 }
                 ensureActive()
                 if (customIssueRuleGeneration.get() != generation || settings.customIssueRules != rules) return@launchPinned
@@ -16894,7 +16905,10 @@ class AppState(
                 // there takes the normal unpinned path (an "Existing notes found" prompt when the file exists). upTab, not upAnn: no export.
                 synchronized(stateLock) {
                     val source = tab(attach.sourceTabId) ?: return
-                    upTab(newTabId) { it.copy(annotations = source.annotations, noteTargetName = source.noteTargetName) }
+                    // The closed logs the note cites travel with it, so its citations can still reopen them from the new tab.
+                    upTab(newTabId) {
+                        it.copy(annotations = source.annotations, noteTargetName = source.noteTargetName, noteClosedSources = source.noteClosedSources)
+                    }
                     upTab(source.id) { it.copy(noteTargetName = null) }
                 }
             }

@@ -118,7 +118,8 @@ class HeldFilterCriteriaTest {
 
             val withoutHeld = mkTab("plain", "app.log", emptyList()).copy(sourcePath = source.absolutePath).tabToken()
             assertNull(withoutHeld.tabShellFromToken()?.tab?.heldFilterCriteria)
-            val oldToken = token.substringBeforeLast('|')
+            // The field after the held criteria (the note's closed sources) is the token's last; a token from before both has neither.
+            val oldToken = token.substringBeforeLast('|').substringBeforeLast('|')
             assertNull(oldToken.tabShellFromToken()?.tab?.heldFilterCriteria, "a token from before the field decodes with none")
             assertEquals(tab.filter, oldToken.tabShellFromToken()?.tab?.filter)
         } finally {

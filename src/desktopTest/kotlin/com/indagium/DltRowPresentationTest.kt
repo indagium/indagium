@@ -14,6 +14,9 @@ import com.indagium.utils.RegexEvaluationContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
+/** Position of the split-DLT-identifiers flag in a tab token (AutosaveCodec.tabToken). */
+private const val DLT_SPLIT_TOKEN_INDEX = 24
+
 /** A DLT row's session sits in the pid field; it has no thread ID, so that field stays blank instead of reading 0. */
 class DltRowPresentationTest {
     private fun rendered(entry: LogEntry) = buildLogLineRender(
@@ -65,7 +68,9 @@ class DltRowPresentationTest {
             .copy(sourcePath = "/tmp/capture.dlt", dltSplitIdentifiers = true)
         val token = tab.tabToken()
         assertEquals(true, token.tabShellFromToken()?.tab?.dltSplitIdentifiers)
-        // Dropping the last two fields (held filter criteria, then the split choice) leaves a token from before the split field.
-        assertEquals(false, token.substringBeforeLast('|').substringBeforeLast('|').tabShellFromToken()?.tab?.dltSplitIdentifiers)
+        // Keeping only the fields before the split choice (index 24) gives a token from before that field existed; counting from the
+        // front keeps this true however many fields are appended later.
+        val beforeSplitField = token.split('|').take(DLT_SPLIT_TOKEN_INDEX).joinToString("|")
+        assertEquals(false, beforeSplitField.tabShellFromToken()?.tab?.dltSplitIdentifiers)
     }
 }

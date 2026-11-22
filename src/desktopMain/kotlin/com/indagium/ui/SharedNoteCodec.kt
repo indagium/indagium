@@ -28,11 +28,11 @@ internal fun SharedNoteInfo.sharedNoteToken(): String = tokenFields(
     closedReferenceSources.closedSourcesToken(),
 )
 
-private fun List<SharedNoteClosedSource>.closedSourcesToken(): String = joinToString(",") {
+internal fun List<SharedNoteClosedSource>.closedSourcesToken(): String = joinToString(",") {
     tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty(), it.logFormatProfileSnapshot.orEmpty()).b64()
 }
 
-private fun String?.closedSourcesFromToken(): List<SharedNoteClosedSource> = orEmpty().encodedList().mapNotNull { encoded ->
+internal fun String?.closedSourcesFromToken(): List<SharedNoteClosedSource> = orEmpty().encodedList().mapNotNull { encoded ->
     runCatching {
         val fields = encoded.tokenFields()
         SharedNoteClosedSource(
