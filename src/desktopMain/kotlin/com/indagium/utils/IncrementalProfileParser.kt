@@ -61,6 +61,7 @@ internal class IncrementalProfileParser(
         val consumedLines: Long?,
         val last: LogEntry?,
         val replacement: LineReplacement?,
+        val jsonTailState: JsonTailState?,
     )
 
     /**
@@ -74,7 +75,7 @@ internal class IncrementalProfileParser(
     private var pendingSeed: PendingSeed? = null
 
     // Where the deferred seeding stands. PENDING -> SCANNING (one thread) -> DONE, or -> CANCELLED from either of the first two
-    // (the scan result is then discarded). CANCELLED means "seed from the last row when the first line arrives". A parser without
+    // (the scan result is then discarded). CANCELLED restores the published framing when the first line arrives. A parser without
     // deferred seeding is DONE from the start.
     private enum class SeedPhase { PENDING, SCANNING, DONE, CANCELLED }
 
@@ -120,7 +121,7 @@ internal class IncrementalProfileParser(
 
     @Synchronized
     private fun appendSeeded(lines: List<String>, startId: Int, sourceLineOffset: Long): ParsedLog {
-        seedFromLastRowIfCancelled()
+        seedIfCancelled()
         val plan = replacement?.takeIf { it.line == sourceLineOffset && lines.isNotEmpty() }
         replacement = null
         val offset = if (plan != null) sourceLineOffset - 1 else sourceLineOffset
@@ -183,10 +184,11 @@ internal class IncrementalProfileParser(
         // The re-delivered last line never came: the rows already show the file as far as it went, and what the machine holds is
         // that record without its unfinished line.
         if (replacement != null) return emptyBatch(sourceLineOffset)
+        val jsonTailState = (machine as? JsonRecordMachine)?.tailState()
         val ready = ArrayList<ProfileRecord>()
         machine?.finish(ready)
         cri?.finish()?.mapTo(ready) { it.toProfileRecord() }
-        return result(ready, startId, sourceLineOffset)
+        return result(ready, startId, sourceLineOffset).copy(jsonTailState = jsonTailState)
     }
 
     // Touches no parser state, so it is safe while a scan or an append is in flight.
@@ -216,7 +218,10 @@ internal class IncrementalProfileParser(
             if (openStart != null && openId != null) addSeedId(openStart, openId)
         }
         replacedEntryIds = replaced
-        return ParsedLog(LogFormat.LOGCAT, entries, profile, diagnostics.toList(), sourceClockId, lineCount)
+        return ParsedLog(
+            LogFormat.LOGCAT, entries, profile, diagnostics.toList(), sourceClockId, lineCount,
+            jsonTailState = (machine as? JsonRecordMachine)?.tailState(),
+        )
     }
 
     private fun takeSeedId(startLine: Long): Int? {
@@ -231,11 +236,16 @@ internal class IncrementalProfileParser(
     }
 
     /**
-     * Seeds any record that was flushed by the initial whole-file parse but is still open at EOF.
-     * This uses only the already parsed rows, so starting a tail does not reread a large source.
+     * Seeds an open record from the published rows. JSON can defer rebuilding the full scanner state to [prepare].
      * False when [lineReplacement] was given and this engine's state cannot be rebuilt without the replaced line.
      */
-    private fun seed(existingEntries: List<LogEntry>, file: File?, consumedLines: Long?, lineReplacement: LineReplacement?): Boolean {
+    private fun seed(
+        existingEntries: List<LogEntry>,
+        file: File?,
+        consumedLines: Long?,
+        lineReplacement: LineReplacement?,
+        jsonTailState: JsonTailState?,
+    ): Boolean {
         replacement = lineReplacement
         when (profile.engine) {
             LogFormatEngine.JSON_LINES ->
@@ -249,7 +259,7 @@ internal class IncrementalProfileParser(
                     }
                     // The re-delivered line is not part of the state the scan rebuilds.
                     val limit = if (lineReplacement != null) consumedLines?.minus(1) ?: (lineReplacement.line - 1) else consumedLines
-                    pendingSeed = PendingSeed(file, limit, last, lineReplacement)
+                    pendingSeed = PendingSeed(file, limit, last, lineReplacement, jsonTailState)
                     seedPhase.set(SeedPhase.PENDING)
                 }
             LogFormatEngine.REGEX, LogFormatEngine.CSV,
@@ -316,7 +326,7 @@ internal class IncrementalProfileParser(
      * stateLock, before each batch; [append] calls it too so the state is right whoever comes first. Cheap once done.
      *
      * Only one thread scans; another caller waits for it (it must not hold stateLock). A scan that [cancelSeeding] gave up on
-     * ends this call with the seeding abandoned: the rows are then seeded from the last row by the first [append].
+     * ends this call with the scan abandoned. The first [append] then uses the published framing and rows.
      */
     fun prepare() {
         while (true) {
@@ -352,7 +362,7 @@ internal class IncrementalProfileParser(
         val recordMachine = machine ?: return
         if (pending == null) return
         if (scan == null) {
-            seedLastRow(recordMachine, pending.last, pending.replacement)
+            seedJsonFromPublishedRows(recordMachine, pending)
             return
         }
         machine = scan.machine
@@ -378,7 +388,7 @@ internal class IncrementalProfileParser(
 
     /**
      * Gives up on seeding that has not completed: a scan not started never will, a scan running ends at its next line and its
-     * result is dropped. Never waits. The first [append] then seeds from the last row. True when seeding had not completed (and
+     * result is dropped. Never waits. The first [append] uses the published framing and rows. True when seeding had not completed (and
      * so no line was appended yet), false once it is done.
      */
     fun cancelSeeding(): Boolean {
@@ -394,13 +404,29 @@ internal class IncrementalProfileParser(
         }
     }
 
-    // Caller holds the monitor. After a cancelled scan, the machine is still the untouched one: seed it from the rows alone.
-    private fun seedFromLastRowIfCancelled() {
+    // Caller holds the monitor. A cancelled scan leaves the machine untouched.
+    private fun seedIfCancelled() {
         if (seedPhase.get() != SeedPhase.CANCELLED) return
         val pending = pendingSeed
         pendingSeed = null
-        machine?.let { seedLastRow(it, pending?.last, pending?.replacement) }
+        if (pending != null) machine?.let { seedJsonFromPublishedRows(it, pending) }
         seedPhase.set(SeedPhase.DONE)
+    }
+
+    private fun seedJsonFromPublishedRows(recordMachine: ProfileRecordMachine, pending: PendingSeed) {
+        val plan = pending.replacement
+        val state = pending.jsonTailState
+        if (state == null || recordMachine !is JsonRecordMachine) {
+            seedLastRow(recordMachine, pending.last, plan)
+            return
+        }
+        val boundary = if (plan == null) state.atEnd else state.beforeLastLine
+        recordMachine.resumeArray(boundary.insideArray)
+        if (plan != null && plan.rows.isNotEmpty()) {
+            seedWithoutReplacedLine(recordMachine, plan)
+        } else if (boundary.pendingRecordStart != null) {
+            seedSingleRecord(recordMachine, pending.last?.takeIf { it.sourceStartLine == boundary.pendingRecordStart })
+        }
     }
 
     private fun seedSingleRecord(recordMachine: ProfileRecordMachine, last: LogEntry?) {
@@ -532,6 +558,7 @@ internal class IncrementalProfileParser(
             consumedLines: Long? = null,
             unfinishedLine: TrailingPartialLine? = null,
             parsedByteLength: Long? = null,
+            jsonTailState: JsonTailState? = null,
         ): IncrementalProfileParser? {
             if (unfinishedLine != null && parsedByteLength != null && unfinishedLine.fileLength == parsedByteLength) {
                 val plan = planLineReplacement(profile, existingEntries, consumedLines, unfinishedLine)
@@ -539,11 +566,11 @@ internal class IncrementalProfileParser(
                     // A header row that is itself the unfinished line is the first line the new parser is given.
                     val headerIsUnfinished = profile.engine == LogFormatEngine.CSV && profile.hasHeader && plan.line == 1L
                     val replacing = if (headerIsUnfinished) IncrementalProfileParser(profile, sourceClockId) else parserFor(profile, sourceClockId, file)
-                    if (replacing != null && replacing.seed(existingEntries, file, consumedLines, plan)) return replacing
+                    if (replacing != null && replacing.seed(existingEntries, file, consumedLines, plan, jsonTailState)) return replacing
                 }
             }
             val parser = parserFor(profile, sourceClockId, file) ?: return null
-            parser.seed(existingEntries, file, consumedLines, null)
+            parser.seed(existingEntries, file, consumedLines, null, jsonTailState)
             return parser
         }
 

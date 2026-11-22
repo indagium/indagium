@@ -861,6 +861,15 @@ internal fun AnnotationPanel(
         }
     }
 
+    val reopenOffers = remember(tab.id) { mutableStateMapOf<String, GoToRowsResult.NeedsReopen>() }
+
+    fun goToRows(block: AnnBlock.LogRef) {
+        reopenOffers.remove(block.id)
+        val actions = logRefActions
+        if (actions == null) onNavigateLogRef(block)
+        else actions.goToRows(block) { offer -> reopenOffers[block.id] = offer }
+    }
+
     fun activateNoteTarget() {
         val target = noteTargets.getOrNull(navIndex) ?: return
         when (target.kind) {
@@ -879,7 +888,7 @@ internal fun AnnotationPanel(
                 val blockId = target.id.removePrefix("block:")
                 val block = ann.blocks.firstOrNull { it.id == blockId }
                 when (block) {
-                    is AnnBlock.LogRef -> onNavigateLogRef(block)
+                    is AnnBlock.LogRef -> goToRows(block)
                     is AnnBlock.Image -> block.videoFrame?.let(onNavigateVideoFrame)
                         ?: runCatching { blockFieldRequesters[blockId]?.requestFocus() }
                     else -> runCatching { blockFieldRequesters[blockId]?.requestFocus() }
@@ -1448,8 +1457,13 @@ internal fun AnnotationPanel(
                             onMoveUp = { mutate { onMoveBlock(block.id, -1) } },
                             onMoveDown = { mutate { onMoveBlock(block.id, 1) } },
                             onAddBelow = { mutate { onAddNoteAfter(block.id) } },
-                            onNavigate = { onNavigateLogRef(block) },
-                            logRefActions = logRefActions,
+                            onNavigate = { goToRows(block) },
+                            sourceLabel = logRefActions?.sourceLabel?.invoke(block) ?: logRefSourceLabel(block, emptyList()),
+                            reopenOffer = reopenOffers[block.id],
+                            onReopen = { offer ->
+                                reopenOffers.remove(block.id)
+                                logRefActions?.reopenAndGoToRows(offer, block)
+                            },
                             excerptExpanded = logExcerptExpanded[block.id] ?: false,
                             onToggleExcerpt = {
                                 anchorBeforeBlockResize(block.id)
@@ -3371,29 +3385,21 @@ private fun LogRefBlock(
     onToggleExcerpt: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
     editingEnabled: Boolean = true,
-    logRefActions: LogRefActions? = null,
+    sourceLabel: String? = null,
+    reopenOffer: GoToRowsResult.NeedsReopen? = null,
+    onReopen: (GoToRowsResult.NeedsReopen) -> Unit = {},
 ) {
     val rows = block.resolveRows(tab)
     val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
     val context = if (block.presentation == null) rememberAnnotationLogLineContext(tab, settings, localSource) else null
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
-    // Where the rows come from ("file" or "file · section"), shown as a badge in the header line; null for rows of the note's own tab.
-    val sourceLabel = logRefActions?.sourceLabel?.invoke(block) ?: logRefSourceLabel(block, emptyList())
-    // Set when Go to rows found the source tab closed: the prompt under the header offers to reopen it.
-    var reopenOffer by remember(block.id) { mutableStateOf<GoToRowsResult.NeedsReopen?>(null) }
-
     BlockCard(
         tc = tc,
         edgeColor = borderColor,
         focused = focused,
         header = {
-            // The "log ↗" chip is the reference's one link to its rows: with the actions it goes there across tabs and
-            // sections (and offers Reopen when the source is closed); without them it is the panel's own navigation.
-            val goToRows: () -> Unit = logRefActions?.let { actions ->
-                { actions.goToRows(block) { offer -> reopenOffer = offer } }
-            } ?: onNavigate
             BlockControls(
-                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, goToRows,
+                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
                 onNavigateTooltip = sourceLabel?.let { "Go to rows in $it" } ?: "Go to rows",
                 navigateTestTag = logRefGoToRowsTag(block.id),
                 onEdit = onEdit,
@@ -3417,10 +3423,7 @@ private fun LogRefBlock(
                 AppText("${block.sourceFilename ?: "This file"} is closed.", color = tc.ts, fontSize = 11.sp)
                 AccentLink(
                     "Reopen",
-                    onClick = {
-                        reopenOffer = null
-                        logRefActions?.reopenAndGoToRows(offer, block)
-                    },
+                    onClick = { onReopen(offer) },
                     modifier = Modifier.testTag(logRefReopenTag(block.id)),
                 )
             }

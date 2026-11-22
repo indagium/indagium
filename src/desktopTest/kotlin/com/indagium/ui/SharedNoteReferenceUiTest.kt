@@ -2,12 +2,17 @@
 
 package com.indagium.ui
 
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.pressKey
 import com.indagium.model.AnnBlock
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -117,6 +122,29 @@ class SharedNoteReferenceUiTest : SharedNoteUiTestBase() {
             state.tabs.any { it.sourcePath?.endsWith("a.log") == true && it.selected == setOf(1, 2) && state.activeTabId == it.id }
         }
         assertFalse(exists(logRefReopenTag("r1")), "the prompt is gone")
+    }
+
+    @Test
+    fun enterOnACitationOffersToReopenItsClosedSource() {
+        val focus = FocusRequester()
+        setupPanel(width = 460, focusRequester = focus) {
+            it.activeTabId = "b"
+            host = assertNotNull(it.createSharedNote("Pairing", listOf("a", "b")))
+        }
+        putBlocks(host, ref())
+        state.closeTab("a")
+        rule.waitForIdle()
+        rule.runOnIdle { assertTrue(focus.requestFocus()) }
+        val beforeCitation = annotationKeyboardTargets(listOf("r1"), hasRecentNotes = true, hasBlocks = true)
+            .takeWhile { it.kind != KeyboardTargetKind.NoteBlock }.count { it.enabled }
+
+        rule.onRoot().performKeyInput {
+            repeat(beforeCitation) { pressKey(Key.DirectionDown) }
+            pressKey(Key.Enter)
+        }
+
+        waitUntil("the keyboard reopen prompt appears") { exists(logRefReopenTag("r1")) }
+        assertNull(state.tab("a"))
     }
 
     @Test

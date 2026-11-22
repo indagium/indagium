@@ -2003,6 +2003,7 @@ internal sealed interface RestoredTabLoadResult {
         val sourceLineCount: Long? = null,
         /** The byte length of the tab's own source file measured before this load read it; null for any other source. */
         val sourceByteLength: Long? = null,
+        val jsonTailState: com.indagium.utils.JsonTailState? = null,
         val logSections: List<com.indagium.model.LogFileSection> = emptyList(),
         val selectedLogSectionId: String? = null,
         /** The section index of the file this load read in full (replaces the tab's), or null when it built none. */

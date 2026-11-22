@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.ExperimentalTestApi
@@ -88,7 +89,13 @@ abstract class SharedNoteUiTestBase {
     }
 
     /** Composes only the Notes panel of the active tab, [width] dp wide (its own bar of buttons, no tile header). */
-    protected fun setupPanel(width: Int, height: Int = 500, tabs: List<String> = listOf("a", "b", "c"), configure: (AppState) -> Unit = {}) {
+    protected fun setupPanel(
+        width: Int,
+        height: Int = 500,
+        tabs: List<String> = listOf("a", "b", "c"),
+        focusRequester: FocusRequester? = null,
+        configure: (AppState) -> Unit = {},
+    ) {
         dir = createTempDirectory("shared-note-ui").toFile()
         state = AppState(File(dir, "state.cache"), notesDir = File(dir, "notes"), autoExportNotes = false)
         state.tabs = tabs.map { tabOf(it) }
@@ -100,7 +107,10 @@ abstract class SharedNoteUiTestBase {
                     val active = state.activeTabId?.let { state.tab(it) }
                     if (active != null) {
                         key(active.id) {
-                            BoundAnnotationPanel(state = state, tab = active, width = width.toFloat(), focusRequester = null, onPanelFocusChanged = {})
+                            BoundAnnotationPanel(
+                                state = state, tab = active, width = width.toFloat(),
+                                focusRequester = focusRequester, onPanelFocusChanged = {},
+                            )
                         }
                     }
                     SharedNoteDialogHost(state)

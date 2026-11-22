@@ -108,27 +108,23 @@ class FileTailerTest {
 
         val carriageReturn = File(dir, "cr.log").apply { writeText("a\n\r") }
         val crTailer = FileTailer(carriageReturn, onNewLines = {}, startOffset = 0L)
-        assertEquals(listOf("a"), crTailer.readToEndOfFile(includeTrailingPartialLine = true))
+        assertEquals(listOf("a", ""), crTailer.readToEndOfFile(includeTrailingPartialLine = true))
     }
 
     /** A tailer that has not started a poll loop: [FileTailer.readToEndOfFile] reads from [startOffset] on the caller's thread. */
     private fun syncTailer(file: File, startOffset: Long? = 0L) = FileTailer(file, onNewLines = {}, startOffset = startOffset)
 
     @Test
-    fun aCarriageReturnOnlyFileIsReadAsLinesAndItsLastLineWaitsForTheByteAfterItsCarriageReturn() {
+    fun aCarriageReturnOnlyFileEmitsItsLastLineWithoutWaitingForAnotherByte() {
         val dir = createTempDirectory("openlog-tail-cr").toFile()
         val file = File(dir, "cr.log").apply { writeText("one\rtwo\rthree\r") }
         val tailer = syncTailer(file)
 
-        // "three\r" could still become "three\r\n": it is not a line yet.
-        assertEquals(listOf("one", "two"), tailer.readToEndOfFile())
+        assertEquals(listOf("one", "two", "three"), tailer.readToEndOfFile())
         assertEquals(emptyList(), tailer.readToEndOfFile())
 
         file.appendText("four\r")
-        assertEquals(listOf("three"), tailer.readToEndOfFile(), "the next byte settles the held carriage return")
-
-        // The writer finished: the drain's opt-in ends the held line at the end of the file.
-        assertEquals(listOf("four"), tailer.readToEndOfFile(includeTrailingPartialLine = true))
+        assertEquals(listOf("four"), tailer.readToEndOfFile())
         assertEquals(file.length(), tailer.currentOffset)
     }
 
@@ -138,10 +134,10 @@ class FileTailerTest {
         val file = File(dir, "crlf.log").apply { writeText("a\r\nb\r") }
         val tailer = syncTailer(file)
 
-        assertEquals(listOf("a"), tailer.readToEndOfFile())
+        assertEquals(listOf("a", "b"), tailer.readToEndOfFile())
 
         file.appendText("\nc\r\n")
-        assertEquals(listOf("b", "c"), tailer.readToEndOfFile(), "the line feed after a held carriage return ends the same line")
+        assertEquals(listOf("c"), tailer.readToEndOfFile(), "the line feed after a delivered carriage return ends the same line")
     }
 
     @Test
@@ -223,8 +219,8 @@ class FileTailerTest {
             val longLine = "x".repeat(6 * 1024 * 1024)
             file.appendText("$longLine\rnext\r")
 
-            waitUntil(timeoutMs = TimeUnit.SECONDS.toMillis(AWAIT_SECONDS)) { received.isNotEmpty() }
-            assertEquals(listOf(longLine), received.toList(), "the line after the long one is still held, its \\r may be half of a CRLF")
+            waitUntil(timeoutMs = TimeUnit.SECONDS.toMillis(AWAIT_SECONDS)) { received.size >= 2 }
+            assertEquals(listOf(longLine, "next"), received.toList())
         } finally {
             job.cancel()
             scope.cancel()

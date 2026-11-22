@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import com.indagium.capture.CaptureSegmentManualAnchor
 import com.indagium.capture.CaptureTimeline
 import com.indagium.diagram3.DiagramExportMode
+import com.indagium.utils.JsonTailState
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.video.formatVideoTime
 
@@ -1175,6 +1176,8 @@ data class LogTab(
      * Appended last.
      */
     val profileSourceByteLength: Long? = null,
+    /** Runtime JSON framing for a tail whose startup scan was interrupted. */
+    val jsonTailState: JsonTailState? = null,
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */

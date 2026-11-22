@@ -84,7 +84,7 @@ class TailRootArrayScanCancellationTest {
     fun stoppingWithTheDrainReturnsPromptlyWhileTheScanIsBlockedAndKeepsTheRowsRight() {
         val app = newState()
         val (tabId, file) = tailWithBlockedScan(app, openArray)
-        file.appendText("   \"v\":1},\n  {\"message\":\"c\"}\n]\n")
+        file.appendText("   \"v\":1},\n  true,{\"message\":\"c\"}]\n")
 
         val started = System.nanoTime()
         app.drainAndStopTailing(tabId)
@@ -92,12 +92,11 @@ class TailRootArrayScanCancellationTest {
 
         assertTrue(tookMs < PROMPT_MS, "the drain waited ${tookMs}ms for a scan that is blocked")
         assertFalse(app.tab(tabId)!!.tailing)
-        // The few lines drained without the scan's state are seeded from the last row: still one row per record, none doubled.
-        assertEquals(listOf("a", "b", "c"), app.tab(tabId)!!.logData.map { it.msg })
+        assertEquals(listOf("a", "b", "true", "c"), app.messages(tabId))
 
         release.countDown()
         Thread.sleep(200)
-        assertEquals(listOf("a", "b", "c"), app.tab(tabId)!!.logData.map { it.msg }, "a released scan must not touch the finished tab")
+        assertEquals(listOf("a", "b", "true", "c"), app.messages(tabId), "a released scan must not touch the finished tab")
     }
 
     @Test
@@ -152,6 +151,26 @@ class TailRootArrayScanCancellationTest {
     }
 
     @Test
+    fun startCannotClaimATabWhileStopIsStillPublishingItsState() {
+        val app = newState()
+        val (tabId, _) = tailWithBlockedScan(app, openArray)
+        val stop = Thread { app.stopTailing(tabId) }.apply { isDaemon = true }
+        val startReturned = CountDownLatch(1)
+        synchronized(app.stateLock) {
+            stop.start()
+            waitUntil("Stop is waiting to publish the tab") { stop.state == Thread.State.BLOCKED }
+            Thread {
+                app.startTailing(tabId)
+                startReturned.countDown()
+            }.apply { isDaemon = true; start() }
+            assertTrue(startReturned.await(WAIT_SECONDS, TimeUnit.SECONDS), "Start must see the old tail's reservation")
+        }
+        stop.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS))
+        assertFalse(stop.isAlive)
+        assertFalse(app.tab(tabId)!!.tailing)
+    }
+
+    @Test
     fun pausingReturnsPromptlyWhileTheScanIsBlockedAndResumeContinuesFromTheLastRow() {
         val app = newState()
         val (tabId, file) = tailWithBlockedScan(app, openArray)
@@ -164,11 +183,10 @@ class TailRootArrayScanCancellationTest {
         assertFalse(app.tab(tabId)!!.tailing)
 
         release.countDown()
-        file.appendText("  {\"message\":\"c\"}\n]\n")
+        file.appendText("  true,{\"message\":\"c\"}]\n")
         assertTrue(app.resumeTailing(tabId))
         waitUntil("the last row after resume") { app.messages(tabId).contains("c") }
         app.drainAndStopTailing(tabId)
-        // One row per record: the cancelled scan left the parser to be seeded from the last row, not scanned again or left unseeded.
-        assertEquals(listOf("a", "b", "c"), app.messages(tabId))
+        assertEquals(listOf("a", "b", "true", "c"), app.messages(tabId))
     }
 }

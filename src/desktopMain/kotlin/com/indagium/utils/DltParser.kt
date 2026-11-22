@@ -48,6 +48,7 @@ data class ParsedLog(
      * can only make that proof fail, never wrongly pass.
      */
     val sourceByteLength: Long? = null,
+    val jsonTailState: JsonTailState? = null,
 ) {
     val capabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> by lazy {
         profile?.let { com.indagium.model.deriveLogCapabilities(it, entries, sourceClockId = sourceClockId) }.orEmpty()

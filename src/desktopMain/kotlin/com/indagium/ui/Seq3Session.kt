@@ -692,11 +692,20 @@ class Seq3Session(
         }
     }
 
-    /** The open log of the diagram's file name among the tabs the shared note is about; null when there is none, several, or a closed one of the name. */
+    /** Resolves a filename among related logs, using diagram evidence to distinguish duplicate names and reparses. */
     private fun sharedDiagramSourceByFileName(parsed: ParsedSeq3, sharedNote: SharedNoteInfo, related: Set<String>): String? {
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
-        // Only tabs the shared note is about may match, so an unrelated open log called "logcat.txt" is not picked by its name alone.
-        val candidate = appState.tabs.singleOrNull { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }
+        val candidates = appState.tabs.filter { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }
+        val evidence = parsed.document.evidenceSample()
+        val matching = if (evidence.isEmpty()) {
+            emptyList()
+        } else {
+            candidates.filter { tab ->
+                tab.contentState == TabContentState.LOADED && evidence.all { it.matchesRow(tab.rmap[it.entryId]) }
+            }
+        }
+        val candidate = matching.singleOrNull()
+            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED }
             ?: return null
         val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
         return candidate.id.takeUnless {

@@ -9,6 +9,7 @@ import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.FileTailer
 import com.indagium.utils.FilterPlan
 import com.indagium.utils.IncrementalProfileParser
+import com.indagium.utils.ParsedLog
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.TrailingPartialLine
 import com.indagium.utils.appendLogEntries
@@ -27,6 +28,7 @@ import com.indagium.utils.passesFilter
 import com.indagium.utils.trailingPartialLine
 import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
@@ -75,8 +77,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
 
     private val tailTimeEvidence = ConcurrentHashMap<String, TailTimeEvidence>()
 
-    // Ownership of a tab's tailer is CLAIMED, never peeked: every transition (start, pause, resume, drain)
-    // takes its decision under [ownership], and a claim moves the tailer out of the map it was in
+    // Each tail transition takes its decision under [ownership], and a claim moves the tailer out of the map it was in
     // before anything blocking happens. Without that a Pause (joining the tailer on ioScope) and a
     // Stop's drain could both think they owned it: drain saw neither map during the join, skipped the
     // drain, and the pause then published a stale pausedTails entry plus a tailPausedAtRow on a tab
@@ -84,8 +85,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     //  - [pausing]: a tailer pauseTailing has claimed and is joining. A concurrent drain/stop takes it
     //    over (removes it from here); the pause then finds its claim gone and gives up without touching
     //    the tab.
-    //  - [stopping]: tabs whose drain is in flight; pause and start refuse them, which also keeps
-    //    startTailing from racing the drain now that the active entry is claimed at its start.
+    //  - [stopping]: tabs whose stop or drain is in flight; pause and start refuse them until cleanup finishes.
     // [ownership] is held only for short non-blocking sections (it may call upTab inside, so the lock
     // order is ownership -> stateLock); nothing holding stateLock may take it, which is why
     // cancelTailingFor only touches the concurrent maps.
@@ -182,7 +182,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             val profile = appState.pinnedLogFormatProfile(tabId) ?: return
             appendTailedLines(tabId, emptyList(), flushing = old)
             parsers[tabId] = IncrementalProfileParser(profile, tab.sourcePath)
-            appState.upTab(tabId) { it.copy(profileSourceLineCount = 0L, profileSourceByteLength = null) }
+            appState.upTab(tabId) { it.copy(profileSourceLineCount = 0L, profileSourceByteLength = null, jsonTailState = null) }
         }
     }
 
@@ -210,6 +210,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         val consumed = tab.profileSourceLineCount ?: tab.logData.lastOrNull()?.sourceEndLine
         return IncrementalProfileParser.forFile(
             profile, tab.sourcePath, file, tab.logData, consumed, unfinished, tab.profileSourceByteLength,
+            jsonTailState = tab.jsonTailState,
         )
     }
 
@@ -229,18 +230,18 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // A paused tab (see pauseTailing) is left paused: it is already not tailing, and its saved
     // tailer and truncation marker are what Resume and the capture strip rely on.
     fun stopTailing(tabId: String) {
-        val activeJob = activeTails.remove(tabId)?.job
-        // The tailer thread may be inside appendTailedLines, waiting for the start-up scan of a root-array JSON file; cancelling the
-        // job does not wake it. Giving the scan up does (the batch is then seeded from the last row), so the join below, and a
-        // restart that waits for it, end at once instead of with the scan.
-        if (activeJob != null || pausing.containsKey(tabId)) parsers[tabId]?.cancelSeeding()
-        activeJob?.cancel()
-        // A pause still joining this tailer loses its claim and gives up.
-        val pausingJob = pausing.remove(tabId)?.job
-        pausingJob?.cancel()
-        appState.upTab(tabId) { it.copy(tailing = false) }
-        // A tab that was not tailing (already stopped, or paused with its parser kept) has nothing to finish.
-        (activeJob ?: pausingJob)?.let { finishParserAfter(tabId, it) }
+        val claimed = synchronized(ownership) {
+            val tail = activeTails.remove(tabId) ?: pausing.remove(tabId)
+            if (tail != null) stopping += tabId
+            appState.upTab(tabId) { it.copy(tailing = false) }
+            tail?.let { it.job to parsers[tabId] }
+        }
+        claimed?.let { (job, parser) ->
+            job.cancel()
+            // Wake an in-flight poll waiting for the deferred JSON scan.
+            parser?.cancelSeeding()
+            finishParserAfter(tabId, job)
+        }
         AppLogger.info("tail", "Stopped tailing tab")
         // Content-triggered autosave is suppressed while any tab is actively tailing (see the
         // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
@@ -271,15 +272,15 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // arrives while this pause is joining takes the tailer over and this call returns false, leaving the
     // tab to the drain; a Stop that arrives after the pause completed is "Stop while paused" (no drain).
     fun pauseTailing(tabId: String, mayPause: () -> Boolean = { true }): Boolean {
-        val active = synchronized(ownership) {
+        val (active, parser) = synchronized(ownership) {
             if (tabId in stopping || !mayPause()) return false
             val claimed = activeTails.remove(tabId) ?: return false
             pausing[tabId] = claimed
-            claimed
+            claimed to parsers[tabId]
         }
         // A tailer waiting for the start-up scan of a root-array JSON file cannot be joined until the scan ends; give the scan up
-        // (the first batch after Resume is seeded from the tab's last row).
-        parsers[tabId]?.cancelSeeding()
+        // (the first batch after Resume restores the framing from the tab's last parse).
+        parser?.cancelSeeding()
         runBlocking { active.job.cancelAndJoin() }
         synchronized(ownership) {
             // Gone = a drain/stop took the tailer over, or the tab was closed meanwhile.
@@ -358,22 +359,21 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         val active = synchronized(ownership) {
             paused = pausedTails.remove(tabId)
             if (paused != null) {
+                stopping += tabId
                 null
             } else {
                 (activeTails.remove(tabId) ?: pausing.remove(tabId))?.also { stopping += tabId }
             }
         }
-        if (paused != null) {
-            AppLogger.info("tail", "Stopped a paused tab without draining its backlog")
-            // The record it still holds belongs to the backlog that memory pressure kept out.
-            parsers.remove(tabId)?.cancelSeeding()
-            stopTailing(tabId)
-            return
-        }
         try {
+            if (paused != null) {
+                AppLogger.info("tail", "Stopped a paused tab without draining its backlog")
+                // The record it still holds belongs to the backlog that memory pressure kept out.
+                parsers.remove(tabId)?.cancelSeeding()
+            }
             if (active != null) {
                 // A root-array scan that has not finished within a short grace is given up, not waited for: the few lines drained
-                // below are then seeded from the tab's last row, which is what every other engine does. (The tailer thread may be
+                // below then use the tab's saved framing and last row. (The tailer thread may be
                 // waiting for that scan, so this comes before the join, which would otherwise wait for it too.) A scan of an
                 // ordinary file is done well inside the grace, so a drain right after the tail started still sees the exact state.
                 parsers[tabId]?.let { parser ->
@@ -386,7 +386,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             }
             stopTailing(tabId)
         } finally {
-            stopping -= tabId
+            if (active != null || paused != null) stopping -= tabId
         }
     }
 
@@ -419,16 +419,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // cancel() does not wait for it, and flushing before it would put the held record out of order.
     // The tab refuses a restart until then, so a new tail cannot overtake the held record.
     private fun finishParserAfter(tabId: String, tailerJob: Job) {
-        val parser = parsers[tabId] ?: return
-        if (tailerJob.isCompleted) {
-            appendTailedLines(tabId, emptyList(), flushing = parser)
-            return
-        }
-        stopping += tabId
-        scope.launch {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 tailerJob.join()
-                appendTailedLines(tabId, emptyList(), flushing = parser)
+                // A final in-flight rotation may have replaced this tail's parser before the job joined.
+                parsers[tabId]?.let { appendTailedLines(tabId, emptyList(), flushing = it) }
             } finally {
                 stopping -= tabId
             }
@@ -489,11 +484,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             if (parser != null && parsedProfileBatch != null && parsedProfileBatch.entries.isEmpty()) {
                 // The lines were consumed but their record is still held (or nothing was held): only the
                 // line position moves. An empty batch must not reach the capability merge below.
-                recordConsumedLines(tabId, parsedProfileBatch.sourceLineCount)
+                recordConsumedLines(tabId, parsedProfileBatch)
                 return
             }
             if (appendedEntries.isEmpty() && changedReplacements.isEmpty()) {
-                recordConsumedLines(tabId, parsedProfileBatch?.sourceLineCount)
+                recordConsumedLines(tabId, parsedProfileBatch)
                 return
             }
             val batch = TailBatch(
@@ -559,6 +554,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                         logCapabilities = nextCapabilities,
                         profileClockSignature = nextClockSignature,
                         profileSourceLineCount = parsedProfileBatch?.sourceLineCount ?: cur.profileSourceLineCount,
+                        jsonTailState = parsedProfileBatch?.jsonTailState ?: cur.jsonTailState,
                         // The recorded length describes the parse, not what the tail has read since.
                         profileSourceByteLength = null,
                         profileFieldNames = derived.profileFieldNames,
@@ -585,10 +581,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     }
 
     // Caller holds stateLock.
-    private fun recordConsumedLines(tabId: String, sourceLineCount: Long?) {
+    private fun recordConsumedLines(tabId: String, parsed: ParsedLog?) {
         appState.tabs = appState.tabs.map { cur ->
             if (cur.id == tabId) {
-                cur.copy(profileSourceLineCount = sourceLineCount ?: cur.profileSourceLineCount, profileSourceByteLength = null)
+                cur.copy(
+                    profileSourceLineCount = parsed?.sourceLineCount ?: cur.profileSourceLineCount,
+                    jsonTailState = parsed?.jsonTailState ?: cur.jsonTailState,
+                    profileSourceByteLength = null,
+                )
             } else {
                 cur
             }

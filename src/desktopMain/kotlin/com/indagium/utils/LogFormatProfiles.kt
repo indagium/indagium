@@ -250,12 +250,15 @@ private fun parseProfileSequence(
             .copy(sourceLineCount = lineCounter.count)
     }
     val csv = if (profile.engine == LogFormatEngine.CSV) CsvRecordMachine(profile, diagnostics, null, sourceLineOffset) else null
+    var jsonTailState: JsonTailState? = null
     val records = when (profile.engine) {
         LogFormatEngine.PLAIN_TEXT -> physicalLines(countedLines, sourceLineOffset)
         LogFormatEngine.REGEX -> machineRecords(countedLines) {
             continuationMachine(profile, diagnostics, sourceLineOffset) ?: RegexRecordMachine(profile, diagnostics, sourceLineOffset)
         }
-        LogFormatEngine.JSON_LINES -> jsonRecords(countedLines, profile, diagnostics, sourceLineOffset, includeIncompleteJsonTail)
+        LogFormatEngine.JSON_LINES -> jsonRecords(countedLines, profile, diagnostics, sourceLineOffset, includeIncompleteJsonTail) {
+            jsonTailState = it
+        }
         LogFormatEngine.CSV -> machineRecords(countedLines) { requireNotNull(csv) }
         LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164 ->
             continuationMachine(profile, diagnostics, sourceLineOffset)?.let { machine -> machineRecords(countedLines) { machine } }
@@ -276,7 +279,10 @@ private fun parseProfileSequence(
     } else {
         "Parsed ${entries.size - fallbackCount} records with ${profile.name}; retained $fallbackCount as raw text."
     }
-    return ParsedLog(LogFormat.LOGCAT, entries, profile, diagnostics, sourceClockId, lineCounter.count, csvColumns = csv?.columns.orEmpty())
+    return ParsedLog(
+        LogFormat.LOGCAT, entries, profile, diagnostics, sourceClockId, lineCounter.count,
+        csvColumns = csv?.columns.orEmpty(), jsonTailState = jsonTailState,
+    )
 }
 
 private class ProfileLineCounter(startAt: Long) {
@@ -538,6 +544,7 @@ private fun jsonRecords(
     diagnostics: MutableList<String>,
     sourceLineOffset: Long,
     includeIncompleteTail: Boolean = true,
+    onTailState: (JsonTailState) -> Unit,
 ): Sequence<ProfileRecord> = sequence {
     val machine = JsonRecordMachine(profile, diagnostics, sourceLineOffset)
     val ready = ArrayList<ProfileRecord>(2)
@@ -546,8 +553,17 @@ private fun jsonRecords(
         for (record in ready) yield(record)
         ready.clear()
     }
+    onTailState(machine.tailState())
     machine.finish(ready, includeIncompleteTail)
     for (record in ready) yield(record)
+}
+
+/** JSON framing at the parse cursor and immediately before the last physical line, in case that line is replayed. */
+data class JsonTailState(
+    val beforeLastLine: Boundary,
+    val atEnd: Boundary,
+) {
+    data class Boundary(val insideArray: Boolean, val pendingRecordStart: Long?)
 }
 
 /** Scans object boundaries across lines and emits each top-level array element independently. */
@@ -581,7 +597,18 @@ internal class JsonRecordMachine(
     private var scannedChars = 0
     private var lineColumn = 0
     private var discardLine = false
+    private var arrayBeforeLastLine = false
+    private var recordBeforeLastLine: Long? = null
     override var lineNumber: Long = sourceLineOffset
+
+    fun tailState() = JsonTailState(
+        beforeLastLine = JsonTailState.Boundary(arrayBeforeLastLine, recordBeforeLastLine),
+        atEnd = JsonTailState.Boundary(arrayMode, startLine.takeIf { hasPendingRecord() }),
+    )
+
+    fun resumeArray(open: Boolean) {
+        setArrayMode(open)
+    }
 
     override fun hasPendingRecord(): Boolean = current.isNotEmpty()
 
@@ -593,6 +620,8 @@ internal class JsonRecordMachine(
     @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements", "ComplexCondition", "ReturnCount")
     fun acceptFragment(fragment: String, startsLine: Boolean, endsLine: Boolean, out: MutableList<ProfileRecord>) {
         if (startsLine) {
+            arrayBeforeLastLine = arrayMode
+            recordBeforeLastLine = startLine.takeIf { hasPendingRecord() }
             lineNumber++
             lineColumn = 0
             discardLine = false

@@ -654,6 +654,7 @@ fun mkTab(
         profileProjectionSchemaPresent = profile?.let(::usesCustomLogFormatProjection) == true,
         // The one place every open, split-part and reparse tab passes through: parity between those paths by construction.
         profileSourceByteLength = parsedLog?.sourceByteLength,
+        jsonTailState = parsedLog?.jsonTailState,
     )
 }
 
@@ -18886,6 +18887,7 @@ class AppState(
                 loaded.profile?.let(::usesCustomLogFormatProjection) == true,
             profileSourceLineCount = if (loaded.fromSectionIndex) current.profileSourceLineCount else loaded.sourceLineCount,
             profileSourceByteLength = if (loaded.fromSectionIndex) current.profileSourceByteLength else loaded.sourceByteLength,
+            jsonTailState = loaded.jsonTailState,
             archiveCandidate = loaded.archiveCandidate,
             largeFileMode = loaded.largeFileMode,
             selected = current.selected.filterTo(linkedSetOf()) { it in publishedRmap },
@@ -19068,6 +19070,7 @@ class AppState(
                 profileClockSignature = parsed.profileClockSignature,
                 sourceLineCount = parsed.sourceLineCount,
                 sourceByteLength = parsed.sourceByteLength,
+                jsonTailState = parsed.jsonTailState,
                 sectionIndex = parsed.metadataSectionIndex,
             )
         }

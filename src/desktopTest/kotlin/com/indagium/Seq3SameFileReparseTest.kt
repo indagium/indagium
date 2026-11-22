@@ -116,6 +116,31 @@ class Seq3SameFileReparseTest {
     @Test
     fun stoppingSharingIntoAReparseWithTheSameIdsButOtherTextStampsTheOriginalTabToo() = stopIntoReparse(sameIds = true)
 
+    @Test
+    fun anOrdinaryConfirmedDiagramKeepsItsSourceWhenTransferredIntoAReparse() {
+        val root = createTempDirectory("indagium-seq3-confirmed-reparse").toFile()
+        val path = File(root, "a.log").absolutePath
+        val state = state(root, path, reparseSameIds = true)
+        try {
+            val coordinator = state.seq3Sessions
+            val session = assertNotNull(coordinator.begin("a", setOf(1, 2)))
+            await { coordinator.sessions.firstOrNull { it.id == session }?.generating == false }
+            val blockId = assertNotNull(coordinator.confirm(session))
+            coordinator.close(session)
+            val hostId = assertNotNull(state.shareTabNote("a", "Investigation", listOf("a", "a2")))
+
+            assertEquals("a", coordinator.sourceTabIdForNote(hostId, blockId))
+            assertTrue(state.stopSharing(hostId, "a2"))
+            assertEquals(path, stampOf(state, "a2", blockId))
+            state.closeTab("a")
+            val reopened = assertNotNull(coordinator.beginEdit("a2", blockId))
+            assertNull(coordinator.sessions.single { it.id == reopened }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
     private fun stopIntoReparse(sameIds: Boolean) {
         val root = createTempDirectory("indagium-seq3-stop-into-reparse").toFile()
         val path = File(root, "a.log").absolutePath
