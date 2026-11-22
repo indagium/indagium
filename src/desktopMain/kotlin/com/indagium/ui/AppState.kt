@@ -9946,7 +9946,14 @@ class AppState(
             null
         }
         upFlt(tabId, trackDraft = false) { _ -> normalization?.filter ?: sf.toFilter() }
-        upTab(tabId) { it.copy(filterNormalizationNotice = normalization?.notice) }
+        // The criteria the tab's rows cannot filter by are set aside like a load's (see filterForPublishedRows), so a later section or
+        // reload that has those fields brings the whole preset back. upFlt above has just cleared whatever was held before.
+        upTab(tabId) {
+            it.copy(
+                filterNormalizationNotice = normalization?.notice,
+                heldFilterCriteria = sf.toFilter().takeIf { normalization?.notice != null },
+            )
+        }
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
         // Loading a different preset abandons this tab's in-progress unsaved draft (if any) —
         // otherwise it lingers forever in savedFiltersForTab()'s list, never active but never gone.

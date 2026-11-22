@@ -2,12 +2,14 @@ package com.indagium
 
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormatAttribute
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
 import com.indagium.model.LogProfileValueType
+import com.indagium.model.SavedFilter
 import com.indagium.model.TabContentState
 import com.indagium.model.UNKNOWN_SEVERITY_METADATA
 import com.indagium.model.deriveLogCapabilities
@@ -16,6 +18,7 @@ import com.indagium.ui.filterForPublishedRows
 import com.indagium.ui.mkTab
 import com.indagium.ui.tabShellFromToken
 import com.indagium.ui.tabToken
+import com.indagium.ui.toFilter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -144,6 +147,41 @@ class HeldFilterCriteriaTest {
 
             val reloaded = publish(tab.filter, tab.heldFilterCriteria, listOf(row(1, severity = true)))
             assertEquals(LogLevel.entries.toSet(), reloaded.filter.levels)
+            app.close()
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aPresetLoadedIntoRowsThatLackAFieldHoldsTheTrimmedCriteria() {
+        val directory = createTempDirectory("held-filter-preset").toFile()
+        try {
+            val app = newState(directory)
+            app.tabs = listOf(mkTab("t", "notes.txt", listOf(row(1, severity = false)), profile = plainText))
+            val preset = SavedFilter(
+                id = "errors", name = "Errors only", levels = setOf(LogLevel.E), activeTags = emptySet(), kwText = "boom",
+                kwRegex = false, mode = FilterMode.KEYWORD, excludeTags = emptySet(), excludeKw = "", excludeKwRegex = false,
+                highlighters = emptyList(), seqOn = true,
+            )
+
+            app.loadFilter("t", preset)
+
+            val tab = requireNotNull(app.tab("t"))
+            // The rows have no levels, so the level criterion is trimmed from the filter but set aside with the rest of the preset.
+            assertEquals(LogLevel.entries.toSet(), tab.filter.levels)
+            assertEquals("boom", tab.filter.kwText)
+            assertNotNull(tab.filterNormalizationNotice)
+            assertEquals(preset.toFilter(), tab.heldFilterCriteria)
+
+            // A later load whose rows have levels brings the preset's level criterion back.
+            val reloaded = publish(tab.filter, tab.heldFilterCriteria, listOf(row(1, severity = true)))
+            assertEquals(setOf(LogLevel.E), reloaded.filter.levels)
+            assertNull(reloaded.heldFilterCriteria)
+
+            // A preset that fits the rows holds nothing.
+            app.loadFilter("t", preset.copy(id = "all", levels = LogLevel.entries.toSet()))
+            assertNull(app.tab("t")?.heldFilterCriteria)
             app.close()
         } finally {
             directory.deleteRecursively()
