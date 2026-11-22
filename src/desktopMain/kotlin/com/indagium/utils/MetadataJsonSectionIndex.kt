@@ -419,7 +419,7 @@ internal fun loadMetadataJsonSection(
                 }
                 if (!complete) return null
             }
-            return rows
+            return rows.takeIf { index.matches(file) }
         }
     } catch (cancelled: CancellationException) {
         throw cancelled

@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.diagram3.parseSeq3Note
+import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFileSection
 import com.indagium.model.LogLevel
@@ -7,6 +9,7 @@ import com.indagium.model.TabContentState
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.mkTab
+import com.indagium.ui.setSharedNoteMembers
 import com.indagium.ui.shareTabNote
 import com.indagium.ui.stopSharing
 import kotlinx.coroutines.runBlocking
@@ -113,6 +116,39 @@ class Seq3DiagramPreviewNavigationTest {
             state.upTab("a") { it.copy(logData = original.logData, rmap = original.rmap, selectedLogSectionId = "s1") }
             assertTrue(navigate(state, hostId, blockId, 2))
             assertEquals(setOf(2), state.tab("a")!!.selected)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aSharedDiagramKeepsItsOriginalPathWhenAMemberWithTheSameFilenameRemains() {
+        val root = createTempDirectory("indagium-seq3-preview-nav-other-log").toFile()
+        val state = state(root)
+        try {
+            val originalPath = state.tab("a")!!.sourcePath
+            state.upTab("b") {
+                it.copy(
+                    filename = "a.log",
+                    sourcePath = File(root, "other/a.log").absolutePath,
+                    logSections = listOf(LogFileSection("s1", "Main", "", 2), LogFileSection("s2", "Events", "", 2)),
+                    selectedLogSectionId = "s1",
+                )
+            }
+            state.tabs = state.tabs + mkTab("c", "c.log", emptyList())
+            val blockId = confirmedDiagram(state, "a")
+            val hostId = assertNotNull(state.shareTabNote("a", "Investigation", listOf("a", "b", "c")))
+
+            assertTrue(state.setSharedNoteMembers(hostId, listOf("b", "c")))
+            assertEquals("a", state.seq3Sessions.sourceTabIdForNote(hostId, blockId))
+            state.closeTab("a")
+            assertNull(state.seq3Sessions.sourceTabIdForNote(hostId, blockId))
+            assertTrue(state.stopSharing(hostId, "c"))
+
+            val moved = state.tab("c")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note
+            assertEquals(originalPath, assertNotNull(parseSeq3Note(moved.text)).document.sourcePath)
+            assertNull(state.seq3Sessions.sourceTabIdForNote("c", blockId))
         } finally {
             state.close()
             root.deleteRecursively()

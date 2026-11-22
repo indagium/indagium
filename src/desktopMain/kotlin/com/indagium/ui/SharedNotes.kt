@@ -268,9 +268,11 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
     // An in-flight edit lives only on pendingNoteOverwrite.pendingTab: moving the note now would race its resolution.
     if (pendingNoteOverwrite?.tabId == tabId) return null
     val members = eligibleMemberIds(listOf(tabId) + memberTabIds)
+    val annotations = tab.annotations.ownedBy(tab)
+    val shared = seq3Sessions.stampSharedDiagramSources(tab, annotations.blocks)
     val host = newSharedNoteHost(name, members).let {
         it.copy(
-            annotations = tab.annotations.ownedBy(tab),
+            annotations = annotations.copy(blocks = shared.blocks),
             // The tab's pinned file goes with its note; a tab that had none leaves the host the free pin it was made with.
             noteTargetName = tab.noteTargetName ?: it.noteTargetName,
             recoveredNoteRows = tab.recoveredNoteRows,
@@ -296,7 +298,7 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
             member.copy(notesView = host.id)
         }
     }
-    seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks)
+    seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks, shared.stamps)
     host.id
 }
 

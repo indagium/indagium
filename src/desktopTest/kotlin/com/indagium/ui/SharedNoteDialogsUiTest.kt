@@ -7,6 +7,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.captureToImage
@@ -168,6 +169,11 @@ class SharedNoteDialogsUiTest : SharedNoteUiTestBase() {
         openShareDialog(existing = true)
         assertTrue(textExists("Share note"))
         assertTrue(textExists("Watch drops after pairing"), "the name defaults to the note's title")
+        val sourceRow = tag(sharedNoteTabRowTag("a"))
+        sourceRow.assertIsOn().assertIsNotEnabled()
+        sourceRow.performMouseInput { click(center) }
+        rule.waitForIdle()
+        sourceRow.assertIsOn()
 
         tag(SHARE_DIALOG_NAME_TAG).performTextReplacement("Pairing")
         tag(sharedNoteTabRowTag("b")).performClick()

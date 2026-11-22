@@ -200,6 +200,7 @@ private fun ShareNoteDialog(state: AppState, request: SharedNoteDialogRequest.Sh
                     tabs = tabs,
                     thisTabId = thisTab.id,
                     ticked = ticked,
+                    requiredTabId = thisTab.id.takeIf { request.shareExistingNote },
                     onToggle = { id -> ticked = if (id in ticked) ticked - id else ticked + id },
                 )
                 AppText("Tabs can be added or removed later from the note's Shared badge.", color = tc.ts, fontSize = 11.sp, maxLines = 2)
@@ -228,7 +229,14 @@ private fun ShareNoteDialog(state: AppState, request: SharedNoteDialogRequest.Sh
  * whole width: the app's hover tint while the pointer is over it, and a focus ring only while it holds keyboard focus (a click leaves no mark).
  */
 @Composable
-private fun TabCheckList(state: AppState, tabs: List<LogTab>, thisTabId: String?, ticked: Set<String>, onToggle: (String) -> Unit) {
+private fun TabCheckList(
+    state: AppState,
+    tabs: List<LogTab>,
+    thisTabId: String?,
+    ticked: Set<String>,
+    requiredTabId: String? = null,
+    onToggle: (String) -> Unit,
+) {
     val tc = tc()
     val shape = RoundedCornerShape(5.dp)
     Column(
@@ -237,10 +245,11 @@ private fun TabCheckList(state: AppState, tabs: List<LogTab>, thisTabId: String?
     ) {
         tabs.forEachIndexed { index, tab ->
             TabCheckRow(
-                checked = tab.id in ticked,
+                checked = tab.id == requiredTabId || tab.id in ticked,
                 name = tab.filename,
                 disambiguation = tabDisambiguation(tab, state.tabs),
                 trailing = state.tabFormatLabel(tab).let { if (tab.id == thisTabId) "This tab · $it" else it },
+                enabled = tab.id != requiredTabId,
                 onToggle = { onToggle(tab.id) },
                 modifier = Modifier.testTag(sharedNoteTabRowTag(tab.id)),
             )
@@ -256,6 +265,7 @@ private fun TabCheckRow(
     name: String,
     disambiguation: String?,
     trailing: String,
+    enabled: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -274,8 +284,10 @@ private fun TabCheckRow(
                     pointerFocus = false
                     false
                 }
-                .hoverable(interaction)
-                .toggleable(value = checked, interactionSource = interaction, indication = null, role = Role.Checkbox) { onToggle() }
+                .hoverable(interaction, enabled = enabled)
+                .toggleable(value = checked, interactionSource = interaction, indication = null, enabled = enabled, role = Role.Checkbox) {
+                    onToggle()
+                }
                 .then(if (focused && !pointerFocus) Modifier.border(1.dp, tc.ac, RoundedCornerShape(3.dp)) else Modifier)
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -284,7 +296,8 @@ private fun TabCheckRow(
             CheckboxMark(checked)
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 AppText(
-                    name, color = tc.tx, fontSize = 12.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    name, color = if (enabled) tc.tx else tc.ts, fontSize = 12.sp, fontFamily = MONO, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 if (disambiguation != null) {

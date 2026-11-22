@@ -148,6 +148,31 @@ class MetadataJsonSectionIndexTest {
     }
 
     @Test
+    fun aSameLengthRewriteAfterTheOpeningStampCheckDiscardsIndexedRows() = withDirectory { directory ->
+        val original = document()
+        val file = write(directory, "export.json", original)
+        val index = assertNotNull(full(file).metadataSectionIndex)
+        val originalLength = file.length()
+        val changingFile = object : File(file.absolutePath) {
+            private var rewritePending = true
+
+            override fun lastModified(): Long {
+                val modified = super.lastModified()
+                if (rewritePending) {
+                    rewritePending = false
+                    file.writeText(original.replace("hci-late", "hci-move"))
+                    assertEquals(originalLength, file.length())
+                    assertTrue(file.setLastModified(modified + 5_000))
+                }
+                return modified
+            }
+        }
+
+        assertNull(loadMetadataJsonSection(changingFile, index, "Tethered Bluetooth / HCI", metadataJsonProfile()))
+        assertTrue(file.readText().contains("hci-move"))
+    }
+
+    @Test
     fun aCompressedFileIsParsedTheOrdinaryWayWithoutAnIndex() = withDirectory { directory ->
         val file = File(directory, "export.json.gz")
         GZIPOutputStream(file.outputStream()).use { it.write(document().toByteArray()) }

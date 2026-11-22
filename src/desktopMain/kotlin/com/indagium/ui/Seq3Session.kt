@@ -213,8 +213,8 @@ data class Seq3WorkspaceSession(
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
 
-/** [blocks] with the diagrams Stop sharing stamped rewritten, and the stamp each got by block id. */
-internal class StampedDiagramBlocks(val blocks: List<AnnBlock>, val stamps: Map<String, String>)
+/** [blocks] with updated diagram sources, and the changes by block id (null clears a stamp). */
+internal class StampedDiagramBlocks(val blocks: List<AnnBlock>, val stamps: Map<String, String?>)
 
 /** The longest source text, in characters, that an import accepts. */
 private const val SEQ3_SOURCE_IMPORT_MAX_CHARS = 2 * 1024 * 1024
@@ -681,8 +681,7 @@ class Seq3Session(
         val sharedNote = owner.sharedNote ?: return privateDiagramSourceTabId(parsed, storedSource, owner, related)
         // A shared note's host has no rows of its own: only the evidence can name the log.
         if (storedSource != null && !storedSource.isNone) tabForStoredSource(storedSource, null, related, parsed.document)?.let { return it }
-        // A diagram Stop sharing stamped (and that was then shared again) names its log itself, as in a private note: a log that is
-        // not open is unavailable, never another log of the same file name.
+        // A stamped diagram names its log even after that log is removed from the note's members.
         val stamped = parsed.document.sourcePath
         return when {
             stamped != null -> {
@@ -707,8 +706,7 @@ class Seq3Session(
             }
         }
         val candidate = matching.singleOrNull()
-            // The only candidate may have unloaded its rows or be showing a different section of the same log.
-            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED || it.logSections.size > 1 }
+            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED }
             ?: return null
         val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
         return candidate.id.takeUnless {
@@ -750,22 +748,44 @@ class Seq3Session(
         return named.singleOrNull()?.id
     }
 
+    /** Keeps a private diagram's known source when its note stops belonging to one log. Caller holds stateLock. */
+    internal fun stampSharedDiagramSources(owner: LogTab, blocks: List<AnnBlock>): StampedDiagramBlocks {
+        val related = tabsTheNoteIsAbout(owner)
+        return rewriteDiagramSourcePaths(blocks) { note, parsed ->
+            val document = parsed.document
+            if (document.sourcePath != null || parsed.attachment != null) return@rewriteDiagramSourcePaths document.sourcePath
+            val sessionSource = sessions.firstOrNull { it.noteTargetTabId == owner.id && it.confirmedBlockId == note.id }
+                ?.sourceTabId?.let(appState::tab)
+            val source = sessionSource ?: privateDiagramSourceTabId(parsed, null, owner, related)?.let(appState::tab)?.takeIf { tab ->
+                document.sourceFile == File(tab.filename).name && document.evidenceSample().all { it.matchesRow(tab.rmap[it.entryId]) }
+            }
+            source?.sourcePath
+        }
+    }
+
     /**
      * Stop sharing: records, in each diagram of [blocks] (the shared note [host]'s blocks, about to become [into]'s private note),
      * the log it was made from, resolved while the shared note still exists (see [diagramSourceTabId]). A diagram whose log is
      * open and is not the tab [into] itself (compared by tab id: another tab of the recipient's file is another log) is stamped with
      * that tab's path; one whose log is closed is stamped with the path the library record names, else with the one closed
      * member/cited log of the document's file name (none or several: nothing is guessed).
-     * Nothing is stamped when the log is [into] itself or cannot be resolved. Returns the blocks, stamped ones rewritten in place
-     * (same ids), and the stamps by block id. Caller holds stateLock.
+     * A diagram returned to its own tab can follow that tab again. Caller holds stateLock.
      */
     internal fun stampStoppedDiagramSources(host: LogTab, into: LogTab, blocks: List<AnnBlock>): StampedDiagramBlocks {
         val related = tabsTheNoteIsAbout(host)
-        val stamps = LinkedHashMap<String, String>()
+        return rewriteDiagramSourcePaths(blocks) { _, parsed -> stoppedDiagramSourcePath(parsed, host, into, related) }
+    }
+
+    private fun rewriteDiagramSourcePaths(
+        blocks: List<AnnBlock>,
+        sourcePath: (AnnBlock.Note, ParsedSeq3) -> String?,
+    ): StampedDiagramBlocks {
+        val stamps = LinkedHashMap<String, String?>()
         val stamped = blocks.map { block ->
             val note = block as? AnnBlock.Note ?: return@map block
             val parsed = parseSeq3Note(note.text) ?: return@map block
-            val path = stoppedDiagramSourcePath(parsed, host, into, related) ?: return@map block
+            val path = sourcePath(note, parsed)
+            if (path == parsed.document.sourcePath) return@map block
             val text = updateSeq3NoteSourcePath(note.text, path) ?: return@map block
             stamps[block.id] = path
             note.copy(text = text)
@@ -778,9 +798,13 @@ class Seq3Session(
         val open = diagramSourceTabId(parsed, storedSource, host, related)?.let(appState::tab)
         // Tab identity, not the path: the recipient can be a second tab of the same file (a reparse with other rows), which is not
         // the log a diagram made from the first tab is about.
-        if (open != null) return (open.sourcePath ?: open.filename).takeIf { open.id != into.id }
+        if (open != null) {
+            if (open.id != into.id) return open.sourcePath ?: open.filename
+            // A section switch or unload can hide the evidence that would let the diagram follow its private tab again.
+            return parsed.document.sourcePath?.takeUnless { parsed.document.evidenceSample().all { it.matchesRow(into.rmap[it.entryId]) } }
+        }
         // An existing stamp (it names the log; it simply is not open) is kept, not replaced by what the record or a file name guesses.
-        if (parsed.document.sourcePath != null) return null
+        parsed.document.sourcePath?.let { return it }
         // No open tab agrees with the diagram, the recipient included, so a log that is closed now (even one of the recipient's own
         // path) is the diagram's: it is named, and the recipient's rows are used only if they agree with the diagram.
         if (storedSource != null) return storedSource.sourcePath.takeIf { it.isNotBlank() }
@@ -829,15 +853,15 @@ class Seq3Session(
     }
 
     /** Caller holds stateLock while moving these blocks to their new note. */
-    internal fun moveNoteOwner(fromTabId: String, toTabId: String, blocks: List<AnnBlock>, stamps: Map<String, String> = emptyMap()) {
+    internal fun moveNoteOwner(fromTabId: String, toTabId: String, blocks: List<AnnBlock>, stamps: Map<String, String?> = emptyMap()) {
         val movedIds = blocks.mapTo(HashSet()) { it.id }
         sessions = sessions.map { session ->
             if (session.noteTargetTabId == fromTabId && session.confirmedBlockId in movedIds) {
-                // An open diagram carries the same stamp as its moved block, or its next confirm would write it away again.
+                // An open diagram carries the same source as its moved block for the next Confirm.
                 val stamp = stamps[session.confirmedBlockId]
                 session.copy(
                     noteOwnerTabId = toTabId.takeUnless { it == session.sourceTabId },
-                    document = if (stamp != null) session.document.copy(sourcePath = stamp) else session.document,
+                    document = if (session.confirmedBlockId in stamps) session.document.copy(sourcePath = stamp) else session.document,
                 )
             } else {
                 session
@@ -2052,12 +2076,18 @@ class Seq3Session(
         // reached via beginEdit/openLibraryItem, which seed it from the note/item's own already-
         // written choice — reuses this value rather than re-reading a since-changed setting.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
-        val existingAttachment = existingBlock?.let { parseSeq3Note(it.text)?.attachment }
+        val existing = existingBlock?.let { parseSeq3Note(it.text) }
+        val noteDocument = if (existing?.attachment == null && appState.sharedNoteHost(tabId) != null) {
+            val sourcePath = current.sourceTabId?.let(appState::tab)?.sourcePath
+            current.document.copy(sourcePath = sourcePath ?: current.document.sourcePath ?: existing?.document?.sourcePath)
+        } else {
+            current.document
+        }
         val text = encodeSeq3Note(
-            current.document,
+            noteDocument,
             current.dialect,
             exportMode = exportMode,
-            attachment = existingAttachment,
+            attachment = existing?.attachment,
         )
         val blockId = current.confirmedBlockId?.also { appState.updateBlock(tabId, it, text) }
             ?: appState.addNoteBlock(tabId, text)
