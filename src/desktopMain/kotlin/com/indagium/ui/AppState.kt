@@ -1974,12 +1974,11 @@ sealed interface UpdateDownloadState {
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
     restoreOnCreate: Boolean = false,
-    // ::parseLogFile (not ::parseLogcat) is what makes bare compressed logs (.log.gz etc) "just
-    // work" everywhere a plain file already did — this one seam covers openFileInternal, the
-    // split path, and loadRestoredTab, which would otherwise re-parse gzip bytes as raw (garbage)
-    // logcat lines on every relaunch of a restored .log.gz tab. parseLogFile falls through to
-    // parseLogcat unchanged for every file that isn't a bare compressed log, so this is a no-op
-    // for the overwhelming majority of callers/tests.
+    // Test seam only: null in production (Main.kt passes nothing), where opening, splitting and
+    // restoring parse through parseLogFileResultWithProfiles (parseFileWithFormatProfile), which
+    // also handles bare compressed logs (.log.gz) and the user's custom log format profiles. A
+    // test may inject a parser; it then stands in for the native Logcat/DLT parse only. Do not wire
+    // ::parseLogFile here in production: it ignores custom profiles and their detection.
     private val parser: ((File) -> ParsedLog)? = null,
     private val notesDir: File = DesktopStorage.notesDir(),
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),

@@ -99,6 +99,23 @@ class IssueToNotesTest {
     }
 
     @Test
+    fun withTheLaneLogOpenTwiceTheTabBeingWorkedInThenTheLogcatOneGetsTheIssue() {
+        val issue = storedIssue()
+        val original = openAndAwait(laneLog())
+        // A reparsed copy of the same file, listed first: it must not win just by its place in the tab list.
+        val copy = checkNotNull(state.tab(original)).copy(id = "reparsed-copy", filename = "lane.log · JSON", logFormatProfileId = "json-lines")
+        state.tabs = listOf(copy) + state.tabs
+
+        state.activeTabId = original
+        assertEquals(original, assertIs<IssueActionResult.Done>(deliver(issue)).tabId)
+
+        // Working in neither: the tab read as the Logcat the lane recorded still wins over the reparsed copy.
+        state.activeTabId = ""
+        assertEquals(original, assertIs<IssueActionResult.Done>(deliver(storedIssue())).tabId)
+        assertTrue(checkNotNull(state.tab(copy.id)).annotations.blocks.isEmpty())
+    }
+
+    @Test
     fun aTabThatViewsASharedNoteGetsTheIssueInTheSharedNote() {
         val issue = storedIssue()
         val tabId = openAndAwait(laneLog())

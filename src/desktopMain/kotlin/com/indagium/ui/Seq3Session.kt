@@ -39,6 +39,7 @@ import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteInfo
+import com.indagium.model.TabContentState
 import com.indagium.utils.computeLogFingerprint
 import com.indagium.utils.expandSelectionThroughCollapsedBlocks
 import kotlinx.coroutines.CancellationException
@@ -591,15 +592,25 @@ class Seq3Session(
         sharedNote: SharedNoteInfo,
         host: LogTab,
     ): String? {
+        // The tabs the shared note is about: its members and the logs its references name.
+        val related = HashSet(sharedNote.memberTabIds)
+        host.annotations.blocks.forEach { block -> (block as? AnnBlock.LogRef)?.sourceTabId?.let(related::add) }
         if (storedSource != null) {
             if (storedSource.isNone) return null
-            return appState.tabs.singleOrNull { (it.sourcePath ?: it.filename) == storedSource.sourcePath }?.id
+            val samePath = appState.tabs.filter { !it.isCaptureLauncher && (it.sourcePath ?: it.filename) == storedSource.sourcePath }
+            if (samePath.size <= 1) return samePath.singleOrNull()?.id
+            // One file can be open in several tabs (a log and its reparsed copy): the content fingerprint the library stored says which
+            // rows the diagram came from, and among equals a tab the note is about wins.
+            val sameContent = samePath.filter { tab ->
+                tab.contentState == TabContentState.LOADED &&
+                    runCatching { computeLogFingerprint(tab.logData) }.getOrNull() == storedSource.contentFingerprint
+            }
+            val pool = sameContent.ifEmpty { samePath }
+            return (pool.singleOrNull() ?: pool.firstOrNull { it.id in related })?.id
         }
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
         // Without a library record only the log's file name says which log it was, so only tabs the shared note is about may match: a
         // member, or a log one of its references names. An unrelated open log called "logcat.txt" must not be picked by its name alone.
-        val related = HashSet(sharedNote.memberTabIds)
-        host.annotations.blocks.forEach { block -> (block as? AnnBlock.LogRef)?.sourceTabId?.let(related::add) }
         val candidate = appState.tabs.singleOrNull {
             !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename
         } ?: return null

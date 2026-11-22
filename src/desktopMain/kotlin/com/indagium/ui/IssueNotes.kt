@@ -34,8 +34,16 @@ private fun AppState.noteText(record: IssueRecord, hasImage: Boolean): String {
 private fun AppState.targetTab(tabId: String?, logFile: File?): String? {
     if (tabId != null) return noteTab(tabId)?.id
     if (logFile == null) return null
-    return tabs.firstOrNull { tab -> tab.sourcePath?.let { sameFile(File(it), logFile) } == true }?.id?.let(::notesTargetFor)
+    val showing = tabs.filter { tab -> tab.sourcePath?.let { sameFile(File(it), logFile) } == true }
+    // The lane's log can be open more than once (as recorded and reparsed with a profile): the tab being worked in wins, then the
+    // one read as the Logcat it was recorded as, then any.
+    val chosen = showing.firstOrNull { it.id == activeTabId }
+        ?: showing.firstOrNull { it.logFormatProfileId == null || it.logFormatProfileId == ANDROID_LOGCAT_PROFILE_ID }
+        ?: showing.firstOrNull()
+    return chosen?.id?.let(::notesTargetFor)
 }
+
+private const val ANDROID_LOGCAT_PROFILE_ID = "android-logcat"
 
 /** Opens [logFile] as a tab and waits (bounded) until it is loaded. Null when it did not open. */
 private suspend fun AppState.openLogTab(logFile: File): String? {
