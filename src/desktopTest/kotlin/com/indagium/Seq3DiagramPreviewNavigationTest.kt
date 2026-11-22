@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFileSection
 import com.indagium.model.LogLevel
 import com.indagium.model.TabContentState
 import com.indagium.ui.AppState
@@ -80,6 +81,38 @@ class Seq3DiagramPreviewNavigationTest {
             assertTrue(state.tab("b")!!.selected.isEmpty(), "the viewing tab's rows are not the diagram's")
             assertEquals("a", state.activeTabId)
             assertNull(state.pendingDiagramNotice)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aSharedConfirmedDiagramRecognizesItsLogAfterASwitchToAnotherSection() {
+        val root = createTempDirectory("indagium-seq3-preview-nav-section").toFile()
+        val state = state(root)
+        try {
+            state.upTab("a") {
+                it.copy(
+                    logSections = listOf(LogFileSection("s1", "Main", "", 2), LogFileSection("s2", "Events", "", 1)),
+                    selectedLogSectionId = "s1",
+                )
+            }
+            val blockId = confirmedDiagram(state, "a")
+            val hostId = assertNotNull(state.shareTabNote("a", "Investigation", listOf("a", "b")))
+            val original = assertNotNull(state.tab("a"))
+            val other = mkTab("a", "a.log", listOf(LogEntry(1, "11:00:00.000", LogLevel.I, "Other", "unrelated")))
+            state.upTab("a") { it.copy(logData = other.logData, rmap = other.rmap, selectedLogSectionId = "s2") }
+
+            for (entryId in 1..2) {
+                assertFalse(navigate(state, hostId, blockId, entryId))
+                assertEquals("Row not in this section", state.pendingDiagramNotice?.title)
+                assertTrue(state.tab("a")!!.selected.isEmpty())
+            }
+
+            state.upTab("a") { it.copy(logData = original.logData, rmap = original.rmap, selectedLogSectionId = "s1") }
+            assertTrue(navigate(state, hostId, blockId, 2))
+            assertEquals(setOf(2), state.tab("a")!!.selected)
         } finally {
             state.close()
             root.deleteRecursively()

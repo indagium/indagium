@@ -484,11 +484,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             if (parser != null && parsedProfileBatch != null && parsedProfileBatch.entries.isEmpty()) {
                 // The lines were consumed but their record is still held (or nothing was held): only the
                 // line position moves. An empty batch must not reach the capability merge below.
-                recordConsumedLines(tabId, parsedProfileBatch)
+                recordConsumedLines(tabId, parsedProfileBatch, sourceLineOffset)
                 return
             }
             if (appendedEntries.isEmpty() && changedReplacements.isEmpty()) {
-                recordConsumedLines(tabId, parsedProfileBatch)
+                recordConsumedLines(tabId, parsedProfileBatch, sourceLineOffset)
                 return
             }
             val batch = TailBatch(
@@ -581,13 +581,15 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     }
 
     // Caller holds stateLock.
-    private fun recordConsumedLines(tabId: String, parsed: ParsedLog?) {
+    private fun recordConsumedLines(tabId: String, parsed: ParsedLog?, sourceLineOffset: Long) {
         appState.tabs = appState.tabs.map { cur ->
             if (cur.id == tabId) {
+                val consumedLines = parsed?.sourceLineCount ?: sourceLineOffset
                 cur.copy(
                     profileSourceLineCount = parsed?.sourceLineCount ?: cur.profileSourceLineCount,
                     jsonTailState = parsed?.jsonTailState ?: cur.jsonTailState,
-                    profileSourceByteLength = null,
+                    // An idle flush leaves the original parse length valid for replaying its unfinished line on restart.
+                    profileSourceByteLength = cur.profileSourceByteLength.takeIf { consumedLines == sourceLineOffset },
                 )
             } else {
                 cur

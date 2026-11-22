@@ -629,8 +629,9 @@ class Seq3Session(
         // The log may have been chosen while its rows were not resident: the row the arrow points to must be the one the diagram saw.
         val row = loaded?.rmap?.get(entryId)
         val occurrence = diagramOccurrence(noteTabId, blockId, entryId)
-        if (row != null && occurrence != null && !occurrence.matchesRow(row)) {
-            appState.pendingDiagramNotice = if ((loaded.logSections.size) > 1) {
+        val sectioned = (loaded?.logSections?.size ?: 0) > 1
+        if ((row != null || sectioned) && occurrence?.matchesRow(row) == false) {
+            appState.pendingDiagramNotice = if (sectioned) {
                 DiagramNotice(
                     title = "Row not in this section",
                     body = "The diagram's row is not in the section shown. Switch to the section the diagram was made from and try again.",
@@ -640,8 +641,9 @@ class Seq3Session(
             }
             return false
         }
-        val shown = loaded != null && entryId in loaded.rmap &&
-            appState.requestLogNavigationIf(sourceId, listOf(entryId)) { it.contentState == TabContentState.LOADED && entryId in it.rmap }
+        val shown = row != null && appState.requestLogNavigationIf(sourceId, listOf(entryId)) {
+            it.contentState == TabContentState.LOADED && occurrence?.matchesRow(it.rmap[entryId]) != false
+        }
         if (!shown) {
             appState.pendingDiagramNotice = DiagramNotice(
                 title = "Row not found",
@@ -705,7 +707,8 @@ class Seq3Session(
             }
         }
         val candidate = matching.singleOrNull()
-            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED }
+            // The only candidate may have unloaded its rows or be showing a different section of the same log.
+            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED || it.logSections.size > 1 }
             ?: return null
         val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
         return candidate.id.takeUnless {

@@ -185,6 +185,30 @@ class TailUnfinishedLineProofTest {
         assertEquals(listOf("x", "rep two", "z"), rows(app, tabId).map { it.msg })
     }
 
+    @Test
+    fun anIdleStopAndRestartStillReplaysTheUnfinishedLine() {
+        val app = newState()
+        val file = File(dir!!, "restart.log").apply { writeText("x\nrep") }
+        val tabId = app.openPlain(file)
+        val unfinishedId = rows(app, tabId).last().id
+
+        app.startTailing(tabId)
+        assertTrue(app.tab(tabId)!!.tailing)
+        app.stopTailing(tabId)
+        waitUntil("the tail restarts after the stop flush") {
+            app.startTailing(tabId)
+            app.tab(tabId)!!.tailing
+        }
+
+        file.appendText(" two\nz\n")
+        waitUntil("the new line after the continuation") { rows(app, tabId).last().msg == "z" }
+        app.drainAndStopTailing(tabId)
+
+        val after = rows(app, tabId)
+        assertEquals(listOf("x", "rep two", "z"), after.map { it.msg })
+        assertEquals(unfinishedId, after[1].id)
+    }
+
     // ── where the length comes from ──────────────────────────────────────────────────────────
 
     @Test
