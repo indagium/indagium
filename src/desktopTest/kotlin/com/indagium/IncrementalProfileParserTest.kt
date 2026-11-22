@@ -451,7 +451,15 @@ class IncrementalProfileParserTest {
             assertEquals(setOf(initialArrayRows.last().id), arrayParser.replacedEntryIds)
             assertEquals(listOf("second"), appended.entries.map { it.msg })
             assertEquals(3L, appended.entries.single().sourceStartLine)
-            assertEquals(4L, appended.entries.single().sourceEndLine)
+            // A root-array element ends at the delimiter that closes it (here the `]` on line 5), as in a parse of the whole file.
+            assertEquals(5L, appended.entries.single().sourceEndLine)
+            assertEquals(
+                parseLogContent(
+                    ByteArrayInputStream((arrayInitial + listOf("  }", "]")).joinToString("\n", postfix = "\n").toByteArray()),
+                    profile = profile, sourceClockId = CLOCK,
+                ).entries.last().sourceEndLine,
+                appended.entries.single().sourceEndLine,
+            )
         } finally {
             directory.deleteRecursively()
         }

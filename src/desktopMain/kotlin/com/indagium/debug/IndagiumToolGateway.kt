@@ -1,7 +1,6 @@
 package com.indagium.debug
 
 import com.indagium.ai.LlmToolDefinition
-import com.indagium.ui.SHARED_NOTE_ID_PREFIX
 import com.indagium.ui.SharedNoteWriteDenied
 import com.indagium.ui.withSharedNoteWriteAuthor
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
@@ -62,7 +61,10 @@ internal class IndagiumToolGateway(
             return sharedNoteWriteForTab?.invoke(name, arguments, inAppTabId)
                 ?: mapOf("error" to "Shared-note membership writes are unavailable to the tab for this run.")
         }
-        if (inAppTabId != null && (arguments["tabId"] as? String)?.startsWith(SHARED_NOTE_ID_PREFIX) == true) {
+        if (inAppTabId != null) {
+            // Every in-app call carries its tab as the write author, not just the ones that NAME a shared note: a tool can resolve its
+            // own target (create_issue_from_step with the notes destination picks the note the lane's log tab shows), and the
+            // membership check at the write (LogTab.requireSharedNoteWriteAccess in upAnn / loadAnnotationsFrom) must see it too.
             return try {
                 withSharedNoteWriteAuthor(inAppTabId) { dispatchSuspending(name, arguments) }
             } catch (denied: SharedNoteWriteDenied) {

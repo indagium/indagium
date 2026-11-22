@@ -10458,17 +10458,37 @@ class AppState(
     fun navigateToLogLine(tabId: String, entryId: Int) = requestAiLogNavigation(tabId, listOf(entryId))
 
     internal fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
-        val tab = tab(tabId) ?: return
+        requestLogNavigationIf(tabId, lineIds) { true }
+    }
+
+    /**
+     * Selects [lineIds] in [tabId], activates it and asks its view to reveal them, but only while [stillShowsRows] holds for the
+     * tab as it is when the selection is written (that check and the write are one step under stateLock). False, with nothing
+     * selected or activated, when the tab is gone, none of the ids is in it, or its rows changed (an unload, a section switch)
+     * since the caller resolved them.
+     */
+    internal fun requestLogNavigationIf(tabId: String, lineIds: List<Int>, stillShowsRows: (LogTab) -> Boolean): Boolean {
+        val tab = tab(tabId) ?: return false
         val actualIds = lineIds.distinct().filter { it in tab.rmap }
-        if (actualIds.isEmpty()) return
+        if (actualIds.isEmpty()) return false
+        var selected = false
+        upTab(tabId) { t ->
+            if (stillShowsRows(t) && actualIds.all { it in t.rmap }) {
+                selected = true
+                t.copy(selected = actualIds.toSet())
+            } else {
+                t
+            }
+        }
+        if (!selected) return false
         if (compareMode && tabId != activeTabId) {
             compareTabId = tabId
         } else {
             activateTab(tabId)
         }
-        setSelectedRows(tabId, actualIds)
         annotationNavigationCounter += 1
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, actualIds)
+        return true
     }
 
     // ── Sequence expand/collapse ─────────────────────────────────────
@@ -12300,6 +12320,10 @@ class AppState(
         videoFrame: VideoFrameReference? = null,
         caption: String = "",
     ): String? = annotationManager.addImageBlock(tabId, sourceBytes, provenance, afterId, videoFrame, caption)
+
+    /** A note then an image under it, in one write (see [AnnotationManager.addNoteWithImage]). Returns the note's id, or null when it was not committed. */
+    internal fun addNoteWithImage(tabId: String, text: String, sourceBytes: ByteArray?, provenance: String, caption: String): String? =
+        annotationManager.addNoteWithImage(tabId, text, sourceBytes, provenance, caption)
 
     /** Captures a video frame as Notes evidence with durable identity and exact seek metadata. */
     fun addVideoFrameNote(

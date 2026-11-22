@@ -6,6 +6,7 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
+import com.indagium.model.TabContentState
 import com.indagium.model.resolveRows
 import com.indagium.utils.logFormatProfileFromJson
 import com.indagium.utils.recordFingerprint
@@ -692,18 +693,39 @@ private suspend fun AppState.loadedSourceShowing(sourceTabId: String, sectionId:
  * the note); a shared note's row reference with no source tab has [GoToRowsResult.NoSource]. A source tab that is not open but
  * has a saved file in a note (a shared note, or the viewing tab's own private note) gives [GoToRowsResult.NeedsReopen].
  */
-internal suspend fun AppState.goToLogRefRows(block: AnnBlock.LogRef, viewingTabId: String): GoToRowsResult {
+internal suspend fun AppState.goToLogRefRows(
+    block: AnnBlock.LogRef,
+    viewingTabId: String,
+    // A test seam: runs between resolving the ids and applying them, where an unload or a section switch can land.
+    afterResolve: () -> Unit = {},
+): GoToRowsResult {
     val viewedHostId = notesTargetFor(viewingTabId).takeIf { it != viewingTabId }
     val sourceTabId = block.sourceTabId ?: viewingTabId.takeIf { viewedHostId == null } ?: return GoToRowsResult.NoSource
     if (tab(sourceTabId) == null) return reopenOfferFor(sourceTabId, viewingTabId, viewedHostId)
-    val shown = loadedSourceShowing(sourceTabId, block.sourceSectionId) ?: return GoToRowsResult.RowsNotFound
-    val ids = withContext(Dispatchers.Default) { resolveLogRefRowIds(block, shown.logData, shown.rmap) }
-    if (ids.isEmpty()) return GoToRowsResult.RowsNotFound
-    requestAiLogNavigation(sourceTabId, ids)
-    // A fields reference also opens the record's tree at the chosen fields.
-    block.recordFields?.let { fields -> openRecordFields(sourceTabId, ids.first(), fields.map { it.path }.toSet()) }
-    return GoToRowsResult.Navigated(sourceTabId, ids, missing = block.logIds.size - ids.size)
+    // The ids are resolved off the lock against one snapshot of the rows. They are applied only to those same rows: when the tab was
+    // unloaded or switched section meanwhile, the resolve is redone once, and a source that still moves gets no success.
+    repeat(GO_TO_ROWS_ATTEMPTS) {
+        val shown = loadedSourceShowing(sourceTabId, block.sourceSectionId) ?: return GoToRowsResult.RowsNotFound
+        val ids = withContext(Dispatchers.Default) { resolveLogRefRowIds(block, shown.logData, shown.rmap) }
+        afterResolve()
+        // Row by row, not the whole list: a live tail or capture publishes a new logData every batch but keeps the earlier rows'
+        // objects, while an unload, reload or section switch replaces (or drops) the rows the ids were resolved against.
+        val stillShown = { live: LogTab ->
+            live.contentState == TabContentState.LOADED && live.selectedLogSectionId == shown.selectedLogSectionId &&
+                ids.all { id -> live.rmap[id].let { it != null && it === shown.rmap[id] } }
+        }
+        if (ids.isEmpty()) {
+            if (tab(sourceTabId)?.let(stillShown) == true) return GoToRowsResult.RowsNotFound
+        } else if (requestLogNavigationIf(sourceTabId, ids, stillShown)) {
+            // A fields reference also opens the record's tree at the chosen fields.
+            block.recordFields?.let { fields -> openRecordFields(sourceTabId, ids.first(), fields.map { it.path }.toSet()) }
+            return GoToRowsResult.Navigated(sourceTabId, ids, missing = block.logIds.size - ids.size)
+        }
+    }
+    return GoToRowsResult.RowsNotFound
 }
+
+private const val GO_TO_ROWS_ATTEMPTS = 2
 
 /**
  * Reopens the saved source the user agreed to reopen, waits for the tab to be published, and

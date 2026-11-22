@@ -1,5 +1,6 @@
 package com.indagium.testing
 
+import com.indagium.debug.IndagiumToolOperations
 import com.indagium.model.AnnBlock
 import com.indagium.testing.model.IssueAttachmentKind
 import com.indagium.testing.model.IssueDestination
@@ -10,6 +11,7 @@ import com.indagium.ui.IssueActionResult
 import com.indagium.ui.buildIssueSeed
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.deliverIssue
+import com.indagium.ui.mkTab
 import com.indagium.ui.saveIssue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -211,5 +213,41 @@ class IssueToNotesTest {
 
         assertEquals(IssueStatus.SENT, again.record.status)
         assertEquals(2, again.record.destinationResults.size)
+    }
+
+    // ── In-app tool runs and shared-note membership ─────────────────
+
+    private fun createIssueNotesCall(inAppTabId: String): Map<*, *> = runBlocking {
+        IndagiumToolOperations(state).toolGateway.executeSuspending(
+            "create_issue_from_step",
+            mapOf(
+                "runId" to fixture.run.id, "laneId" to fixture.laneId, "caseId" to fixture.caseId,
+                "stepId" to fixture.failingStep.stepId, "destination" to "notes",
+            ),
+            inAppTabId = inAppTabId,
+        ) as Map<*, *>
+    }
+
+    @Test
+    fun anInAppRunThatIsNotAMemberCannotReachASharedNoteThroughTheToolsOwnNoteChoice() {
+        val laneTab = openAndAwait(laneLog())
+        val host = assertNotNull(state.createSharedNote("Pairing", listOf(laneTab)))
+        state.tabs = state.tabs + mkTab("c", "c.log", emptyList())
+        val before = checkNotNull(state.noteTab(host)).annotations
+
+        // No tabId argument: the tool picks the note the lane's log tab shows, which is the shared note.
+        val denied = createIssueNotesCall("c")
+
+        assertTrue(denied["error"].toString().contains("unavailable"), denied.toString())
+        assertEquals(before, checkNotNull(state.noteTab(host)).annotations, "the shared note is unchanged, no note and no image")
+        assertTrue(checkNotNull(state.tab("c")).annotations.blocks.isEmpty())
+
+        val allowed = createIssueNotesCall(laneTab)
+
+        assertEquals(null, allowed["error"], allowed.toString())
+        val blocks = checkNotNull(state.noteTab(host)).annotations.blocks
+        assertTrue(blocks[0] is AnnBlock.Note)
+        assertTrue(blocks[1] is AnnBlock.Image)
+        assertEquals(2, blocks.size)
     }
 }

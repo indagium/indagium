@@ -38,7 +38,6 @@ import com.indagium.diagram3.seq3NoteHasHandEdit
 import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
-import com.indagium.model.SharedNoteInfo
 import com.indagium.model.TabContentState
 import com.indagium.utils.computeLogFingerprint
 import com.indagium.utils.expandSelectionThroughCollapsedBlocks
@@ -551,7 +550,7 @@ class Seq3Session(
         val isSnapshot = parsed.attachment?.mode == Seq3AttachmentMode.SNAPSHOT
         val sharedNote = tab.sharedNote
         val storedSource = attachmentLibraryId?.let(libraryStore::get)?.source
-        val sourceId = if (sharedNote != null) sharedDiagramSourceTabId(parsed, storedSource, sharedNote, tab) else tabId
+        val sourceId = diagramSourceTabId(parsed, storedSource, tab, tabsTheNoteIsAbout(tab))
         val existing = synchronized(appState.stateLock) { sessions.firstOrNull { existing ->
             existing.noteTargetTabId == tabId &&
                 (!isSnapshot || existing.document == openedDocument) &&
@@ -586,38 +585,74 @@ class Seq3Session(
         return id
     }
 
-    private fun sharedDiagramSourceTabId(
+    /** The tabs [owner]'s note is about: a shared note's members, or the private note's own tab, and the logs its references name. */
+    private fun tabsTheNoteIsAbout(owner: LogTab): Set<String> = HashSet<String>().apply {
+        owner.sharedNote?.let { addAll(it.memberTabIds) } ?: add(owner.id)
+        owner.annotations.blocks.forEach { block -> (block as? AnnBlock.LogRef)?.sourceTabId?.let(::add) }
+    }
+
+    /**
+     * The open log a diagram in [owner]'s note was made from, or null when it is not open. [owner] is the note's own tab (a log tab,
+     * or a shared note's host) and [related] the tabs the note is about. The evidence is the library record's source (path and
+     * content fingerprint) when there is one, else the document's source file name.
+     */
+    private fun diagramSourceTabId(
         parsed: ParsedSeq3,
         storedSource: DiagramSourceIdentity?,
-        sharedNote: SharedNoteInfo,
-        host: LogTab,
+        owner: LogTab,
+        related: Set<String>,
     ): String? {
-        // The tabs the shared note is about: its members and the logs its references name.
-        val related = HashSet(sharedNote.memberTabIds)
-        host.annotations.blocks.forEach { block -> (block as? AnnBlock.LogRef)?.sourceTabId?.let(related::add) }
-        if (storedSource != null) {
-            if (storedSource.isNone) return null
-            val samePath = appState.tabs.filter { !it.isCaptureLauncher && (it.sourcePath ?: it.filename) == storedSource.sourcePath }
-            if (samePath.size <= 1) return samePath.singleOrNull()?.id
-            // One file can be open in several tabs (a log and its reparsed copy): the content fingerprint the library stored says which
-            // rows the diagram came from, and among equals a tab the note is about wins.
-            val sameContent = samePath.filter { tab ->
-                tab.contentState == TabContentState.LOADED &&
-                    runCatching { computeLogFingerprint(tab.logData) }.getOrNull() == storedSource.contentFingerprint
-            }
-            val pool = sameContent.ifEmpty { samePath }
-            return (pool.singleOrNull() ?: pool.firstOrNull { it.id in related })?.id
-        }
+        val sharedNote = owner.sharedNote ?: return privateDiagramSourceTabId(parsed, storedSource, owner, related)
+        // A shared note's host has no rows of its own: only the evidence can name the log.
+        if (storedSource != null) return if (storedSource.isNone) null else tabForStoredSource(storedSource, null, related)
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
-        // Without a library record only the log's file name says which log it was, so only tabs the shared note is about may match: a
-        // member, or a log one of its references names. An unrelated open log called "logcat.txt" must not be picked by its name alone.
-        val candidate = appState.tabs.singleOrNull {
-            !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename
-        } ?: return null
+        // Only tabs the shared note is about may match, so an unrelated open log called "logcat.txt" is not picked by its name alone.
+        val candidate = appState.tabs.singleOrNull { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }
+            ?: return null
         val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
         return candidate.id.takeUnless {
             closedSources.any { source -> File(source.filename).name == filename && source.sourcePath != candidate.sourcePath }
         }
+    }
+
+    /**
+     * A diagram in a log tab's own note normally comes from that log, under whatever name the tab has now (a capture tab's title, a
+     * relinked file). Another log is used only on positive evidence that the diagram is about it, as after Stop sharing moved a
+     * diagram made from log A into log B's note: the record names A's file, or the diagram's file name is another log the note is
+     * about (open: that tab; recorded as closed: no source). Otherwise the owner, as before.
+     */
+    private fun privateDiagramSourceTabId(
+        parsed: ParsedSeq3,
+        storedSource: DiagramSourceIdentity?,
+        owner: LogTab,
+        related: Set<String>,
+    ): String? {
+        if (storedSource != null && !storedSource.isNone) {
+            tabForStoredSource(storedSource, owner.id, related)?.let { return it }
+        }
+        val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return owner.id
+        val named = appState.tabs.filter { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }
+        if (named.isEmpty() || named.any { it.id == owner.id }) {
+            // A closed log of that name the note knows of is the diagram's own log, closed since: never the owner's other rows.
+            val closedNamed = named.isEmpty() && owner.noteClosedSources.any { File(it.filename).name == filename && it.sourcePath != owner.sourcePath }
+            return owner.id.takeUnless { closedNamed }
+        }
+        return named.singleOrNull()?.id
+    }
+
+    /**
+     * The open tab of the file [source] names: one tab of that path, else among several (a log and its reparsed copy) the one with
+     * the content fingerprint the library stored, and among equals [preferred], then a tab the note is about. Null when none is open.
+     */
+    private fun tabForStoredSource(source: DiagramSourceIdentity, preferred: String?, related: Set<String>): String? {
+        val samePath = appState.tabs.filter { !it.isCaptureLauncher && (it.sourcePath ?: it.filename) == source.sourcePath }
+        if (samePath.size <= 1) return samePath.singleOrNull()?.id
+        val sameContent = samePath.filter { tab ->
+            tab.contentState == TabContentState.LOADED &&
+                runCatching { computeLogFingerprint(tab.logData) }.getOrNull() == source.contentFingerprint
+        }
+        val pool = sameContent.ifEmpty { samePath }
+        return (pool.singleOrNull() ?: pool.firstOrNull { it.id == preferred } ?: pool.firstOrNull { it.id in related })?.id
     }
 
     /** Caller holds stateLock while moving these blocks to their new note. */

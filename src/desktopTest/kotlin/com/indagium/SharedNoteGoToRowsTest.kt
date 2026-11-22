@@ -7,6 +7,7 @@ import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
+import com.indagium.model.LogTab
 import com.indagium.model.TabContentState
 import com.indagium.ui.AppState
 import com.indagium.ui.GoToRowsResult
@@ -536,6 +537,99 @@ class SharedNoteGoToRowsTest {
             assertIs<GoToRowsResult.Navigated>(go { app.goToLogRefRows(ref(source = null, ids = listOf(1), frozen = listOf(entry(1, "b says 1"))), "b") })
         } finally {
             app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    // ── Rows that change between resolving and applying ──────────────────────────────────────────
+
+    @Test
+    fun aSourceThatChangesAfterTheIdsWereResolvedIsResolvedAgainAndThenNavigatedOnce() {
+        val dir = createTempDirectory("goto-race-retry").toFile()
+        val state = twoTabs(dir)
+        try {
+            val block = ref(source = "a", ids = listOf(2, 3))
+            var swaps = 0
+            // The rows are read again once, as a reload does (equal rows, new objects): the first resolve no longer applies.
+            val result = go {
+                state.goToLogRefRows(block, "b") {
+                    if (swaps++ == 0) state.upTab("a") { it.reread() }
+                }
+            }
+
+            assertEquals(GoToRowsResult.Navigated("a", listOf(2, 3)), result)
+            assertEquals(2, swaps, "the second attempt resolved against the new rows")
+            assertEquals(setOf(2, 3), state.tab("a")!!.selected.toSet())
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rowsATailAppendsMeanwhileDoNotCostTheNavigation() {
+        val dir = createTempDirectory("goto-race-tail").toFile()
+        val state = twoTabs(dir)
+        try {
+            val block = ref(source = "a", ids = listOf(2, 3))
+            var resolves = 0
+            // A live tail or capture publishes a new list every batch but keeps the rows it already had.
+            val result = go {
+                state.goToLogRefRows(block, "b") {
+                    resolves++
+                    state.upTab("a") { t ->
+                        val rows = t.logData + entry(t.logData.size + 1)
+                        t.copy(logData = rows, rmap = rows.associateBy { it.id })
+                    }
+                }
+            }
+
+            assertEquals(GoToRowsResult.Navigated("a", listOf(2, 3)), result)
+            assertEquals(1, resolves, "an append is not a change of the rows the ids name")
+            assertEquals(setOf(2, 3), state.tab("a")!!.selected.toSet())
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    // A reload: the same rows read again into new objects.
+    private fun LogTab.reread(): LogTab {
+        val rows = logData.map { it.copy() }
+        return copy(logData = rows, rmap = rows.associateBy { it.id })
+    }
+
+    @Test
+    fun aSourceThatKeepsChangingOrSwitchesSectionNeverReportsASelectionItDidNotMake() {
+        val dir = createTempDirectory("goto-race-gone").toFile()
+        val state = twoTabs(dir)
+        try {
+            val block = ref(source = "a", ids = listOf(2, 3))
+
+            val churning = go {
+                state.goToLogRefRows(block, "b") { state.upTab("a") { it.reread() } }
+            }
+            assertEquals(GoToRowsResult.RowsNotFound, churning)
+            assertTrue(state.tab("a")!!.selected.isEmpty(), "nothing was selected")
+
+            // The rows are dropped altogether (an unload): the old code still answered Navigated with nothing selected.
+            val dropped = go {
+                state.goToLogRefRows(block, "b") { state.upTab("a") { it.copy(logData = emptyList(), rmap = emptyMap()) } }
+            }
+            assertEquals(GoToRowsResult.RowsNotFound, dropped)
+            assertTrue(state.tab("a")!!.selected.isEmpty())
+            state.upTab("a") { it.copy(logData = (1..6).map { id -> entry(id) }, rmap = (1..6).associateWith { id -> entry(id) }) }
+
+            // Another section is shown by the time the rows are applied: they belong to the section that was resolved.
+            var switches = 0
+            val switched = go {
+                state.goToLogRefRows(block, "b") { state.upTab("a") { it.copy(selectedLogSectionId = "other-${switches++}") } }
+            }
+            assertEquals(GoToRowsResult.RowsNotFound, switched)
+            assertTrue(state.tab("a")!!.selected.isEmpty())
+            assertEquals("b", state.activeTabId, "the source tab was not activated either")
+        } finally {
+            state.close()
             dir.deleteRecursively()
         }
     }

@@ -231,38 +231,73 @@ internal class AnnotationManager(private val appState: AppState) {
         val encoded = downscaleAndEncodeJpeg(sourceBytes) ?: return null
         val id = "i${System.nanoTime()}"
         appState.upAnn(tabId) { t ->
-            val block = AnnBlock.Image(
-                id = id,
-                caption = caption,
-                provenance = provenance,
-                format = "jpeg",
-                bytes = encoded,
-                videoFrame = videoFrame,
-            )
-            val blocks = t.annotations.blocks.toMutableList()
-            // A stale focus id (for example, the user removed that block while a drag was in
-            // flight) is equivalent to no focused block: append rather than unexpectedly putting
-            // newly pasted evidence at the top of Notes.
-            val idx = afterId?.let { anchorId ->
-                blocks.indexOfFirst { it.id == anchorId }.takeIf { it >= 0 }?.plus(1)
-            } ?: blocks.size
-            blocks.add(idx, block)
-            // Gated on "this analysis had NO image at all until now", not merely on a null stamp.
-            // An analysis created before frameStamp existed has a null stamp AND existing images:
-            // stamping it here would rename every one of its frames on the next export, orphaning
-            // the files already sitting in its _frames folder and breaking the `!frame-0N.jpg!`
-            // anchors in Markdown that may already be pasted into a Jira issue. Those analyses keep
-            // the legacy unstamped naming for good; only analyses that get their first image from
-            // this version onwards are stamped.
-            val isFirstImage = t.annotations.blocks.none { it is AnnBlock.Image }
-            t.copy(
-                annotations = t.annotations.copy(
-                    blocks = blocks,
-                    frameStamp = if (isFirstImage) FRAME_STAMP_FORMAT.format(LocalDateTime.now()) else t.annotations.frameStamp,
+            t.withImageBlock(
+                AnnBlock.Image(
+                    id = id,
+                    caption = caption,
+                    provenance = provenance,
+                    format = "jpeg",
+                    bytes = encoded,
+                    videoFrame = videoFrame,
                 ),
+                afterId,
             )
         }
         return id
+    }
+
+    /**
+     * A note followed by an image block, added in ONE write: a shared note's membership can change between two writes, and an
+     * image without its note (or the reverse) would be a half-delivered issue. A null or non-image [sourceBytes] adds the note
+     * alone. Returns the note's id, or null when the note was not committed (see [addNoteBlock]).
+     */
+    fun addNoteWithImage(
+        tabId: String,
+        text: String,
+        sourceBytes: ByteArray?,
+        provenance: String,
+        caption: String,
+    ): String? {
+        val encoded = sourceBytes?.let { downscaleAndEncodeJpeg(it) }
+        val noteId = "n${System.nanoTime()}"
+        val imageId = "i${System.nanoTime()}"
+        appState.upAnn(tabId) { t ->
+            val withNote = t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + AnnBlock.Note(noteId, text)))
+            if (encoded == null) {
+                withNote
+            } else {
+                withNote.withImageBlock(
+                    AnnBlock.Image(id = imageId, caption = caption, provenance = provenance, format = "jpeg", bytes = encoded),
+                    afterId = noteId,
+                )
+            }
+        }
+        return noteId.takeIf { appState.noteTab(tabId)?.annotations?.blocks?.any { block -> block.id == noteId } == true }
+    }
+
+    private fun LogTab.withImageBlock(block: AnnBlock.Image, afterId: String?): LogTab {
+        val blocks = annotations.blocks.toMutableList()
+        // A stale focus id (for example, the user removed that block while a drag was in
+        // flight) is equivalent to no focused block: append rather than unexpectedly putting
+        // newly pasted evidence at the top of Notes.
+        val idx = afterId?.let { anchorId ->
+            blocks.indexOfFirst { it.id == anchorId }.takeIf { it >= 0 }?.plus(1)
+        } ?: blocks.size
+        blocks.add(idx, block)
+        // Gated on "this analysis had NO image at all until now", not merely on a null stamp.
+        // An analysis created before frameStamp existed has a null stamp AND existing images:
+        // stamping it here would rename every one of its frames on the next export, orphaning
+        // the files already sitting in its _frames folder and breaking the `!frame-0N.jpg!`
+        // anchors in Markdown that may already be pasted into a Jira issue. Those analyses keep
+        // the legacy unstamped naming for good; only analyses that get their first image from
+        // this version onwards are stamped.
+        val isFirstImage = annotations.blocks.none { it is AnnBlock.Image }
+        return copy(
+            annotations = annotations.copy(
+                blocks = blocks,
+                frameStamp = if (isFirstImage) FRAME_STAMP_FORMAT.format(LocalDateTime.now()) else annotations.frameStamp,
+            ),
+        )
     }
 
     /** Adds clickable video evidence with identity and time kept as structured metadata. */

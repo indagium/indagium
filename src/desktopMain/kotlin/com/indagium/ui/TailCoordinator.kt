@@ -144,7 +144,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         )
         synchronized(ownership) {
             if (isTailOwned(tabId)) return
-            if (parser != null) parsers[tabId] = parser
+            if (parser != null) {
+                parsers[tabId] = parser
+                // A JSON root-array tab rebuilds its parser state by reading the file: do it now, off this thread and off stateLock.
+                scope.launch { runCatching { parser.prepare() } }
+            }
             tailTimeEvidence[tabId] = initialTailTimeEvidence(
                 t,
                 profile ?: appState.defaultLogFormatProfile(t.logFormat),
@@ -181,7 +185,9 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         file: File,
     ): IncrementalProfileParser? {
         if (profile == null || profile.engine == com.indagium.model.LogFormatEngine.LOGCAT) return null
-        return IncrementalProfileParser.forFile(profile, tab.sourcePath, file, tab.logData)
+        // The lines the tab has consumed bound a root-array JSON scan, so it rebuilds the state at the tab's own end of file.
+        val consumed = tab.profileSourceLineCount ?: tab.logData.lastOrNull()?.sourceEndLine
+        return IncrementalProfileParser.forFile(profile, tab.sourcePath, file, tab.logData, consumed)
     }
 
     // Whether [tabId] already has a tailer in any state (running, being paused, paused, being drained).
@@ -401,6 +407,8 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     @Suppress("CyclomaticComplexMethod") // One locked read-modify-write of the tab; splitting it would hide the lock scope.
     private fun appendTailedLines(tabId: String, newRawLines: List<String>, flushing: IncrementalProfileParser? = null) {
         if (newRawLines.isEmpty() && flushing == null) return
+        // Any file read the parser still owes (see IncrementalProfileParser.prepare) happens here, before stateLock is taken.
+        if (flushing == null) parsers[tabId]?.prepare()
         synchronized(appState.stateLock) {
             val parser = flushing ?: parsers[tabId]
             val t = appState.tab(tabId) ?: run {

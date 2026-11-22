@@ -7,6 +7,22 @@ import com.indagium.model.LogFormatProfile
 import java.io.File
 
 private const val TAIL_CANCELLATION_INTERVAL = 128L
+private const val ROOT_ARRAY_PEEK_CHARS = 1 shl 16
+
+/** Whether the first non-whitespace character [reader] holds is `[`; the reader is left where it was. */
+private fun startsWithJsonArray(reader: java.io.BufferedReader): Boolean {
+    reader.mark(ROOT_ARRAY_PEEK_CHARS)
+    try {
+        repeat(ROOT_ARRAY_PEEK_CHARS) {
+            val c = reader.read()
+            if (c < 0) return false
+            if (!c.toChar().isWhitespace()) return c.toChar() == '['
+        }
+        return false
+    } finally {
+        reader.reset()
+    }
+}
 
 /**
  * Parses a growing file batch by batch and keeps the state a record that spans lines needs: an open
@@ -30,6 +46,11 @@ internal class IncrementalProfileParser(
     private val compactor = ProfileRowCompactor()
     private val seedEntryIdsByStartLine = mutableMapOf<Long, Int>()
 
+    private class PendingSeed(val file: File, val consumedLines: Long?, val last: LogEntry?)
+
+    // The seeding [seed] left for [prepare]: it reads the file. Guarded by this parser's monitor.
+    private var pendingSeed: PendingSeed? = null
+
     /** How many open-record seeds the parser holds; a test seam for the "never grows with closed records" guarantee. */
     internal val seedCountForTesting: Int get() = seedEntryIdsByStartLine.size
 
@@ -51,8 +72,10 @@ internal class IncrementalProfileParser(
      * records those lines completed. A record still waiting for more lines is kept for the next call.
      * [ParsedLog.sourceLineCount] is the absolute count of lines consumed so far.
      */
+    @Synchronized
     fun append(lines: List<String>, startId: Int, sourceLineOffset: Long): ParsedLog {
         require(sourceLineOffset >= 0) { "Source line offset cannot be negative." }
+        prepare()
         if (machine == null && cri == null) {
             replacedEntryIds = emptySet()
             return parseProfileLines(lines, profile, startId, sourceClockId, sourceLineOffset)
@@ -76,7 +99,13 @@ internal class IncrementalProfileParser(
     }
 
     /** Returns the record still held when tailing stops; it is complete as far as the file goes. */
+    @Synchronized
     fun flush(startId: Int, sourceLineOffset: Long): ParsedLog {
+        // Still unseeded means no line was appended since the tab's own parse, which already ended (and showed) the open record.
+        if (pendingSeed != null) {
+            pendingSeed = null
+            return result(emptyList(), startId, sourceLineOffset)
+        }
         val ready = ArrayList<ProfileRecord>()
         machine?.finish(ready)
         cri?.finish()?.mapTo(ready) { it.toProfileRecord() }
@@ -113,15 +142,68 @@ internal class IncrementalProfileParser(
      * Seeds any record that was flushed by the initial whole-file parse but is still open at EOF.
      * This uses only the already parsed rows, so starting a tail does not reread a large source.
      */
-    private fun seed(existingEntries: List<LogEntry>) {
+    private fun seed(existingEntries: List<LogEntry>, file: File?, consumedLines: Long?) {
         when (profile.engine) {
-            LogFormatEngine.REGEX, LogFormatEngine.CSV, LogFormatEngine.JSON_LINES,
+            LogFormatEngine.JSON_LINES ->
+                machine?.let { recordMachine ->
+                    // A document whose root array is still open at EOF keeps state no row carries (the array itself), so the rows
+                    // alone cannot rebuild it: the file is streamed once. That read is deferred to [prepare] so it never runs on the
+                    // thread that starts the tail (the UI thread for the Tail menu item) or under stateLock.
+                    val last = existingEntries.lastOrNull()
+                    if (file == null) seedSingleRecord(recordMachine, last) else pendingSeed = PendingSeed(file, consumedLines, last)
+                }
+            LogFormatEngine.REGEX, LogFormatEngine.CSV,
             LogFormatEngine.SYSLOG_RFC5424, LogFormatEngine.SYSLOG_RFC3164,
             ->
                 machine?.let { seedSingleRecord(it, existingEntries.lastOrNull()) }
             LogFormatEngine.CRI -> cri?.let { seedCriRecords(it, existingEntries) }
             else -> Unit
         }
+    }
+
+    /**
+     * Rebuilds [recordMachine] for a file whose first character is `[`: the first [consumedLines] lines (the whole file when null) are
+     * streamed through the machine and every record it emits is dropped, so the memory held is one record and no rows are kept.
+     * The element still open at that point is the one the tab shows as its last row; it is seeded like [seedSingleRecord] does, so
+     * its completion replaces that row. False, with the machine untouched in effect, when the file is not a root array or cannot be read.
+     */
+    private fun seedRootArray(recordMachine: ProfileRecordMachine, file: File, consumedLines: Long?, last: LogEntry?): Boolean {
+        val scanned = runCatching {
+            file.inputStream().use { input ->
+                openLogTextReader(input).use { reader ->
+                    if (!startsWithJsonArray(reader)) return@use false
+                    val dropped = ArrayList<ProfileRecord>(2)
+                    var lines = 0L
+                    for (line in reader.lineSequence()) {
+                        if (consumedLines != null && lines >= consumedLines) break
+                        recordMachine.accept(line, dropped)
+                        dropped.clear()
+                        lines++
+                    }
+                    true
+                }
+            }
+        }.getOrDefault(false)
+        diagnostics.clear()
+        if (!scanned) return false
+        val openStart = recordMachine.pendingReplacementStartLine()
+        if (recordMachine.hasPendingRecord() && openStart != null && last != null && last.sourceStartLine == openStart) {
+            seedEntryIdsByStartLine[openStart] = last.id
+        }
+        return true
+    }
+
+    /**
+     * Runs the seeding [seed] deferred (a JSON file: whether it is a root array, and if so the scan that rebuilds the array state).
+     * It reads the file, so TailCoordinator calls it on a background thread right after the tail starts and again, outside
+     * stateLock, before each batch; [append] calls it too so the state is right whoever comes first. Cheap once done.
+     */
+    @Synchronized
+    fun prepare() {
+        val pending = pendingSeed ?: return
+        pendingSeed = null
+        val recordMachine = machine ?: return
+        if (!seedRootArray(recordMachine, pending.file, pending.consumedLines, pending.last)) seedSingleRecord(recordMachine, pending.last)
     }
 
     private fun seedSingleRecord(recordMachine: ProfileRecordMachine, last: LogEntry?) {
@@ -178,6 +260,8 @@ internal class IncrementalProfileParser(
             sourceClockId: String?,
             file: File,
             existingEntries: List<LogEntry> = emptyList(),
+            // How many lines of [file] the tab has consumed; a root-array JSON scan stops there. Null scans the whole file.
+            consumedLines: Long? = null,
         ): IncrementalProfileParser? {
             val parser = if (profile.engine != LogFormatEngine.CSV || !profile.hasHeader) {
                 IncrementalProfileParser(profile, sourceClockId)
@@ -189,7 +273,7 @@ internal class IncrementalProfileParser(
                 }.getOrNull() ?: return null
                 IncrementalProfileParser(profile, sourceClockId, headers)
             }
-            parser.seed(existingEntries)
+            parser.seed(existingEntries, file, consumedLines)
             return parser
         }
     }

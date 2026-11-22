@@ -69,13 +69,12 @@ internal suspend fun AppState.deliverToNotes(record: IssueRecord, tabId: String?
     val screenshot = withContext(Dispatchers.IO) {
         record.draft.attachments.firstOrNull { it.kind == IssueAttachmentKind.SCREENSHOT }?.let { issueStore.attachmentFile(record, it) }?.readBytes()
     }
-    val noteId = addNoteBlock(target, noteText(record, screenshot != null)) ?: return IssueActionResult.Failed(NOTE_NOT_ADDED_MESSAGE)
-    if (screenshot != null) {
-        addImageBlock(
-            target, screenshot, provenance = "from issue ${record.id}", afterId = noteId,
-            caption = "Step ${record.source.stepNumber}: ${record.draft.title}".take(MAX_IMAGE_CAPTION_CHARS),
-        )
-    }
+    // One write for the note and its screenshot: a denied or deferred write leaves neither behind (a shared note's membership can
+    // change between two writes). A denied write throws SharedNoteWriteDenied, which the tool gateway reports as the tool's error.
+    addNoteWithImage(
+        target, noteText(record, screenshot != null), screenshot, provenance = "from issue ${record.id}",
+        caption = "Step ${record.source.stepNumber}: ${record.draft.title}".take(MAX_IMAGE_CAPTION_CHARS),
+    ) ?: return IssueActionResult.Failed(NOTE_NOT_ADDED_MESSAGE)
     return recordDelivery(record, IssueDestination.NOTES, "Added to the notes of tab $target.", reference = target)
 }
 
