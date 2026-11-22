@@ -123,6 +123,33 @@ class HeldFilterCriteriaTest {
         }
     }
 
+    @Test
+    fun anEditThatEndsOnTheTrimmedValueStillDropsTheHeldCriteria() {
+        val directory = createTempDirectory("held-filter-edit").toFile()
+        try {
+            val app = newState(directory)
+            val held = Filter(levels = setOf(LogLevel.E))
+            val trimmed = Filter()
+            app.tabs = listOf(mkTab("t", "app.log", listOf(row(1, severity = false))).copy(filter = trimmed, heldFilterCriteria = held))
+
+            // A re-push of the same filter (a debounced field settling) is not an edit: the held criteria stay.
+            app.upFlt("t") { it }
+            assertEquals(held, app.tab("t")?.heldFilterCriteria)
+
+            // The user picks a level, then goes back to all levels: the filter ends where the trim left it, yet it is the user's now.
+            app.upFlt("t") { it.copy(levels = setOf(LogLevel.W)) }
+            app.upFlt("t") { it.copy(levels = LogLevel.entries.toSet()) }
+            val tab = requireNotNull(app.tab("t"))
+            assertNull(tab.heldFilterCriteria)
+
+            val reloaded = publish(tab.filter, tab.heldFilterCriteria, listOf(row(1, severity = true)))
+            assertEquals(LogLevel.entries.toSet(), reloaded.filter.levels)
+            app.close()
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     private fun newState(directory: File, restore: Boolean = false): AppState = AppState(
         autosaveFile = File(directory, "state.cache"),
         restoreOnCreate = restore,

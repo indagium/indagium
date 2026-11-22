@@ -9080,7 +9080,9 @@ class AppState(
         upTab(tabId) { it.copy(filter = fn(it.filter)) }
         val after = noteTab(tabId)?.filter
         if (before != null && before != after) {
-            upTab(tabId) { it.copy(filterNormalizationNotice = null) }
+            // An edit, a loaded preset or an MCP set_filter is the user's filter now: criteria a load had set aside never come back
+            // over it, even when the edit happens to end on the trimmed value (levels set back to all, say).
+            upTab(tabId) { it.copy(filterNormalizationNotice = null, heldFilterCriteria = null) }
             val transientOnlyChange =
                 tabId in transientRegexSearchTabIds && after != null && isTransientRegexOnlyChange(before, after)
             if (tabId in transientRegexSearchTabIds && !transientOnlyChange) {
