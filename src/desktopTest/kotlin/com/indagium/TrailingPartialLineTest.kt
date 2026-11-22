@@ -44,6 +44,36 @@ class TrailingPartialLineTest {
     }
 
     @Test
+    fun aLoneCarriageReturnEndsTheLineBeforeTheUnfinishedOne() {
+        // A CR-only log has no line feed: the unfinished line starts after the last carriage return.
+        file("one\rtwo\rthi".toByteArray()) {
+            val line = assertNotNull(trailingPartialLine(it))
+            assertEquals(8L, line.startOffset)
+            assertEquals("thi", line.text)
+        }
+        file("one\r\ntwo\rthi".toByteArray()) {
+            val line = assertNotNull(trailingPartialLine(it))
+            assertEquals(9L, line.startOffset)
+            assertEquals("thi", line.text)
+        }
+    }
+
+    @Test
+    fun aFinalCarriageReturnAfterALoneCarriageReturnStillHoldsThatLineBack() {
+        file("one\rtwo\r".toByteArray()) {
+            val line = assertNotNull(trailingPartialLine(it))
+            assertEquals(4L, line.startOffset)
+            assertEquals("two", line.text)
+        }
+        // An empty line ended by the held carriage return.
+        file("one\r\r".toByteArray()) {
+            val line = assertNotNull(trailingPartialLine(it))
+            assertEquals(4L, line.startOffset)
+            assertEquals("", line.text)
+        }
+    }
+
+    @Test
     fun aFileWithNoLineBreakStartsAtZeroAndDropsAByteOrderMark() {
         file("﻿only line".toByteArray()) {
             val line = assertNotNull(trailingPartialLine(it))

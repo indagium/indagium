@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.diagram3.parseSeq3Note
+import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFileSection
 import com.indagium.model.LogLevel
@@ -8,6 +10,7 @@ import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.mkTab
 import com.indagium.ui.shareTabNote
+import com.indagium.ui.stopSharing
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -96,6 +99,67 @@ class Seq3SameFileReparseTest {
             assertFalse(navigate(state, hostId, blockId, 1))
             assertEquals("The diagram's log is not open.", state.pendingDiagramNotice?.body)
             assertTrue(state.tab("a2")!!.selected.isEmpty(), "no row of the reparse is selected")
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    private fun stampOf(state: AppState, tabId: String, blockId: String): String? {
+        val block = state.tab(tabId)!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note
+        return assertNotNull(parseSeq3Note(block.text)).document.sourcePath
+    }
+
+    @Test
+    fun stoppingSharingIntoAReparseOfTheDiagramsFileStampsTheOriginalTabAndNeverFallsBackToTheReparse() = stopIntoReparse(sameIds = false)
+
+    @Test
+    fun stoppingSharingIntoAReparseWithTheSameIdsButOtherTextStampsTheOriginalTabToo() = stopIntoReparse(sameIds = true)
+
+    private fun stopIntoReparse(sameIds: Boolean) {
+        val root = createTempDirectory("indagium-seq3-stop-into-reparse").toFile()
+        val path = File(root, "a.log").absolutePath
+        val state = state(root, path, sameIds)
+        try {
+            val (hostId, blockId) = sharedDiagram(state, root)
+
+            assertTrue(state.stopSharing(hostId, "a2"))
+
+            // The recipient holds the same path, but its rows are not the diagram's: the log is named by the stamp.
+            assertEquals(path, stampOf(state, "a2", blockId))
+            assertEquals("a", state.seq3Sessions.sourceTabIdForNote("a2", blockId), "the open original, not the recipient")
+
+            state.closeTab("a")
+
+            assertNull(state.seq3Sessions.sourceTabIdForNote("a2", blockId), "never the reparse")
+            val reopened = assertNotNull(state.seq3Sessions.beginEdit("a2", blockId))
+            assertNull(state.seq3Sessions.sessions.single { it.id == reopened }.sourceTabId)
+            assertFalse(navigate(state, "a2", blockId, 1))
+            assertEquals("The diagram's log is not open.", state.pendingDiagramNotice?.body)
+            assertTrue(state.tab("a2")!!.selected.isEmpty(), "no row of the reparse is selected")
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stoppingSharingIntoTheTabTheDiagramWasMadeFromDoesNotStampItAndStillUsesThatTab() {
+        val root = createTempDirectory("indagium-seq3-stop-into-own").toFile()
+        val state = state(root, File(root, "a.log").absolutePath)
+        try {
+            val coordinator = state.seq3Sessions
+            state.activateTab("a2")
+            val id = assertNotNull(coordinator.begin("a2", setOf(OTHER_ID_BASE + 1, OTHER_ID_BASE + 2)))
+            await { coordinator.sessions.firstOrNull { it.id == id }?.generating == false }
+            val blockId = assertNotNull(coordinator.confirm(id))
+            coordinator.close(id)
+            val hostId = assertNotNull(state.shareTabNote("a2", "Investigation", listOf("a", "a2")))
+
+            assertTrue(state.stopSharing(hostId, "a2"))
+
+            assertNull(stampOf(state, "a2", blockId), "its log is the recipient itself")
+            assertEquals("a2", coordinator.sourceTabIdForNote("a2", blockId))
         } finally {
             state.close()
             root.deleteRecursively()

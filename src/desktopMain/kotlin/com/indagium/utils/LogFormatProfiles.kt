@@ -572,6 +572,10 @@ internal class JsonRecordMachine(
     private var inString = false
     private var escaped = false
     private var invalidStructure = false
+
+    // A record nested deeper than MAX_JSON_RECORD_DEPTH is still well-formed: it is scanned to its end (the stack is bounded by the
+    // record limit) and kept as raw text, so the events after it on the same line are not lost.
+    private var tooDeep = false
     private var startLine = 0L
     private var rootIndent = 0
     private var scannedChars = 0
@@ -652,7 +656,7 @@ internal class JsonRecordMachine(
                 emitMalformed(out, lineNumber)
                 // A malformed closer invalidates this candidate. Do not interpret its suffix as a
                 // second event; the next physical root boundary is the bounded recovery point.
-                discardLine = true
+                if (splitMode) keepRestOfLineRaw(fragment, index, endsLine, out) else discardLine = true
                 return
             }
             if (current.length > recordLimitChars) {
@@ -669,6 +673,16 @@ internal class JsonRecordMachine(
                 checkParserCancellation()
                 scannedChars = 0
             }
+        }
+    }
+
+    // Splitting copies text, so the suffix a parse would discard must still reach the output (as one raw row up to the line's end).
+    private fun keepRestOfLineRaw(fragment: String, from: Int, endsLine: Boolean, out: MutableList<ProfileRecord>) {
+        val rest = fragment.substring(from)
+        if (endsLine) {
+            if (rest.isNotBlank()) addRawLine(rest, out)
+        } else {
+            rawLine = StringBuilder(rest)
         }
     }
 
@@ -705,6 +719,7 @@ internal class JsonRecordMachine(
         scalarArrayItem = arrayMode && first != '{' && first != '['
         scalarStringItem = scalarArrayItem && first == '"'
         elementComplete = false
+        tooDeep = false
         startLine = atLine
         rootIndent = indentation
         scannedChars = 0
@@ -733,7 +748,7 @@ internal class JsonRecordMachine(
             }
             '{', '[' -> {
                 stack += c
-                if (stack.size > MAX_JSON_RECORD_DEPTH) invalidStructure = true
+                if (stack.size > MAX_JSON_RECORD_DEPTH) tooDeep = true
             }
             '}', ']' -> {
                 val expected = if (c == '}') '{' else '['
@@ -748,7 +763,7 @@ internal class JsonRecordMachine(
 
     private fun emitCompleteElement(out: MutableList<ProfileRecord>, endLine: Long) {
         val raw = current.toString().trim()
-        val fields = if (recordRoot == '{') {
+        val fields = if (recordRoot == '{' && !tooDeep) {
             profile?.let { jsonProfileFields(raw, it) }
                 ?: jsonObjectFields(raw)?.let { if (profile == null) emptyMap() else null }
         } else {
@@ -756,7 +771,8 @@ internal class JsonRecordMachine(
         }
         if (fields == null) {
             diagnostics.addLimited(
-                if (scalarArrayItem || (arrayMode && recordRoot != '{')) "A non-object JSON array element was kept as raw text."
+                if (tooDeep) "A JSON record nested deeper than $MAX_JSON_RECORD_DEPTH levels was kept as raw text."
+                else if (scalarArrayItem || (arrayMode && recordRoot != '{')) "A non-object JSON array element was kept as raw text."
                 else "An invalid JSON record was kept as raw text.",
             )
             out += ProfileRecord(raw, parseFields = false, sourceStartLine = startLine, sourceEndLine = endLine)
@@ -800,6 +816,7 @@ internal class JsonRecordMachine(
         inString = false
         escaped = false
         invalidStructure = false
+        tooDeep = false
         scannedChars = 0
     }
 }

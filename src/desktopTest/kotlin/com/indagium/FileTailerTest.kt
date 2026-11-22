@@ -21,6 +21,7 @@ import kotlin.test.assertTrue
 // back to polling every ~2s), so every await here is generous rather than tight — these tests
 // assert correctness of what eventually arrives, not sub-second responsiveness.
 private const val AWAIT_SECONDS = 8L
+private const val PER_BYTE_PAUSE_MS = 120L
 
 class FileTailerTest {
     private fun newScope() = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -108,6 +109,126 @@ class FileTailerTest {
         val carriageReturn = File(dir, "cr.log").apply { writeText("a\n\r") }
         val crTailer = FileTailer(carriageReturn, onNewLines = {}, startOffset = 0L)
         assertEquals(listOf("a"), crTailer.readToEndOfFile(includeTrailingPartialLine = true))
+    }
+
+    /** A tailer that has not started a poll loop: [FileTailer.readToEndOfFile] reads from [startOffset] on the caller's thread. */
+    private fun syncTailer(file: File, startOffset: Long? = 0L) = FileTailer(file, onNewLines = {}, startOffset = startOffset)
+
+    @Test
+    fun aCarriageReturnOnlyFileIsReadAsLinesAndItsLastLineWaitsForTheByteAfterItsCarriageReturn() {
+        val dir = createTempDirectory("openlog-tail-cr").toFile()
+        val file = File(dir, "cr.log").apply { writeText("one\rtwo\rthree\r") }
+        val tailer = syncTailer(file)
+
+        // "three\r" could still become "three\r\n": it is not a line yet.
+        assertEquals(listOf("one", "two"), tailer.readToEndOfFile())
+        assertEquals(emptyList(), tailer.readToEndOfFile())
+
+        file.appendText("four\r")
+        assertEquals(listOf("three"), tailer.readToEndOfFile(), "the next byte settles the held carriage return")
+
+        // The writer finished: the drain's opt-in ends the held line at the end of the file.
+        assertEquals(listOf("four"), tailer.readToEndOfFile(includeTrailingPartialLine = true))
+        assertEquals(file.length(), tailer.currentOffset)
+    }
+
+    @Test
+    fun aCarriageReturnLineFeedCutBetweenTwoReadsIsOneLineEnd() {
+        val dir = createTempDirectory("openlog-tail-crlf-cut").toFile()
+        val file = File(dir, "crlf.log").apply { writeText("a\r\nb\r") }
+        val tailer = syncTailer(file)
+
+        assertEquals(listOf("a"), tailer.readToEndOfFile())
+
+        file.appendText("\nc\r\n")
+        assertEquals(listOf("b", "c"), tailer.readToEndOfFile(), "the line feed after a held carriage return ends the same line")
+    }
+
+    @Test
+    fun aLoneCarriageReturnEndedByTheDrainDoesNotTurnTheLineFeedThatFollowsItIntoAnEmptyLine() {
+        val dir = createTempDirectory("openlog-tail-drain-cr").toFile()
+        val file = File(dir, "drain.log").apply { writeText("a\rb\r") }
+        val tailer = syncTailer(file)
+
+        assertEquals(listOf("a", "b"), tailer.readToEndOfFile(includeTrailingPartialLine = true))
+
+        file.appendText("\nc\n")
+        assertEquals(listOf("c"), tailer.readToEndOfFile(), "the \\n completes the \\r\\n already delivered as one line")
+    }
+
+    @Test
+    fun aTailStartedRightAfterACarriageReturnSkipsTheLineFeedThatCompletesIt() {
+        val dir = createTempDirectory("openlog-tail-start-cr").toFile()
+        val file = File(dir, "start.log").apply { writeText("first\r") }
+        val tailer = syncTailer(file, startOffset = null)
+        tailer.start(newScope()).cancel()
+
+        file.appendText("\nsecond\n")
+        assertEquals(listOf("second"), tailer.readToEndOfFile())
+
+        // Not after a carriage return: a line feed that is the next byte is an empty line.
+        val plain = File(dir, "plain.log").apply { writeText("first\n") }
+        val plainTailer = syncTailer(plain, startOffset = null)
+        plainTailer.start(newScope()).cancel()
+        plain.appendText("\nsecond\n")
+        assertEquals(listOf("", "second"), plainTailer.readToEndOfFile())
+    }
+
+    @Test
+    fun mixedLineBreaksSplitLikeAFreshOpenOfTheFile() {
+        val dir = createTempDirectory("openlog-tail-mixed").toFile()
+        val text = "a\nb\r\nc\rd\n\ne\r\rf\r\n"
+        val file = File(dir, "mixed.log").apply { writeText(text) }
+
+        val tailed = syncTailer(file).readToEndOfFile()
+
+        assertEquals(text.reader().buffered().readLines(), tailed)
+        assertEquals(listOf("a", "b", "c", "d", "", "e", "", "f"), tailed)
+    }
+
+    @Test
+    fun carriageReturnsArriveOneByteAtATimeAsThePollLoopSeesThem() {
+        val dir = createTempDirectory("openlog-tail-bytes").toFile()
+        val file = File(dir, "bytes.log").apply { writeText("") }
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { lines -> received.addAll(lines) }, pollIntervalMs = 50)
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            // The file ends up as "a\rb\r\nc\n\rd": CR only, a CRLF written in two steps, an LF alone, an empty CR line, an open last line.
+            val steps = listOf("a", "\r", "b", "\r", "\n", "c", "\n", "\r", "d")
+            for (step in steps) {
+                file.appendText(step)
+                Thread.sleep(PER_BYTE_PAUSE_MS)
+            }
+            val expected = listOf("a", "b", "c", "")
+            waitUntil { received.size >= expected.size }
+            Thread.sleep(PER_BYTE_PAUSE_MS)
+            assertEquals(expected, received.toList(), "a CRLF cut between two polls is one line end, not two")
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun aCarriageReturnTerminatedLineLongerThanTheReadChunkCapStillCompletes() {
+        val dir = createTempDirectory("openlog-tail-cr-long").toFile()
+        val file = File(dir, "long.log").apply { writeText("") }
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { lines -> received.addAll(lines) }, pollIntervalMs = 100)
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            val longLine = "x".repeat(6 * 1024 * 1024)
+            file.appendText("$longLine\rnext\r")
+
+            waitUntil(timeoutMs = TimeUnit.SECONDS.toMillis(AWAIT_SECONDS)) { received.isNotEmpty() }
+            assertEquals(listOf(longLine), received.toList(), "the line after the long one is still held, its \\r may be half of a CRLF")
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
     }
 
     @Test

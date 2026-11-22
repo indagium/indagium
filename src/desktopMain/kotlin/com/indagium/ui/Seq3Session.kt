@@ -721,9 +721,10 @@ class Seq3Session(
         }
         // Stop sharing wrote the log's identity into the diagram itself: that, not what the note happens to cite, says which log
         // it is about. A log that is not open is unavailable, never the owner's rows.
+        // The stamp is a path, and another tab can hold the owner's path (the file reparsed under another profile, other rows): the
+        // owner is the answer only when its rows agree with the diagram, never because the paths do.
         val stamped = parsed.document.sourcePath
         if (stamped != null) {
-            if (stamped == (owner.sourcePath ?: owner.filename)) return owner.id
             val fingerprint = storedSource?.takeIf { it.sourcePath == stamped }?.contentFingerprint.orEmpty()
             return tabForStoredSource(DiagramSourceIdentity(stamped, fingerprint), owner.id, related, parsed.document)
         }
@@ -740,8 +741,9 @@ class Seq3Session(
     /**
      * Stop sharing: records, in each diagram of [blocks] (the shared note [host]'s blocks, about to become [into]'s private note),
      * the log it was made from, resolved while the shared note still exists (see [diagramSourceTabId]). A diagram whose log is
-     * open and is not [into] is stamped with that tab's path; one whose log is closed is stamped with the path the library record
-     * names, else with the one closed member/cited log of the document's file name (none or several: nothing is guessed).
+     * open and is not the tab [into] itself (compared by tab id: another tab of the recipient's file is another log) is stamped with
+     * that tab's path; one whose log is closed is stamped with the path the library record names, else with the one closed
+     * member/cited log of the document's file name (none or several: nothing is guessed).
      * Nothing is stamped when the log is [into] itself or cannot be resolved. Returns the blocks, stamped ones rewritten in place
      * (same ids), and the stamps by block id. Caller holds stateLock.
      */
@@ -761,17 +763,20 @@ class Seq3Session(
 
     private fun stoppedDiagramSourcePath(parsed: ParsedSeq3, host: LogTab, into: LogTab, related: Set<String>): String? {
         val storedSource = parsed.attachment?.diagramId?.let(libraryStore::get)?.source
-        val recipientPath = into.sourcePath ?: into.filename
         val open = diagramSourceTabId(parsed, storedSource, host, related)?.let(appState::tab)
-        if (open != null) return (open.sourcePath ?: open.filename).takeIf { it != recipientPath }
+        // Tab identity, not the path: the recipient can be a second tab of the same file (a reparse with other rows), which is not
+        // the log a diagram made from the first tab is about.
+        if (open != null) return (open.sourcePath ?: open.filename).takeIf { open.id != into.id }
         // An existing stamp (it names the log; it simply is not open) is kept, not replaced by what the record or a file name guesses.
         if (parsed.document.sourcePath != null) return null
-        if (storedSource != null) return storedSource.sourcePath.takeIf { it.isNotBlank() && it != recipientPath }
-        return closedDiagramSourcePath(parsed, host, related, recipientPath)
+        // No open tab agrees with the diagram, the recipient included, so a log that is closed now (even one of the recipient's own
+        // path) is the diagram's: it is named, and the recipient's rows are used only if they agree with the diagram.
+        if (storedSource != null) return storedSource.sourcePath.takeIf { it.isNotBlank() }
+        return closedDiagramSourcePath(parsed, host, related)
     }
 
     /** The path of the one closed member or cited log of the diagram's file name (none or several: null, nothing is guessed). */
-    private fun closedDiagramSourcePath(parsed: ParsedSeq3, host: LogTab, related: Set<String>, recipientPath: String): String? {
+    private fun closedDiagramSourcePath(parsed: ParsedSeq3, host: LogTab, related: Set<String>): String? {
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
         // An open log of that name the note is about makes the choice ambiguous: only a log that is closed everywhere is named.
         if (appState.tabs.any { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }) return null
@@ -779,7 +784,7 @@ class Seq3Session(
             .filter { File(it.filename).name == filename }
             .distinctBy { it.sourcePath ?: it.filename }
             .singleOrNull() ?: return null
-        return (closed.sourcePath ?: closed.filename).takeIf { it != recipientPath }
+        return closed.sourcePath ?: closed.filename
     }
 
     /**

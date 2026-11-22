@@ -11,7 +11,7 @@ import java.nio.file.FileSystems
 import java.nio.file.StandardWatchEventKinds
 
 private const val NEWLINE_BYTE = '\n'.code.toByte()
-private const val CARRIAGE_RETURN = '\r'
+private const val CARRIAGE_RETURN_BYTE = '\r'.code.toByte()
 
 // Caps a single readNewLines() allocation so a large backlog (app suspended, or a burst of many
 // MB written between polls) doesn't allocate one huge buffer sized to the entire unread delta.
@@ -19,9 +19,10 @@ private const val CARRIAGE_RETURN = '\r'
 private const val MAX_TAIL_READ_BYTES = 4L * 1024L * 1024L
 
 /**
- * The last line of a file that does not end with a newline: [startOffset] is the byte offset just after the file's last `\n`
- * (0 for a file with no newline at all), [text] the line as a reader shows it (no `\r`, no byte-order mark), [fileLength] the
- * length of the file this was read from (the line ends there).
+ * The last line of a file that does not end with a newline: [startOffset] is the byte offset just after the last `\n` or lone `\r`
+ * before it (0 for a file with no earlier line break at all), [text] the line as a reader shows it (no `\r`, no byte-order mark),
+ * [fileLength] the length of the file this was read from (the line ends there). A final `\r` is not a line break yet, as it may be
+ * half of a `\r\n` still being written: the line stays unfinished, and the tail re-reads it once the next byte is known.
  */
 internal class TrailingPartialLine(val startOffset: Long, val text: String, val fileLength: Long)
 
@@ -39,9 +40,12 @@ internal fun trailingPartialLine(file: File): TrailingPartialLine? = runCatching
         val length = raf.length()
         if (length == 0L) return@use null
         raf.seek(length - 1)
-        if (raf.read() == NEWLINE_BYTE.toInt()) return@use null
+        val last = raf.read()
+        if (last == NEWLINE_BYTE.toInt()) return@use null
         var start = 0L
-        var end = length
+        // A final `\r` belongs to the unfinished line (it may be the first half of a `\r\n`), so the line starts after an earlier break.
+        val endsWithCarriageReturn = last == CARRIAGE_RETURN_BYTE.toInt()
+        var end = if (endsWithCarriageReturn) length - 1 else length
         val chunk = ByteArray(PARTIAL_LINE_SCAN_CHUNK)
         search@ while (end > 0L) {
             val from = maxOf(0L, end - chunk.size)
@@ -49,7 +53,7 @@ internal fun trailingPartialLine(file: File): TrailingPartialLine? = runCatching
             raf.seek(from)
             raf.readFully(chunk, 0, size)
             for (i in size - 1 downTo 0) {
-                if (chunk[i] == NEWLINE_BYTE) {
+                if (chunk[i] == NEWLINE_BYTE || chunk[i] == CARRIAGE_RETURN_BYTE) {
                     start = from + i + 1
                     break@search
                 }
@@ -58,10 +62,10 @@ internal fun trailingPartialLine(file: File): TrailingPartialLine? = runCatching
             end = from
         }
         if (length - start > MAX_PARTIAL_LINE_BYTES) return@use null
-        val bytes = ByteArray((length - start).toInt())
+        val bytes = ByteArray((length - start).toInt() - if (endsWithCarriageReturn) 1 else 0)
         raf.seek(start)
         raf.readFully(bytes)
-        val raw = String(bytes, Charsets.UTF_8).trimEnd(CARRIAGE_RETURN)
+        val raw = String(bytes, Charsets.UTF_8)
         TrailingPartialLine(start, if (start == 0L) raw.removePrefix("\uFEFF") else raw, length)
     }
 }.getOrNull()
@@ -79,6 +83,11 @@ internal fun trailingPartialLine(file: File): TrailingPartialLine? = runCatching
 // regardless of whether the watch mechanism noticed anything. WatchService is kept registered and
 // drained on a best-effort, non-blocking basis only — a possible future optimization to wake up
 // earlier than the next interval, never a correctness dependency.
+//
+// A line ends at `\n`, `\r\n` or a lone `\r`, exactly as the reader that opens a file splits it, so a tail numbers and cuts lines
+// like a fresh open does (a CR-only log has no `\n` at all). A `\r` that is the last byte read could be the first half of a `\r\n`
+// still being written: it is held back until the next byte is known, and [drainToEndOfFile] with its trailing-line opt-in ends the
+// held line at the end of the file. A tail that begins right after a `\r` skips the `\n` that may follow it ([skipLeadingLf]).
 //
 // v1 never replays existing file content on the initial start() UNLESS the caller explicitly asks
 // it to via [startOffset]: with the default (null), tailing begins from the current end-of-file,
@@ -129,6 +138,12 @@ class FileTailer(
     @Volatile
     private var knownLength: Long = 0L
 
+    // True while [offset] sits right after a `\r` whose line has been (or is being) ended: a `\n` that is the next byte then belongs
+    // to that `\r\n` and is skipped, not read as an empty line. Set when a tail starts after a `\r` (a file cut between the two
+    // bytes of a CRLF) and when the end-of-file drain consumes a held-back `\r`.
+    @Volatile
+    private var skipLeadingLf: Boolean = false
+
     /** Bytes of [file] this tailer has not emitted yet (file length minus [currentOffset], never negative). */
     fun unreadBytes(): Long = (file.length() - offset).coerceAtLeast(0L)
 
@@ -142,6 +157,7 @@ class FileTailer(
         val length = if (file.exists()) file.length() else 0L
         offset = startOffset ?: length
         knownLength = length
+        skipLeadingLf = followsCarriageReturn(offset)
         return launchPollLoop(scope)
     }
 
@@ -153,6 +169,13 @@ class FileTailer(
     // in bounded chunks. The caller must have fully stopped the previous Job (cancelAndJoin) so two
     // loops never advance [offset] at once.
     fun resume(scope: CoroutineScope): Job = launchPollLoop(scope)
+
+    private fun followsCarriageReturn(at: Long): Boolean = at > 0L && runCatching {
+        RandomAccessFile(file, "r").use { raf ->
+            raf.seek(at - 1)
+            raf.read() == CARRIAGE_RETURN_BYTE.toInt()
+        }
+    }.getOrDefault(false)
 
     private fun launchPollLoop(scope: CoroutineScope): Job {
         val parentPath = file.parentFile?.toPath()
@@ -222,8 +245,9 @@ class FileTailer(
         if (includeTrailingPartialLine) readTrailingPartialLine()?.let { onBatch(listOf(it)) }
     }
 
-    // The bytes after the last complete line, as one line — or null when there are none, they are
-    // only a carriage return, or (defensively) they contain a newline and so are not a partial line.
+    // The bytes after the last complete line, as one line - or null when there are none, they are only a carriage return, or
+    // (defensively) they contain a line break before the end and so are not a partial line. A held-back `\r` that ends them is the
+    // end of the line: it is consumed with it (and the `\n` that might still follow it is skipped, see [skipLeadingLf]).
     private fun readTrailingPartialLine(): String? {
         if (!file.exists()) return null
         val remaining = file.length() - offset
@@ -233,10 +257,13 @@ class FileTailer(
             raf.seek(offset)
             raf.readFully(bytes)
         }
-        if (bytes.contains(NEWLINE_BYTE)) return null
-        val line = String(bytes, Charsets.UTF_8).trimEnd(CARRIAGE_RETURN)
+        val endsWithCarriageReturn = bytes.last() == CARRIAGE_RETURN_BYTE
+        val content = if (endsWithCarriageReturn) bytes.copyOf(bytes.size - 1) else bytes
+        if (content.any { it == NEWLINE_BYTE || it == CARRIAGE_RETURN_BYTE }) return null
+        val line = String(content, Charsets.UTF_8)
         if (line.isEmpty()) return null
         offset += bytes.size
+        skipLeadingLf = endsWithCarriageReturn
         return line
     }
 
@@ -256,14 +283,23 @@ class FileTailer(
         // "Shorter than before", not just "shorter than the offset": the offset can sit well below the end of the file (a tail
         // started at its unfinished last line, a partial line held back), and a rewrite that is still longer than the offset
         // would be read as the continuation of the old content.
-        val readFrom = if (length < maxOf(fromOffset, knownLength)) {
+        var readFrom = if (length < maxOf(fromOffset, knownLength)) {
             offset = 0L
             knownLength = length
+            skipLeadingLf = false
             onRestart()
             0L
         } else {
             knownLength = length
             fromOffset
+        }
+        if (skipLeadingLf && length > readFrom) {
+            // The `\n` of a `\r\n` whose `\r` ended a line already: no line of its own, but the offset moves past it.
+            skipLeadingLf = false
+            if (byteAt(readFrom) == NEWLINE_BYTE) {
+                readFrom++
+                offset = readFrom
+            }
         }
         if (length == readFrom) return ReadResult(emptyList(), readFrom, moreAvailable = false)
 
@@ -275,35 +311,59 @@ class FileTailer(
         // end-of-file for this one call (the original unbounded behavior) so it still completes
         // correctly; ordinary bursts of normal-length lines never take this path.
         if (cappedTo < length) readChunk(readFrom, length)?.let { return it }
-        // Only emit complete lines — a trailing partial line (no newline yet) is left unread by
-        // not advancing past it, so the next flush picks it up whole.
+        // Only emit complete lines — a trailing partial line (no line break yet, or a `\r` that may be half of a `\r\n`) is left
+        // unread by not advancing past it, so the next flush picks it up whole.
         return ReadResult(emptyList(), readFrom, moreAvailable = false)
     }
 
+    private fun byteAt(position: Long): Byte? = runCatching {
+        RandomAccessFile(file, "r").use { raf ->
+            raf.seek(position)
+            raf.read().takeIf { it >= 0 }?.toByte()
+        }
+    }.getOrNull()
+
     // Reads [from, to) and returns a result only if it contains at least one complete line; null
-    // tells the caller "no newline in this range" so it can decide whether to widen the range.
+    // tells the caller "no line break in this range" so it can decide whether to widen the range.
+    // A line ends at `\n`, `\r\n` or a lone `\r`; a `\r` that is the last byte of the range is not yet known to be a lone one
+    // (a `\n` may follow), so it stays unread with the line it ends.
     private fun readChunk(from: Long, to: Long): ReadResult? {
         RandomAccessFile(file, "r").use { raf ->
             raf.seek(from)
             val bytes = ByteArray((to - from).toInt())
             raf.readFully(bytes)
 
-            var lastNewlineIdx = -1
+            var lastBreakIdx = -1
             for (i in bytes.indices.reversed()) {
-                if (bytes[i] == NEWLINE_BYTE) {
-                    lastNewlineIdx = i
+                val b = bytes[i]
+                if (b == NEWLINE_BYTE || (b == CARRIAGE_RETURN_BYTE && i < bytes.lastIndex)) {
+                    lastBreakIdx = i
                     break
                 }
             }
-            if (lastNewlineIdx < 0) return null
+            if (lastBreakIdx < 0) return null
 
-            val completeBytes = bytes.copyOfRange(0, lastNewlineIdx + 1)
-            val lines = String(completeBytes, Charsets.UTF_8)
-                .split('\n')
-                .dropLast(1) // split on a string ending in '\n' leaves a trailing "" — drop it
-                .map { it.trimEnd(CARRIAGE_RETURN) }
+            val completeBytes = bytes.copyOfRange(0, lastBreakIdx + 1)
+            val lines = splitLines(String(completeBytes, Charsets.UTF_8))
             val newOffset = from + completeBytes.size
             return ReadResult(lines, newOffset, moreAvailable = newOffset < file.length())
         }
+    }
+
+    // [text] ends with a line break: each `\n`, `\r\n` or lone `\r` ends one line (what BufferedReader.readLine does).
+    private fun splitLines(text: String): List<String> {
+        val lines = ArrayList<String>()
+        var start = 0
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\n' || c == '\r') {
+                lines += text.substring(start, i)
+                if (c == '\r' && i + 1 < text.length && text[i + 1] == '\n') i++
+                start = i + 1
+            }
+            i++
+        }
+        return lines
     }
 }

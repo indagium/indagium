@@ -39,7 +39,9 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
     private fun create(a: Map<String, Any?>, inAppTabId: String? = null): Map<String, Any?> {
         val members = a.strList("memberTabIds").orEmpty().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         val fromTabId = a.str("fromTabId")?.trim()?.takeIf { it.isNotEmpty() }
+        val badEntry = badMemberEntry(a)
         val problem = when {
+            badEntry != null -> badEntry
             members.isEmpty() -> error("memberTabIds must name at least one open tab")
             inAppTabId != null && fromTabId != null && fromTabId != inAppTabId ->
                 error("An in-app run can only share the private note of its own tab.")
@@ -64,11 +66,13 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
     private fun setMembers(hostId: String, a: Map<String, Any?>, inAppTabId: String? = null): Map<String, Any?> {
         val members = a.strList("memberTabIds").orEmpty().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         val host = appState.sharedNoteHost(hostId)?.sharedNote
+        val badEntry = badMemberEntry(a)
         val problem = when {
             hostId.isBlank() -> error("missing hostId")
             host == null -> error("no such shared note: $hostId")
             inAppTabId != null && inAppTabId !in host.memberTabIds -> error("Shared note $hostId is unavailable to the tab for this run.")
             a["memberTabIds"] !is List<*> -> error("missing memberTabIds (an array of open tab ids; empty removes every open member)")
+            badEntry != null -> badEntry
             else -> unknownTabs(members)
         }
         if (problem != null) return problem
@@ -79,6 +83,19 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
         } else {
             mapOf("ok" to true, "hostId" to hostId, "name" to info.name, "members" to members(info), "closedMembers" to closedMembers(info))
         }
+    }
+
+    /**
+     * An error for the first `memberTabIds` entry that is not a non-blank string, else null. Checked before the entries are trimmed
+     * and filtered: a blank id dropped silently would turn `[" "]` into the empty list, which means "remove every open member".
+     */
+    private fun badMemberEntry(a: Map<String, Any?>): Map<String, Any?>? {
+        val entries = a["memberTabIds"] as? List<*> ?: return null
+        entries.forEachIndexed { index, entry ->
+            if (entry !is String) return error("memberTabIds[$index] must be a string tab id")
+            if (entry.isBlank()) return error("memberTabIds[$index] is blank")
+        }
+        return null
     }
 
     private fun openTab(id: String) = appState.tab(id)?.takeIf { !it.isCaptureLauncher }

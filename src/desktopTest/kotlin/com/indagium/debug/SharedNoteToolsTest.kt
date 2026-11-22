@@ -386,6 +386,35 @@ class SharedNoteToolsTest {
     }
 
     @Test
+    fun setMembersRefusesABlankOrNonStringEntryInsteadOfClearingTheMembers() {
+        val hostId = call("create_shared_note", "memberTabIds" to listOf("a", "b"))["hostId"] as String
+
+        // A blank id once vanished in the filter, leaving [] - the request to remove every open member.
+        assertEquals("memberTabIds[0] is blank", call("set_shared_note_members", "hostId" to hostId, "memberTabIds" to listOf(" "))["error"])
+        assertEquals("memberTabIds[1] is blank", call("set_shared_note_members", "hostId" to hostId, "memberTabIds" to listOf("a", ""))["error"])
+        assertEquals(
+            "memberTabIds[0] must be a string tab id",
+            call("set_shared_note_members", "hostId" to hostId, "memberTabIds" to listOf(1))["error"],
+        )
+        assertEquals(
+            "memberTabIds[1] must be a string tab id",
+            call("set_shared_note_members", "hostId" to hostId, "memberTabIds" to listOf("a", null))["error"],
+        )
+
+        assertEquals(listOf("a", "b"), state.sharedNoteHost(hostId)!!.sharedNote!!.memberTabIds, "nothing changed")
+        assertEquals(hostId, state.tab("a")?.notesView)
+        assertTrue(memberIds(call("set_shared_note_members", "hostId" to hostId, "memberTabIds" to emptyList<String>())).isEmpty())
+    }
+
+    @Test
+    fun createRefusesABlankOrNonStringMemberEntry() {
+        assertEquals("memberTabIds[0] is blank", call("create_shared_note", "memberTabIds" to listOf("  "))["error"])
+        assertEquals("memberTabIds[1] is blank", call("create_shared_note", "memberTabIds" to listOf("a", ""))["error"])
+        assertEquals("memberTabIds[0] must be a string tab id", call("create_shared_note", "memberTabIds" to listOf(7))["error"])
+        assertTrue(state.sharedNoteHosts.isEmpty())
+    }
+
+    @Test
     fun theNotesToolsTakeAHostIdAsTabId() {
         val hostId = call("create_shared_note", "name" to "N", "memberTabIds" to listOf("a", "b"))["hostId"] as String
 
