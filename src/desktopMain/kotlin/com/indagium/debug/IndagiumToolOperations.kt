@@ -2431,9 +2431,13 @@ internal class IndagiumToolOperations(
         val removedBlockCount = tab.annotations.blocks.size
         val clearedPrefix = tab.annotations.prefix.isNotEmpty()
         val clearedSuffix = tab.annotations.suffix.isNotEmpty()
+        var clearedBlockIds = emptyList<String>()
         appState.upAnn(tabId) { current ->
+            clearedBlockIds = current.annotations.blocks.map { it.id }
             current.copy(annotations = current.annotations.copy(blocks = emptyList(), prefix = "", suffix = ""))
         }
+        // The cleared diagram notes' library back-references go too (outside the state lock: the library writes to disk).
+        appState.seq3Sessions.releaseLibraryAttachments(tabId, clearedBlockIds)
         return mapOf(
             "ok" to true,
             "tabId" to tabId,

@@ -66,6 +66,7 @@ import com.indagium.model.LogFormat
 import com.indagium.model.RecordFieldNameColor
 import com.indagium.model.RecordValueAlignment
 import com.indagium.utils.hasRecordDetails
+import com.indagium.utils.parseHexDigits
 import com.indagium.utils.recordInspectionSource
 
 private const val MAX_JSON_CHARS = 256 * 1024
@@ -992,7 +993,7 @@ private class BoundedJsonReader(private val source: String) {
                         't' -> result.append('\t')
                         'u' -> {
                             val hex = source.substringOrNull(cursor, cursor + 4) ?: return null
-                            val code = hex.toIntOrNull(16) ?: return null
+                            val code = parseHexDigits(hex) ?: return null
                             result.append(code.toChar())
                             cursor += 4
                         }

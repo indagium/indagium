@@ -24,6 +24,7 @@ import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.diagram3.toSource
+import com.indagium.diagram3.updateSeq3NoteSourcePath
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
@@ -1761,6 +1762,9 @@ class Seq3SessionTest {
             // No library record: only the file name says which log the diagram came from.
             val hostBlock = assertIs<AnnBlock.Note>(state.sharedNoteHost(hostId)!!.annotations.blocks.single())
             parseSeq3Note(hostBlock.text)?.attachment?.diagramId?.let(store::delete)
+            // Sharing stamps even a log with no file path (with its tab name); a diagram without any stamp (older notes) is what
+            // this test is about, so the stamp is taken off.
+            state.updateBlock(hostId, blockId, assertNotNull(updateSeq3NoteSourcePath(hostBlock.text, null)))
 
             // The member is chosen although another open tab has the same name (which alone would make the name ambiguous).
             val first = assertNotNull(coordinator.beginEdit(hostId, blockId))

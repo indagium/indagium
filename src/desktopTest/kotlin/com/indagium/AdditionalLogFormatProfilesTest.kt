@@ -250,6 +250,42 @@ class AdditionalLogFormatProfilesTest {
     }
 
     @Test
+    fun logfmtSignedOrNonHexEscapesAreMalformedAndNeverThrow() {
+        val rows = listOf(
+            "time=2024-02-03T04:05:06Z level=INFO msg=\"\\U-0000001\"",
+            "time=2024-02-03T04:05:06Z level=INFO msg=\"\\x-1\"",
+            "time=2024-02-03T04:05:06Z level=INFO msg=\"\\u+041\"",
+            "time=2024-02-03T04:05:06Z level=INFO msg=\"\\U+0000041\"",
+            "time=2024-02-03T04:05:06Z level=INFO msg=\"\\U0011FFFF\"",
+            "time=2024-02-03T04:05:06Z level=INFO msg=\"\\U0000D800\"",
+        )
+        val parsed = parseLogfmtProfile(rows.asSequence(), profile("logfmt"), sourceClockId = "app-a")
+
+        assertEquals(rows.size, parsed.entries.size)
+        parsed.entries.forEachIndexed { index, entry ->
+            assertFalse(entry.severityKnown, "row $index stays raw")
+            assertEquals(rows[index], entry.msg, "row $index keeps its raw text")
+        }
+        assertTrue(parsed.diagnostics.any { "malformed logfmt" in it })
+    }
+
+    @Test
+    fun logfmtValidEscapesStillDecode() {
+        val raw = "time=2024-02-03T04:05:06Z level=INFO msg=\"\\U0001F600 \\u0041\\x42\""
+        val parsed = parseLogfmtProfile(sequenceOf(raw), profile("logfmt"), sourceClockId = "app-a")
+
+        assertEquals("\uD83D\uDE00 AB", parsed.entries.single().msg)
+    }
+
+    @Test
+    fun detectionOfASampleWithASignedEscapeReturnsWithoutThrowing() {
+        val sample = "a=\"\\U-0000001\"\nb=\"\\x-1\"\n".toByteArray()
+
+        assertNull(detectAdditionalLogProfileResult(sample).profile)
+        assertNull(detectAdditionalLogProfile("a=\"\\U-0000001\"\n".toByteArray()))
+    }
+
+    @Test
     fun criInterleavedStreamsReassembleIndependentlyAndStayInSourceOrder() {
         val rows = sequenceOf(
             "2024-01-01T00:00:00.000000001Z stdout P hello ",

@@ -105,7 +105,7 @@ internal class QSettingsIni private constructor(
                     val digits = if (key[i + 1] == 'U') 4 else 2
                     val start = if (key[i + 1] == 'U') i + 2 else i + 1
                     val hex = key.substring(start, minOf(key.length, start + digits))
-                    val code = if (hex.length == digits) hex.toIntOrNull(16) else null
+                    val code = if (hex.length == digits) parseHexDigits(hex) else null
                     if (code != null) {
                         out.append(code.toChar())
                         i = start + digits

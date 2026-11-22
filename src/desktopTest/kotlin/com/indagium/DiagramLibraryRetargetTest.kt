@@ -85,4 +85,29 @@ class DiagramLibraryRetargetTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun removingAttachmentsDropsOnlyTheNamedBlocksOfTheNamedTabInOneWrite() {
+        val root = createTempDirectory("indagium-library-remove-attachments").toFile()
+        try {
+            val file = File(root, "library.cache")
+            val store = DiagramLibraryStore(file)
+            val first = newItem(store, "first")
+            val second = newItem(store, "second")
+            store.addAttachment(first.id, attachment("a", "n1"))
+            store.addAttachment(first.id, attachment("a", "n2"))
+            store.addAttachment(first.id, attachment("c", "n1"))
+            store.addAttachment(second.id, attachment("a", "n1"))
+
+            assertTrue(store.removeAttachments("a", listOf("n1", "n9")))
+
+            assertEquals(setOf("a" to "n2", "c" to "n1"), store.get(first.id)!!.attachments.map { it.tabId to it.blockId }.toSet())
+            assertFalse(store.get(second.id)!!.isAttached)
+            assertFalse(DiagramLibraryStore(file).get(second.id)!!.isAttached, "persisted")
+            assertFalse(store.removeAttachments("a", emptyList()))
+            assertFalse(store.removeAttachments("a", listOf("n1")), "nothing left to remove")
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

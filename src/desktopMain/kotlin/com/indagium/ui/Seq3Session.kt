@@ -75,6 +75,13 @@ sealed interface ActiveSurface {
     data object Tests : ActiveSurface
 }
 
+/**
+ * The key a diagram records for the log it was made from ([Seq3Document.sourcePath], [DiagramSourceIdentity.sourcePath]): the
+ * file path, else the tab's name (a merged or captured log has no path). Every place that stamps a diagram's source and every
+ * place that matches a stamp back to a tab goes through this, so a log with no file path is named the same way both ways.
+ */
+internal val LogTab.diagramSourceKey: String get() = sourcePath ?: filename
+
 /** Every diagram note in [tab], paired with its block id — the one place that decides "is this
  *  Note actually a diagram", so the panel, the export and the MCP layer can never disagree.
  *  v3 counterpart of the deleted `ui.diagramNotes()` (`SeqDiagramCoordinator.kt`). */
@@ -759,7 +766,7 @@ class Seq3Session(
             val source = sessionSource ?: privateDiagramSourceTabId(parsed, null, owner, related)?.let(appState::tab)?.takeIf { tab ->
                 document.sourceFile == File(tab.filename).name && document.evidenceSample().all { it.matchesRow(tab.rmap[it.entryId]) }
             }
-            source?.sourcePath
+            source?.diagramSourceKey
         }
     }
 
@@ -797,7 +804,7 @@ class Seq3Session(
         // Tab identity, not the path: the recipient can be a second tab of the same file (a reparse with other rows), which is not
         // the log a diagram made from the first tab is about.
         if (open != null) {
-            if (open.id != into.id) return open.sourcePath ?: open.filename
+            if (open.id != into.id) return open.diagramSourceKey
             // A section switch or unload can hide the evidence that would let the diagram follow its private tab again.
             return parsed.document.sourcePath?.takeUnless { parsed.document.evidenceSample().all { it.matchesRow(into.rmap[it.entryId]) } }
         }
@@ -831,7 +838,7 @@ class Seq3Session(
      * evidence and keeps the plain rule: the sole tab of that path, else the fingerprint, else [preferred] or a related tab.
      */
     private fun tabForStoredSource(source: DiagramSourceIdentity, preferred: String?, related: Set<String>, document: Seq3Document): String? {
-        val samePath = appState.tabs.filter { !it.isCaptureLauncher && (it.sourcePath ?: it.filename) == source.sourcePath }
+        val samePath = appState.tabs.filter { !it.isCaptureLauncher && it.diagramSourceKey == source.sourcePath }
         if (samePath.size <= 1 && document.evidenceSample().isEmpty()) return samePath.singleOrNull()?.id
 
         fun choose(pool: List<LogTab>): String? =
@@ -1084,7 +1091,7 @@ class Seq3Session(
                 title = current.document.title.ifBlank { fresh.title },
                 // A diagram Stop sharing stamped keeps naming its log; one relinked to another log names that one instead.
                 sourcePath = current.document.sourcePath?.let {
-                    current.sourceTabId?.let(appState::tab)?.let { tab -> tab.sourcePath ?: tab.filename } ?: it
+                    current.sourceTabId?.let(appState::tab)?.diagramSourceKey ?: it
                 },
             )
         generatedBaselines[id] = document
@@ -2084,7 +2091,7 @@ class Seq3Session(
         val existing = existingBlock?.let { parseSeq3Note(it.text) }
         val noteDocument = when {
             existing?.attachment == null && appState.sharedNoteHost(tabId) != null -> {
-                val sourcePath = current.sourceTabId?.let(appState::tab)?.sourcePath
+                val sourcePath = current.sourceTabId?.let(appState::tab)?.diagramSourceKey
                 current.document.copy(sourcePath = sourcePath ?: current.document.sourcePath ?: existing?.document?.sourcePath)
             }
             // A private note keeps the log its block already names when the session lost it: never erase the note's own stamp.
@@ -2431,7 +2438,7 @@ class Seq3Session(
         val pinned = appState.pinLoadedTabSnapshot(tabId) ?: return null
         return pinned.use { loaded ->
             DiagramSourceIdentity(
-                sourcePath = loaded.tab.sourcePath ?: loaded.tab.filename,
+                sourcePath = loaded.tab.diagramSourceKey,
                 contentFingerprint = computeLogFingerprint(loaded.tab.logData),
             )
         }
@@ -2638,6 +2645,15 @@ class Seq3Session(
      */
     fun retargetLibraryAttachments(fromTabId: String, toTabId: String, blockIds: Collection<String>) {
         if (libraryStore.retargetAttachments(fromTabId, toTabId, blockIds)) libraryRevision++
+    }
+
+    /**
+     * Drops the library's back-references of diagram notes that left [tabId]'s note without moving anywhere (replaced by Stop
+     * sharing, deleted with a shared note, cleared by "clear all notes"). One pass over the library, one write. Never call with
+     * the state lock held: the library writes to disk.
+     */
+    fun releaseLibraryAttachments(tabId: String, blockIds: Collection<String>) {
+        if (libraryStore.removeAttachments(tabId, blockIds)) libraryRevision++
     }
 
     /** Removes the library's durable back-reference when a Note attachment is deleted. */

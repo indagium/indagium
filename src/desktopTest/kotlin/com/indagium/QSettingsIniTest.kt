@@ -41,6 +41,14 @@ class QSettingsIniTest {
     }
 
     @Test
+    fun signedKeyEscapesAreKeptLiterally() {
+        val ini = QSettingsIni.parse("[S]\n%-1=1\n%U-001=2\n%+A=3\n")
+        assertEquals("1", ini.string("S/%-1"))
+        assertEquals("2", ini.string("S/%U-001"))
+        assertEquals("3", ini.string("S/%+A"))
+    }
+
+    @Test
     fun quotedValuesAndEscapesAreDecoded() {
         val ini = QSettingsIni.parse(
             """

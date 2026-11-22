@@ -1,5 +1,6 @@
 package com.indagium.utils
 
+import com.indagium.debug.AppLogger
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
@@ -80,13 +81,28 @@ internal fun detectAdditionalLogProfileResult(sample: ByteArray): AdditionalLogP
     }.getOrDefault("")
     val lines = text.lineSequence().filter(String::isNotBlank).take(SIGNATURE_SAMPLE_LINES).toList()
     if (lines.isEmpty()) return AdditionalLogProfileDetection()
-    val jsonRecords = scanJsonObjectRecordRaws(text)
-    val candidates = detectJsonCandidates(jsonRecords) + listOfNotNull(
-        detectHttpCandidate(lines),
-        detectDmesgCandidate(lines),
-        detectCriCandidate(lines),
-        detectLogfmtCandidate(lines),
+    val failures = mutableListOf<Throwable>()
+
+    // Detection must never fail an open: a detector that throws on odd content counts as "no candidate".
+    fun <T> guarded(detector: () -> T?): T? = runCatching(detector).onFailure {
+        if (it is CancellationException || it is Error) throw it
+        failures += it
+    }.getOrNull()
+
+    val candidates = (guarded { detectJsonCandidates(scanJsonObjectRecordRaws(text)) } ?: emptyList()) + listOfNotNull(
+        guarded { detectHttpCandidate(lines) },
+        guarded { detectDmesgCandidate(lines) },
+        guarded { detectCriCandidate(lines) },
+        guarded { detectLogfmtCandidate(lines) },
     )
+    failures.firstOrNull()?.let { first ->
+        runCatching {
+            AppLogger.warn(
+                "formats",
+                "A log format detector failed and was skipped (${failures.size} failure(s)): ${first::class.simpleName}: ${first.message}",
+            )
+        }
+    }
     return chooseDetectionCandidate(candidates)
 }
 
@@ -541,15 +557,15 @@ private fun logfmtSingleCharEscape(escape: Char): Int? = when (escape) {
 private fun appendEscapedCodeUnit(raw: String, offset: Int, digits: Int): Pair<Char, Int>? {
     val end = offset + digits
     if (end > raw.length) return null
-    val value = raw.substring(offset, end).toIntOrNull(16) ?: return null
+    val value = parseHexDigits(raw.substring(offset, end)) ?: return null
     return value.toChar() to end
 }
 
 private fun appendEscapedCodePoint(raw: String, offset: Int): Pair<Int, Int>? {
     val end = offset + LOGFMT_CODE_POINT_HEX_DIGITS
     if (end > raw.length) return null
-    val value = raw.substring(offset, end).toLongOrNull(16)?.takeIf { it <= MAX_UNICODE_CODE_POINT }?.toInt() ?: return null
-    if (value in MIN_SURROGATE_CODE_POINT..MAX_SURROGATE_CODE_POINT) return null
+    val value = parseHexDigitsLong(raw.substring(offset, end))?.takeIf { it <= MAX_UNICODE_CODE_POINT }?.toInt() ?: return null
+    if (value in MIN_SURROGATE_CODE_POINT..MAX_SURROGATE_CODE_POINT || !Character.isValidCodePoint(value)) return null
     return value to end
 }
 

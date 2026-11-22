@@ -250,7 +250,7 @@ internal class HomeDiagramOpener(private val state: AppState) {
     }
 
     private fun isLogTabOfPath(tab: com.indagium.model.LogTab, path: String): Boolean =
-        !tab.isCaptureLauncher && (tab.sourcePath ?: tab.filename) == path
+        !tab.isCaptureLauncher && tab.diagramSourceKey == path
 
     /** The id of an open tab holding exactly this log (same path, same content fingerprint), or null. */
     private suspend fun matchingOpenLog(source: DiagramSourceIdentity): String? {

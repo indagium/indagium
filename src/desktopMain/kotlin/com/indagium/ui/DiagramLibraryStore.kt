@@ -483,6 +483,33 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
         }?.getOrNull()
 
     /**
+     * Drops every attachment that names a block of [blockIds] in tab [tabId]: those note blocks were deleted or replaced wholesale
+     * (a recipient's private note replaced by Stop sharing, a deleted shared note, "clear all notes"), so the items must stop
+     * counting them. One pass, one write, no per-item validation (removing only shrinks a list). Returns whether anything changed.
+     * Never call with the caller's state lock held (it writes to disk).
+     */
+    fun removeAttachments(tabId: String, blockIds: Collection<String>): Boolean {
+        if (blockIds.isEmpty()) return false
+        val dropping = blockIds.toHashSet()
+        val changed = synchronized(lock) {
+            var any = false
+            val updated = LinkedHashMap<String, DiagramLibraryItem>(items.size)
+            items.forEach { (id, item) ->
+                if (item.attachments.none { it.tabId == tabId && it.blockId in dropping }) {
+                    updated[id] = item
+                } else {
+                    any = true
+                    updated[id] = item.copy(attachments = item.attachments.filterNot { it.tabId == tabId && it.blockId in dropping })
+                }
+            }
+            if (any) items = updated
+            any
+        }
+        if (changed) runCatching { persist() }
+        return changed
+    }
+
+    /**
      * Re-points the attachments that name a block of [blockIds] in tab [fromTabId] to tab [toTabId]: the blocks moved to another note
      * (Share, Stop sharing) keep their ids, so the library's back-reference must follow or a later delete of the block finds
      * nothing and the item stays "Attached". One pass, one write, one reference per (tab, block) afterwards. Non-throwing: a
