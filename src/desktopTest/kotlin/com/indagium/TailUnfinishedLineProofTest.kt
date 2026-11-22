@@ -123,6 +123,53 @@ class TailUnfinishedLineProofTest {
         assertEquals(before, after.take(2), "the second row is still the line it was parsed from")
     }
 
+    private fun AppState.openJson(file: File): String {
+        val tabId = requireNotNull(openFileWithLogFormatProfile(file, "json-lines"))
+        waitUntil("loaded") { tab(tabId)?.contentState == TabContentState.LOADED }
+        return tabId
+    }
+
+    @Test
+    fun anUnfinishedLineHoldingSeveralJsonEventsIsReplacedAsAWholeAndTheRestIsNotARowOfItsOwn() {
+        val app = newState()
+        val file = File(dir!!, "compact.jsonl").apply { writeText("""{"a":1}{"b":2}{"c":""") }
+        val tabId = app.openJson(file)
+        val before = rows(app, tabId)
+        assertEquals(3, before.size, "fixture: a, b and the partial c are rows")
+
+        app.startTailing(tabId)
+        file.appendText("3}\n")
+        waitUntil("the completed c") { rows(app, tabId).lastOrNull()?.rawRecord?.contains("3") == true }
+        app.drainAndStopTailing(tabId)
+
+        val after = rows(app, tabId)
+        assertEquals(3, after.size, "no extra row for what followed the cut")
+        assertEquals(before.take(2), after.take(2), "a and b keep their ids and content")
+        assertEquals(before.map { it.id }, after.map { it.id })
+        assertEquals("""{"c":3}""", after.last().rawRecord)
+        assertEquals(listOf(1L, 1L, 1L), after.map { it.sourceStartLine })
+    }
+
+    @Test
+    fun anUnfinishedJsonLineGrownAfterTheParseIsNotTakenForTheTabsOwnLastLine() {
+        val app = newState()
+        val file = File(dir!!, "grown.jsonl").apply { writeText("{\"a\":1}\n") }
+        val tabId = app.openJson(file)
+        val before = rows(app, tabId)
+        assertEquals(1, before.size)
+
+        // An unfinished line the tab has not seen, which contains the tab's last row's text.
+        file.appendText("""{"a":1}{"b":2}{"c":""")
+        app.startTailing(tabId)
+        file.appendText("3}\n")
+        waitUntil("a row after the first") { rows(app, tabId).size >= 2 }
+        app.drainAndStopTailing(tabId)
+
+        val after = rows(app, tabId)
+        assertEquals(before, after.take(1), "row 1 is untouched, never replaced by the events that merely contain its text")
+        assertEquals(after.size, after.map { it.id }.toSet().size)
+    }
+
     @Test
     fun anUnfinishedLastLineOfTheUnchangedFileIsStillReplacedByItsWholeLine() {
         val app = newState()

@@ -230,6 +230,10 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // tailer and truncation marker are what Resume and the capture strip rely on.
     fun stopTailing(tabId: String) {
         val activeJob = activeTails.remove(tabId)?.job
+        // The tailer thread may be inside appendTailedLines, waiting for the start-up scan of a root-array JSON file; cancelling the
+        // job does not wake it. Giving the scan up does (the batch is then seeded from the last row), so the join below, and a
+        // restart that waits for it, end at once instead of with the scan.
+        if (activeJob != null || pausing.containsKey(tabId)) parsers[tabId]?.cancelSeeding()
         activeJob?.cancel()
         // A pause still joining this tailer loses its claim and gives up.
         val pausingJob = pausing.remove(tabId)?.job
@@ -273,6 +277,9 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             pausing[tabId] = claimed
             claimed
         }
+        // A tailer waiting for the start-up scan of a root-array JSON file cannot be joined until the scan ends; give the scan up
+        // (the first batch after Resume is seeded from the tab's last row).
+        parsers[tabId]?.cancelSeeding()
         runBlocking { active.job.cancelAndJoin() }
         synchronized(ownership) {
             // Gone = a drain/stop took the tailer over, or the tab was closed meanwhile.

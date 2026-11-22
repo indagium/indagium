@@ -6,8 +6,12 @@ import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.SharedNoteInfo
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import com.indagium.ui.sharedNoteHostTab
+import com.indagium.utils.annotationFramesDirIn
+import com.indagium.utils.annotationFramesFolderName
 import com.indagium.utils.annotationImageFileName
 import com.indagium.utils.buildMd
 import java.io.File
@@ -255,6 +259,62 @@ class AnnotationExportTest {
 
         assertFalse(pickerCalled, "an empty (no-image) tab must not even prompt for a folder")
         assertTrue(dir.listFiles().orEmpty().isEmpty())
+    }
+
+    // ── frames folder name (a shared note's name is typed by the user) ───
+
+    @Test
+    fun framesFolderNameKeepsTheUsualLogNameAndNeverEscapes() {
+        assertEquals("app_frames", annotationFramesFolderName("app.log"))
+        assertEquals("a.b_frames", annotationFramesFolderName("a.b.log"))
+        assertEquals("Pairing bug_frames", annotationFramesFolderName("Pairing bug"))
+        val hostile = listOf(
+            "../escape", "a/b", "..\\win", "   ", "", "/abs/path", "C:\\Windows\\x", "..", ".", "a\u0000b\nc", "x<>:\"|?*y", "trail. .", "NUL",
+            "../../../etc/passwd",
+        )
+        for (name in hostile) {
+            val folder = annotationFramesFolderName(name)
+            assertTrue(folder.endsWith("_frames"), name)
+            assertFalse(folder.any { it in "/\\:*?\"<>|" || it.isISOControl() }, "$name -> $folder")
+            assertFalse(folder.contains(".."), "$name -> $folder")
+            assertTrue(folder.removeSuffix("_frames").isNotBlank(), "$name -> $folder")
+        }
+        assertEquals("notes_frames", annotationFramesFolderName("   "))
+        assertEquals("notes_frames", annotationFramesFolderName(".."))
+        assertEquals("NUL__frames", annotationFramesFolderName("NUL"))
+    }
+
+    @Test
+    fun framesDirIsRefusedWhenItsNameIsASymbolicLinkOutOfTheChosenFolder() {
+        val dir = createTempDirectory("openlog-frames-link").toFile()
+        val outside = createTempDirectory("openlog-frames-outside").toFile()
+        java.nio.file.Files.createSymbolicLink(File(dir, "app_frames").toPath(), outside.toPath())
+
+        assertEquals(null, annotationFramesDirIn(dir, "app.log"))
+        assertEquals(File(dir, "other_frames"), annotationFramesDirIn(dir, "other.log"))
+    }
+
+    @Test
+    fun exportingASharedNoteWithAnEscapingNameWritesOnlyOneSafeChildFolder() {
+        for (name in listOf("../escape", "a/b", "..\\win", "   ", "/abs")) {
+            val root = createTempDirectory("openlog-frame-export-hostile").toFile()
+            val dir = File(root, "chosen").apply { mkdirs() }
+            val state = AppState(directoryPicker = { _, _ -> dir })
+            val host = sharedNoteHostTab(SharedNoteInfo(id = "shared-1", name = name)).copy(
+                annotations = Annotations(blocks = listOf(imageBlock("i1", "First", bytes = byteArrayOf(5)))),
+            )
+            state.addSharedNoteHost(host)
+
+            state.exportAnnotationFrames(host.id)
+
+            waitUntil { dir.listFiles().orEmpty().singleOrNull()?.listFiles().orEmpty().any { it.name == "frame-01.jpg" } }
+            val children = dir.listFiles().orEmpty()
+            assertEquals(1, children.size, "$name -> ${children.map { it.name }}")
+            assertTrue(children.single().isDirectory && children.single().name == annotationFramesFolderName(name), name)
+            // Nothing landed beside the chosen folder, in the temp root, or under any other path.
+            assertEquals(listOf("chosen"), root.listFiles().orEmpty().map { it.name }, name)
+            assertEquals(listOf("frame-01.jpg"), children.single().listFiles().orEmpty().map { it.name })
+        }
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {

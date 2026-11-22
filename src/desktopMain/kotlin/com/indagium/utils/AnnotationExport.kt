@@ -48,3 +48,42 @@ fun annotationDiagramFileName(diagramOrdinal: Int, frameStamp: String? = null): 
     val pattern = if (frameStamp != null) "diagram-$frameStamp-%02d.png" else "diagram-%02d.png"
     return pattern.format(diagramOrdinal)
 }
+
+private val FRAMES_FOLDER_INVALID_CHARS = Regex("[\\\\/:*?\"<>|\\p{Cntrl}]")
+private val FRAMES_FOLDER_DOT_RUNS = Regex("\\.{2,}")
+private val FRAMES_FOLDER_RESERVED_NAMES = Regex("(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])")
+private const val FRAMES_FOLDER_FALLBACK = "notes"
+private const val FRAMES_FOLDER_MAX_BASE = 100
+
+/**
+ * The name of the `<base>_frames` folder an export of a tab's note images writes under a user-chosen folder.
+ *
+ * [filename] is the tab's display name: a log's file name, but for a shared note whatever the user typed, so it can carry path
+ * separators (`/` and `\`), `..` segments, a drive prefix, control characters or characters Windows rejects. All of those become
+ * `_`, runs of dots collapse, leading/trailing dots and spaces go, and a name that ends up blank (or a Windows device name)
+ * (or only `_`) becomes "notes". The usual `app.log` still yields `app_frames`: the last extension is dropped, but only when something stays.
+ * The result is always one plain path segment.
+ */
+fun annotationFramesFolderName(filename: String): String {
+    val cleaned = filename.replace(FRAMES_FOLDER_INVALID_CHARS, "_").replace(FRAMES_FOLDER_DOT_RUNS, "_")
+    val dot = cleaned.lastIndexOf('.')
+    val withoutExtension = if (dot > 0 && cleaned.substring(0, dot).isNotBlank()) cleaned.substring(0, dot) else cleaned
+    var base = withoutExtension.trim { it == '.' || it.isWhitespace() }.take(FRAMES_FOLDER_MAX_BASE).trim { it == '.' || it.isWhitespace() }
+    if (base.all { it == '_' }) base = FRAMES_FOLDER_FALLBACK
+    if (FRAMES_FOLDER_RESERVED_NAMES.matches(base)) base = "${base}_"
+    return "${base}_frames"
+}
+
+/**
+ * The `<base>_frames` folder under [dir] for [filename] (see [annotationFramesFolderName]), or null when its canonical path would
+ * not lie strictly inside [dir]'s canonical path (for example a symbolic link already sitting at that name).
+ */
+fun annotationFramesDirIn(dir: java.io.File, filename: String): java.io.File? {
+    val framesDir = java.io.File(dir, annotationFramesFolderName(filename))
+    val inside = runCatching {
+        val root = dir.canonicalFile.toPath()
+        val target = framesDir.canonicalFile.toPath()
+        target != root && target.startsWith(root)
+    }.getOrDefault(false)
+    return framesDir.takeIf { inside }
+}

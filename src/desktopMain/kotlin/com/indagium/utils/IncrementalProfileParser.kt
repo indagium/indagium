@@ -597,15 +597,18 @@ internal class IncrementalProfileParser(
             return rows.takeUnless { cri && it.size > 1 }
         }
 
-        // A sanity check on top of the unchanged-file proof, so exact: the text the row ends with is the unfinished line. A JSON
-        // row's raw text may omit what delimits an element of a root array (the comma after it or before it, the closing `]`), so
-        // for that engine only those are left out of the comparison.
+        // A sanity check on top of the unchanged-file proof (the file still has the length measured before the tab's parse, which is
+        // what shows the line is the tab's own last one): the text the row ends with is the unfinished line. A JSON line may hold
+        // several events (`{"a":1}{"b":2}{"c":`), of which the last row shows only the last, and its raw text may omit what
+        // delimits an element of a root array (the comma after it or before it, the closing `]`), so for that engine the row's
+        // text need only be contained in the line, those delimiters left out. Every row that touches the line is replaced.
         private fun showsLine(profile: LogFormatProfile, row: LogEntry, reread: String): Boolean {
             val shown = row.rawRecord?.substringAfterLast('\n')?.trim() ?: return false
             if (shown == reread) return true
             if (profile.engine != LogFormatEngine.JSON_LINES) return false
+            if (shown.isNotEmpty() && reread.contains(shown)) return true
             val bare = withoutArrayDelimiters(shown)
-            return bare.isNotEmpty() && bare == withoutArrayDelimiters(reread)
+            return bare.isNotEmpty() && withoutArrayDelimiters(reread).contains(bare)
         }
 
         private fun withoutArrayDelimiters(text: String): String =

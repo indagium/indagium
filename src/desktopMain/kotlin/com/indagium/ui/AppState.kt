@@ -151,6 +151,7 @@ import com.indagium.utils.SearchComputeResult
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
 import com.indagium.utils.annotationDiagramFileName
+import com.indagium.utils.annotationFramesDirIn
 import com.indagium.utils.annotationImageFileName
 import com.indagium.utils.archiveVideoCacheFileName
 import com.indagium.utils.buildAnnotationsHtml
@@ -15998,7 +15999,13 @@ class AppState(
         if (images.isEmpty() && imageDiagramCount == 0) return
         val dir = pickDirectory("Export Frames", initialSaveDialogDir()) ?: return
         settings = settings.copy(lastSaveDialogDir = dir.absolutePath)
-        val framesDir = File(dir, "${t.filename.substringBeforeLast('.')}_frames")
+        // The folder name comes from the tab's name, which a shared note lets the user type freely: sanitize it and refuse
+        // anything that would land outside the chosen folder.
+        val framesDir = annotationFramesDirIn(dir, t.filename)
+        if (framesDir == null) {
+            AppLogger.error("export", "Refused to export frame images: the folder for '${t.filename}' would be outside ${dir.absolutePath}")
+            return
+        }
         ioScope.launch {
             runCatching {
                 framesDir.mkdirs()

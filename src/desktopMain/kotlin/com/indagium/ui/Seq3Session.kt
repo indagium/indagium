@@ -18,6 +18,7 @@ import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3GenerateOptions
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3NoteSeed
+import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
 import com.indagium.diagram3.Seq3RowRef
@@ -38,6 +39,7 @@ import com.indagium.diagram3.seq3NoteHasHandEdit
 import com.indagium.diagram3.toSource
 import com.indagium.diagram3.updateSeq3NoteSourcePath
 import com.indagium.model.AnnBlock
+import com.indagium.model.LogEntry
 import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteInfo
 import com.indagium.model.TabContentState
@@ -624,6 +626,20 @@ class Seq3Session(
         }
         if (appState.tab(sourceId)?.contentState != TabContentState.LOADED) appState.activateTab(sourceId)
         val loaded = appState.awaitTabLoaded(sourceId)
+        // The log may have been chosen while its rows were not resident: the row the arrow points to must be the one the diagram saw.
+        val row = loaded?.rmap?.get(entryId)
+        val occurrence = diagramOccurrence(noteTabId, blockId, entryId)
+        if (row != null && occurrence != null && !occurrence.matchesRow(row)) {
+            appState.pendingDiagramNotice = if ((loaded.logSections.size) > 1) {
+                DiagramNotice(
+                    title = "Row not in this section",
+                    body = "The diagram's row is not in the section shown. Switch to the section the diagram was made from and try again.",
+                )
+            } else {
+                DiagramNotice(title = "Log changed", body = "The diagram's log has changed since it was made.")
+            }
+            return false
+        }
         val shown = loaded != null && entryId in loaded.rmap &&
             appState.requestLogNavigationIf(sourceId, listOf(entryId)) { it.contentState == TabContentState.LOADED && entryId in it.rmap }
         if (!shown) {
@@ -633,6 +649,14 @@ class Seq3Session(
             )
         }
         return shown
+    }
+
+    /** The occurrence of row [entryId] in the diagram [blockId] of [noteTabId]'s note, or null when there is none. */
+    private fun diagramOccurrence(noteTabId: String, blockId: String, entryId: Int): Seq3Occurrence? {
+        val tab = appState.noteTab(noteTabId) ?: return null
+        val block = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note ?: return null
+        val document = parseSeq3Note(block.text)?.document ?: return null
+        return document.messages.asSequence().flatMap { it.occurrences.asSequence() }.firstOrNull { it.entryId == entryId }
     }
 
     /** The tabs [owner]'s note is about: a shared note's members, or the private note's own tab, and the logs its references name. */
@@ -654,14 +678,14 @@ class Seq3Session(
     ): String? {
         val sharedNote = owner.sharedNote ?: return privateDiagramSourceTabId(parsed, storedSource, owner, related)
         // A shared note's host has no rows of its own: only the evidence can name the log.
-        if (storedSource != null && !storedSource.isNone) tabForStoredSource(storedSource, null, related)?.let { return it }
+        if (storedSource != null && !storedSource.isNone) tabForStoredSource(storedSource, null, related, parsed.document)?.let { return it }
         // A diagram Stop sharing stamped (and that was then shared again) names its log itself, as in a private note: a log that is
         // not open is unavailable, never another log of the same file name.
         val stamped = parsed.document.sourcePath
         return when {
             stamped != null -> {
                 val fingerprint = storedSource?.takeIf { it.sourcePath == stamped }?.contentFingerprint.orEmpty()
-                tabForStoredSource(DiagramSourceIdentity(stamped, fingerprint), null, related)
+                tabForStoredSource(DiagramSourceIdentity(stamped, fingerprint), null, related, parsed.document)
             }
             storedSource != null -> null
             else -> sharedDiagramSourceByFileName(parsed, sharedNote, related)
@@ -693,7 +717,7 @@ class Seq3Session(
         related: Set<String>,
     ): String? {
         if (storedSource != null && !storedSource.isNone) {
-            tabForStoredSource(storedSource, owner.id, related)?.let { return it }
+            tabForStoredSource(storedSource, owner.id, related, parsed.document)?.let { return it }
         }
         // Stop sharing wrote the log's identity into the diagram itself: that, not what the note happens to cite, says which log
         // it is about. A log that is not open is unavailable, never the owner's rows.
@@ -701,7 +725,7 @@ class Seq3Session(
         if (stamped != null) {
             if (stamped == (owner.sourcePath ?: owner.filename)) return owner.id
             val fingerprint = storedSource?.takeIf { it.sourcePath == stamped }?.contentFingerprint.orEmpty()
-            return tabForStoredSource(DiagramSourceIdentity(stamped, fingerprint), owner.id, related)
+            return tabForStoredSource(DiagramSourceIdentity(stamped, fingerprint), owner.id, related, parsed.document)
         }
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return owner.id
         val named = appState.tabs.filter { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }
@@ -759,18 +783,32 @@ class Seq3Session(
     }
 
     /**
-     * The open tab of the file [source] names: one tab of that path, else among several (a log and its reparsed copy) the one with
-     * the content fingerprint the library stored, and among equals [preferred], then a tab the note is about. Null when none is open.
+     * The open tab of the file [source] names, for the diagram [document]. Same-path tabs are not all the diagram's log: a reparse
+     * of the file under another profile has other rows and ids. So a loaded tab is chosen by, in order: the content fingerprint the
+     * library stored; else the tab whose rows agree with the diagram's own evidence (see [Seq3Document.evidenceSample], which
+     * survives the log growing, unlike the fingerprint). A loaded tab that disagrees is never returned. A tab whose rows are not
+     * resident cannot be checked: it is the answer only when it is the one candidate left (the click then re-checks the row, see
+     * [navigateToOccurrence]). Among equals [preferred], then a tab the note is about. A document with no occurrences has no
+     * evidence and keeps the plain rule: the sole tab of that path, else the fingerprint, else [preferred] or a related tab.
      */
-    private fun tabForStoredSource(source: DiagramSourceIdentity, preferred: String?, related: Set<String>): String? {
+    private fun tabForStoredSource(source: DiagramSourceIdentity, preferred: String?, related: Set<String>, document: Seq3Document): String? {
         val samePath = appState.tabs.filter { !it.isCaptureLauncher && (it.sourcePath ?: it.filename) == source.sourcePath }
-        if (samePath.size <= 1) return samePath.singleOrNull()?.id
-        val sameContent = samePath.filter { tab ->
-            tab.contentState == TabContentState.LOADED &&
-                runCatching { computeLogFingerprint(tab.logData) }.getOrNull() == source.contentFingerprint
+        if (samePath.size <= 1 && document.evidenceSample().isEmpty()) return samePath.singleOrNull()?.id
+
+        fun choose(pool: List<LogTab>): String? =
+            (pool.singleOrNull() ?: pool.firstOrNull { it.id == preferred } ?: pool.firstOrNull { it.id in related })?.id
+        val loaded = samePath.filter { it.contentState == TabContentState.LOADED }
+        val sameContent = loaded.filter { tab ->
+            source.contentFingerprint.isNotEmpty() && runCatching { computeLogFingerprint(tab.logData) }.getOrNull() == source.contentFingerprint
         }
-        val pool = sameContent.ifEmpty { samePath }
-        return (pool.singleOrNull() ?: pool.firstOrNull { it.id == preferred } ?: pool.firstOrNull { it.id in related })?.id
+        if (sameContent.isNotEmpty()) return choose(sameContent)
+        val sample = document.evidenceSample()
+        if (sample.isEmpty()) return choose(samePath)
+        val consistent = loaded.filter { tab -> sample.all { it.matchesRow(tab.rmap[it.entryId]) } }
+        if (consistent.isNotEmpty()) return choose(consistent)
+        // What cannot be checked: a tab whose rows are not resident, or one with several sections showing another section than the
+        // diagram's (a diagram does not record its section, and a section switch replaces the rows). Only a sole such tab is taken.
+        return samePath.filter { it.contentState != TabContentState.LOADED || it.logSections.size > 1 }.singleOrNull()?.id
     }
 
     /** Caller holds stateLock while moving these blocks to their new note. */
@@ -2769,4 +2807,33 @@ class Seq3Session(
         const val DRAFT_SAVE_DEBOUNCE_MS = 400L
         const val MAX_UNDO_DEPTH = 50
     }
+}
+
+/** How many occurrences from each end of the document's rows [evidenceSample] takes. */
+private const val EVIDENCE_SAMPLE_PER_END = 4
+
+/**
+ * A few of the diagram's own occurrences, the lowest and the highest row ids (up to [EVIDENCE_SAMPLE_PER_END] each), to check
+ * whether a log still has the rows the diagram was made from. Empty for a document with no occurrences.
+ */
+internal fun Seq3Document.evidenceSample(): List<Seq3Occurrence> {
+    val byId = HashMap<Int, Seq3Occurrence>()
+    for (message in messages) for (occurrence in message.occurrences) byId.putIfAbsent(occurrence.entryId, occurrence)
+    if (byId.size <= 2 * EVIDENCE_SAMPLE_PER_END) return byId.values.toList()
+    val ids = byId.keys.sorted()
+    return (ids.take(EVIDENCE_SAMPLE_PER_END) + ids.takeLast(EVIDENCE_SAMPLE_PER_END)).map { byId.getValue(it) }
+}
+
+/**
+ * True when [row] is the log row this occurrence was made from: the same raw timestamp and message text ([Seq3Generator] copies
+ * both from the row). A message that is only longer or shorter at its end still matches, since a multi-line record may have grown
+ * (or a tail re-read) since the diagram was made. False for no row.
+ */
+internal fun Seq3Occurrence.matchesRow(row: LogEntry?): Boolean {
+    if (row == null || row.ts != rawTimestamp) return false
+    val rowText = row.msg
+    if (rowText == text) return true
+    val shorter = if (rowText.length < text.length) rowText else text
+    val longer = if (rowText.length < text.length) text else rowText
+    return shorter.isNotBlank() && longer.startsWith(shorter)
 }

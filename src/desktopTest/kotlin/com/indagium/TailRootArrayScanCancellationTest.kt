@@ -16,6 +16,7 @@ import kotlin.test.assertTrue
 private const val WAIT_SECONDS = 15L
 private const val PROMPT_MS = 2_000L
 private const val BLOCK_SECONDS = 6L
+private const val TAILER_BLOCKS_MS = 1_300L
 
 /**
  * The scan that rebuilds a root-array JSON tail's state must never be waited for by a stop or a rotation: both run under stateLock,
@@ -114,5 +115,60 @@ class TailRootArrayScanCancellationTest {
         Thread.sleep(200)
         assertTrue(app.tab(tabId)!!.logData.any { it.msg == "x" })
         app.stopTailing(tabId)
+    }
+
+    /** Appends lines and gives the tailer (polling every 500 ms) time to pick them up and block on the scan inside its append. */
+    private fun appendAndLetTheTailerBlock(file: File, text: String) {
+        file.appendText(text)
+        Thread.sleep(TAILER_BLOCKS_MS)
+    }
+
+    private fun AppState.messages(tabId: String): List<String> = tab(tabId)!!.logData.map { it.msg }
+
+    @Test
+    fun stopThenStartAgainDoesNotWaitForTheScanTheOldTailerIsBlockedOn() {
+        val app = newState()
+        val (tabId, file) = tailWithBlockedScan(app, openArray)
+        appendAndLetTheTailerBlock(file, "   \"v\":1},\n")
+
+        app.stopTailing(tabId)
+        assertFalse(app.tab(tabId)!!.tailing)
+
+        // Before the fix the old tailer waited for the scan (6 s here), and a restart is refused until it has ended.
+        val started = System.nanoTime()
+        waitUntil("a restarted tail") {
+            app.startTailing(tabId)
+            app.tab(tabId)!!.tailing
+        }
+        val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        assertTrue(tookMs < PROMPT_MS, "the restart waited ${tookMs}ms for a scan that is blocked")
+
+        // The old tail's batch landed once, before the new tail's: nothing is doubled or reordered afterwards.
+        release.countDown()
+        file.appendText("  {\"message\":\"c\"}\n]\n")
+        waitUntil("the last row") { app.messages(tabId).contains("c") }
+        app.drainAndStopTailing(tabId)
+        assertEquals(listOf("a", "b", "c"), app.messages(tabId))
+    }
+
+    @Test
+    fun pausingReturnsPromptlyWhileTheScanIsBlockedAndResumeContinuesFromTheLastRow() {
+        val app = newState()
+        val (tabId, file) = tailWithBlockedScan(app, openArray)
+        appendAndLetTheTailerBlock(file, "   \"v\":1},\n")
+
+        val started = System.nanoTime()
+        assertTrue(app.pauseTailing(tabId))
+        val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        assertTrue(tookMs < PROMPT_MS, "the pause waited ${tookMs}ms for a scan that is blocked")
+        assertFalse(app.tab(tabId)!!.tailing)
+
+        release.countDown()
+        file.appendText("  {\"message\":\"c\"}\n]\n")
+        assertTrue(app.resumeTailing(tabId))
+        waitUntil("the last row after resume") { app.messages(tabId).contains("c") }
+        app.drainAndStopTailing(tabId)
+        // One row per record: the cancelled scan left the parser to be seeded from the last row, not scanned again or left unseeded.
+        assertEquals(listOf("a", "b", "c"), app.messages(tabId))
     }
 }

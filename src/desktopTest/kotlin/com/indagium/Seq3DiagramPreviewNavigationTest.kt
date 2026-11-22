@@ -162,7 +162,14 @@ class Seq3DiagramPreviewNavigationTest {
             monotonicNowNanos = { now },
         )
         try {
-            val file = File(root, "a.log").apply { writeText((1..4).joinToString("") { "10:00:00.000 I/Tag: row $it\n" }) }
+            // The file holds the rows the diagram was made from (its occurrences are checked against them after the load).
+            val file = File(root, "a.log").apply {
+                writeText(
+                    "06-26 10:00:00.000     $PID    $TID I Producer: start op\n" +
+                        "06-26 10:00:00.050     $PID    $TID I Consumer: handle op\n" +
+                        "06-26 10:00:00.060     $PID    $TID I Consumer: more\n",
+                )
+            }
             val rows = listOf(
                 LogEntry(1, "10:00:00.000", LogLevel.I, "Producer", "start op", PID, TID),
                 LogEntry(2, "10:00:00.050", LogLevel.I, "Consumer", "handle op", PID, TID),
