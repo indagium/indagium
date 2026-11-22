@@ -201,8 +201,8 @@ class VideoAttachmentTokenTest {
     fun tabTokenCarriesAttachedVideoAsFieldIndexEleven() {
         val original = tabFixture(VideoAttachment(path = "/videos/repro.mp4", sourceLabel = "/videos/repro.mp4"))
         val fields = original.tabToken().tokenFields()
-        // Later fields through the DLT column setting at index 24 leave the attachment at index 11.
-        assertEquals(25, fields.size)
+        // Later fields through the held filter criteria at index 25 leave the attachment at index 11.
+        assertEquals(26, fields.size)
         assertTrue(fields[11].isNotEmpty())
         assertEquals("/videos/repro.mp4", original.tabToken().tabShellFromToken()?.tab?.attachedVideo?.path)
     }

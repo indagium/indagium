@@ -539,6 +539,58 @@ internal fun normalizeFilterForCapabilities(
 private fun Filter.hasComponentFilterCriteria(): Boolean =
     activeTags.isNotEmpty() || excludeTags.isNotEmpty() || pkgPrefixes.isNotEmpty() || excludePkgPrefixes.isNotEmpty()
 
+/** A tab's filter, held criteria and notice once a load's rows are published. */
+internal data class PublishedFilterState(val filter: Filter, val heldFilterCriteria: Filter?, val notice: String?)
+
+/**
+ * The filter a tab carries once rows were loaded into it.
+ *
+ * Empty rows say nothing about what the file can filter by, so nothing is normalized: the filter and any held criteria stay as
+ * they are and no notice is shown. Otherwise the base is the held criteria while they still apply ([isTrimmedFormOf]), else the
+ * tab's current filter. When normalizing the base removes criteria the trimmed filter is shown and the base is held, so a later
+ * load that has the fields brings the criteria back; when nothing is removed nothing is held.
+ */
+internal fun filterForPublishedRows(
+    currentFilter: Filter,
+    held: Filter?,
+    rowsAreEmpty: Boolean,
+    capabilities: Map<LogCapability, LogCapabilityStatus>,
+    profile: LogFormatProfile?,
+): PublishedFilterState {
+    if (rowsAreEmpty) return PublishedFilterState(currentFilter, held, null)
+    val base = held?.takeIf { currentFilter.isTrimmedFormOf(it) } ?: currentFilter
+    val normalization = normalizeFilterForCapabilities(base, capabilities, profile)
+    return PublishedFilterState(
+        filter = normalization.filter,
+        heldFilterCriteria = base.takeIf { normalization.notice != null },
+        notice = normalization.notice,
+    )
+}
+
+/**
+ * True when this filter is [held] with some of the criteria normalization can remove (component, PID/TID, level) cleared, or
+ * untouched: nothing else differs. Checked against the filter itself rather than the capabilities that trimmed it, so it holds
+ * for whatever section or load produced the trim, and any later edit of another field makes the held criteria stop applying.
+ */
+private fun Filter.isTrimmedFormOf(held: Filter): Boolean {
+    val cleaned = held.copy(
+        activeTags = held.activeTags.filterNot(String::isBlank).toSet(),
+        excludeTags = held.excludeTags.filterNot(String::isBlank).toSet(),
+        pkgPrefixes = held.pkgPrefixes.filterNot(String::isBlank).toSet(),
+        excludePkgPrefixes = held.excludePkgPrefixes.filterNot(String::isBlank).toSet(),
+    )
+    val withoutTags = cleaned.copy(
+        activeTags = emptySet(), excludeTags = emptySet(), pkgPrefixes = emptySet(), excludePkgPrefixes = emptySet(),
+    )
+    // Bits 0..2 of the mask: which of the tag, PID/TID and level criteria this candidate drops.
+    return (0 until 8).any { mask ->
+        (if (mask and 1 != 0) withoutTags else cleaned).copy(
+            pidTidFilter = if (mask and 2 != 0) "" else cleaned.pidTidFilter,
+            levels = if (mask and 4 != 0) LogLevel.entries.toSet() else cleaned.levels,
+        ) == this
+    }
+}
+
 // What a freshly loaded tab carries while the stack/crash analysis still runs in the background:
 // tag counts immediately (cheap, the filter panel needs them), folding/crash data deferred.
 // processNames is computed here too, not only in buildLogAnalysis — a single tag-gated scan
@@ -18713,14 +18765,15 @@ class AppState(
     private fun enterLogSection(from: LogTab, sectionId: String): LogTab {
         val views = from.logSectionViews.toMutableMap()
         from.selectedLogSectionId?.let { shown ->
-            views[shown] = LogSectionViewState(from.filter, from.selected, from.expanded, from.manualBlocks)
+            views[shown] = LogSectionViewState(from.filter, from.selected, from.expanded, from.manualBlocks, from.heldFilterCriteria)
         }
         val view = views[sectionId] ?: LogSectionViewState()
         return from.copy(
             selectedLogSectionId = sectionId,
             inspectedRecordId = null,
             logSectionViews = views,
-            filter = view.filter, selected = view.selected, expanded = view.expanded, manualBlocks = view.manualBlocks,
+            filter = view.filter, heldFilterCriteria = view.heldFilterCriteria,
+            selected = view.selected, expanded = view.expanded, manualBlocks = view.manualBlocks,
             search = LogSearchState.EMPTY, searches = LogSearchSessions(),
         )
     }
@@ -18741,7 +18794,13 @@ class AppState(
             sourceClockId = current.sourcePath,
             sourceLookupSupported = sourceLookupConfigured(),
         )
-        val filterNormalization = normalizeFilterForCapabilities(current.filter, capabilities, loaded.profile)
+        val publishedFilter = filterForPublishedRows(
+            currentFilter = current.filter,
+            held = current.heldFilterCriteria,
+            rowsAreEmpty = publishedRows.isEmpty(),
+            capabilities = capabilities,
+            profile = loaded.profile,
+        )
         return current.copy(
             logData = publishedRows,
             rmap = publishedRmap,
@@ -18753,8 +18812,9 @@ class AppState(
             logSections = if (loaded.fromSectionIndex) current.logSections else loaded.logSections,
             selectedLogSectionId = loaded.selectedLogSectionId,
             logCapabilities = capabilities,
-            filter = filterNormalization.filter,
-            filterNormalizationNotice = filterNormalization.notice,
+            filter = publishedFilter.filter,
+            heldFilterCriteria = publishedFilter.heldFilterCriteria,
+            filterNormalizationNotice = publishedFilter.notice,
             profileFieldNames = publishedRows.asSequence().flatMap { it.profileFields.keys.asSequence() }.toSet(),
             profileClockSignature = loaded.profileClockSignature
                 ?: loaded.profile?.let { logFormatClockSignature(it, publishedRows, current.sourcePath) },

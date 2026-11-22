@@ -2,6 +2,8 @@ package com.indagium
 
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.ErrorHighlightStyle
+import com.indagium.model.Filter
+import com.indagium.model.LogLevel
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.SharedNoteInfo
@@ -313,9 +315,10 @@ class AutosaveSchedulerTest {
             base.copy(sharedNote = SharedNoteInfo("shared-1", "Pairing bug")),
             base.copy(notesView = "shared-1"),
             base.copy(dltSplitIdentifiers = true),
+            base.copy(heldFilterCriteria = Filter(levels = setOf(LogLevel.E))),
         )
 
-        assertEquals(25, base.persistedSnapshot().size)
+        assertEquals(26, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

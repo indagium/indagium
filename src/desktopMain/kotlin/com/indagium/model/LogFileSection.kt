@@ -16,4 +16,6 @@ data class LogSectionViewState(
     val selected: Set<Int> = emptySet(),
     val expanded: Set<String> = emptySet(),
     val manualBlocks: List<ManualCollapseBlock> = emptyList(),
+    /** The section's [LogTab.heldFilterCriteria], kept with its own filter so held criteria never leak into another section. */
+    val heldFilterCriteria: Filter? = null,
 )

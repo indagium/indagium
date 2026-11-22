@@ -65,6 +65,7 @@ class DltRowPresentationTest {
             .copy(sourcePath = "/tmp/capture.dlt", dltSplitIdentifiers = true)
         val token = tab.tabToken()
         assertEquals(true, token.tabShellFromToken()?.tab?.dltSplitIdentifiers)
-        assertEquals(false, token.substringBeforeLast('|').tabShellFromToken()?.tab?.dltSplitIdentifiers)
+        // Dropping the last two fields (held filter criteria, then the split choice) leaves a token from before the split field.
+        assertEquals(false, token.substringBeforeLast('|').substringBeforeLast('|').tabShellFromToken()?.tab?.dltSplitIdentifiers)
     }
 }

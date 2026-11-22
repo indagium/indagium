@@ -54,6 +54,7 @@ private const val ANN_ENTRY_USES_LEGACY_CLOCK_INDEX = 26
 private const val TAB_TOKEN_LOG_FORMAT_PROFILE_ID_INDEX = 17
 internal const val TAB_TOKEN_SHARED_NOTE_INDEX = 22
 private const val TAB_TOKEN_NOTES_VIEW_INDEX = 23
+private const val TAB_TOKEN_HELD_FILTER_INDEX = 25
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
 internal fun String.jsonStr(): String = buildString {
@@ -1801,7 +1802,7 @@ internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
     logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
-    selectedLogSectionId, sharedNote, notesView, dltSplitIdentifiers,
+    selectedLogSectionId, sharedNote, notesView, dltSplitIdentifiers, heldFilterCriteria,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1973,6 +1974,10 @@ internal fun LogTab.tabToken(): String {
         // Trailing field (23): which shared note this tab's Notes tile shows (a host id); empty = the tab's own note.
         notesView.orEmpty(),
         dltSplitIdentifiers.toString(),
+        // Trailing field (25): the filter as the user left it while capability normalization has trimmed criteria from
+        // `filter` (LogTab.heldFilterCriteria), as the same SavedFilter token as field 3. Blank when nothing is held, so
+        // tokens written before this field existed restore with null (tabShellFromToken reads it via getOrNull).
+        heldFilterCriteria?.asSavedFilterForToken()?.savedFilterToken().orEmpty(),
     )
 }
 
@@ -2088,6 +2093,8 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             // drops an id whose host no longer exists.
             notesView = p.getOrNull(TAB_TOKEN_NOTES_VIEW_INDEX)?.takeIf { it.isNotBlank() },
             dltSplitIdentifiers = p.getOrNull(24)?.toBooleanStrictOrNull() == true,
+            // Field index 25 (append-only); blank or missing means no criteria are held.
+            heldFilterCriteria = p.getOrNull(TAB_TOKEN_HELD_FILTER_INDEX)?.takeIf { it.isNotBlank() }?.savedFilterFromToken()?.toFilter(),
         ),
         source,
     )

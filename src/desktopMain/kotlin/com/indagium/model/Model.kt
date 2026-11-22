@@ -1153,6 +1153,14 @@ data class LogTab(
      * longer exists falls back to null.
      */
     val notesView: String? = null,
+    /**
+     * The filter as the user left it, kept while capability normalization has trimmed criteria (tag, PID/TID, level) from
+     * [filter] because the loaded rows lack those fields. It applies only while [filter] is still what trimming that held
+     * filter produces: the next load that has the fields restores the criteria, and any edit of [filter] since makes the
+     * held criteria stop applying (see AppState.filterForPublishedRows). Persisted in the tab token (AutosaveCodec),
+     * appended last; null on a tab that has nothing held.
+     */
+    val heldFilterCriteria: Filter? = null,
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */
