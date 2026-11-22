@@ -11,6 +11,7 @@ import java.nio.file.FileSystems
 import java.nio.file.StandardWatchEventKinds
 
 private const val NEWLINE_BYTE = '\n'.code.toByte()
+private const val UTF8_BOM_CHAR = "\uFEFF"
 private const val CARRIAGE_RETURN_BYTE = '\r'.code.toByte()
 
 // Caps a single readNewLines() allocation so a large backlog (app suspended, or a burst of many
@@ -254,9 +255,20 @@ class FileTailer(
             raf.readFully(bytes)
         }
         if (bytes.any { it == NEWLINE_BYTE || it == CARRIAGE_RETURN_BYTE }) return null
+        val line = String(bytes, Charsets.UTF_8).let { if (offset == 0L) it.removePrefix(UTF8_BOM_CHAR) else it }
         offset += bytes.size
-        return String(bytes, Charsets.UTF_8)
+        return line
     }
+
+    // A UTF-8 file starts with a byte order mark the reader that opens a file drops. A read that starts at byte 0 (the first read, or the
+    // one after a rotation) meets it as the first character of the first line, which would break a header column or make a Logcat
+    // line RAW. Offsets stay byte-exact: only the decoded text loses the mark.
+    private fun List<String>.withoutByteOrderMark(from: Long): List<String> =
+        if (from == 0L && isNotEmpty() && first().startsWith(UTF8_BOM_CHAR)) {
+            toMutableList().also { it[0] = it[0].removePrefix(UTF8_BOM_CHAR) }
+        } else {
+            this
+        }
 
     private fun readNewLines(fromOffset: Long): ReadResult {
         if (!file.exists()) return ReadResult(emptyList(), fromOffset, moreAvailable = false)
@@ -332,7 +344,7 @@ class FileTailer(
             if (lastBreakIdx < 0) return null
 
             val completeBytes = bytes.copyOfRange(0, lastBreakIdx + 1)
-            val lines = splitLines(String(completeBytes, Charsets.UTF_8))
+            val lines = splitLines(String(completeBytes, Charsets.UTF_8)).withoutByteOrderMark(from)
             val newOffset = from + completeBytes.size
             skipLeadingLf = completeBytes.last() == CARRIAGE_RETURN_BYTE
             return ReadResult(lines, newOffset, moreAvailable = newOffset < file.length())

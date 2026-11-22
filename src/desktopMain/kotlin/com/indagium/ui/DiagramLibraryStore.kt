@@ -483,6 +483,36 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
         }?.getOrNull()
 
     /**
+     * Re-points the attachments that name a block of [blockIds] in tab [fromTabId] to tab [toTabId]: the blocks moved to another note
+     * (Share, Stop sharing) keep their ids, so the library's back-reference must follow or a later delete of the block finds
+     * nothing and the item stays "Attached". One pass, one write, one reference per (tab, block) afterwards. Non-throwing: a
+     * blank or over-long [toTabId] changes nothing. Returns whether anything changed. Never call with the caller's state lock held (it writes to disk).
+     */
+    fun retargetAttachments(fromTabId: String, toTabId: String, blockIds: Collection<String>): Boolean {
+        if (fromTabId == toTabId || blockIds.isEmpty() || toTabId.isBlank() || toTabId.length > MAX_DIAGRAM_LIBRARY_ID_CHARS) return false
+        val moving = blockIds.toHashSet()
+        val changed = synchronized(lock) {
+            var any = false
+            val updated = LinkedHashMap<String, DiagramLibraryItem>(items.size)
+            items.forEach { (id, item) ->
+                if (item.attachments.none { it.tabId == fromTabId && it.blockId in moving }) {
+                    updated[id] = item
+                    return@forEach
+                }
+                any = true
+                val moved = item.attachments.map { if (it.tabId == fromTabId && it.blockId in moving) it.copy(tabId = toTabId) else it }
+                // The last of two references to one note block is the newer one.
+                val deduped = moved.asReversed().distinctBy { it.tabId to it.blockId }.asReversed()
+                updated[id] = item.copy(attachments = deduped)
+            }
+            if (any) items = updated
+            any
+        }
+        if (changed) runCatching { persist() }
+        return changed
+    }
+
+    /**
      * W3: the disk write — `writeFileAtomically` replaces the whole file — runs OUTSIDE [lock],
      * serialized instead by [writeLock] (mirrors `AutosaveScheduler`'s `schedulingLock`/`writerLock`
      * split; see that class's own header comment). save/update/delete each mutate `items` under

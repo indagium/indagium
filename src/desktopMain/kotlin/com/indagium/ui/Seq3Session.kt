@@ -31,6 +31,7 @@ import com.indagium.diagram3.applySeq3NoteSeeds
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
 import com.indagium.diagram3.importSeq3Source
+import com.indagium.diagram3.keepSeq3NoteSurroundings
 import com.indagium.diagram3.matchOneMessage
 import com.indagium.diagram3.normalizeSeq3FragmentSpans
 import com.indagium.diagram3.parseSeq3Note
@@ -212,9 +213,6 @@ data class Seq3WorkspaceSession(
 }
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
-
-/** [blocks] with updated diagram sources, and the changes by block id (null clears a stamp). */
-internal class StampedDiagramBlocks(val blocks: List<AnnBlock>, val stamps: Map<String, String?>)
 
 /** The longest source text, in characters, that an import accepts. */
 private const val SEQ3_SOURCE_IMPORT_MAX_CHARS = 2 * 1024 * 1024
@@ -706,7 +704,9 @@ class Seq3Session(
             }
         }
         val candidate = matching.singleOrNull()
-            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED }
+            // The only candidate may have unloaded its rows or be showing a different section of the same log: neither can be checked.
+            // A loaded single-section candidate whose rows disagree with the diagram is another log and stays rejected.
+            ?: candidates.singleOrNull()?.takeIf { evidence.isEmpty() || it.contentState != TabContentState.LOADED || it.logSections.size > 1 }
             ?: return null
         val closedSources = sharedNote.closedMembers.asSequence() + sharedNote.closedReferenceSources.asSequence()
         return candidate.id.takeUnless {
@@ -749,7 +749,7 @@ class Seq3Session(
     }
 
     /** Keeps a private diagram's known source when its note stops belonging to one log. Caller holds stateLock. */
-    internal fun stampSharedDiagramSources(owner: LogTab, blocks: List<AnnBlock>): StampedDiagramBlocks {
+    internal fun stampSharedDiagramSources(owner: LogTab, blocks: List<AnnBlock>): List<AnnBlock> {
         val related = tabsTheNoteIsAbout(owner)
         return rewriteDiagramSourcePaths(blocks) { note, parsed ->
             val document = parsed.document
@@ -771,7 +771,7 @@ class Seq3Session(
      * member/cited log of the document's file name (none or several: nothing is guessed).
      * A diagram returned to its own tab can follow that tab again. Caller holds stateLock.
      */
-    internal fun stampStoppedDiagramSources(host: LogTab, into: LogTab, blocks: List<AnnBlock>): StampedDiagramBlocks {
+    internal fun stampStoppedDiagramSources(host: LogTab, into: LogTab, blocks: List<AnnBlock>): List<AnnBlock> {
         val related = tabsTheNoteIsAbout(host)
         return rewriteDiagramSourcePaths(blocks) { _, parsed -> stoppedDiagramSourcePath(parsed, host, into, related) }
     }
@@ -779,18 +779,16 @@ class Seq3Session(
     private fun rewriteDiagramSourcePaths(
         blocks: List<AnnBlock>,
         sourcePath: (AnnBlock.Note, ParsedSeq3) -> String?,
-    ): StampedDiagramBlocks {
-        val stamps = LinkedHashMap<String, String?>()
+    ): List<AnnBlock> {
         val stamped = blocks.map { block ->
             val note = block as? AnnBlock.Note ?: return@map block
             val parsed = parseSeq3Note(note.text) ?: return@map block
             val path = sourcePath(note, parsed)
             if (path == parsed.document.sourcePath) return@map block
             val text = updateSeq3NoteSourcePath(note.text, path) ?: return@map block
-            stamps[block.id] = path
             note.copy(text = text)
         }
-        return StampedDiagramBlocks(stamped, stamps)
+        return stamped
     }
 
     private fun stoppedDiagramSourcePath(parsed: ParsedSeq3, host: LogTab, into: LogTab, related: Set<String>): String? {
@@ -852,16 +850,20 @@ class Seq3Session(
         return samePath.filter { it.contentState != TabContentState.LOADED || it.logSections.size > 1 }.singleOrNull()?.id
     }
 
-    /** Caller holds stateLock while moving these blocks to their new note. */
-    internal fun moveNoteOwner(fromTabId: String, toTabId: String, blocks: List<AnnBlock>, stamps: Map<String, String?> = emptyMap()) {
-        val movedIds = blocks.mapTo(HashSet()) { it.id }
+    /**
+     * Caller holds stateLock while moving these blocks to their new note. [blocks] are the blocks as they are in the new note: an
+     * open diagram takes the source its moved block names, whether or not the move changed it (the note is the truth), so the next
+     * Confirm never writes a different source than the note carries.
+     */
+    internal fun moveNoteOwner(fromTabId: String, toTabId: String, blocks: List<AnnBlock>) {
+        val moved = blocks.associateBy { it.id }
         sessions = sessions.map { session ->
-            if (session.noteTargetTabId == fromTabId && session.confirmedBlockId in movedIds) {
-                // An open diagram carries the same source as its moved block for the next Confirm.
-                val stamp = stamps[session.confirmedBlockId]
+            val block = if (session.noteTargetTabId == fromTabId) moved[session.confirmedBlockId] else null
+            if (block != null) {
+                val noted = (block as? AnnBlock.Note)?.let { parseSeq3Note(it.text) }
                 session.copy(
                     noteOwnerTabId = toTabId.takeUnless { it == session.sourceTabId },
-                    document = if (session.confirmedBlockId in stamps) session.document.copy(sourcePath = stamp) else session.document,
+                    document = if (noted != null) session.document.copy(sourcePath = noted.document.sourcePath) else session.document,
                 )
             } else {
                 session
@@ -1882,7 +1884,10 @@ class Seq3Session(
                 appState.updateBlock(
                     tabId,
                     blockId,
-                    encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment),
+                    keepSeq3NoteSurroundings(
+                        note.text,
+                        encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment),
+                    ),
                 )
             }
         }
@@ -2077,11 +2082,15 @@ class Seq3Session(
         // written choice — reuses this value rather than re-reading a since-changed setting.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val existing = existingBlock?.let { parseSeq3Note(it.text) }
-        val noteDocument = if (existing?.attachment == null && appState.sharedNoteHost(tabId) != null) {
-            val sourcePath = current.sourceTabId?.let(appState::tab)?.sourcePath
-            current.document.copy(sourcePath = sourcePath ?: current.document.sourcePath ?: existing?.document?.sourcePath)
-        } else {
-            current.document
+        val noteDocument = when {
+            existing?.attachment == null && appState.sharedNoteHost(tabId) != null -> {
+                val sourcePath = current.sourceTabId?.let(appState::tab)?.sourcePath
+                current.document.copy(sourcePath = sourcePath ?: current.document.sourcePath ?: existing?.document?.sourcePath)
+            }
+            // A private note keeps the log its block already names when the session lost it: never erase the note's own stamp.
+            existing != null && existing.attachment == null && current.document.sourcePath == null && existing.document.sourcePath != null ->
+                current.document.copy(sourcePath = existing.document.sourcePath)
+            else -> current.document
         }
         val text = encodeSeq3Note(
             noteDocument,
@@ -2089,7 +2098,8 @@ class Seq3Session(
             exportMode = exportMode,
             attachment = existing?.attachment,
         )
-        val blockId = current.confirmedBlockId?.also { appState.updateBlock(tabId, it, text) }
+        val blockId = current.confirmedBlockId
+            ?.also { appState.updateBlock(tabId, it, keepSeq3NoteSurroundings(existingBlock?.text, text)) }
             ?: appState.addNoteBlock(tabId, text)
         if (blockId != null) {
             val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
@@ -2101,6 +2111,9 @@ class Seq3Session(
                     draftSavedAtMillis = clock(),
                     libraryItemId = savedItem?.id ?: it.libraryItemId,
                     exportMode = exportMode,
+                    // The note is now the truth about which log the diagram is about: the session keeps what it wrote, so a
+                    // later Confirm (after the note moved to another owner) never erases it.
+                    document = it.document.copy(sourcePath = noteDocument.sourcePath),
                 )
             }
             syncLiveLinkedNote(id)
@@ -2331,7 +2344,7 @@ class Seq3Session(
             val parsed = parseSeq3Note(note.text) ?: return@mapNotNull null
             val attachment = parsed.attachment ?: return@mapNotNull null
             if (attachment.mode == Seq3AttachmentMode.LINKED && attachment.diagramId == libraryItemId) {
-                Triple(note.id, parsed, attachment)
+                Triple(note, parsed, attachment)
             } else {
                 null
             }
@@ -2381,7 +2394,7 @@ class Seq3Session(
                     )
                 }
                 resolveLibraryWrite(id, result)?.let { updated ->
-                    syncable.forEach { (blockId, parsed, attachment) ->
+                    syncable.forEach { (note, parsed, attachment) ->
                         val linkedText = encodeSeq3Note(
                             current.document,
                             current.dialect,
@@ -2389,7 +2402,7 @@ class Seq3Session(
                             exportMode,
                             attachment = attachment.copy(revision = updated.updatedAt),
                         )
-                        appState.updateBlock(tabId, blockId, linkedText)
+                        appState.updateBlock(tabId, note.id, keepSeq3NoteSurroundings(note.text, linkedText))
                     }
                     libraryRevision++
                     replace(id) {
@@ -2617,6 +2630,14 @@ class Seq3Session(
         val saved = result?.isSuccess == true
         if (saved) libraryRevision++
         return saved
+    }
+
+    /**
+     * Follows the library's back-references of diagram notes that moved from [fromTabId]'s note to [toTabId]'s (Share, Stop sharing; the
+     * block ids stay). Never call with the state lock held: the library writes to disk.
+     */
+    fun retargetLibraryAttachments(fromTabId: String, toTabId: String, blockIds: Collection<String>) {
+        if (libraryStore.retargetAttachments(fromTabId, toTabId, blockIds)) libraryRevision++
     }
 
     /** Removes the library's durable back-reference when a Note attachment is deleted. */

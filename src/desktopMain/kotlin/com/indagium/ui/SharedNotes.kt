@@ -263,16 +263,26 @@ internal fun AppState.createSharedNote(name: String, memberTabIds: List<String>)
  * tab gets a fresh private note that exports under a new name (never over the shared file). [tabId] is always a member.
  * Null (nothing changed) when the tab is not an open ordinary tab or an overwrite prompt is pending for it.
  */
-internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: List<String>): String? = synchronized(stateLock) {
+internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: List<String>): String? {
+    val moved = shareTabNoteLocked(tabId, name, memberTabIds) ?: return null
+    // The library's attachments follow the blocks to the host, after the lock: the library writes to disk.
+    seq3Sessions.retargetLibraryAttachments(tabId, moved.noteTabId, moved.blockIds)
+    return moved.noteTabId
+}
+
+/** The tab that holds the note after a move and the ids of the blocks that moved into it. */
+private class MovedNote(val noteTabId: String, val blockIds: List<String>)
+
+private fun AppState.shareTabNoteLocked(tabId: String, name: String, memberTabIds: List<String>): MovedNote? = synchronized(stateLock) {
     val tab = tabs.firstOrNull { it.id == tabId && !it.isCaptureLauncher } ?: return null
     // An in-flight edit lives only on pendingNoteOverwrite.pendingTab: moving the note now would race its resolution.
     if (pendingNoteOverwrite?.tabId == tabId) return null
     val members = eligibleMemberIds(listOf(tabId) + memberTabIds)
     val annotations = tab.annotations.ownedBy(tab)
-    val shared = seq3Sessions.stampSharedDiagramSources(tab, annotations.blocks)
+    val sharedBlocks = seq3Sessions.stampSharedDiagramSources(tab, annotations.blocks)
     val host = newSharedNoteHost(name, members).let {
         it.copy(
-            annotations = annotations.copy(blocks = shared.blocks),
+            annotations = annotations.copy(blocks = sharedBlocks),
             // The tab's pinned file goes with its note; a tab that had none leaves the host the free pin it was made with.
             noteTargetName = tab.noteTargetName ?: it.noteTargetName,
             recoveredNoteRows = tab.recoveredNoteRows,
@@ -298,8 +308,8 @@ internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: Li
             member.copy(notesView = host.id)
         }
     }
-    seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks, shared.stamps)
-    host.id
+    seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks)
+    MovedNote(host.id, host.annotations.blocks.map { it.id })
 }
 
 // ── Members, rename, stop sharing, delete ────────────────────────────────────────────────────
@@ -338,32 +348,39 @@ internal fun AppState.renameSharedNote(hostId: String, name: String): Boolean = 
  * its own private note holds anything and [replaceExisting] is false (the UI confirms, then asks again with true), or when
  * an overwrite prompt is pending for the note or the tab.
  */
-internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExisting: Boolean = false): Boolean =
+internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExisting: Boolean = false): Boolean {
+    val moved = stopSharingLocked(hostId, intoTabId, replaceExisting) ?: return false
+    // The library's attachments follow the blocks to the recipient, after the lock: the library writes to disk.
+    seq3Sessions.retargetLibraryAttachments(hostId, intoTabId, moved.blockIds)
+    return true
+}
+
+private fun AppState.stopSharingLocked(hostId: String, intoTabId: String, replaceExisting: Boolean): MovedNote? =
     synchronized(stateLock) {
-        val host = sharedNoteHost(hostId) ?: return false
-        val tab = tabs.firstOrNull { it.id == intoTabId } ?: return false
-        if (intoTabId !in host.sharedNote?.memberTabIds.orEmpty()) return false
+        val host = sharedNoteHost(hostId) ?: return null
+        val tab = tabs.firstOrNull { it.id == intoTabId } ?: return null
+        if (intoTabId !in host.sharedNote?.memberTabIds.orEmpty()) return null
         val pending = pendingNoteOverwrite
-        if (pending != null && (pending.tabId == hostId || pending.tabId == intoTabId)) return false
-        if (!replaceExisting && privateNoteHasContent(tab)) return false
+        if (pending != null && (pending.tabId == hostId || pending.tabId == intoTabId)) return null
+        if (!replaceExisting && privateNoteHasContent(tab)) return null
         // The host's record of closed logs goes with the citations: without it the transferred note could no longer reopen them.
         val cited = host.annotations.blocks.citedSourceTabIds()
         val carriedSources = host.sharedNote?.let { (it.closedMembers + it.closedReferenceSources) }.orEmpty()
             .filter { it.tabId in cited }
             .distinctBy { it.tabId }
         // The diagrams record their log before the shared note (their evidence) is gone, in the same write as the move.
-        val returned = seq3Sessions.stampStoppedDiagramSources(host, tab, host.annotations.blocks)
+        val returnedBlocks = seq3Sessions.stampStoppedDiagramSources(host, tab, host.annotations.blocks)
         val recipient = tab.copy(
-            annotations = host.annotations.copy(blocks = returned.blocks).returnedTo(intoTabId),
+            annotations = host.annotations.copy(blocks = returnedBlocks).returnedTo(intoTabId),
             noteTargetName = stoppedSharedNotePin(host, tab),
             recoveredNoteRows = host.recoveredNoteRows.ifEmpty { tab.recoveredNoteRows },
             noteClosedSources = carriedSources,
         )
         updateTabsLocked(setOf(intoTabId)) { recipient }
-        seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks, returned.stamps)
+        seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks)
         deleteSharedNote(hostId)
         persistStoppedSharedNote(host, recipient)
-        true
+        MovedNote(intoTabId, recipient.annotations.blocks.map { it.id })
     }
 
 /** True when the tab's private note holds something worth confirming over: blocks, text, or a prefix other than the seeded one. */

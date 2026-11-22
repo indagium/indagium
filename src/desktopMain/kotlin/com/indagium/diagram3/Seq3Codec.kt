@@ -283,33 +283,56 @@ fun seq3HeaderJsonChars(encoded: String): Int? {
  *  gate. */
 fun seq3NoteWithinBounds(encoded: String): Boolean = (seq3HeaderJsonChars(encoded) ?: 0) <= MAX_SEQ3_HEADER_CHARS
 
+/**
+ * [encoded] (a freshly encoded diagram note) spliced into [oldText]'s place: the whitespace before the old header and everything after
+ * the old closing fence line (prose the note carries beside the diagram) are kept, so a metadata rewrite or a re-encode never deletes
+ * text [parseSeq3Note] accepts. [oldText] null, or not a diagram note, gives [encoded] itself.
+ */
+fun keepSeq3NoteSurroundings(oldText: String?, encoded: String): String {
+    val parsed = oldText?.let(::parseSeq3Note) ?: return encoded
+    return spliceSeq3Note(oldText, parsed, encoded)
+}
+
+private fun spliceSeq3Note(oldText: String, parsed: ParsedSeq3, encoded: String): String {
+    val leading = oldText.substring(0, oldText.length - oldText.trimStart().length)
+    return leading + encoded + oldText.substring(parsed.fenceRange.last + 1)
+}
+
 /** Returns [noteText] rewritten with a new caption, or null for a non-v3-diagram note. Mirrors
  *  `diagram.updateDiagramNoteCaption`: re-encodes the whole note from the parsed document/dialect/
  *  source so the fenced body — and therefore [Seq3Codec]'s own hash — is preserved verbatim. */
 fun updateSeq3NoteCaption(noteText: String, caption: String): String? {
     val parsed = parseSeq3Note(noteText) ?: return null
-    return encodeSeq3Note(
-        parsed.document,
-        parsed.dialect,
-        caption,
-        parsed.exportMode,
-        attachment = parsed.attachment,
-        sourceOverride = parsed.source,
-        sourceHashOverride = parsed.sourceHash,
+    return spliceSeq3Note(
+        noteText,
+        parsed,
+        encodeSeq3Note(
+            parsed.document,
+            parsed.dialect,
+            caption,
+            parsed.exportMode,
+            attachment = parsed.attachment,
+            sourceOverride = parsed.source,
+            sourceHashOverride = parsed.sourceHash,
+        ),
     )
 }
 
 /** Returns [noteText] rewritten with [exportMode], or null for a non-v3-diagram note. */
 fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): String? {
     val parsed = parseSeq3Note(noteText) ?: return null
-    return encodeSeq3Note(
-        parsed.document,
-        parsed.dialect,
-        parsed.caption,
-        exportMode,
-        attachment = parsed.attachment,
-        sourceOverride = parsed.source,
-        sourceHashOverride = parsed.sourceHash,
+    return spliceSeq3Note(
+        noteText,
+        parsed,
+        encodeSeq3Note(
+            parsed.document,
+            parsed.dialect,
+            parsed.caption,
+            exportMode,
+            attachment = parsed.attachment,
+            sourceOverride = parsed.source,
+            sourceHashOverride = parsed.sourceHash,
+        ),
     )
 }
 
@@ -317,14 +340,18 @@ fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): S
  *  fenced body is carried through verbatim, like [updateSeq3NoteCaption]. */
 fun updateSeq3NoteSourcePath(noteText: String, sourcePath: String?): String? {
     val parsed = parseSeq3Note(noteText) ?: return null
-    return encodeSeq3Note(
-        parsed.document.copy(sourcePath = sourcePath),
-        parsed.dialect,
-        parsed.caption,
-        parsed.exportMode,
-        attachment = parsed.attachment,
-        sourceOverride = parsed.source,
-        sourceHashOverride = parsed.sourceHash,
+    return spliceSeq3Note(
+        noteText,
+        parsed,
+        encodeSeq3Note(
+            parsed.document.copy(sourcePath = sourcePath),
+            parsed.dialect,
+            parsed.caption,
+            parsed.exportMode,
+            attachment = parsed.attachment,
+            sourceOverride = parsed.source,
+            sourceHashOverride = parsed.sourceHash,
+        ),
     )
 }
 
@@ -360,13 +387,17 @@ fun adoptSeq3NoteSource(noteText: String): String? {
         if (current.mode == Seq3AttachmentMode.LINKED) current.copy(diagramId = null, mode = Seq3AttachmentMode.SNAPSHOT, revision = null)
         else current
     }
-    return encodeSeq3Note(
-        parsed.document,
-        parsed.dialect,
-        parsed.caption,
-        DiagramExportMode.SOURCE,
-        attachment = attachment,
-        sourceOverride = parsed.source,
+    return spliceSeq3Note(
+        noteText,
+        parsed,
+        encodeSeq3Note(
+            parsed.document,
+            parsed.dialect,
+            parsed.caption,
+            DiagramExportMode.SOURCE,
+            attachment = attachment,
+            sourceOverride = parsed.source,
+        ),
     )
 }
 

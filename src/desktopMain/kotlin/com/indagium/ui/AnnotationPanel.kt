@@ -86,6 +86,7 @@ import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.adoptSeq3NoteSource
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.importSeq3Source
+import com.indagium.diagram3.keepSeq3NoteSurroundings
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.diagram3.updateSeq3NoteExportMode
@@ -3167,13 +3168,16 @@ private fun DiagramNoteView(
                                     if (imported.evidenceLoss) {
                                         pendingEvidenceImport = imported
                                     } else if (!linked) {
-                                        encodeSeq3Note(
-                                            imported.document,
-                                            parsed.dialect,
-                                            parsed.caption,
-                                            parsed.exportMode,
-                                            attachment = parsed.attachment,
-                                            sourceOverride = imported.canonicalSource,
+                                        keepSeq3NoteSurroundings(
+                                            noteText,
+                                            encodeSeq3Note(
+                                                imported.document,
+                                                parsed.dialect,
+                                                parsed.caption,
+                                                parsed.exportMode,
+                                                attachment = parsed.attachment,
+                                                sourceOverride = imported.canonicalSource,
+                                            ),
                                         ).let(onUpdateDiagramText)
                                     }
                                 }
@@ -3227,8 +3231,11 @@ private fun DiagramNoteView(
                                 }
                             } else {
                                 val success = pendingEvidenceImport ?: return@clickable
-                                encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment,
-                                    sourceOverride = success.canonicalSource).let(onUpdateDiagramText)
+                                keepSeq3NoteSurroundings(
+                                    noteText,
+                                    encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment,
+                                        sourceOverride = success.canonicalSource),
+                                ).let(onUpdateDiagramText)
                                 pendingEvidenceImport = null
                             }
                         } else Modifier).padding(3.dp)) { AppText("Import anyway", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }

@@ -9238,10 +9238,25 @@ class AppState(
     fun toggleSeq(tabId: String) = upFlt(tabId) { it.copy(seqOn = !it.seqOn) }
 
     fun clearFilter(tabId: String) {
-        upFlt(tabId, trackDraft = false) { Filter() }
+        synchronized(stateLock) {
+            upFlt(tabId, trackDraft = false) { Filter() }
+            dropHeldFilterCriteria(tabId)
+        }
         activeSavedFilterIds = activeSavedFilterIds - tabId
         clearDraftForTab(tabId)
         transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
+    }
+
+    /**
+     * Forgets the criteria a load set aside (and the notice that says so) even when the visible filter did not change: [upFlt] clears
+     * them only on a change, and a visible filter already trimmed to what this one sets would otherwise keep a held preset that a later
+     * load with the missing fields brings back over the user's explicit choice. Takes stateLock, like [upTab].
+     */
+    private fun dropHeldFilterCriteria(tabId: String) = synchronized(stateLock) {
+        val tab = noteTab(tabId) ?: return@synchronized
+        if (tab.heldFilterCriteria != null || tab.filterNormalizationNotice != null) {
+            upTab(tabId) { it.copy(filterNormalizationNotice = null, heldFilterCriteria = null) }
+        }
     }
 
     fun requestClearFilter(tabId: String) {
@@ -9864,7 +9879,10 @@ class AppState(
             return
         }
         if (sf.id == filterDraftsByTab[tabId]?.id) {
-            upFlt(tabId, trackDraft = false) { _ -> sf.toFilter() }
+            synchronized(stateLock) {
+                upFlt(tabId, trackDraft = false) { _ -> sf.toFilter() }
+                dropHeldFilterCriteria(tabId)
+            }
             activeSavedFilterIds = activeSavedFilterIds - tabId
             activeFilterDraftTabIds = activeFilterDraftTabIds + tabId
             return
