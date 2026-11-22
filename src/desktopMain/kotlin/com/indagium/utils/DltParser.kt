@@ -42,6 +42,12 @@ data class ParsedLog(
     /** Set when a plain metadata JSON file was parsed from its bytes: where each section lives, for switching sections later. */
     val metadataSectionIndex: MetadataJsonSectionIndex? = null,
     val csvColumns: List<String> = emptyList(),
+    /**
+     * Runtime-only: the byte length of the source file measured BEFORE it was read (null when the rows did not come from one
+     * plain file, or it was not measured). A tail uses it to prove the file is unchanged since this parse; growth during the parse
+     * can only make that proof fail, never wrongly pass.
+     */
+    val sourceByteLength: Long? = null,
 ) {
     val capabilities: Map<com.indagium.model.LogCapability, com.indagium.model.LogCapabilityStatus> by lazy {
         profile?.let { com.indagium.model.deriveLogCapabilities(it, entries, sourceClockId = sourceClockId) }.orEmpty()

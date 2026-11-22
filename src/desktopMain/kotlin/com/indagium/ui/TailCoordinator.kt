@@ -10,6 +10,7 @@ import com.indagium.utils.FileTailer
 import com.indagium.utils.FilterPlan
 import com.indagium.utils.IncrementalProfileParser
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.TrailingPartialLine
 import com.indagium.utils.appendLogEntries
 import com.indagium.utils.appendMapped
 import com.indagium.utils.computeMessageTemplates
@@ -23,6 +24,7 @@ import com.indagium.utils.mergeTagPids
 import com.indagium.utils.parseLogcatLines
 import com.indagium.utils.parseProfileLines
 import com.indagium.utils.passesFilter
+import com.indagium.utils.trailingPartialLine
 import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -34,9 +36,13 @@ import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+// How long drainAndStopTailing lets a root-array scan finish before it gives the scan up.
+private const val SEEDING_GRACE_MS = 400L
+
 // Extracted from AppState (Task 12 slice 2, mechanical — no behavior change): owns live file
 // tailing — starting/stopping a FileTailer per tab, appending newly tailed lines into the owning
 // AppState's tabs list, and debouncing the follow-up full analysis refresh each batch triggers.
+//
 // Synchronizes on AppState.stateLock (internal, not private, for exactly this reason) so its
 // tabs-list writes stay atomic with every other stateLock-guarded mutation — see upTab's doc
 // comment on AppState for the invariant this preserves.
@@ -132,14 +138,15 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // into NULs and split lines at the wrong byte boundary, so static import supports it but
         // live watching remains unavailable until a streaming decoder is designed for it.
         if (isUtf16LogFile(file)) return
+        val unfinished = unfinishedLineToTail(profile, startOffset, file)
         // A CSV needs its header row again (line 1 is in no later batch); without it there is no tail.
-        val parser = profileParserForTail(profile, t, file)
+        val parser = profileParserForTail(profile, t, file, unfinished)
         if (profile != null && engine != com.indagium.model.LogFormatEngine.LOGCAT && parser == null) return
         val tailer = FileTailer(
             file,
             onNewLines = { newLines -> appendTailedLines(tabId, newLines) },
             pollIntervalMs = pollIntervalMs,
-            startOffset = startOffset,
+            startOffset = tailStartOffset(parser, unfinished, startOffset),
             onRestart = { restartParserForRewrittenFile(tabId) },
         )
         synchronized(ownership) {
@@ -175,19 +182,35 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             val profile = appState.pinnedLogFormatProfile(tabId) ?: return
             appendTailedLines(tabId, emptyList(), flushing = old)
             parsers[tabId] = IncrementalProfileParser(profile, tab.sourcePath)
-            appState.upTab(tabId) { it.copy(profileSourceLineCount = 0L) }
+            appState.upTab(tabId) { it.copy(profileSourceLineCount = 0L, profileSourceByteLength = null) }
         }
     }
+
+    // A profile file the tab read up to an unfinished last line: the tailer starts at that line's first byte and the parser takes the
+    // line it delivers whole as the replacement of the row the tab shows, instead of the rest of it arriving as a line of its own.
+    // Logcat tabs (and a capture, which names its own start) are deliberately left as they were in v1.9.2: they start at the end
+    // of the file.
+    private fun unfinishedLineToTail(profile: com.indagium.model.LogFormatProfile?, startOffset: Long?, file: File): TrailingPartialLine? {
+        val profileTab = profile != null && profile.engine != com.indagium.model.LogFormatEngine.LOGCAT
+        return if (startOffset == null && profileTab) trailingPartialLine(file) else null
+    }
+
+    // Where the tailer starts: at the unfinished line when [parser] will treat it as a replacement, else where the caller said.
+    private fun tailStartOffset(parser: IncrementalProfileParser?, unfinished: TrailingPartialLine?, startOffset: Long?): Long? =
+        if (parser?.replacesLastLine == true) unfinished?.startOffset else startOffset
 
     private fun profileParserForTail(
         profile: com.indagium.model.LogFormatProfile?,
         tab: LogTab,
         file: File,
+        unfinished: TrailingPartialLine?,
     ): IncrementalProfileParser? {
         if (profile == null || profile.engine == com.indagium.model.LogFormatEngine.LOGCAT) return null
         // The lines the tab has consumed bound a root-array JSON scan, so it rebuilds the state at the tab's own end of file.
         val consumed = tab.profileSourceLineCount ?: tab.logData.lastOrNull()?.sourceEndLine
-        return IncrementalProfileParser.forFile(profile, tab.sourcePath, file, tab.logData, consumed)
+        return IncrementalProfileParser.forFile(
+            profile, tab.sourcePath, file, tab.logData, consumed, unfinished, tab.profileSourceByteLength,
+        )
     }
 
     // Whether [tabId] already has a tailer in any state (running, being paused, paused, being drained).
@@ -336,12 +359,20 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         if (paused != null) {
             AppLogger.info("tail", "Stopped a paused tab without draining its backlog")
             // The record it still holds belongs to the backlog that memory pressure kept out.
-            parsers.remove(tabId)
+            parsers.remove(tabId)?.cancelSeeding()
             stopTailing(tabId)
             return
         }
         try {
             if (active != null) {
+                // A root-array scan that has not finished within a short grace is given up, not waited for: the few lines drained
+                // below are then seeded from the tab's last row, which is what every other engine does. (The tailer thread may be
+                // waiting for that scan, so this comes before the join, which would otherwise wait for it too.) A scan of an
+                // ordinary file is done well inside the grace, so a drain right after the tail started still sees the exact state.
+                parsers[tabId]?.let { parser ->
+                    parser.awaitSeeding(SEEDING_GRACE_MS)
+                    parser.cancelSeeding()
+                }
                 runBlocking { active.job.cancelAndJoin() }
                 active.tailer.drainToEndOfFile(includeTrailingPartialLine) { batch -> appendTailedLines(tabId, batch) }
                 parsers[tabId]?.let { appendTailedLines(tabId, emptyList(), flushing = it) }
@@ -358,7 +389,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         activeTails.remove(tabId)?.job?.cancel()
         pausing.remove(tabId)?.job?.cancel()
         pausedTails.remove(tabId)
-        parsers.remove(tabId)
+        parsers.remove(tabId)?.cancelSeeding()
         tailTimeEvidence.remove(tabId)
         analysisDebouncer.cancel(tabId)
     }
@@ -367,6 +398,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         activeTails.clear()
         pausing.clear()
         pausedTails.clear()
+        parsers.values.forEach { it.cancelSeeding() }
         parsers.clear()
         tailTimeEvidence.clear()
         analysisDebouncer.clear()
@@ -520,6 +552,8 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                         logCapabilities = nextCapabilities,
                         profileClockSignature = nextClockSignature,
                         profileSourceLineCount = parsedProfileBatch?.sourceLineCount ?: cur.profileSourceLineCount,
+                        // The recorded length describes the parse, not what the tail has read since.
+                        profileSourceByteLength = null,
                         profileFieldNames = derived.profileFieldNames,
                         rmap = mkRmap(nextData),
                         // largeFileMode is normally decided once at open time from the file's
@@ -546,7 +580,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // Caller holds stateLock.
     private fun recordConsumedLines(tabId: String, sourceLineCount: Long?) {
         appState.tabs = appState.tabs.map { cur ->
-            if (cur.id == tabId) cur.copy(profileSourceLineCount = sourceLineCount ?: cur.profileSourceLineCount) else cur
+            if (cur.id == tabId) {
+                cur.copy(profileSourceLineCount = sourceLineCount ?: cur.profileSourceLineCount, profileSourceByteLength = null)
+            } else {
+                cur
+            }
         }
     }
 

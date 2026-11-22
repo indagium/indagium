@@ -263,6 +263,83 @@ class FileTailerTest {
         assertEquals(listOf("lines:old one,old two", "restart", "lines:new"), events)
     }
 
+    // A tail started at an unfinished last line's first byte (offset 0 for a one-line file) holds an offset far below the end of the
+    // file. A rewrite shorter than the file was but longer than that offset is still a rotation, not a continuation.
+    @Test
+    fun aRewriteShorterThanBeforeButPastTheOffsetStillAnnouncesARestart() {
+        val dir = createTempDirectory("openlog-tail-restart-partial").toFile()
+        val file = File(dir, "out.log").apply { writeText("the one unfinished line of the old file") }
+        val events = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(
+            file,
+            onNewLines = { lines -> events.add("lines:" + lines.joinToString(",")) },
+            pollIntervalMs = 50,
+            startOffset = 0L,
+            onRestart = { events.add("restart") },
+        )
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            file.writeText("new a\nnew b\n")
+            waitUntil { events.any { it.startsWith("lines:") } }
+            Thread.sleep(300)
+            assertEquals(listOf("restart", "lines:new a,new b"), events.toList())
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
+    // The same blind spot without a started-at-the-line tail: a partial line held back leaves the offset below the file's end.
+    @Test
+    fun aRewriteShorterThanBeforeButPastAHeldBackPartialLinesOffsetAnnouncesARestart() {
+        val dir = createTempDirectory("openlog-tail-restart-held").toFile()
+        val file = File(dir, "out.log").apply { writeText("one\ntwo\nthree is not finished") }
+        val events = mutableListOf<String>()
+        val tailer = FileTailer(
+            file,
+            onNewLines = {},
+            pollIntervalMs = 60_000,
+            startOffset = 0L,
+            onRestart = { events.add("restart") },
+        )
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            tailer.drainToEndOfFile { events.add("lines:" + it.joinToString(",")) }
+            assertEquals(8L, tailer.currentOffset, "the partial line is held back")
+            // Longer than the offset (8), shorter than the old file (29).
+            file.writeText("aaa\nbbbb\ncc\n")
+            tailer.drainToEndOfFile { events.add("lines:" + it.joinToString(",")) }
+            assertEquals(listOf("lines:one,two", "restart", "lines:aaa,bbbb,cc"), events)
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
+    // A pause must not forget how long the file was: a rewrite while paused is announced on resume.
+    @Test
+    fun aRewriteWhilePausedIsAnnouncedAfterResume() {
+        val dir = createTempDirectory("openlog-tail-restart-paused").toFile()
+        val file = File(dir, "out.log").apply { writeText("an unfinished line that is long") }
+        val restarts = AtomicInteger()
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { received.addAll(it) }, pollIntervalMs = 50, startOffset = 0L, onRestart = { restarts.incrementAndGet() })
+        val scope = newScope()
+        try {
+            runBlocking { tailer.start(scope).cancelAndJoin() }
+            file.writeText("x\ny\n")
+            val resumed = tailer.resume(scope)
+            waitUntil { received.size >= 2 }
+            assertEquals(1, restarts.get())
+            assertEquals(listOf("x", "y"), received.toList())
+            resumed.cancel()
+        } finally {
+            scope.cancel()
+        }
+    }
+
     // P-04: readNewLines() caps a single read at a few MB instead of allocating one buffer sized
     // to the whole unread delta. A burst bigger than that cap must still be drained completely,
     // in order, without loss or duplication — start()'s inner drain loop must keep re-reading

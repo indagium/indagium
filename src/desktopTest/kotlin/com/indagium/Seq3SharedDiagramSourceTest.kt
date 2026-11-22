@@ -1,5 +1,8 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.encodeSeq3Note
+import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -153,5 +156,287 @@ class Seq3SharedDiagramSourceTest {
             state.close()
             root.deleteRecursively()
         }
+    }
+
+    /** A diagram made from "a", confirmed into a's note, then moved with a's whole note into a shared note over a and b. */
+    private fun sharedDiagramFromA(state: AppState): Pair<String, String> {
+        val coordinator = state.seq3Sessions
+        val original = assertNotNull(coordinator.begin("a", setOf(1, 2)))
+        await { coordinator.sessions.firstOrNull { it.id == original }?.generating == false }
+        val blockId = assertNotNull(coordinator.confirm(original))
+        coordinator.close(original)
+        val hostId = assertNotNull(state.shareTabNote("a", "Investigation", listOf("a", "b")))
+        return hostId to blockId
+    }
+
+    private fun noteDocument(state: AppState, tabId: String, blockId: String): Seq3Document {
+        val block = state.tab(tabId)!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note
+        return assertNotNull(parseSeq3Note(block.text)).document
+    }
+
+    @Test
+    fun confirmingAMovedDiagramUpdatesItsBlockInTheNoteItSitsInAndTheSessionIsFoundAgain() {
+        val root = createTempDirectory("indagium-seq3-moved-confirm").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            assertTrue(state.stopSharing(hostId, "b"))
+            val notesOfA = state.tab("a")!!.annotations
+
+            val editing = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertEquals("a", coordinator.sessions.single().sourceTabId)
+            assertEquals("b", coordinator.sessions.single().noteTargetTabId, "the diagram is written back to the note it sits in")
+            coordinator.updateTitle(editing, "Renamed in b")
+            val written = assertNotNull(coordinator.confirm(editing))
+
+            assertEquals(blockId, written, "the same block is updated in place")
+            assertEquals("Renamed in b", noteDocument(state, "b", blockId).title)
+            assertEquals(1, state.tab("b")!!.annotations.blocks.size)
+            assertEquals(notesOfA, state.tab("a")!!.annotations, "a's note is untouched")
+            assertEquals(editing, coordinator.beginEdit("b", blockId), "reopening finds the same session")
+            assertEquals(1, coordinator.sessions.size)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aMovedDiagramWhoseLogIsClosedStillConfirmsIntoTheNoteItSitsIn() {
+        val root = createTempDirectory("indagium-seq3-moved-offline-confirm").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            assertTrue(state.stopSharing(hostId, "b"))
+            state.closeTab("a")
+
+            val editing = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertNull(coordinator.sessions.single().sourceTabId)
+            assertEquals("b", coordinator.sessions.single().noteTargetTabId)
+            coordinator.updateTitle(editing, "Offline edit")
+            assertEquals(blockId, coordinator.confirm(editing))
+            assertEquals("Offline edit", noteDocument(state, "b", blockId).title)
+            assertEquals(editing, coordinator.beginEdit("b", blockId))
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aDiagramAloneInASharedNoteKeepsItsOpenLogAfterStopSharingEvenWhenNothingCitesIt() {
+        val root = createTempDirectory("indagium-seq3-stamp-open").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            assertTrue(state.stopSharing(hostId, "b"))
+
+            assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath)
+            val reopened = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertEquals("a", coordinator.sessions.single { it.id == reopened }.sourceTabId)
+            coordinator.close(reopened)
+
+            // The log closed after Stop sharing: nothing may stand in for it, b's rows least of all.
+            state.closeTab("a")
+            val without = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertNull(coordinator.sessions.single { it.id == without }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aDiagramAloneInASharedNoteWhoseLogClosedBeforeStopSharingIsUnavailableNotTheRecipients() {
+        val root = createTempDirectory("indagium-seq3-stamp-closed-member").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            state.closeTab("a")
+            assertTrue(state.stopSharing(hostId, "b"))
+
+            assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath)
+            val reopened = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertNull(coordinator.sessions.single { it.id == reopened }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aDiagramMadeFromTheRecipientItselfIsNotStamped() {
+        val root = createTempDirectory("indagium-seq3-stamp-none").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            state.activateTab("b")
+            val original = assertNotNull(coordinator.begin("b", setOf(1, 2)))
+            await { coordinator.sessions.firstOrNull { it.id == original }?.generating == false }
+            val blockId = assertNotNull(coordinator.confirm(original))
+            coordinator.close(original)
+            val hostId = assertNotNull(state.shareTabNote("b", "Investigation", listOf("a", "b")))
+            assertTrue(state.stopSharing(hostId, "b"))
+
+            assertNull(noteDocument(state, "b", blockId).sourcePath, "its log is the recipient itself")
+            val reopened = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertEquals("b", coordinator.sessions.single { it.id == reopened }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aStampedDiagramKeepsItsLogThroughAnEditAndConfirmInTheRecipientsNote() {
+        val root = createTempDirectory("indagium-seq3-stamp-confirm").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            assertTrue(state.stopSharing(hostId, "b"))
+            val editing = assertNotNull(coordinator.beginEdit("b", blockId))
+            coordinator.updateTitle(editing, "Edited")
+            assertEquals(blockId, coordinator.confirm(editing))
+            coordinator.close(editing)
+
+            assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath, "the stamp survives the confirm")
+            state.closeTab("a")
+            val reopened = assertNotNull(coordinator.beginEdit("b", blockId))
+            assertNull(coordinator.sessions.single { it.id == reopened }.sourceTabId, "a's log is closed: b's rows are not the diagram's")
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun anOpenSessionOnTheMovedDiagramCarriesTheStampSoItsNextConfirmKeepsIt() {
+        val root = createTempDirectory("indagium-seq3-stamp-open-session").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            val editing = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            assertTrue(state.stopSharing(hostId, "b"))
+            assertEquals(File(root, "a.log").absolutePath, coordinator.sessions.single { it.id == editing }.document.sourcePath)
+            coordinator.updateTitle(editing, "Edited while open")
+            assertEquals(blockId, coordinator.confirm(editing))
+            assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    /** a and b as in [twoLogsState], plus another log "c" that is also called "a.log" but is another file. */
+    private fun threeLogsState(root: File): AppState = twoLogsState(root).also {
+        val third = listOf(LogEntry(1, "12:00:00.000", LogLevel.I, "Third", "same name, other file"))
+        it.tabs = it.tabs + mkTab("c", "a.log", third).copy(sourcePath = File(root, "elsewhere/a.log").absolutePath)
+    }
+
+    /** A diagram made from a, moved into b's private note by Stop sharing (stamped with a's path), then shared again with c. */
+    private fun stampedDiagramSharedAgain(state: AppState): Pair<String, String> {
+        val (hostId, blockId) = sharedDiagramFromA(state)
+        assertTrue(state.stopSharing(hostId, "b"))
+        assertEquals(File(state.tab("a")!!.sourcePath!!).absolutePath, noteDocument(state, "b", blockId).sourcePath, "fixture: stamped")
+        val again = assertNotNull(state.shareTabNote("b", "Second investigation", listOf("b", "c")))
+        return again to blockId
+    }
+
+    @Test
+    fun aStampedDiagramSharedAgainStillFindsItsOpenLogNotASameNamedOne() {
+        val root = createTempDirectory("indagium-seq3-stamp-shared-again").toFile()
+        val state = threeLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = stampedDiagramSharedAgain(state)
+
+            // a is not a member of the new shared note; its stamp, not the file name "a.log" (which c also has), names the log.
+            assertEquals("a", coordinator.sourceTabIdForNote(hostId, blockId))
+            val reopened = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            assertEquals("a", coordinator.sessions.single { it.id == reopened }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aStampedDiagramSharedAgainHasNoLogWhenItsLogIsClosedNeverASameNamedOne() {
+        val root = createTempDirectory("indagium-seq3-stamp-shared-again-closed").toFile()
+        val state = threeLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = stampedDiagramSharedAgain(state)
+            state.closeTab("a")
+
+            assertNull(coordinator.sourceTabIdForNote(hostId, blockId), "c is called a.log too, but is not the diagram's log")
+            val reopened = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            assertNull(coordinator.sessions.single { it.id == reopened }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stoppingTheSecondSharingKeepsTheExistingStampInsteadOfStampingAnotherLog() {
+        val root = createTempDirectory("indagium-seq3-stamp-kept").toFile()
+        val state = threeLogsState(root)
+        try {
+            val (hostId, blockId) = stampedDiagramSharedAgain(state)
+            assertTrue(state.stopSharing(hostId, "b"))
+
+            assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath)
+            assertEquals("a", state.seq3Sessions.sourceTabIdForNote("b", blockId))
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun undoAfterStopSharingKeepsTheStampSoTheNextConfirmStillNamesTheLog() {
+        val root = createTempDirectory("indagium-seq3-stamp-undo").toFile()
+        val state = twoLogsState(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val (hostId, blockId) = sharedDiagramFromA(state)
+            val editing = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            // An edit before the stamp: its undo snapshot holds the unstamped document.
+            coordinator.updateTitle(editing, "Edited while shared")
+            assertTrue(coordinator.canUndo(editing))
+            assertTrue(state.stopSharing(hostId, "b"))
+            assertEquals(File(root, "a.log").absolutePath, coordinator.sessions.single { it.id == editing }.document.sourcePath)
+
+            assertTrue(coordinator.undo(editing))
+            val afterUndo = coordinator.sessions.single { it.id == editing }.document
+            assertEquals(File(root, "a.log").absolutePath, afterUndo.sourcePath, "undo restores the title, not the source")
+            assertEquals(blockId, coordinator.confirm(editing))
+
+            assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath, "the stamp survives undo and confirm")
+            assertEquals("a", coordinator.sourceTabIdForNote("b", blockId))
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun theSourcePathRoundTripsAndAnUnstampedDocumentEncodesWithoutTheKey() {
+        val plain = Seq3Document(title = "t", sourceFile = "a.log")
+        val stampedText = encodeSeq3Note(plain.copy(sourcePath = "/logs/a.log"))
+        assertEquals("/logs/a.log", parseSeq3Note(stampedText)?.document?.sourcePath)
+        val plainText = encodeSeq3Note(plain)
+        assertNull(parseSeq3Note(plainText)?.document?.sourcePath)
+        assertTrue("sourcePath" !in plainText, "an unstamped document must encode exactly as before")
+        assertEquals(plainText, encodeSeq3Note(parseSeq3Note(plainText)!!.document))
+        // A header written by this build for an older reader: the key sits inside the document map, which readers look up by name.
+        assertTrue(stampedText.contains("\"sourcePath\":\"/logs/a.log\""))
     }
 }

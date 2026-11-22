@@ -612,7 +612,7 @@ internal fun AnnotationPanel(
     // test harness) keeps compiling; a caller that doesn't wire them just gets a non-interactive
     // diagram, never a broken one.
     onEditDiagram: (blockId: String) -> Unit = {},
-    onNavigateDiagramLine: (entryId: Int) -> Unit = {},
+    onNavigateDiagramLine: (blockId: String, entryId: Int) -> Unit = { _, _ -> },
     onImportLinkedDiagram: (
         blockId: String,
         source: String,
@@ -1425,7 +1425,7 @@ internal fun AnnotationPanel(
                             dragHandleModifier = dragHandleModifier,
                             onBeforeToggleDiagram = { anchorBeforeBlockResize(block.id) },
                             onEditDiagram = { onEditDiagram(block.id) },
-                            onNavigateDiagramLine = onNavigateDiagramLine,
+                            onNavigateDiagramLine = { entryId -> onNavigateDiagramLine(block.id, entryId) },
                             onImportLinkedDiagram = { source, dialect, confirm ->
                                 if (!notesLocked) onImportLinkedDiagram(block.id, source, dialect, confirm) else null
                             },

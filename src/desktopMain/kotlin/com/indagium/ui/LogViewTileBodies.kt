@@ -68,7 +68,11 @@ internal fun BoundAnnotationPanel(
             state.updateLogRefPresentation(noteId, blockId, caption, presentation)
         },
         onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(noteId, blockId, TabRef.Log(tab.id)) },
-        onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
+        // The ids are the diagram's own log's, which is not necessarily the tab the note is viewed from (another member, or log A after Stop sharing).
+        onNavigateDiagramLine = { blockId, entryId ->
+            // Loading the diagram's log can take a while: never on the click's thread.
+            state.launchInBackground { state.seq3Sessions.navigateToOccurrence(noteId, blockId, entryId) }
+        },
         onImportLinkedDiagram = { blockId, source, dialect, confirm ->
             val diagramId = note.annotations.blocks
                 .filterIsInstance<AnnBlock.Note>()

@@ -18,6 +18,54 @@ private const val CARRIAGE_RETURN = '\r'
 // Large enough that ordinary multi-line bursts never hit the long-line fallback below.
 private const val MAX_TAIL_READ_BYTES = 4L * 1024L * 1024L
 
+/**
+ * The last line of a file that does not end with a newline: [startOffset] is the byte offset just after the file's last `\n`
+ * (0 for a file with no newline at all), [text] the line as a reader shows it (no `\r`, no byte-order mark), [fileLength] the
+ * length of the file this was read from (the line ends there).
+ */
+internal class TrailingPartialLine(val startOffset: Long, val text: String, val fileLength: Long)
+
+// The longest unfinished last line [trailingPartialLine] will look for; a longer one is left as the v1 tail leaves it.
+private const val MAX_PARTIAL_LINE_BYTES = 1 shl 20
+private const val PARTIAL_LINE_SCAN_CHUNK = 8 * 1024
+
+/**
+ * The unfinished last line of [file], or null when it is empty, ends with a newline, or its last line is longer than a megabyte.
+ * A tailer started at [TrailingPartialLine.startOffset] reads that line whole once its writer finishes it, instead of only the
+ * bytes written after the tail started.
+ */
+internal fun trailingPartialLine(file: File): TrailingPartialLine? = runCatching {
+    RandomAccessFile(file, "r").use { raf ->
+        val length = raf.length()
+        if (length == 0L) return@use null
+        raf.seek(length - 1)
+        if (raf.read() == NEWLINE_BYTE.toInt()) return@use null
+        var start = 0L
+        var end = length
+        val chunk = ByteArray(PARTIAL_LINE_SCAN_CHUNK)
+        search@ while (end > 0L) {
+            val from = maxOf(0L, end - chunk.size)
+            val size = (end - from).toInt()
+            raf.seek(from)
+            raf.readFully(chunk, 0, size)
+            for (i in size - 1 downTo 0) {
+                if (chunk[i] == NEWLINE_BYTE) {
+                    start = from + i + 1
+                    break@search
+                }
+            }
+            if (length - from > MAX_PARTIAL_LINE_BYTES) return@use null
+            end = from
+        }
+        if (length - start > MAX_PARTIAL_LINE_BYTES) return@use null
+        val bytes = ByteArray((length - start).toInt())
+        raf.seek(start)
+        raf.readFully(bytes)
+        val raw = String(bytes, Charsets.UTF_8).trimEnd(CARRIAGE_RETURN)
+        TrailingPartialLine(start, if (start == 0L) raw.removePrefix("\uFEFF") else raw, length)
+    }
+}.getOrNull()
+
 // Watches a file that's growing externally (e.g. `adb logcat > out.log` run outside the app — no
 // direct adb integration, by design) and emits newly-appended, complete lines in batches.
 //
@@ -74,6 +122,13 @@ class FileTailer(
      *  tailer left off. */
     val currentOffset: Long get() = offset
 
+    // The highest length [file] has been seen at (by [start] or any read), so a rotation that leaves the file at least as long as
+    // [offset] still shows as a shrink. The offset alone cannot: a tail started at an unfinished last line's first byte (see
+    // [trailingPartialLine]) holds an offset far below the file's end, and so does any tail holding back a partial line. Raised on
+    // every read, reset to the new length when a restart is announced; [resume] keeps it, so a rotation during a pause is seen too.
+    @Volatile
+    private var knownLength: Long = 0L
+
     /** Bytes of [file] this tailer has not emitted yet (file length minus [currentOffset], never negative). */
     fun unreadBytes(): Long = (file.length() - offset).coerceAtLeast(0L)
 
@@ -84,7 +139,9 @@ class FileTailer(
     // treating already-new content as pre-existing. This bug reproduced consistently in
     // FileTailerTest until fixed this way.
     fun start(scope: CoroutineScope): Job {
-        offset = startOffset ?: if (file.exists()) file.length() else 0L
+        val length = if (file.exists()) file.length() else 0L
+        offset = startOffset ?: length
+        knownLength = length
         return launchPollLoop(scope)
     }
 
@@ -195,11 +252,17 @@ class FileTailer(
         // The restart is announced here, in the one place every read passes through, with the offset
         // already moved back so a second read of the same shrunken file does not announce it again.
         // Done before any line of the new content is returned, so a consumer resets its state first.
-        val readFrom = if (length < fromOffset) {
+        //
+        // "Shorter than before", not just "shorter than the offset": the offset can sit well below the end of the file (a tail
+        // started at its unfinished last line, a partial line held back), and a rewrite that is still longer than the offset
+        // would be read as the continuation of the old content.
+        val readFrom = if (length < maxOf(fromOffset, knownLength)) {
             offset = 0L
+            knownLength = length
             onRestart()
             0L
         } else {
+            knownLength = length
             fromOffset
         }
         if (length == readFrom) return ReadResult(emptyList(), readFrom, moreAvailable = false)

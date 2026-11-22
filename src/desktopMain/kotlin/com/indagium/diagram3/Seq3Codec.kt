@@ -154,6 +154,11 @@ fun encodeSeq3Note(
     // `diagram.updateDiagramAttachment` avoided by re-encoding from its own parsed [source] rather
     // than regenerating it. Null (the normal generate/confirm path) derives from [document] as before.
     sourceOverride: String? = null,
+    // The hash a metadata-only rewrite must keep: the one the note's header ALREADY declares (ParsedSeq3.sourceHash). Without it the
+    // hash is recomputed from [sourceOverride], which for a drifted (hand-edited) fence turns the drift into agreement, so the edit
+    // is no longer reported by seq3NoteHasHandEdit and a later Confirm overwrites it silently. Null (generate, confirm, adopt,
+    // import) hashes the fence being written.
+    sourceHashOverride: String? = null,
 ): String {
     // Normalized (no trailing newline) BEFORE hashing/embedding, then the closing fence's own "\n"
     // is added unconditionally below — mirrors `DiagramSpecCodec.encodeDiagramNote`'s identical
@@ -164,7 +169,7 @@ fun encodeSeq3Note(
     val source = (sourceOverride ?: document.toSource(dialect)).trimEnd('\n')
     val header = mapOf(
         "dialect" to dialect.name.lowercase(),
-        "sourceHash" to seq3SourceHash(source),
+        "sourceHash" to (sourceHashOverride ?: seq3SourceHash(source)),
         "caption" to caption,
         "exportMode" to exportMode.name,
         "attachment" to attachment?.let(::attachmentToMap),
@@ -290,6 +295,7 @@ fun updateSeq3NoteCaption(noteText: String, caption: String): String? {
         parsed.exportMode,
         attachment = parsed.attachment,
         sourceOverride = parsed.source,
+        sourceHashOverride = parsed.sourceHash,
     )
 }
 
@@ -303,15 +309,31 @@ fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): S
         exportMode,
         attachment = parsed.attachment,
         sourceOverride = parsed.source,
+        sourceHashOverride = parsed.sourceHash,
+    )
+}
+
+/** Returns [noteText] rewritten with [sourcePath] on its document (null removes it), or null for a non-v3-diagram note. The
+ *  fenced body is carried through verbatim, like [updateSeq3NoteCaption]. */
+fun updateSeq3NoteSourcePath(noteText: String, sourcePath: String?): String? {
+    val parsed = parseSeq3Note(noteText) ?: return null
+    return encodeSeq3Note(
+        parsed.document.copy(sourcePath = sourcePath),
+        parsed.dialect,
+        parsed.caption,
+        parsed.exportMode,
+        attachment = parsed.attachment,
+        sourceOverride = parsed.source,
+        sourceHashOverride = parsed.sourceHash,
     )
 }
 
 /**
  * Accepts a hand-edited fence as the note's real content, clearing the drift warning
  * ([ParsedSeq3.sourceHashMatches] is true when the result is re-parsed). Re-encodes with
- * `sourceOverride = parsed.source` — the exact mechanism [updateSeq3NoteCaption] and
- * [updateSeq3NoteExportMode] already use to carry a fence through a metadata-only rewrite
- * unchanged, so the hash recomputed by [encodeSeq3Note] now matches what's on the page.
+ * `sourceOverride = parsed.source` and, unlike [updateSeq3NoteCaption] and [updateSeq3NoteExportMode] (which also pass
+ * `sourceHashOverride = parsed.sourceHash` so a drifted fence stays drifted), NO hash override: the hash recomputed by
+ * [encodeSeq3Note] now matches what's on the page.
  *
  * Adopting does NOT touch [ParsedSeq3.document] — the model that generated the picture is left
  * exactly as it was, so a rendered image would still show something the adopted text disagrees
@@ -441,7 +463,7 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     "manualActivations" to d.manualActivations.map(::manualActivationToMap),
     // Append-last: documents predating authored row order decode to empty and preserve chronology.
     "rowOrder" to d.rowOrder.map(::rowRefToMap),
-)
+) + (d.sourcePath?.let { mapOf("sourcePath" to it) } ?: emptyMap())
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
 // detekt's limit — this is the top-level "does the declared shape even fit our caps" gate, checked
@@ -506,6 +528,7 @@ private fun seq3DocumentStrings(document: Seq3Document): Sequence<String> = sequ
 private suspend fun SequenceScope<String>.yieldSeq3DocumentMetadata(document: Seq3Document) {
     yield(document.title)
     document.sourceFile?.let { yield(it) }
+    document.sourcePath?.let { yield(it) }
     document.themePresetName?.let { yield(it) }
     when (val range = document.range) {
         is Seq3Range.Time -> {
@@ -646,6 +669,8 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         // Older notes have no explicit row order and keep the legacy shared chronology. Malformed
         // individual references drop out without losing the diagram.
         rowOrder = rowOrderMaps.mapNotNull(::rowRefFromMap),
+        // Absent on every document that was never moved by Stop sharing (see Seq3Document.sourcePath).
+        sourcePath = boundedString(map.str("sourcePath"))?.takeIf { it.isNotBlank() },
     )
 }
 

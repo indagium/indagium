@@ -651,6 +651,8 @@ fun mkTab(
         profileClockSignature = summary.clockSignature.takeIf { parsedLog == null || parsedLog.profile != null },
         profileDisplayColumns = logFormatDisplayColumnDefinitions(inferredProfile),
         profileProjectionSchemaPresent = profile?.let(::usesCustomLogFormatProjection) == true,
+        // The one place every open, split-part and reparse tab passes through: parity between those paths by construction.
+        profileSourceByteLength = parsedLog?.sourceByteLength,
     )
 }
 
@@ -8002,9 +8004,16 @@ class AppState(
         // pinned to an unmodified built-in Logcat or DLT profile (every ordinary open pins one).
         val nativeProfile = profile == null ||
             (profile.engine in setOf(LogFormatEngine.LOGCAT, LogFormatEngine.DLT) && !usesCustomLogFormatProjection(profile))
+        // Measured before the parse reads the file: growth while it is read can then only make a later "unchanged" check fail.
+        val lengthBeforeParse = file.length().takeIf { file.isFile }
         val injected = parser?.takeIf { nativeProfile }?.invoke(file)
-        if (injected != null) return if (injected.profile == null && profile != null) injected.copy(profile = profile) else injected
-        return parseLogFileResultWithProfiles(file, profiles = availableLogFormatProfiles(), profile = profile).selectSection(sectionId)
+        if (injected != null) {
+            val named = if (injected.profile == null && profile != null) injected.copy(profile = profile) else injected
+            return named.copy(sourceByteLength = lengthBeforeParse)
+        }
+        return parseLogFileResultWithProfiles(file, profiles = availableLogFormatProfiles(), profile = profile)
+            .selectSection(sectionId)
+            .copy(sourceByteLength = lengthBeforeParse)
     }
 
     private fun sourceLookupConfigured(): Boolean = sourceResolver != null && registeredSourceRoots().isNotEmpty()
@@ -18869,6 +18878,7 @@ class AppState(
             profileProjectionSchemaPresent = current.profileProjectionSchemaPresent ||
                 loaded.profile?.let(::usesCustomLogFormatProjection) == true,
             profileSourceLineCount = if (loaded.fromSectionIndex) current.profileSourceLineCount else loaded.sourceLineCount,
+            profileSourceByteLength = if (loaded.fromSectionIndex) current.profileSourceByteLength else loaded.sourceByteLength,
             archiveCandidate = loaded.archiveCandidate,
             largeFileMode = loaded.largeFileMode,
             selected = current.selected.filterTo(linkedSetOf()) { it in publishedRmap },
@@ -19050,6 +19060,7 @@ class AppState(
                 selectedLogSectionId = parsed.selectedSectionId,
                 profileClockSignature = parsed.profileClockSignature,
                 sourceLineCount = parsed.sourceLineCount,
+                sourceByteLength = parsed.sourceByteLength,
                 sectionIndex = parsed.metadataSectionIndex,
             )
         }

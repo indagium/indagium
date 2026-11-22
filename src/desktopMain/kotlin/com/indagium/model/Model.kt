@@ -1168,6 +1168,13 @@ data class LogTab(
      * rebinds the citations to the new tab and drops the entry. Persisted in the tab token (AutosaveCodec), appended last.
      */
     val noteClosedSources: List<SharedNoteClosedSource> = emptyList(),
+    /**
+     * Runtime-only, never serialized (a restored tab reparses and records it again): the byte length of [sourcePath] measured
+     * BEFORE the parse that made this tab's rows read it. Starting a tail may treat the file's unfinished last line as the one the
+     * tab's last row shows only while the file still has this length (see IncrementalProfileParser.forFile). Null when unknown.
+     * Appended last.
+     */
+    val profileSourceByteLength: Long? = null,
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */

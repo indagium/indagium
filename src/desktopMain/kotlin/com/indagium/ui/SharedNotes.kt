@@ -349,14 +349,16 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
         val carriedSources = host.sharedNote?.let { (it.closedMembers + it.closedReferenceSources) }.orEmpty()
             .filter { it.tabId in cited }
             .distinctBy { it.tabId }
+        // The diagrams record their log before the shared note (their evidence) is gone, in the same write as the move.
+        val returned = seq3Sessions.stampStoppedDiagramSources(host, tab, host.annotations.blocks)
         val recipient = tab.copy(
-            annotations = host.annotations.returnedTo(intoTabId),
+            annotations = host.annotations.copy(blocks = returned.blocks).returnedTo(intoTabId),
             noteTargetName = stoppedSharedNotePin(host, tab),
             recoveredNoteRows = host.recoveredNoteRows.ifEmpty { tab.recoveredNoteRows },
             noteClosedSources = carriedSources,
         )
         updateTabsLocked(setOf(intoTabId)) { recipient }
-        seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks)
+        seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks, returned.stamps)
         deleteSharedNote(hostId)
         persistStoppedSharedNote(host, recipient)
         true
