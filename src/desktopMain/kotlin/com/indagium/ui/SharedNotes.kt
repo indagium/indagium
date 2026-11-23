@@ -77,12 +77,18 @@ internal fun noteOverwriteMessage(targetName: String, sharedNote: Boolean): Stri
 private fun String?.plainSourcePathKey(): String? =
     this?.takeIf { it.isNotBlank() }?.let { File(it).absoluteFile.normalize().path }
 
-private fun LogTab.plainNoteSourcePath(): String? {
+/**
+ * The path of the plain file this tab shows, or null for a tab that is not one (an archive entry, a capture, a path-less log). Decided
+ * from what the tab already knows, never from the disk (callers run under the state lock): a tab opened from an archive carries its
+ * [LogTab.archiveCandidate], and the one that does not yet (a restore from an autosave older than that field) was marked
+ * [LogTab.legacyArchiveEntry] by the restore, which looked at the file once. So a `!` in the path of any other tab is just part of a
+ * plain file's name.
+ */
+internal fun LogTab.plainNoteSourcePath(): String? {
     if (archiveCandidate != null || captureArchivePath != null || attachedVideo?.captureSourcePath != null || captureSessionId != null) {
         return null
     }
-    // A legacy restored archive tab may lack its entry metadata until its first load.
-    return sourcePath?.takeIf { '!' !in it || it.restoredTabSource() is RestoredTabSource.FileSource }
+    return sourcePath?.takeIf { '!' !in it || !legacyArchiveEntry }
 }
 
 /** Older sessions have no profile snapshot, so their closed sources match by path alone. */
@@ -397,6 +403,7 @@ internal fun AppState.shareTabNoteLocked(tabId: String, name: String, memberTabI
                 noteTargetName = freshPin,
                 recoveredNoteRows = emptyMap(),
                 noteClosedSources = emptyList(),
+                importedLocalCitationBlockIds = emptySet(),
                 notesView = host.id,
             )
         } else {
@@ -463,6 +470,8 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
             noteTargetName = stoppedSharedNotePin(host, tab),
             recoveredNoteRows = host.recoveredNoteRows.ifEmpty { tab.recoveredNoteRows },
             noteClosedSources = carriedSources,
+            // The recipient's note is the host's now: the ids belonged to the note it had.
+            importedLocalCitationBlockIds = emptySet(),
         )
         updateTabsLocked(setOf(intoTabId)) { recipient }
         val changed = seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks, tab.annotations.blocks)

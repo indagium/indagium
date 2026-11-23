@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
+import com.indagium.utils.recordFieldsInDocumentOrder
 import org.junit.Assume.assumeFalse
 import org.junit.Rule
 import org.junit.Test
@@ -59,6 +60,18 @@ private val STATUS = listOf("metadata", "status")
 private val OWNER = listOf("metadata", "owner")
 private val RANK = listOf("metadata", "rank")
 private val METADATA = listOf("metadata")
+
+/** Three containers of two fields each, to range across one that is covered whole between two that are covered in part. */
+internal const val RECORD_THREE_CONTAINERS = """{"a":{"a1":1,"a2":2},"b":{"b1":3,"b2":4},"c":{"c1":5,"c2":6}}"""
+
+private val A1 = listOf("a", "a1")
+private val A2 = listOf("a", "a2")
+private val B = listOf("b")
+private val B1 = listOf("b", "b1")
+private val B2 = listOf("b", "b2")
+private val C = listOf("c")
+private val C1 = listOf("c", "c1")
+private val C2 = listOf("c", "c2")
 
 /** How far into a field row (whose bounds start after its indent) its key text is hit: past the 20 px chevron slot. */
 internal const val KEY_INSET = 28f
@@ -177,6 +190,53 @@ class RecordFieldNormalizationTest {
         assertTrue(normalizeFieldPaths(order, emptySet()).isEmpty())
     }
 
+    private val threeContainers = listOf(listOf("a"), A1, A2, B, B1, B2, C, C1, C2)
+
+    @Test
+    fun aPickedContainerWithNoneOfItsFieldsPickedMarksItsWholeSubtreeButOneWithSomeMarksOnlyItsOwnRow() {
+        val whole = FieldPickCoverage(setOf(METADATA))
+        assertTrue(listOf(METADATA, IDENTITY, RANK).all { whole.covers(it) })
+        assertTrue(!whole.covers(listOf("tail")))
+
+        val part = FieldPickCoverage(setOf(METADATA, IDENTITY))
+        assertTrue(part.covers(METADATA) && part.covers(IDENTITY))
+        assertTrue(!part.covers(SOURCE), "a range that ended inside the container leaves its other fields unmarked")
+    }
+
+    @Test
+    fun theNormalisedPickIsWhatTheRangeWasNormalisedToBeforeItKeptEveryRow() {
+        val covered = setOf(A2, B, B1, B2, C, C1)
+        assertEquals(normalizeFieldPaths(threeContainers, covered), normalizedPick(threeContainers, covered))
+        assertEquals(listOf(A2, B, C1), normalizedPick(threeContainers, covered))
+        assertEquals(listOf(B), normalizedPick(threeContainers, setOf(B)), "a container alone stands for its fields")
+        assertEquals(listOf(B), normalizedPick(threeContainers, setOf(B, B1, B2)))
+        assertEquals(listOf(B1), normalizedPick(threeContainers, setOf(B, B1)), "partly picked: just the picked field")
+        assertEquals(listOf(listOf("x", "gone")), normalizedPick(threeContainers, setOf(listOf("x", "gone"))), "a field that is no row stays as it is")
+        assertEquals(listOf(B), normalizedPick(emptyList(), setOf(B)), "no rows laid out: the pick itself")
+    }
+
+    @Test
+    fun aToggleInsideAPickedContainerLeavesItsOtherVisibleFieldsAndNeverDoesNothing() {
+        assertEquals(setOf(B, C), toggledFieldPick(threeContainers, setOf(B), C), "a field far from the pick simply joins it")
+        assertEquals(setOf(B), toggledFieldPick(threeContainers, setOf(B, C), C), "a picked field leaves alone")
+        assertEquals(setOf(B2), toggledFieldPick(threeContainers, setOf(B), B1), "the container gives way to its other fields")
+        assertEquals(setOf(A1, B, B1, B2), toggledFieldPick(threeContainers, setOf(listOf("a"), B), A2), "the other container stays whole")
+        assertEquals(setOf(A2), toggledFieldPick(threeContainers, setOf(listOf("a")), A1), "A's other visible field")
+        assertEquals(
+            setOf(B, B1, B2, C, C1, C2),
+            toggledFieldPick(threeContainers, setOf(B1, C), B),
+            "a container that holds picked fields takes all of its own, the other container stays whole",
+        )
+        assertTrue(toggledFieldPick(threeContainers, setOf(B), B).isEmpty())
+    }
+
+    @Test
+    fun theDocumentOrderOfARecordListsAContainerBeforeItsFields() {
+        assertEquals(threeContainers, recordFieldsInDocumentOrder(RECORD_THREE_CONTAINERS))
+        assertEquals(listOf(listOf("[0]"), listOf("[0]", "k"), listOf("[1]")), recordFieldsInDocumentOrder("""[{"k":1},2]"""))
+        assertNull(recordFieldsInDocumentOrder("not json"))
+    }
+
     @Test
     fun theMenuActsOnThePickWhenThePointerIsOnAPickedRowElseOnTheSelectionWhenItIsInsideIt() {
         val selection = TextSelectionFields(setOf(IDENTITY, SOURCE, STATUS), listOf(IDENTITY, SOURCE, STATUS))
@@ -252,6 +312,9 @@ class RecordFieldTextSelectionUiTest {
     }
 
     private fun row(vararg path: String) = nodeTag("1.root", *path)
+
+    /** The row of a field given as a path of one or two names (the records here nest no deeper). */
+    private fun rowOf(path: List<String>) = if (path.size == 1) row(path[0]) else row(path[0], path[1])
 
     private fun rightClick(tag: String) {
         rule.onNodeWithTag(tag).performMouseInput { rightClick(Offset(width - 8f, center.y)) }
@@ -439,23 +502,126 @@ class RecordFieldTextSelectionUiTest {
     }
 
     @Test
-    fun aShiftRangeOverAContainersWholeSubtreePicksTheContainer() {
+    fun aShiftRangeOverAContainersWholeSubtreeKeepsEveryRowAndAddsTheContainer() {
         show()
 
         rule.modifiedClick(row("metadata"))
         rule.modifiedClick(row("metadata", "rank"), shift = true)
 
-        assertEquals(setOf(METADATA), recorder.picked)
+        assertEquals(listOf(METADATA, IDENTITY, SOURCE, STATUS, OWNER, RANK), recorder.picked.toList(), "every row between is the pick")
+        rightClick(row("metadata", "source"))
+        rule.onNodeWithText("Add field to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf(METADATA)), recorder.added, "what is added is the container, once")
     }
 
     @Test
-    fun aShiftRangeOverPartOfAContainerPicksTheFieldsItCovers() {
+    fun aShiftRangeOverPartOfAContainerKeepsEveryRowAndAddsTheFieldsItCovers() {
         show()
 
         rule.modifiedClick(row("id"))
         rule.modifiedClick(row("metadata", "owner"), shift = true)
 
-        assertEquals(setOf(listOf("id"), IDENTITY, SOURCE, STATUS, OWNER), recorder.picked)
+        assertEquals(listOf(listOf("id"), METADATA, IDENTITY, SOURCE, STATUS, OWNER), recorder.picked.toList(), "the partly covered container's row too")
+        rightClick(row("metadata", "source"))
+        rule.onNodeWithText("Add 5 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf(listOf("id"), IDENTITY, SOURCE, STATUS, OWNER)), recorder.added, "the container itself is not added")
+    }
+
+    @Test
+    fun aShiftRangeAcrossAWhollyCoveredContainerBetweenTwoPartlyCoveredOnesMarksEveryRowBetween() {
+        show(RECORD_THREE_CONTAINERS)
+
+        rule.modifiedClick(row("a", "a2"))
+        rule.modifiedClick(row("c", "c1"), shift = true)
+
+        assertEquals(listOf(A2, B, B1, B2, C, C1), recorder.picked.toList(), "every row from the anchor to the target")
+        rule.pointerAway()
+        val plain = rule.rowTint(row("a", "a1"))
+        listOf(A2, B, B1, B2, C, C1).forEach { path ->
+            assertTrue(rule.rowTint(rowOf(path)) != plain, "$path is marked")
+        }
+        assertTrue(rule.rowTint(row("c", "c2")) == plain, "c2 is past the target")
+        assertTrue(rule.rowTint(row("a")) == plain, "the row above the anchor")
+        rightClick(row("b", "b1"))
+        rule.onNodeWithText("Add 3 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf(A2, B, C1)), recorder.added, "added as before: B whole, A and C by their covered fields")
+    }
+
+    @Test
+    fun aCtrlClickOnAContainerMarksTheFieldsInsideItAndAnotherClickTakesOneOut() {
+        show()
+        rule.pointerAway()
+        val plain = rule.rowTint(row("metadata", "identity"))
+
+        rule.modifiedClick(row("metadata"), ctrl = true)
+
+        assertEquals(setOf(METADATA), recorder.picked)
+        rule.pointerAway()
+        listOf(METADATA, IDENTITY, SOURCE, STATUS, OWNER, RANK).forEach { path ->
+            assertTrue(rule.rowTint(rowOf(path)) != plain, "$path is marked")
+        }
+        assertTrue(rule.rowTint(row("tail")) == plain, "a field outside it is not")
+        // The container's own row has the selection fill; the fields it holds a lighter one, so they read as included, not picked.
+        val containerFill = rule.rowTint(row("metadata"))
+        val includedFill = rule.rowTint(row("metadata", "identity"))
+        // The capture has no background under the tree, so the fills differ in their alpha (same hue).
+        assertTrue(includedFill.alpha < containerFill.alpha - 0.05f, "an included field is tinted lighter: $includedFill vs $containerFill")
+        assertTrue(includedFill.alpha > plain.alpha + 0.03f, "but still tinted: $includedFill vs $plain")
+
+        rule.modifiedClick(row("metadata", "source"), ctrl = true)
+
+        assertEquals(setOf(IDENTITY, STATUS, OWNER, RANK), recorder.picked, "the container gives way to its other visible fields")
+        rule.pointerAway()
+        assertTrue(rule.rowTint(row("metadata", "source")) == plain, "the clicked field is no longer marked")
+        val ownFill = rule.rowTint(row("metadata", "identity"))
+        assertTrue(abs(ownFill.alpha - containerFill.alpha) < 0.03f, "a field picked on its own has the full fill: $ownFill vs $containerFill")
+        assertTrue(rule.rowTint(row("metadata")) == plain, "and the container's own row is not picked any more")
+
+        rule.modifiedClick(row("metadata", "source"), ctrl = true)
+        assertEquals(setOf(IDENTITY, STATUS, OWNER, RANK, SOURCE), recorder.picked, "a second click puts it back")
+    }
+
+    @Test
+    fun aKeyboardRangeAcrossContainersCopiesWhatAddingWouldAdd() {
+        show(RECORD_THREE_CONTAINERS)
+
+        rule.modifiedClick(row("a", "a2"))
+        rule.modifiedClick(row("c", "c1"), shift = true)
+        rule.pressKey(Key.C, action = true)
+
+        assertEquals(listOf("a.a2: 2\nb: {\"b1\":3,\"b2\":4}\nc.c1: 5"), recorder.copied)
+    }
+
+    @Test
+    fun aCtrlShiftRangeKeepsTheRowsAPickedContainerStoodFor() {
+        show(RECORD_THREE_CONTAINERS)
+        rule.modifiedClick(row("b"), ctrl = true)
+        assertEquals(setOf(B), recorder.picked)
+
+        rule.modifiedClick(row("c", "c1"), ctrl = true, shift = true)
+
+        assertEquals(setOf(B, B1, B2, C, C1), recorder.picked, "B keeps all its fields once the pick holds rows inside it")
+        rightClick(row("c", "c1"))
+        rule.onNodeWithText("Add 2 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf(B, C1)), recorder.added)
+    }
+
+    @Test
+    fun shiftDownAfterARangeKeepsExtendingTheCoveredRows() {
+        show(RECORD_THREE_CONTAINERS)
+        rule.modifiedClick(row("a", "a2"))
+
+        rule.pressKey(Key.DirectionDown, shift = true)
+        rule.pressKey(Key.DirectionDown, shift = true)
+
+        assertEquals(listOf(A2, B, B1), recorder.picked.toList(), "B's row and its first field, B itself only in part")
+        rule.pressKey(Key.DirectionDown, shift = true)
+        rule.pressKey(Key.DirectionDown, shift = true)
+        assertEquals(listOf(A2, B, B1, B2, C), recorder.picked.toList())
     }
 
     @Test
@@ -641,6 +807,35 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
 
         assertNull(state.ctx)
         assertEquals(listOf(IDENTITY), addedPaths())
+    }
+
+    @Test
+    fun theLogRowsMenuAddsTheNormalisedFieldsOfAShiftRangeThatKeptEveryRow() {
+        setupJson()
+        openRecordUnderRow()
+        rule.clickRow(under("id"))
+        rule.modifiedClick(under("metadata", "owner"), shift = true)
+        assertEquals(6, state.recordFieldSelection!!.paths.size, "the range keeps its rows, the partly covered container's among them")
+
+        rule.onNodeWithTag("log-row-a:main-1").performMouseInput { rightClick(Offset(120f, 8f)) }
+        rule.waitForIdle()
+
+        val entry = assertNotNull(state.recordFieldsMenuEntry("a", 1))
+        assertEquals("Add 5 selected fields to notes", entry.label)
+        entry.onClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf("id"), IDENTITY, SOURCE, STATUS, OWNER), addedPaths())
+    }
+
+    @Test
+    fun withNoTreeLaidOutThePicksFieldsAreNormalisedAgainstTheRecordsOwnDocumentOrder() {
+        setupJson()
+        val section = state.tab("a")!!.selectedLogSectionId
+        state.recordFieldSelection = RecordFieldSelection("a", section, 1, setOf(listOf("id"), METADATA, IDENTITY, SOURCE, STATUS, OWNER))
+
+        assertEquals(listOf(listOf("id"), IDENTITY, SOURCE, STATUS, OWNER), state.recordFieldsForRowMenu("a", 1))
+        state.recordFieldSelection = RecordFieldSelection("a", section, 1, setOf(METADATA, IDENTITY, SOURCE, STATUS, OWNER, RANK))
+        assertEquals(listOf(METADATA), state.recordFieldsForRowMenu("a", 1), "a container picked with all its fields is the container")
     }
 
     @Test
@@ -1108,7 +1303,11 @@ class RecordFieldRowDragUiTest {
         drag.moveTo(at("metadata", "identity"))
         assertEquals(setOf(IDENTITY), recorder.picked, "back on the pressed row it is just that row")
         drag.moveTo(at("id"))
-        assertEquals(setOf(listOf("id"), IDENTITY), recorder.picked, "past the start, upwards (the container above is only partly covered)")
+        assertEquals(
+            setOf(listOf("id"), METADATA, IDENTITY),
+            recorder.picked,
+            "past the start, upwards (the container above is covered in part: its row is in the range)",
+        )
         drag.moveTo(at("metadata", "status"))
         assertEquals(setOf(IDENTITY, SOURCE, STATUS), recorder.picked)
         drag.release()
@@ -1489,10 +1688,34 @@ class RecordFieldRowSelectionLogViewUiTest : SharedNoteUiTestBase() {
         assertEquals(selectedBefore, state.tab("a")!!.selected, "the log row selection never changed")
 
         rightClick(details("metadata", "owner"))
-        assertEquals(setOf(OWNER), picked(), "a right-click on an unpicked row picks it")
+        assertEquals(setOf(METADATA), picked(), "the open container stands for the field the right-click is on")
         rule.onNodeWithText("Add field to notes").performClick()
         rule.waitForIdle()
-        assertEquals(listOf(OWNER), addedPaths())
+        assertEquals(listOf(METADATA), addedPaths())
+    }
+
+    @Test
+    fun aRangeAcrossContainersInMessageDetailsMarksEveryRowAndAddsTheSameFieldsAsBefore() {
+        setup(1100, 760) { s ->
+            s.tabs = s.tabs.map { tab ->
+                if (tab.id == "a") {
+                    mkTab("a", "a.log", listOf(jsonRow(1, RECORD_THREE_CONTAINERS), jsonRow(2, RECORD_ONE))).copy(sourcePath = tab.sourcePath)
+                } else {
+                    tab
+                }
+            }
+        }
+        rule.onNodeWithTag("log-row-a:main-1").performClick()
+        rule.waitForIdle()
+
+        clickField(details("a", "a2"))
+        rule.modifiedClick(details("c", "c1"), shift = true)
+
+        assertEquals(setOf(A2, B, B1, B2, C, C1), picked(), "every row between the anchor and the target")
+        rightClick(details("b", "b1"))
+        rule.onNodeWithText("Add 3 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(A2, B, C1), addedPaths())
     }
 
     // ── Dragging across field rows ───────────────────────────────────────────────────────────────

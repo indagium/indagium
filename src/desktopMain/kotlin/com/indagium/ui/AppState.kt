@@ -16402,6 +16402,7 @@ class AppState(
                 noteTargetName = newName,
                 recoveredNoteRows = emptyMap(),
                 noteClosedSources = emptyList(),
+                importedLocalCitationBlockIds = emptySet(),
             )
         }
     }

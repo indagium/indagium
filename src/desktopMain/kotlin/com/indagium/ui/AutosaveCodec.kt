@@ -2121,6 +2121,8 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             noteClosedSources = p.getOrNull(TAB_TOKEN_NOTE_CLOSED_SOURCES_INDEX).closedSourcesFromToken(),
             sourceInstanceId = p.getOrNull(TAB_TOKEN_SOURCE_INSTANCE_INDEX)
                 ?.let { runCatching { UUID.fromString(it) }.getOrNull() } ?: UUID.randomUUID(),
+            // Runtime-only: an archive entry restored without its candidate metadata (an autosave older than that field).
+            legacyArchiveEntry = source is RestoredTabSource.ArchiveSource && source.persistedCandidate == null,
         ),
         source,
     )

@@ -66,6 +66,71 @@ internal fun normalizeFieldPaths(order: List<List<String>>, covered: Set<List<St
     return kept
 }
 
+/**
+ * Which rows a pick of record fields marks. The pick holds the rows the user covered (a Shift range or a drag keeps every row between
+ * its ends, like a text selection); a picked field with none of its own fields picked (a Ctrl/Cmd-clicked container, or a range that
+ * ends on one) stands for its whole subtree, exactly as [normalizeFieldPaths] adds it, so the rows inside it are marked too. A picked
+ * container with some of its fields picked is marked on its own row only: just those fields are in.
+ */
+internal class FieldPickCoverage(val paths: Set<List<String>>) {
+    private val owners: Set<List<String>> = run {
+        val holdingPicked = HashSet<List<String>>()
+        for (path in paths) for (length in 1 until path.size) holdingPicked += path.subList(0, length)
+        paths.filterTo(HashSet()) { it !in holdingPicked }
+    }
+
+    /** The picked field that stands for [path]'s whole subtree and holds [path], or null. */
+    fun ownerAbove(path: List<String>): List<String>? {
+        if (owners.isEmpty()) return null
+        for (length in 1 until path.size) path.subList(0, length).let { if (it in owners) return it }
+        return null
+    }
+
+    /** Whether the row of [path] is marked: picked itself, or inside a picked field that stands for its subtree. */
+    fun covers(path: List<String>): Boolean = path in paths || ownerAbove(path) != null
+}
+
+/** The rows of [order] a pick marks, in document order, then the picked fields that are not visible rows (as they are). */
+internal fun markedFieldRows(order: List<List<String>>, pick: Set<List<String>>): List<List<String>> {
+    val coverage = FieldPickCoverage(pick)
+    val visible = order.toHashSet()
+    return order.filter { coverage.covers(it) } + pick.filter { it !in visible }
+}
+
+/**
+ * The fields a pick adds, copies or offers to the menus: the pick as [normalizeFieldPaths] reads it for a tree whose visible fields are
+ * [order] (document order), so what is used is what a range was normalised to before the pick kept every covered row. Picked fields that
+ * are not visible rows stay as they are unless a kept field holds them. With no [order] (a tree that is not laid out) the pick itself.
+ */
+internal fun normalizedPick(order: List<List<String>>, pick: Set<List<String>>): List<List<String>> {
+    val coverage = FieldPickCoverage(pick)
+    val visible = order.toHashSet()
+    val kept = normalizeFieldPaths(order, order.filterTo(LinkedHashSet()) { coverage.covers(it) })
+    val hidden = pick.filter { it !in visible && kept.none { holder -> isFieldInside(it, holder) } }
+    return kept + hidden
+}
+
+/**
+ * The pick after a Ctrl/Cmd-click on [path]. A field that is not marked joins the pick (with its visible fields when some of them
+ * are picked already, so it stands for all of them). A picked field leaves it alone when nothing else depends on it; one that is marked
+ * only because a picked container holds it, or that holds picked fields, leaves with its subtree, and the container it was marked
+ * through gives way to the visible fields it held that are not on [path]'s line (so the click is never a silent no-op).
+ */
+internal fun toggledFieldPick(order: List<List<String>>, pick: Set<List<String>>, path: List<String>): Set<List<String>> {
+    val coverage = FieldPickCoverage(pick)
+    val viaContainer = coverage.ownerAbove(path) != null
+    val holdsPicked = pick.any { isFieldInside(it, path) }
+    return when {
+        path in pick && !viaContainer && !holdsPicked -> pick - setOf(path)
+        !coverage.covers(path) && !holdsPicked -> pick + setOf(path)
+        !coverage.covers(path) -> LinkedHashSet(markedFieldRows(order, pick)).apply {
+            add(path)
+            addAll(order.filter { row -> isFieldInside(row, path) })
+        }
+        else -> markedFieldRows(order, pick).filterTo(LinkedHashSet()) { it != path && !isFieldInside(it, path) && !isFieldInside(path, it) }
+    }
+}
+
 /** The fields a text selection in a tree covers: every [covered] row the selection touches, and [fields], what adding them adds. */
 internal class TextSelectionFields(val covered: Set<List<String>>, val fields: List<List<String>>)
 
@@ -453,6 +518,9 @@ internal class RecordTreeHandle(
     /** The tree handles [event] when it holds keyboard focus and the key means something to its selected fields. */
     fun handleKey(event: KeyEvent): Boolean = hasFocus() && onKey(event)
 
+    /** The visible rows of the tree in document order, or null while none is laid out. */
+    fun visibleOrder(): List<List<String>>? = geometry.order().takeIf { it.isNotEmpty() }
+
     /** The fields the tree's text selection would add, in document order; empty when no text is selected. */
     fun selectedFields(): List<List<String>> = geometry.textSelectionFields(probe.selectedText())?.fields.orEmpty()
 }
@@ -480,6 +548,10 @@ internal class RecordFieldTrees {
         handles += handle
         return { handles -= handle }
     }
+
+    /** The visible rows of a mounted, laid-out tree of record [entryId] in [tabId] (document order), or null when there is none. */
+    fun visibleOrder(tabId: String, entryId: Int): List<List<String>>? =
+        handles.firstNotNullOfOrNull { if (it.tabId == tabId && it.entryId == entryId) it.visibleOrder() else null }
 
     /** Remembers what each tree's text selection covers now; called as a right press begins, before anything reacts to it. */
     fun captureAtRightPress() {

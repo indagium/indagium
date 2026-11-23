@@ -41,15 +41,17 @@ internal fun handleRecordTreeKey(context: RecordFieldContext, event: KeyEvent): 
     }
 }
 
-/** Cmd/Ctrl+C: the text selected in the tree when there is some, else the picked rows as "path: value" lines (document order). */
+/**
+ * Cmd/Ctrl+C: the text selected in the tree when there is some, else the picked fields (normalised, as they would be added) as
+ * "path: value" lines (document order).
+ */
 private fun copyPicked(context: RecordFieldContext, picked: Set<List<String>>): Boolean {
     val text = context.probe.selectedText()
     if (text.isNotEmpty()) {
         context.actions.copyText(text)
         return true
     }
-    val order = context.geometry.order()
-    val rows = order.filter { it in picked } + picked.filter { it !in order }
+    val rows = normalizedPick(context.geometry.order(), picked)
     val root = parseRecordJson(context.source)
     val lines = rows.map { path ->
         val value = root?.let { jsonSubtreeAt(it, path) }?.let(::recordValueText).orEmpty()
@@ -61,9 +63,10 @@ private fun copyPicked(context: RecordFieldContext, picked: Set<List<String>>): 
 
 /** The row the keyboard works from: the cursor, else the anchor, else the first picked row on screen; null when none is on screen. */
 private fun cursorRow(context: RecordFieldContext, picked: Set<List<String>>, order: List<List<String>>): List<String>? {
-    val cursor = context.geometry.cursor?.takeIf { it in order && it in picked }
-    val anchor = context.actions.rangeAnchor(context.tabId, context.entryId)?.takeIf { it in order && it in picked }
-    return cursor ?: anchor ?: order.firstOrNull { it in picked }
+    val marked = FieldPickCoverage(picked)
+    val cursor = context.geometry.cursor?.takeIf { it in order && marked.covers(it) }
+    val anchor = context.actions.rangeAnchor(context.tabId, context.entryId)?.takeIf { it in order && marked.covers(it) }
+    return cursor ?: anchor ?: order.firstOrNull { marked.covers(it) }
 }
 
 private fun moveWithArrow(context: RecordFieldContext, picked: Set<List<String>>, key: Key, extend: Boolean): Boolean {
@@ -85,10 +88,9 @@ private fun moveTo(context: RecordFieldContext, row: List<String>, order: List<L
         context.moveSelectionTo(row)
     } else {
         val anchor = context.actions.rangeAnchor(context.tabId, context.entryId)?.takeIf { it in order } ?: from
-        val covered = context.geometry.between(anchor, row) ?: setOf(row)
-        val range = normalizeFieldPaths(order, covered).ifEmpty { listOf(row) }
+        val range = context.geometry.between(anchor, row) ?: setOf(row)
         context.actions.setRangeAnchor(context.tabId, context.entryId, anchor)
-        context.actions.pickFields(context.tabId, context.entryId, range, additive = false)
+        context.actions.pickFields(context.tabId, context.entryId, range.toList(), additive = false)
         context.geometry.cursor = row
     }
     context.geometry.revealRow(row)

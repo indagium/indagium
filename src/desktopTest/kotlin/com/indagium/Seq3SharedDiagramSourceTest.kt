@@ -3,15 +3,19 @@ package com.indagium
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
+import com.indagium.diagram3.updateSeq3NoteSourcePath
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.SharedNoteClosedSource
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.diagramSourceKey
 import com.indagium.ui.mkTab
 import com.indagium.ui.shareTabNote
 import com.indagium.ui.stopSharing
 import java.io.File
+import java.util.UUID
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -262,6 +266,69 @@ class Seq3SharedDiagramSourceTest {
             assertEquals(File(root, "a.log").absolutePath, noteDocument(state, "b", blockId).sourcePath)
             val reopened = assertNotNull(coordinator.beginEdit("b", blockId))
             assertNull(coordinator.sessions.single { it.id == reopened }.sourceTabId)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    /**
+     * A shared note over a path-less log "a" and b whose diagram carries no stamp, with "a" closed and recorded as [closedRecord] says
+     * (given a's instance id), then shared no more into b. Returns the state, the diagram's block id and a's instance id.
+     */
+    private fun stoppedPathlessDiagram(root: File, closedRecord: (UUID) -> SharedNoteClosedSource): Triple<AppState, String, UUID> {
+        val state = AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        )
+        val other = listOf(LogEntry(1, "11:00:00.000", LogLevel.I, "Other", "unrelated"), LogEntry(2, "11:00:00.010", LogLevel.I, "More", "rows"))
+        state.tabs = listOf(mkTab("a", "a.log", rows()), mkTab("b", "b.log", other).copy(sourcePath = File(root, "b.log").absolutePath))
+        state.activateTab("a")
+        val (hostId, blockId) = sharedDiagramFromA(state)
+        val instance = state.tab("a")!!.sourceInstanceId
+        assertEquals("tab:$instance", state.tab("a")!!.diagramSourceKey)
+        // Share stamped the open path-less log; the closed log is what is under test, so the diagram goes back to carrying no stamp.
+        state.upTab(hostId) { host ->
+            host.copy(
+                annotations = host.annotations.copy(
+                    blocks = host.annotations.blocks.map { block ->
+                        if (block is AnnBlock.Note && block.id == blockId) {
+                            block.copy(text = assertNotNull(updateSeq3NoteSourcePath(block.text, null)))
+                        } else {
+                            block
+                        }
+                    },
+                ),
+            )
+        }
+        state.closeTab("a")
+        // A path-less log closed with the note leaves no record of its own; the sidecar import is what writes one.
+        state.sharedNoteHosts = state.sharedNoteHosts.map { host ->
+            host.copy(sharedNote = host.sharedNote!!.copy(closedMembers = listOf(closedRecord(instance))))
+        }
+        assertTrue(state.stopSharing(hostId, "b"))
+        return Triple(state, blockId, instance)
+    }
+
+    @Test
+    fun aClosedPathlessLogsStampIsTheKeyItHadWhileOpenNotItsTabId() {
+        val root = createTempDirectory("indagium-seq3-stamp-closed-pathless").toFile()
+        val (state, blockId, instance) = stoppedPathlessDiagram(root) { SharedNoteClosedSource("a", "a.log", null, sourceInstanceId = it) }
+        try {
+            assertEquals("tab:$instance", noteDocument(state, "b", blockId).sourcePath)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aClosedPathlessLogWithNoInstanceIdIsNotStampedAtAll() {
+        val root = createTempDirectory("indagium-seq3-stamp-closed-no-instance").toFile()
+        val (state, blockId, _) = stoppedPathlessDiagram(root) { SharedNoteClosedSource("a", "a.log", null) }
+        try {
+            assertNull(noteDocument(state, "b", blockId).sourcePath, "nothing identifies the log, so nothing is guessed")
         } finally {
             state.close()
             root.deleteRecursively()

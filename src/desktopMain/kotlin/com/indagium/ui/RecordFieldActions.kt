@@ -51,6 +51,7 @@ import com.indagium.utils.joinRecordPath
 import com.indagium.utils.jsonSubtreeAt
 import com.indagium.utils.parseRecordJson
 import com.indagium.utils.recordFieldRefs
+import com.indagium.utils.recordFieldsInDocumentOrder
 import com.indagium.utils.recordInspectionSource
 import com.indagium.utils.recordValueText
 
@@ -192,6 +193,21 @@ internal class RecordFieldContext(
     /** Drops the text selected in the tree (a row drag takes over from it). */
     val clearTextSelection: () -> Unit = {},
 ) {
+    private val coverage by lazy(LazyThreadSafetyMode.NONE) { FieldPickCoverage(selected) }
+
+    /** Whether the row of [path] is marked by the pick: picked itself, or inside a picked field that stands for its subtree. */
+    fun isMarked(path: List<String>): Boolean = coverage.covers(path)
+
+    /** How the row of [path] shows the pick: picked itself, included because a picked container holds it, or not at all. */
+    fun markOf(path: List<String>): FieldRowMark = when {
+        path in selected -> FieldRowMark.PICKED
+        coverage.ownerAbove(path) != null -> FieldRowMark.INCLUDED
+        else -> FieldRowMark.NONE
+    }
+
+    /** What the pick adds and copies, as [normalizedPick] reads it for the rows laid out now. */
+    fun pickedFields(): List<List<String>> = normalizedPick(geometry.order(), selected)
+
     /**
      * Whether a Shift-press would pick a range of fields: there is an anchor and no text is selected (with text selected it extends
      * that selection instead). Read as the press arrives, before the text selection reacts to it.
@@ -221,7 +237,7 @@ internal class RecordFieldContext(
 
     /** A right-click on the row of [path]: a row that is not part of the pick (or of a text selection) is picked first, as on a log row. */
     fun selectForMenu(path: List<String>) {
-        if (path in actions.selectedPaths(tabId, entryId)) return
+        if (FieldPickCoverage(actions.selectedPaths(tabId, entryId)).covers(path)) return
         val covered = geometry.textSelectionFields(probe.selectedText())?.covered
         if (covered != null && path in covered) return
         moveSelectionTo(path)
@@ -231,14 +247,16 @@ internal class RecordFieldContext(
     fun dropPick() = actions.pickFields(tabId, entryId, emptyList(), additive = false)
 
     /**
-     * Picks the fields from the anchor to [path]: what lies between them, normalised like a text selection (just [path] when the
-     * anchor is not in the tree any more). [additive] (Shift with Ctrl/Cmd) keeps the rest of the pick. False when there is no anchor.
+     * Picks the fields from the anchor to [path]: every row that lies between them, as a text selection covers them (just [path] when
+     * the anchor is not in the tree any more); what is added or copied is [pickedFields], the normalised pick. [additive] (Shift with
+     * Ctrl/Cmd) keeps the rest of the pick, with the rows a picked container stands for. False when there is no anchor.
      */
     fun pickRangeTo(path: List<String>, additive: Boolean): Boolean {
         val anchor = actions.rangeAnchor(tabId, entryId) ?: return false
         val covered = geometry.between(anchor, path) ?: setOf(path)
-        val picked = normalizeFieldPaths(geometry.order(), covered).ifEmpty { listOf(path) }
-        actions.pickFields(tabId, entryId, picked, additive)
+        val kept = if (additive) markedFieldRows(geometry.order(), actions.selectedPaths(tabId, entryId)) else emptyList()
+        val keptSet = kept.toHashSet()
+        actions.pickFields(tabId, entryId, kept + covered.filter { it !in keptSet }, additive = false)
         geometry.cursor = path
         return true
     }
@@ -253,14 +271,14 @@ internal class RecordFieldContext(
     }
 
     /**
-     * The row drag from [start] is at [current]: the pick is the rows between them, normalised like a Shift-click range, together with
-     * [kept] (the pick a Ctrl/Cmd drag adds to). The anchor stays at [start] and the keyboard continues from [current].
+     * The row drag from [start] is at [current]: the pick is the rows between them (all of them, as a Shift-click range keeps them),
+     * together with [kept] (the pick a Ctrl/Cmd drag adds to, with the rows a picked container stands for). The anchor stays at [start]
+     * and the keyboard continues from [current].
      */
     fun pickDragRange(start: List<String>, current: List<String>, kept: Set<List<String>>?) {
         val order = geometry.order()
-        val covered = geometry.between(start, current) ?: setOf(current)
-        val range = normalizeFieldPaths(order, covered).ifEmpty { listOf(current) }
-        val all = if (kept == null) range.toSet() else kept + range
+        val range = geometry.between(start, current) ?: setOf(current)
+        val all = if (kept == null) range else markedFieldRows(order, kept).toSet() + range
         actions.pickFields(tabId, entryId, order.filter { it in all } + all.filter { it !in order }, additive = false)
         geometry.cursor = current
     }
@@ -271,12 +289,25 @@ internal class RecordFieldContext(
         focusTree()
     }
 
-    /** A Ctrl/Cmd-click on [path]: adds it to the pick or takes it out, and the keyboard continues from it. */
+    /**
+     * A Ctrl/Cmd-click on [path]: adds it to the pick or takes it out ([toggledFieldPick]: a field inside a picked container takes the
+     * container's other visible fields as the pick instead), and the keyboard continues from it.
+     */
     fun toggleRow(path: List<String>) {
-        actions.toggleSelected(tabId, entryId, path)
+        val picked = actions.selectedPaths(tabId, entryId)
+        val next = toggledFieldPick(geometry.order(), picked, path)
+        if (next == (if (path in picked) picked - setOf(path) else picked + setOf(path))) {
+            actions.toggleSelected(tabId, entryId, path)
+        } else {
+            actions.pickFields(tabId, entryId, next.toList(), additive = false)
+            actions.setRangeAnchor(tabId, entryId, path)
+        }
         geometry.cursor = path
     }
 }
+
+/** How a field row shows the pick: [PICKED] the full selection fill, [INCLUDED] (inside a picked container) a lighter one. */
+internal enum class FieldRowMark { NONE, PICKED, INCLUDED }
 
 /** What a field's menu acts on, and so which items it offers. */
 internal sealed interface FieldMenuTargets {
@@ -295,11 +326,17 @@ internal sealed interface FieldMenuTargets {
 }
 
 /**
- * What the menu of [clicked] acts on: the pick when the pointer is on a picked row (more than one is picked), else the fields of the text
- * selection when the pointer is inside it and it covers something other than just that field, else the field itself.
+ * What the menu of [clicked] acts on: the pick ([selected], the normalised pick) when the pointer is on a marked row ([clickedPicked]:
+ * more than one field is picked, or the row is only marked through a container), else the fields of the text selection when the pointer
+ * is inside it and it covers something other than just that field, else the field itself.
  */
-internal fun fieldMenuTargets(selected: Set<List<String>>, clicked: List<String>, selection: TextSelectionFields?): FieldMenuTargets = when {
-    clicked in selected && selected.size > 1 -> FieldMenuTargets.Pick(selected.toList())
+internal fun fieldMenuTargets(
+    selected: Set<List<String>>,
+    clicked: List<String>,
+    selection: TextSelectionFields?,
+    clickedPicked: Boolean = clicked in selected,
+): FieldMenuTargets = when {
+    clickedPicked && (selected.size > 1 || clicked !in selected) -> FieldMenuTargets.Pick(selected.toList())
     selection != null && clicked in selection.covered && selection.fields != listOf(clicked) -> FieldMenuTargets.Selection(selection.fields)
     else -> FieldMenuTargets.One(clicked)
 }
@@ -387,9 +424,20 @@ internal fun AppState.clearRecordFieldSelection(): Boolean {
 internal fun AppState.recordFieldsForRowMenu(tabId: String, entryId: Int): List<List<String>> {
     val pick = recordFieldSelection
     if (pick != null && pick.tabId == tabId && pick.entryId == entryId && pick.sectionId == tab(tabId)?.selectedLogSectionId) {
-        return pick.paths.toList()
+        return normalizedPickOfRecord(tabId, entryId, pick.paths)
     }
     return recordFieldTrees.selectedAtRightPress(tabId, entryId)
+}
+
+/**
+ * [pick] of record [entryId] as what it adds: normalised against the rows its mounted tree shows, else (no tree is laid out, so there
+ * is no geometry) against the record's own fields in document order, else the pick as it is.
+ */
+internal fun AppState.normalizedPickOfRecord(tabId: String, entryId: Int, pick: Set<List<String>>): List<List<String>> {
+    val order = recordFieldTrees.visibleOrder(tabId, entryId)
+        ?: tab(tabId)?.rmap?.get(entryId)?.recordInspectionSource()?.let(::recordFieldsInDocumentOrder)
+        ?: return pick.toList()
+    return normalizedPick(order, pick)
 }
 
 /** The log row menu's "Add N selected fields to notes" for record [entryId] of [tabId], or null when no fields are picked or text-selected. */
@@ -596,7 +644,12 @@ internal fun RecordFieldMenu(context: RecordFieldContext, path: List<String>, at
     // Read once, as the menu opens: the text selected in the tree is what "Copy" copies, and the fields it covers what it can add.
     val selectedText = remember(at) { context.probe.selectedText() }
     val targets = remember(at) {
-        fieldMenuTargets(context.selected, path, context.geometry.textSelectionFields(selectedText))
+        fieldMenuTargets(
+            LinkedHashSet(context.pickedFields()),
+            path,
+            context.geometry.textSelectionFields(selectedText),
+            clickedPicked = context.isMarked(path),
+        )
     }
     val closed by rememberUpdatedState(onClosed)
     LaunchedEffect(state.status) {

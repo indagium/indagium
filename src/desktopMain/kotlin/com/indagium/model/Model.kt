@@ -1184,6 +1184,13 @@ data class LogTab(
     val jsonTailState: JsonTailState? = null,
     /** Identity for sources that cannot be reopened by file path. Shell copies and restores retain it. */
     val sourceInstanceId: UUID = UUID.randomUUID(),
+    /**
+     * Runtime-only, never serialized (a restore sets it again): this tab was restored from an autosave that predates
+     * [archiveCandidate] and its `!` path names an archive entry, whose candidate metadata arrives with its first load. Until then
+     * a `!` in [sourcePath] says nothing about whether the file is plain, so the restore (which looked, once) records the answer
+     * here. Appended last.
+     */
+    val legacyArchiveEntry: Boolean = false,
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */

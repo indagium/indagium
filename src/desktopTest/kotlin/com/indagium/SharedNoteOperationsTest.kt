@@ -26,6 +26,7 @@ import com.indagium.ui.shareTabNote
 import com.indagium.ui.sharedNotesFor
 import com.indagium.ui.stopSharing
 import com.indagium.ui.tokenFieldAt
+import com.indagium.utils.ZipLogCandidate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -870,7 +871,11 @@ class SharedNoteOperationsTest {
     fun closingAMemberKeepsItsFileAsAClosedMemberOnEveryClosePath() {
         val dir = createTempDirectory("shared-ops-close").toFile()
         val state = withTabs(dir)
-        state.tabs += mkTab("d", "d.log", listOf(entry(1))).copy(sourcePath = "${File(dir, "z.zip").absolutePath}!inner/d.log")
+        // An archive entry opened in the app carries its candidate (that is what says its `!` path is not a plain file's).
+        state.tabs += mkTab("d", "d.log", listOf(entry(1))).copy(
+            sourcePath = "${File(dir, "z.zip").absolutePath}!inner/d.log",
+            archiveCandidate = ZipLogCandidate("inner/d.log", "d.log", 1),
+        )
         state.tabs += mkTab("e", "e.log", listOf(entry(1))) // no source at all
         val id = assertNotNull(state.createSharedNote("Main", listOf("a", "b", "c", "d", "e")))
 

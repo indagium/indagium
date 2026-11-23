@@ -50,6 +50,28 @@ internal fun jsonSubtreeAt(root: JsonElement, path: List<String>): JsonElement? 
     return node
 }
 
+/**
+ * Every field of the record in [rawRecord] in document order (a container before the fields it holds; array items "[0]", "[1]"…), or null
+ * when it is not a JSON object or array. For picking fields with no field tree laid out; the walk uses no recursion.
+ */
+internal fun recordFieldsInDocumentOrder(rawRecord: String?): List<List<String>>? {
+    val root = parseRecordJson(rawRecord) ?: return null
+    val order = ArrayList<List<String>>()
+    val pending = ArrayDeque<Pair<List<String>, JsonElement>>()
+    pending.addLast(emptyList<String>() to root)
+    while (pending.isNotEmpty()) {
+        val (path, node) = pending.removeLast()
+        if (path.isNotEmpty()) order += path
+        val children = when (node) {
+            is JsonObject -> node.entries.map { it.key to it.value }
+            is JsonArray -> node.mapIndexed { index, child -> "[$index]" to child }
+            else -> emptyList()
+        }
+        for (child in children.asReversed()) pending.addLast((path + child.first) to child.second)
+    }
+    return order
+}
+
 private val RECORD_ARRAY_INDEX = Regex("\\[[0-9]+\\]")
 
 /** Dot paths with array indices and quoted brackets for keys that would otherwise be read as path syntax. */

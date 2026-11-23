@@ -74,6 +74,9 @@ private const val MAX_JSON_DEPTH = 32
 private const val MAX_JSON_CHILDREN = 128
 private const val MAX_JSON_STRING_CHARS = 8 * 1024
 private const val MAX_RECORD_PREVIEW_CHARS = 180
+
+// How strongly a row included only because a picked container holds it shows the selection fill (the container's own row: full).
+private const val INCLUDED_ROW_FILL_ALPHA = 0.45f
 private const val MAX_RAW_LINES = 80
 private const val MAX_RAW_LINE_CHARS = 600
 private const val MAX_VALUE_PREVIEW_CHARS = 220
@@ -396,7 +399,12 @@ private fun StructuredContainerRows(
         val startsOpen = initiallyExpanded || (container && depth < env.open.depth) || env.open.covers(fieldPath)
         val expandedState = remember(childPath, env.open.nonce) { mutableStateOf(startsOpen) }
         var expanded by expandedState
-        val picked = fieldContext != null && fieldPath in fieldContext.selected
+        // A picked row has the selection fill; a row included only because a picked container holds it, a lighter one.
+        val pickFill = when (fieldContext?.markOf(fieldPath)) {
+            FieldRowMark.PICKED -> tc.sl
+            FieldRowMark.INCLUDED -> tc.sl.copy(alpha = tc.sl.alpha * INCLUDED_ROW_FILL_ALPHA)
+            else -> null
+        }
         var hovered by remember(childPath) { mutableStateOf(false) }
         var menuAt by remember(childPath) { mutableStateOf<Offset?>(null) }
         val currentContext by rememberUpdatedState(fieldContext)
@@ -433,7 +441,7 @@ private fun StructuredContainerRows(
                 // A picked row has the fill a selected log row has, a hovered one the hover tint (never both).
                 .then(
                     when {
-                        picked -> Modifier.background(tc.sl)
+                        pickFill != null -> Modifier.background(pickFill)
                         hovered && fieldContext != null -> Modifier.background(tc.hv)
                         else -> Modifier
                     },
@@ -522,7 +530,7 @@ private fun StructuredContainerRows(
         if (expandable && expanded) {
             when {
                 container -> StructuredContainerRows(child, childPath, fieldPath, depth + 1, env)
-                hexBytes != null -> FieldValueArea(fieldContext, fieldPath, childPath, picked) {
+                hexBytes != null -> FieldValueArea(fieldContext, fieldPath, childPath, pickFill) {
                     StructuredHexDump(
                         entryId = path.substringBefore('.').toIntOrNull() ?: 0,
                         path = childPath,
@@ -532,7 +540,7 @@ private fun StructuredContainerRows(
                         tc = tc,
                     )
                 }
-                child is StructuredJsonValue.StringValue -> FieldValueArea(fieldContext, fieldPath, childPath, picked) {
+                child is StructuredJsonValue.StringValue -> FieldValueArea(fieldContext, fieldPath, childPath, pickFill) {
                     StructuredStringLines(
                         entryId = path.substringBefore('.').toIntOrNull() ?: 0,
                         path = childPath,
@@ -567,7 +575,7 @@ private fun FieldValueArea(
     fieldContext: RecordFieldContext?,
     fieldPath: List<String>,
     key: String,
-    picked: Boolean,
+    pickFill: Color?,
     content: @Composable () -> Unit,
 ) {
     if (fieldContext == null) {
@@ -578,7 +586,7 @@ private fun FieldValueArea(
     val currentContext by rememberUpdatedState(fieldContext)
     Box(
         Modifier.fillMaxWidth()
-            .then(if (picked) Modifier.background(tc().sl) else Modifier)
+            .then(if (pickFill != null) Modifier.background(pickFill) else Modifier)
             .trackFieldRow(fieldContext.geometry, fieldPath, area = true)
             .recordFieldGestures(
                 key = key,

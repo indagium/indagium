@@ -824,7 +824,10 @@ class Seq3Session(
         return closedDiagramSourcePath(parsed, host, related)
     }
 
-    /** The path of the one closed member or cited log of the diagram's file name (none or several: null, nothing is guessed). */
+    /**
+     * The stamp of the one closed member or cited log of the diagram's file name (none or several: null, nothing is guessed): its path,
+     * or for a path-less log the `tab:` key of its instance id, which is what [diagramSourceKey] gave it while it was open.
+     */
     private fun closedDiagramSourcePath(parsed: ParsedSeq3, host: LogTab, related: Set<String>): String? {
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return null
         // An open log of that name the note is about makes the choice ambiguous: only a log that is closed everywhere is named.
@@ -833,7 +836,9 @@ class Seq3Session(
             .filter { File(it.filename).name == filename }
             .distinctBy { it.sourcePath ?: it.tabId }
             .singleOrNull() ?: return null
-        return closed.sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX${closed.tabId}"
+        // A path-less log is keyed by its instance id (LogTab.diagramSourceKey), never by the reusable numeric tab id; with no
+        // instance id recorded nothing identifies it, so nothing is stamped.
+        return closed.sourcePath ?: closed.sourceInstanceId?.let { "$DIAGRAM_TAB_SOURCE_PREFIX$it" }
     }
 
     /**

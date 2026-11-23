@@ -24,6 +24,7 @@ import com.indagium.ui.setNotesView
 import com.indagium.ui.stopSharing
 import com.indagium.ui.tabShellFromToken
 import com.indagium.ui.tabToken
+import com.indagium.utils.ZipLogCandidate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -718,7 +719,11 @@ class SharedNoteGoToRowsTest {
             val viewer = assertNotNull(app.tab("b"))
             val rows = listOf(entry(1))
             val merged = mkTab("merge", "Merged", rows)
-            val archive = mkTab("archive", "entry.log", rows).copy(sourcePath = "${File(dir, "archive.zip").absolutePath}!entry.log")
+            // An archive entry opened in the app carries its candidate (that is what says its `!` path is not a plain file's).
+            val archive = mkTab("archive", "entry.log", rows).copy(
+                sourcePath = "${File(dir, "archive.zip").absolutePath}!entry.log",
+                archiveCandidate = ZipLogCandidate("entry.log", "entry.log", 1),
+            )
             app.tabs = listOf(viewer, merged, archive)
             app.putIntoNote(viewer.id, ref(id = "merge-ref", source = merged.id, ids = listOf(1)))
             app.putIntoNote(viewer.id, ref(id = "archive-ref", source = archive.id, ids = listOf(1)))
