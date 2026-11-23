@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.model.AnnBlock
+import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogFormatEngine
@@ -9,8 +10,11 @@ import com.indagium.model.LogLevel
 import com.indagium.model.LogRecordMetadata
 import com.indagium.model.LogTab
 import com.indagium.model.TabContentState
+import com.indagium.model.resolveRows
 import com.indagium.ui.AppState
 import com.indagium.ui.GoToRowsResult
+import com.indagium.ui.annotationsToken
+import com.indagium.ui.citedSourcesFromAnnotationsToken
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.goToLogRefRows
 import com.indagium.ui.goToLogRefRowsAfterReopen
@@ -606,6 +610,76 @@ class SharedNoteGoToRowsTest {
             assertTrue(app.loadAnnotationsFrom("b", exported))
             assertEquals(pending, app.tab("b")!!.noteClosedSources.single())
             assertEquals(original.sourcePath, pending.sourcePath)
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sidecarsKeepCitationsToExistingArchiveAndMergedInstancesAndRejectReusedIds() {
+        val dir = createTempDirectory("goto-sidecar-nonfile-sources").toFile()
+        val app = twoTabs(dir)
+        try {
+            val viewer = assertNotNull(app.tab("b"))
+            val rows = listOf(entry(1))
+            val merged = mkTab("merge", "Merged", rows)
+            val archive = mkTab("archive", "entry.log", rows).copy(sourcePath = "${File(dir, "archive.zip").absolutePath}!entry.log")
+            app.tabs = listOf(viewer, merged, archive)
+            app.putIntoNote(viewer.id, ref(id = "merge-ref", source = merged.id, ids = listOf(1)))
+            app.putIntoNote(viewer.id, ref(id = "archive-ref", source = archive.id, ids = listOf(1)))
+            val sidecar = File(dir, "analysis.ann")
+            assertTrue(app.saveAnnotationsTo(viewer.id, sidecar))
+
+            app.tabs = listOf(viewer, merged.copy(id = "renumbered-merge"), archive.copy(id = "renumbered-archive"))
+            assertTrue(app.loadAnnotationsFrom(viewer.id, sidecar))
+            val bound = app.tab(viewer.id)!!.annotations.blocks.filterIsInstance<AnnBlock.LogRef>()
+            assertEquals(listOf("renumbered-merge", "renumbered-archive"), bound.map { it.sourceTabId })
+            for (citation in bound) {
+                assertEquals(GoToRowsResult.Navigated(citation.sourceTabId!!, listOf(1)), go { app.goToLogRefRows(citation, viewer.id) })
+            }
+
+            val replacements = listOf(merged, archive).map { original ->
+                mkTab(original.id, original.filename, rows).copy(sourcePath = File(dir, "other-${original.id}.log").absolutePath)
+            }
+            app.tabs = listOf(viewer) + replacements
+            assertTrue(app.loadAnnotationsFrom(viewer.id, sidecar))
+            val detached = app.tab(viewer.id)!!.annotations.blocks.filterIsInstance<AnnBlock.LogRef>()
+            for ((index, citation) in detached.withIndex()) {
+                assertNotEquals(listOf(merged.id, archive.id)[index], citation.sourceTabId)
+                assertEquals(rows, citation.sourceEntries)
+                assertEquals(GoToRowsResult.NoSource, go { app.goToLogRefRows(citation, viewer.id) })
+            }
+            val exported = File(dir, "exported.ann")
+            assertTrue(app.saveAnnotationsTo(viewer.id, exported))
+            val saved = exported.readText().citedSourcesFromAnnotationsToken()
+            assertEquals(setOf(merged.sourceInstanceId, archive.sourceInstanceId), saved.map { it.sourceInstanceId }.toSet())
+            assertTrue(saved.all { it.sourcePath == null })
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun anExplicitLegacyCitationWithNoSourceIdentityIsDetachedOnSidecarImport() {
+        val dir = createTempDirectory("goto-legacy-sidecar-unverified").toFile()
+        val app = twoTabs(dir)
+        try {
+            val citation = ref(source = "a", ids = listOf(1))
+            val noSnapshot = ref(id = "no-snapshot", source = "a", ids = listOf(1), frozen = null)
+            val file = File(dir, "legacy.ann").apply { writeText(Annotations(blocks = listOf(citation, noSnapshot)).annotationsToken()) }
+            assertTrue(app.loadAnnotationsFrom("b", file))
+            val owner = app.tab("b")!!
+            val detached = assertIs<AnnBlock.LogRef>(owner.annotations.blocks.first())
+
+            assertNotNull(detached.sourceTabId)
+            assertNotEquals(citation.sourceTabId, detached.sourceTabId)
+            assertEquals(citation.sourceEntries, detached.sourceEntries)
+            assertTrue(assertIs<AnnBlock.LogRef>(owner.annotations.blocks.last()).resolveRows(owner).isEmpty())
+            assertEquals(GoToRowsResult.NoSource, go { app.goToLogRefRows(detached, "b") })
+            assertTrue(app.saveAnnotationsTo("b", file))
+            assertTrue(file.readText().citedSourcesFromAnnotationsToken().isEmpty())
         } finally {
             app.close()
             dir.deleteRecursively()

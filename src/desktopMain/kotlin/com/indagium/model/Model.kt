@@ -1179,8 +1179,8 @@ data class LogTab(
     val profileSourceByteLength: Long? = null,
     /** Runtime JSON framing for a tail whose startup scan was interrupted. */
     val jsonTailState: JsonTailState? = null,
-    /** Identity for diagram sources without a file path. Shell copies and restores retain it; a new tab gets a new value. */
-    val diagramSourceInstanceId: UUID = UUID.randomUUID(),
+    /** Identity for sources that cannot be reopened by file path. Shell copies and restores retain it. */
+    val sourceInstanceId: UUID = UUID.randomUUID(),
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */
@@ -1193,12 +1193,13 @@ data class SharedNoteInfo(
     val closedReferenceSources: List<SharedNoteClosedSource> = emptyList(),
 )
 
-/** Identifies a closed file and the profile that read its rows. */
+/** Identifies a cited file and profile, or an existing tab instance when the source has no plain file. */
 data class SharedNoteClosedSource(
     val tabId: String,
     val filename: String,
     val sourcePath: String?,
     val logFormatProfileSnapshot: String? = null,
+    val sourceInstanceId: UUID? = null,
 )
 
 /** Copy presentation preferences captured when a legacy note is opened/restored. */
@@ -1246,14 +1247,20 @@ fun LogTab.hasSameRow(cached: LogEntry): Boolean {
  * collapsed here so the precedence only has to be right in one place. Order matters:
  * 1. [AnnBlock.LogRef.sourceEntries] — baked in at save time (Annotations.materializeLogRefs), the
  *    fastest and most trustworthy source when present.
- * 2. The tab's live [LogTab.rmap] — resolves by id against whatever log is actually attached now,
- *    so edits to that log stay reflected even if sourceEntries was never populated.
+ * 2. The tab's live [LogTab.rmap] when it owns the citation's rows. Explicit references to other
+ *    tabs cannot use the owner's row IDs, which can overlap with the cited source's IDs.
  * 3. [LogTab.recoveredNoteRows] — a display-time fallback rebuilt by parsing the note's paired .md
  *    (see utils/NoteMarkdownRecovery.kt) for old .ann files saved before sourceEntries existed,
  *    opened into a tab with no matching log.
  */
-fun AnnBlock.LogRef.resolveRows(tab: LogTab): List<LogEntry> =
-    sourceEntries ?: logIds.mapNotNull { tab.rmap[it] }.ifEmpty { tab.recoveredNoteRows[id].orEmpty() }
+fun AnnBlock.LogRef.resolveRows(tab: LogTab): List<LogEntry> {
+    sourceEntries?.let { return it }
+    if (sourceTabId == null || sourceTabId == tab.id) {
+        val rows = logIds.mapNotNull { tab.rmap[it] }
+        if (rows.isNotEmpty()) return rows
+    }
+    return tab.recoveredNoteRows[id].orEmpty()
+}
 
 /**
  * A single, non-nesting group in the saved-filter library.

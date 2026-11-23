@@ -5,6 +5,7 @@ import com.indagium.model.Filter
 import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
+import java.util.UUID
 
 private const val ANNOTATIONS_CITED_SOURCES_INDEX = 10
 
@@ -34,7 +35,9 @@ internal fun SharedNoteInfo.sharedNoteToken(): String = tokenFields(
 )
 
 internal fun List<SharedNoteClosedSource>.closedSourcesToken(): String = joinToString(",") {
-    tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty(), it.logFormatProfileSnapshot.orEmpty()).b64()
+    val fileFields = tokenFields(it.tabId, it.filename, it.sourcePath.orEmpty(), it.logFormatProfileSnapshot.orEmpty())
+    val instanceField = it.sourceInstanceId?.let { id -> "|${tokenFields(id.toString())}" }.orEmpty()
+    (fileFields + instanceField).b64()
 }
 
 internal fun String?.closedSourcesFromToken(): List<SharedNoteClosedSource> = orEmpty().encodedList().mapNotNull { encoded ->
@@ -42,6 +45,7 @@ internal fun String?.closedSourcesFromToken(): List<SharedNoteClosedSource> = or
         val fields = encoded.tokenFields()
         SharedNoteClosedSource(
             fields[0], fields[1], fields.getOrNull(2)?.takeIf { it.isNotBlank() }, fields.getOrNull(3)?.takeIf { it.isNotBlank() },
+            fields.getOrNull(4)?.takeIf { it.isNotBlank() }?.let(UUID::fromString),
         )
     }.getOrNull()
 }

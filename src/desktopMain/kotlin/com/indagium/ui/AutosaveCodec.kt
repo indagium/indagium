@@ -57,7 +57,7 @@ internal const val TAB_TOKEN_SHARED_NOTE_INDEX = 22
 private const val TAB_TOKEN_NOTES_VIEW_INDEX = 23
 private const val TAB_TOKEN_HELD_FILTER_INDEX = 25
 private const val TAB_TOKEN_NOTE_CLOSED_SOURCES_INDEX = 26
-private const val TAB_TOKEN_DIAGRAM_SOURCE_INSTANCE_INDEX = 27
+private const val TAB_TOKEN_SOURCE_INSTANCE_INDEX = 27
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
 internal fun String.jsonStr(): String = buildString {
@@ -1736,9 +1736,8 @@ internal fun Annotations.annotationsToken(
     // getOrNull(9). Absent (null) or a legacy (<10-field) token both mean "no fingerprint
     // recorded", read by AppState's relink flow as "can't verify" rather than a mismatch.
     fingerprint.orEmpty(),
-    // Field 10 is sidecar-only. The autosave tab token records closed sources separately.
-    citedSources.closedSourcesToken(),
-)
+    // Field 10 is sidecar-only and present only when there are cited sources.
+) + if (citedSources.isEmpty()) "" else "|${tokenFields(citedSources.closedSourcesToken())}"
 
 /** Decodes the Filter recorded at [annotationsToken]'s field index 8. Kept separate from
  *  [annotationsFromToken] since the filter is not an [Annotations] field (see that function's own
@@ -1812,7 +1811,7 @@ internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath, errorHighlightStyle,
     logFormatProfileId, logFormatProfileSnapshot, profileProjectionSchemaPresent, profileDisplayColumns,
     selectedLogSectionId, sharedNote, notesView, dltSplitIdentifiers, heldFilterCriteria, noteClosedSources,
-    diagramSourceInstanceId.takeIf { sharedNote == null },
+    sourceInstanceId.takeIf { sharedNote == null },
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1992,7 +1991,7 @@ internal fun LogTab.tabToken(): String {
         // note's closed sources are (SharedNoteCodec.closedSourcesToken). Blank when none, so older tokens restore with none.
         noteClosedSources.closedSourcesToken(),
         // Field 27 keeps a pathless source identity independent of the reusable numeric tab ID.
-        diagramSourceInstanceId.takeIf { sharedNote == null }?.toString().orEmpty(),
+        sourceInstanceId.takeIf { sharedNote == null }?.toString().orEmpty(),
     )
 }
 
@@ -2115,7 +2114,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             heldFilterCriteria = p.getOrNull(TAB_TOKEN_HELD_FILTER_INDEX)?.takeIf { it.isNotBlank() }?.savedFilterFromToken()?.toFilter(),
             // Field index 26 (append-only); blank or missing means the private note cites no closed log.
             noteClosedSources = p.getOrNull(TAB_TOKEN_NOTE_CLOSED_SOURCES_INDEX).closedSourcesFromToken(),
-            diagramSourceInstanceId = p.getOrNull(TAB_TOKEN_DIAGRAM_SOURCE_INSTANCE_INDEX)
+            sourceInstanceId = p.getOrNull(TAB_TOKEN_SOURCE_INSTANCE_INDEX)
                 ?.let { runCatching { UUID.fromString(it) }.getOrNull() } ?: UUID.randomUUID(),
         ),
         source,

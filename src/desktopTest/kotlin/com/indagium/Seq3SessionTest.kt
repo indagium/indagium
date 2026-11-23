@@ -1660,27 +1660,36 @@ class Seq3SessionTest {
     @Test
     fun beginSeedsAUniqueDefaultTitleAgainstOnlyThisLogsLibraryEntries() {
         val root = createTempDirectory("indagium-seq3-default-title").toFile()
-        val tab = mkTab("log", "sample.log", twoTagEntries())
+        val tab = mkTab("log", "Merged", twoTagEntries())
+        val other = mkTab("other", "Merged", twoTagEntries().map { it.copy(msg = "other ${it.msg}") })
         val libraryStore = DiagramLibraryStore(File(root, "library.cache"))
         val state = AppState(
             File(root, "state.cache"),
             notesDir = File(root, "notes"),
             diagramLibraryStore = libraryStore,
         ).also {
-            it.tabs = listOf(tab)
+            it.tabs = listOf(tab, other)
             it.activateTab(tab.id)
         }
-        val sameLogIdentity = DiagramSourceIdentity(tab.sourcePath ?: tab.filename, computeLogFingerprint(tab.logData))
-        val otherLogIdentity = DiagramSourceIdentity("other.log", "different-fingerprint")
-        val snapshot = DiagramLibrarySnapshot.create(Seq3Document())
-        libraryStore.create("Untitled diagram", "", sameLogIdentity, snapshot)
-        // A same-named diagram under a DIFFERENT log's identity must not affect this log's numbering.
-        libraryStore.create("Untitled diagram", "", otherLogIdentity, snapshot)
-        val session = Seq3Session(state, libraryStore = libraryStore)
+        try {
+            val sameLogIdentity = DiagramSourceIdentity(tab.filename, computeLogFingerprint(tab.logData))
+            val otherLogIdentity = DiagramSourceIdentity(other.filename, computeLogFingerprint(other.logData))
+            val snapshot = DiagramLibrarySnapshot.create(Seq3Document())
+            val first = libraryStore.create("Untitled diagram", "", sameLogIdentity, snapshot)
+            val second = libraryStore.create("Untitled diagram 2", "", otherLogIdentity, snapshot)
+            val session = state.seq3Sessions
 
-        val id = session.begin("log", setOf(1, 2))!!
+            assertEquals(listOf(first.id), session.libraryForTab(tab).map { it.id })
+            assertEquals(listOf(second.id), session.libraryForTab(other).map { it.id })
+            val id = assertNotNull(session.begin(tab.id, setOf(1, 2)))
+            assertEquals("Untitled diagram 2", session.sessions.single { it.id == id }.document.title)
 
-        assertEquals("Untitled diagram 2", session.sessions.single { it.id == id }.document.title)
+            state.tabs = state.tabs + mkTab("ambiguous", "Merged", twoTagEntries())
+            assertTrue(session.libraryForTab(tab).none { it.id == first.id })
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
     }
 
     // ── Confirm: writes the document into a note ────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.DiagramTicketFilter
 import com.indagium.ui.diagramSourceKey
 import com.indagium.ui.mkTab
 import com.indagium.ui.setSharedNoteMembers
@@ -175,6 +176,37 @@ class Seq3MergedLogDiagramSourceTest {
     }
 
     @Test
+    fun aStampedManualDiagramKeepsItsTicketWhenReopenedAfterTheSourceCloses() {
+        val root = createTempDirectory("indagium-seq3-merged-closed-ticket").toFile()
+        val state = state(root)
+        try {
+            val coordinator = state.seq3Sessions
+            val editor = assertNotNull(coordinator.beginEmpty("m"))
+            assertTrue(coordinator.applyCommand(editor, Seq3Command.AddLifeline(Seq3Lifeline("manual", "Manual", emptySet(), 0))))
+            val blockId = assertNotNull(coordinator.confirm(editor))
+            val hostId = assertNotNull(state.shareTabNote("m", "Review", listOf("b")))
+            val block = state.noteTab(hostId)!!.annotations.blocks.single() as AnnBlock.Note
+            val saved = assertNotNull(parseSeq3Note(block.text)).document
+            assertNull(saved.sourceFile)
+            assertEquals(state.tab("m")!!.diagramSourceKey, saved.sourcePath)
+            coordinator.close(editor)
+            state.closeTab("m")
+
+            val reopened = assertNotNull(coordinator.beginEdit(hostId, blockId))
+            val session = coordinator.sessions.single { it.id == reopened }
+            assertNull(session.sourceTabId)
+            assertTrue(session.hasTicket)
+            assertEquals("The source log is not open", session.logUnavailableReason())
+            coordinator.updateTitle(reopened, "Edited without the log")
+            assertEquals(blockId, coordinator.confirm(reopened))
+            assertTrue(coordinator.listLibrary(DiagramTicketFilter.NO_TICKET).isEmpty())
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun aMergeCreatedAfterRestartCannotInheritTheClosedMergesDiagram() {
         val root = createTempDirectory("indagium-seq3-merged-restart").toFile()
         val cache = File(root, "state.cache")
@@ -223,7 +255,7 @@ class Seq3MergedLogDiagramSourceTest {
                     fixtures.sourceTabs.forEach { assertTrue(assertNotNull(restored.awaitTabLoaded(it)).logData.isNotEmpty()) }
                 }
                 val owner = assertNotNull(restored.tab(fixtures.recipient.id))
-                assertEquals(fixtures.recipient.diagramSourceInstanceId, owner.diagramSourceInstanceId)
+                assertEquals(fixtures.recipient.sourceInstanceId, owner.sourceInstanceId)
                 restored.mergeTabs(listOf(fixtures.sourceTabs[0], fixtures.sourceTabs[2]), "Replacement merge")
                 await { restored.tabs.any { it.filename == "Replacement merge" } }
                 val replacement = restored.tabs.single { it.filename == "Replacement merge" }

@@ -82,6 +82,8 @@ private fun plainSourcePathKey(sourcePath: String?): String? {
 
 /** Older sessions have no profile snapshot, so their closed sources match by path alone. */
 private fun SharedNoteClosedSource.matches(tab: LogTab): Boolean {
+    if (tab.isCaptureLauncher) return false
+    sourceInstanceId?.let { return it == tab.sourceInstanceId }
     val key = plainSourcePathKey(sourcePath) ?: return false
     return plainSourcePathKey(tab.sourcePath) == key &&
         (logFormatProfileSnapshot == null || logFormatProfileSnapshot == tab.logFormatProfileSnapshot)
@@ -174,7 +176,7 @@ private fun LogTab.withMember(tab: LogTab): LogTab = withReopenedSource(tab, add
 private fun LogTab.asClosedSource(): SharedNoteClosedSource? =
     sourcePath?.takeIf { plainSourcePathKey(it) != null }?.let { SharedNoteClosedSource(id, filename, it, logFormatProfileSnapshot) }
 
-/** File identities for the note sidecar, including cited tabs that are still open at the time of export. */
+/** Source identities for the note sidecar, including cited tabs that are still open at the time of export. */
 internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosedSource> {
     val cited = owner.annotations.blocks.citedSourceTabIds()
     if (cited.isEmpty()) return emptyList()
@@ -182,7 +184,8 @@ internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosed
     val stored = known.filter { it.tabId in cited }.distinctBy { it.tabId }
     val storedById = stored.associateBy { it.tabId }
     val open = tabs.mapNotNull { tab ->
-        tab.takeIf { it.id in cited && storedById[it.id]?.matches(it) != false }?.asClosedSource()
+        if (tab.isCaptureLauncher || tab.id !in cited || storedById[tab.id]?.matches(tab) == false) return@mapNotNull null
+        tab.asClosedSource() ?: SharedNoteClosedSource(tab.id, tab.filename, null, sourceInstanceId = tab.sourceInstanceId)
     }
     return stored.withClosedSources(open)
 }
@@ -192,15 +195,19 @@ private const val PENDING_CITATION_SOURCE_PREFIX = "citation-"
 /** Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock. */
 internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<SharedNoteClosedSource>): LogTab {
     val cited = owner.annotations.blocks.citedSourceTabIds()
+    val known = sources.distinctBy { it.tabId }.associateBy { it.tabId }
     val destinations = HashMap<String, String>()
     val pending = ArrayList<SharedNoteClosedSource>()
-    for (source in sources.filter { it.tabId in cited }.distinctBy { it.tabId }) {
-        val opened = tabs.firstOrNull { it.id == source.tabId && source.matches(it) }
-            ?: tabs.filter(source::matches).singleOrNull()
-        val destination = opened?.id ?: source.tabId.takeIf { it.startsWith(PENDING_CITATION_SOURCE_PREFIX) && tab(it) == null }
+    for (id in cited) {
+        val source = known[id]
+        val opened = source?.let {
+            tabs.firstOrNull { tab -> tab.id == id && source.matches(tab) } ?: tabs.filter(source::matches).singleOrNull()
+        }
+        // An older sidecar may have no identity for this citation. Preserve the frozen rows but detach the unverified numeric ID.
+        val destination = opened?.id ?: id.takeIf { it.startsWith(PENDING_CITATION_SOURCE_PREFIX) && tab(it) == null }
             ?: "$PENDING_CITATION_SOURCE_PREFIX${UUID.randomUUID()}"
-        destinations[source.tabId] = destination
-        if (opened == null) pending += source.copy(tabId = destination)
+        destinations[id] = destination
+        if (opened == null && source != null) pending += source.copy(tabId = destination)
     }
     val annotations = owner.annotations.mapLogRefs { ref ->
         val destination = destinations[ref.sourceTabId]
@@ -749,7 +756,7 @@ private fun closestUnusedRow(rows: List<Int>, target: Int, from: Int, to: Int, t
  */
 private fun AppState.reopenOfferFor(sourceTabId: String, viewingTabId: String, viewedHostId: String?): GoToRowsResult {
     val owners = listOf(viewedHostId ?: viewingTabId) + sharedNoteHosts.map { it.id }
-    val owner = owners.firstOrNull { closedSourceOf(it, sourceTabId) != null }
+    val owner = owners.firstOrNull { plainSourcePathKey(closedSourceOf(it, sourceTabId)?.sourcePath) != null }
     return owner?.let { GoToRowsResult.NeedsReopen(it, sourceTabId) } ?: GoToRowsResult.NoSource
 }
 

@@ -81,7 +81,7 @@ internal const val DIAGRAM_TAB_SOURCE_PREFIX = "tab:"
  * The key a diagram records for the log it was made from ([Seq3Document.sourcePath], [DiagramSourceIdentity.sourcePath]): the
  * file path, else the persistent instance identity of a pathless tab. Numeric tab ids can be reused after restart.
  */
-internal val LogTab.diagramSourceKey: String get() = sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX$diagramSourceInstanceId"
+internal val LogTab.diagramSourceKey: String get() = sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX$sourceInstanceId"
 
 internal fun LogTab.matchesDiagramSourceKey(key: String, allowLegacyName: Boolean): Boolean =
     !isCaptureLauncher && (diagramSourceKey == key ||
@@ -595,7 +595,8 @@ class Seq3Session(
                 ?.diagramId,
             exportMode = parsed.exportMode,
             dialect = parsed.dialect,
-            hasTicket = sharedNote == null || (storedSource?.let { !it.isNone } ?: !parsed.document.sourceFile.isNullOrBlank()),
+            hasTicket = sharedNote == null || openedDocument.sourcePath != null ||
+                (storedSource?.let { !it.isNone } ?: !openedDocument.sourceFile.isNullOrBlank()),
             // Null only when the note's tab IS the source log (an own-log diagram): any other source (a moved diagram's log A
             // in B's private note, a shared note's member) or none leaves the note's tab as the explicit owner, so confirm
             // and the existing-session lookup keep addressing this note.
@@ -2472,13 +2473,15 @@ class Seq3Session(
         val observedRevision = libraryRevision
         val source = sourceIdentityForLoadedTab(tab.id) ?: return emptyList()
         val items = libraryStore.forSource(source)
-        // Older pathless entries used the display name. Keep them visible when that name identifies one open tab.
-        val legacySource = source.copy(sourcePath = tab.filename)
-        return if (tab.sourcePath == null && appState.tabs.count { it.matchesDiagramSourceKey(tab.filename, allowLegacyName = true) } == 1) {
-            items + libraryStore.forSource(legacySource)
-        } else {
-            items
+        if (tab.sourcePath != null) return items
+        val legacy = libraryStore.forSource(source.copy(sourcePath = tab.filename))
+        if (legacy.isEmpty()) return items
+        // A second merge with the same title only makes old records ambiguous if it also has the saved fingerprint.
+        val ambiguous = appState.tabs.any {
+            it.id != tab.id && it.matchesDiagramSourceKey(tab.filename, allowLegacyName = true) &&
+                sourceIdentityForLoadedTab(it.id)?.contentFingerprint == source.contentFingerprint
         }
+        return if (ambiguous) items else items + legacy
     }
 
     /** WP17: the `ref` fragment picker's data source — [libraryForTab] above is deliberately NOT
