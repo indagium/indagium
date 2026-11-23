@@ -1762,7 +1762,7 @@ class Seq3SessionTest {
             // No library record: only the file name says which log the diagram came from.
             val hostBlock = assertIs<AnnBlock.Note>(state.sharedNoteHost(hostId)!!.annotations.blocks.single())
             parseSeq3Note(hostBlock.text)?.attachment?.diagramId?.let(store::delete)
-            // Sharing stamps even a log with no file path (with its tab name); a diagram without any stamp (older notes) is what
+            // Sharing stamps even a log with no file path; a diagram without any stamp (older notes) is what
             // this test is about, so the stamp is taken off.
             state.updateBlock(hostId, blockId, assertNotNull(updateSeq3NoteSourcePath(hostBlock.text, null)))
 

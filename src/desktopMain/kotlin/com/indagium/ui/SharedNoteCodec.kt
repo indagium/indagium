@@ -6,6 +6,11 @@ import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 
+private const val ANNOTATIONS_CITED_SOURCES_INDEX = 10
+
+internal fun String.citedSourcesFromAnnotationsToken(): List<SharedNoteClosedSource> =
+    runCatching { tokenFieldAt(ANNOTATIONS_CITED_SOURCES_INDEX).closedSourcesFromToken() }.getOrDefault(emptyList())
+
 /** Clear the export's owning log while preserving all other annotation token fields. */
 internal fun String.withoutNoteSourcePath(): String {
     val sourcePathIndex = 4

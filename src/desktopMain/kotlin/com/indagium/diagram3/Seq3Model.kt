@@ -791,11 +791,8 @@ data class Seq3Document(
      *  Dangling refs are ignored by resolvers and pruned by edits; hidden but still valid refs are
      *  retained so showing an artifact restores its authored position. */
     val rowOrder: List<Seq3RowRef> = emptyList(),
-    /** The identity (`LogTab.sourcePath ?: LogTab.filename`) of the log this diagram was made from, written only when "Stop
-     *  sharing" moves a shared note's diagram into a member's private note: there the note's own tab is no longer evidence of
-     *  the diagram's log, and a note that never cites that log would otherwise let the diagram fall back to the wrong rows.
-     *  Appended LAST and encoded only when non-null (see `Seq3Codec.documentToMap`), so every unstamped document encodes
-     *  byte-identically to before and an older build ignores the unknown key. Null for every diagram that was never moved. */
+    /** The source file path, or a `tab:` key for a source without a file. Shared notes and diagrams moved to another log's
+     *  private note use this identity independently of their owner. Encoded only when present (`Seq3Codec.documentToMap`). */
     val sourcePath: String? = null,
 )
 

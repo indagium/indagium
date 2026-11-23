@@ -7,6 +7,7 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.diagramSourceKey
 import com.indagium.ui.mkTab
 import com.indagium.ui.setSharedNoteMembers
 import com.indagium.ui.shareTabNote
@@ -21,9 +22,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * A log with no file path (a merged tab) names itself by its tab name everywhere a diagram records or resolves its source: Share,
- * Confirm in a shared note, Stop sharing and the match back to a tab. Otherwise the diagram would depend on the members-only file-name
- * fallback and report its log as not open once that tab leaves the members.
+ * A merged log keeps its tab identity across note ownership changes and title collisions.
  */
 class Seq3MergedLogDiagramSourceTest {
     private companion object {
@@ -31,7 +30,7 @@ class Seq3MergedLogDiagramSourceTest {
         const val WAIT_MS = 4_000L
         const val PID = 7
         const val TID = 11
-        const val MERGED = "merged.log"
+        const val MERGED = "Merged"
     }
 
     private fun await(condition: () -> Boolean) {
@@ -82,7 +81,7 @@ class Seq3MergedLogDiagramSourceTest {
         try {
             val blockId = confirmed(state, "m")
             val hostId = assertNotNull(state.shareTabNote("m", "Investigation", listOf("m", "b")))
-            assertEquals(MERGED, stampOf(state, hostId, blockId), "the diagram is stamped with the merged log's key")
+            assertEquals(state.tab("m")!!.diagramSourceKey, stampOf(state, hostId, blockId))
 
             assertTrue(state.setSharedNoteMembers(hostId, listOf("b")))
             state.activateTab("b")
@@ -113,7 +112,7 @@ class Seq3MergedLogDiagramSourceTest {
             assertEquals("m", state.seq3Sessions.sessions.single { it.id == editing }.sourceTabId)
             state.seq3Sessions.updateTitle(editing, "Edited in the shared note")
             assertEquals(firstBlock, state.seq3Sessions.confirm(editing))
-            assertEquals(MERGED, stampOf(state, hostId, firstBlock), "a diagram confirmed into the shared note names the merged log")
+            assertEquals(state.tab("m")!!.diagramSourceKey, stampOf(state, hostId, firstBlock))
             state.seq3Sessions.close(editing)
 
             assertTrue(state.setSharedNoteMembers(hostId, listOf("b")))
@@ -137,10 +136,34 @@ class Seq3MergedLogDiagramSourceTest {
             val hostId = assertNotNull(state.shareTabNote("m", "Investigation", listOf("m", "b")))
             assertTrue(state.stopSharing(hostId, "b", replaceExisting = true))
 
-            assertEquals(MERGED, stampOf(state, "b", blockId))
+            assertEquals(state.tab("m")!!.diagramSourceKey, stampOf(state, "b", blockId))
             state.activateTab("b")
             assertTrue(navigate(state, "b", blockId, 2))
             assertEquals(setOf(2), state.tab("m")!!.selected)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun closingAMergedSourceNeverBindsItsDiagramToAnotherMergeWithTheSameTitleAndRows() {
+        val root = createTempDirectory("indagium-seq3-merged-duplicate").toFile()
+        val state = state(root)
+        try {
+            val sharedRows = state.tab("m")!!.logData.toList()
+            state.tabs = state.tabs + mkTab("other-merge", MERGED, sharedRows + LogEntry(3, "11:00:00.000", LogLevel.I, "Other", "different"))
+            val blockId = confirmed(state, "m")
+            val hostId = assertNotNull(state.shareTabNote("m", "Investigation", listOf("m", "b")))
+
+            state.upTab("m") { it.copy(filename = "Renamed merge") }
+            assertTrue(navigate(state, hostId, blockId, 2))
+            state.closeTab("m")
+
+            assertNull(state.seq3Sessions.sourceTabIdForNote(hostId, blockId))
+            assertTrue(state.stopSharing(hostId, "b"))
+            assertNull(state.seq3Sessions.sourceTabIdForNote("b", blockId))
+            assertTrue(state.tab("other-merge")!!.selected.isEmpty())
         } finally {
             state.close()
             root.deleteRecursively()

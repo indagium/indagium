@@ -174,6 +174,33 @@ private fun LogTab.withMember(tab: LogTab): LogTab = withReopenedSource(tab, add
 private fun LogTab.asClosedSource(): SharedNoteClosedSource? =
     sourcePath?.takeIf { plainSourcePathKey(it) != null }?.let { SharedNoteClosedSource(id, filename, it, logFormatProfileSnapshot) }
 
+/** File identities for the note sidecar, including cited tabs that are still open at the time of export. */
+internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosedSource> {
+    val cited = owner.annotations.blocks.citedSourceTabIds()
+    if (cited.isEmpty()) return emptyList()
+    val stored = owner.sharedNote?.let { it.closedMembers + it.closedReferenceSources } ?: owner.noteClosedSources
+    val open = tabs.mapNotNull { tab -> tab.takeIf { it.id in cited }?.asClosedSource() }
+    return stored.filter { it.tabId in cited }.withClosedSources(open).distinctBy { it.tabId }
+}
+
+/** Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock. */
+internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<SharedNoteClosedSource>): LogTab {
+    val cited = owner.annotations.blocks.citedSourceTabIds()
+    var annotations = owner.annotations
+    val pending = sources.filter { it.tabId in cited }.distinctBy { it.tabId }.filter { source ->
+        val opened = tabs.firstOrNull { it.id == source.tabId && source.matches(it) }
+            ?: tabs.filter(source::matches).singleOrNull()
+        if (opened != null) annotations = annotations.retargetLogRefSource(source.tabId, opened.id)
+        opened == null
+    }
+    val info = owner.sharedNote
+    return owner.copy(
+        annotations = annotations,
+        noteClosedSources = if (info == null) pending else emptyList(),
+        sharedNote = info?.copy(closedReferenceSources = pending.filterNot { source -> info.closedMembers.any { it.tabId == source.tabId } }),
+    )
+}
+
 /** Keeps reopen information for a closing member or a file cited by this note. */
 private fun LogTab.withSourceClosed(tab: LogTab): LogTab {
     val info = sharedNote ?: return this
@@ -601,8 +628,11 @@ internal sealed interface GoToRowsResult {
 private const val REOPEN_WAIT_MS = 60_000L
 private const val REOPEN_POLL_MS = 25L
 
+// Older frozen rows can omit the process and thread fields, which the sidecar decoder represents as zero.
 private fun LogEntry.sameRowContent(saved: LogEntry): Boolean =
-    ts == saved.ts && msg == saved.msg && tag == saved.tag && (saved.rawRecord == null || rawRecord == saved.rawRecord)
+    ts == saved.ts && msg == saved.msg && tag == saved.tag && level == saved.level &&
+        (saved.pid == 0 || pid == saved.pid) && (saved.tid == 0 || tid == saved.tid) &&
+        (saved.rawRecord == null || rawRecord == saved.rawRecord)
 
 private fun resolveSelectedRecordId(block: AnnBlock.LogRef, rows: List<LogEntry>, rmap: Map<Int, LogEntry>, fingerprint: String): Int? {
     val id = block.logIds.singleOrNull() ?: return null
@@ -622,7 +652,7 @@ private class LostRowGroup(val saved: LogEntry, val targetIds: List<Int>) {
 
 /**
  * The ids in [rows] that stand for [block]'s rows. A saved id is kept when the row now under it is the frozen one (same time,
- * message, tag and JSON when available); an id that changed (a reparse, a reopened file) is looked up by content. Rows that are
+ * message, tag, severity, and process, thread and raw record when available); a changed id is looked up by content. Rows that are
  * already matched at their saved id are reserved, and the changed ids take distinct rows (see [assignLostRows]): identical
  * citations never collapse onto one row. A reference without frozen rows keeps the ids that still exist. One pass over [rows]
  * serves every changed id.
@@ -642,7 +672,7 @@ internal fun resolveLogRefRowIds(block: AnnBlock.LogRef, rows: List<LogEntry>, r
     }
     if (lost.isNotEmpty()) {
         val groups = lost.values
-            .groupBy { listOf(it.ts, it.msg, it.tag, it.rawRecord) }
+            .groupBy { listOf(it.ts, it.msg, it.tag, it.level, it.pid, it.tid, it.rawRecord) }
             .values.map { same -> LostRowGroup(same.first(), same.map(LogEntry::id).sorted()) }
         val byMessage = groups.groupBy { it.saved.msg }
         for (row in rows) {

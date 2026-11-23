@@ -57,6 +57,7 @@ enum class DiagramTicketFilter {
 internal fun diagramTicketLabel(source: DiagramSourceIdentity): String {
     if (source.isNone) return ""
     val path = source.sourcePath
+    if (path.startsWith(DIAGRAM_TAB_SOURCE_PREFIX)) return "Log tab"
     val bang = path.indexOf('!')
     if (bang < 0) return path.substringAfterLast('/').substringAfterLast('\\').ifBlank { path }
     val archive = path.substring(0, bang).substringAfterLast('/').substringAfterLast('\\')
@@ -199,6 +200,8 @@ private fun DiagramLibraryItem.toSummary(): DiagramLibrarySummary {
         attachmentCount = attachments.size,
         participantLabels = parsed?.document?.lifelines?.map { it.name }.orEmpty(),
         rangeSummary = parsed?.let { rangeSummary(it.document.range) } ?: "Unavailable diagram data",
+        ticketLabel = parsed?.document?.sourceFile?.takeIf { source.sourcePath.startsWith(DIAGRAM_TAB_SOURCE_PREFIX) }
+            ?: diagramTicketLabel(source),
     )
 }
 

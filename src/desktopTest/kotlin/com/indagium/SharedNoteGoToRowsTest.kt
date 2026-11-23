@@ -17,6 +17,7 @@ import com.indagium.ui.goToLogRefRowsAfterReopen
 import com.indagium.ui.mkTab
 import com.indagium.ui.resolveLogRefRowIds
 import com.indagium.ui.setNotesView
+import com.indagium.ui.stopSharing
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -234,6 +235,26 @@ class SharedNoteGoToRowsTest {
         val block = ref(source = "a", ids = listOf(10, 11), frozen = listOf(twin.copy(id = 10), twin.copy(id = 11)))
 
         assertEquals(listOf(12, 13), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
+    }
+
+    @Test
+    fun aReusedRowIdMustStillMatchTheSavedProcessThreadAndSeverity() {
+        val saved = entry(2, "same message").copy(pid = 123, tid = 456)
+        val block = ref(source = "a", ids = listOf(saved.id), frozen = listOf(saved))
+        for (other in listOf(saved.copy(pid = 321), saved.copy(tid = 654), saved.copy(level = LogLevel.E))) {
+            val rows = listOf(other, saved.copy(id = 3))
+            assertEquals(listOf(3), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
+        }
+    }
+
+    @Test
+    fun shiftedCitationsWithDifferentThreadIdentitiesAreGroupedSeparately() {
+        val first = entry(2, "same message").copy(pid = 123, tid = 456)
+        val second = first.copy(id = 3, tid = 654)
+        val block = ref(source = "a", ids = listOf(first.id, second.id), frozen = listOf(first, second))
+        val rows = listOf(first.copy(id = 5), second.copy(id = 6))
+
+        assertEquals(listOf(5, 6), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
     }
 
     @Test
@@ -477,6 +498,55 @@ class SharedNoteGoToRowsTest {
             assertEquals(listOf("a"), updated.sharedNote?.memberTabIds)
             assertTrue(updated.sharedNote?.closedReferenceSources.orEmpty().isEmpty())
             assertEquals(reopened.id, (updated.annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aTransferredNoteReloadsItsCitedFilesFromTheSidecar() {
+        val dir = createTempDirectory("goto-transferred-sidecar").toFile()
+        val notes = File(dir, "notes")
+        val app = AppState(File(dir, "state.cache"), restoreOnCreate = false, autoExportNotes = true, notesDir = notes)
+        try {
+            app.updateSettings { it.copy(autoExportNotes = true) }
+            val source = File(dir, "source.log").apply { writeText("Worker: request timed out\n") }
+            val recipient = File(dir, "recipient.log").apply { writeText("10:00:00.000 I/Tag: recipient row\n") }
+            val profile = LogFormatProfile(
+                id = "citation-source-profile",
+                name = "Citation source profile",
+                engine = LogFormatEngine.REGEX,
+                regexPattern = "^(\\w+): (.*)$",
+                fieldMappings = mapOf(LogFieldRole.COMPONENT to "1", LogFieldRole.MESSAGE to "2"),
+            )
+            val sourceId = assertNotNull(app.openFileWithLogFormatProfile(source, profile))
+            val recipientId = assertNotNull(app.openFile(recipient))
+            waitUntil("both logs have loaded") { listOf(sourceId, recipientId).all { app.tab(it)?.contentState == TabContentState.LOADED } }
+            val sourceTab = assertNotNull(app.tab(sourceId))
+            val originalProfile = assertNotNull(sourceTab.logFormatProfileSnapshot)
+            val host = assertNotNull(app.createSharedNote("Investigation", listOf(sourceId, recipientId)))
+            val block = ref(source = sourceId, ids = listOf(1), frozen = sourceTab.logData.toList(), filename = source.name)
+            app.putIntoNote(host, block)
+            assertTrue(app.stopSharing(host, recipientId))
+            val sidecar = File(notes, "recipient_analysis.ann")
+            waitUntil("the transferred note is exported") { sidecar.isFile && sidecar.length() > 0 }
+            app.closeTab(sourceId)
+            app.closeTab(recipientId)
+
+            val restoredId = assertNotNull(app.openFile(recipient))
+            waitUntil("the note autoloads") { app.tab(restoredId)?.annotations?.blocks?.isNotEmpty() == true }
+            val restored = assertIs<AnnBlock.LogRef>(app.tab(restoredId)!!.annotations.blocks.single())
+            assertEquals(GoToRowsResult.NeedsReopen(restoredId, sourceId), go { app.goToLogRefRows(restored, restoredId) })
+            val navigated = assertIs<GoToRowsResult.Navigated>(go { app.goToLogRefRowsAfterReopen(restoredId, sourceId, restored, restoredId) })
+            assertEquals(originalProfile, app.tab(navigated.tabId)?.logFormatProfileSnapshot)
+            assertEquals(listOf(1), navigated.rowIds)
+
+            app.closeTab(restoredId)
+            val againId = assertNotNull(app.openFile(recipient))
+            waitUntil("the note autoloads with its source already open") { app.tab(againId)?.annotations?.blocks?.isNotEmpty() == true }
+            val rebound = assertIs<AnnBlock.LogRef>(app.tab(againId)!!.annotations.blocks.single())
+            assertEquals(navigated.tabId, rebound.sourceTabId)
         } finally {
             app.close()
             dir.deleteRecursively()

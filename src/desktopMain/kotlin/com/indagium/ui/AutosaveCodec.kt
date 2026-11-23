@@ -1705,7 +1705,11 @@ private fun Filter.asSavedFilterForToken(): SavedFilter = SavedFilter(
     kwHighlightEnabled = kwHighlightEnabled, kwHighlightColor = kwHighlightColor,
 )
 
-internal fun Annotations.annotationsToken(sourcePath: String? = null, filter: Filter? = null): String = tokenFields(
+internal fun Annotations.annotationsToken(
+    sourcePath: String? = null,
+    filter: Filter? = null,
+    citedSources: List<SharedNoteClosedSource> = emptyList(),
+): String = tokenFields(
     prefix,
     suffix,
     blocks.joinToString(",") { it.annBlockToken().b64() },
@@ -1730,6 +1734,8 @@ internal fun Annotations.annotationsToken(sourcePath: String? = null, filter: Fi
     // getOrNull(9). Absent (null) or a legacy (<10-field) token both mean "no fingerprint
     // recorded", read by AppState's relink flow as "can't verify" rather than a mismatch.
     fingerprint.orEmpty(),
+    // Field 10 is sidecar-only. The autosave tab token records closed sources separately.
+    citedSources.closedSourcesToken(),
 )
 
 /** Decodes the Filter recorded at [annotationsToken]'s field index 8. Kept separate from

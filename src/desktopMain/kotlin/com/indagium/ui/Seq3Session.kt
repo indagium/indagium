@@ -75,12 +75,17 @@ sealed interface ActiveSurface {
     data object Tests : ActiveSurface
 }
 
+internal const val DIAGRAM_TAB_SOURCE_PREFIX = "tab:"
+
 /**
  * The key a diagram records for the log it was made from ([Seq3Document.sourcePath], [DiagramSourceIdentity.sourcePath]): the
- * file path, else the tab's name (a merged or captured log has no path). Every place that stamps a diagram's source and every
- * place that matches a stamp back to a tab goes through this, so a log with no file path is named the same way both ways.
+ * file path, else the stable tab id (a merged or captured log can have no path).
  */
-internal val LogTab.diagramSourceKey: String get() = sourcePath ?: filename
+internal val LogTab.diagramSourceKey: String get() = sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX$id"
+
+internal fun LogTab.matchesDiagramSourceKey(key: String, allowLegacyName: Boolean): Boolean =
+    !isCaptureLauncher && (diagramSourceKey == key ||
+        (allowLegacyName && sourcePath == null && !key.startsWith(DIAGRAM_TAB_SOURCE_PREFIX) && filename == key))
 
 /** Every diagram note in [tab], paired with its block id — the one place that decides "is this
  *  Note actually a diagram", so the panel, the export and the MCP layer can never disagree.
@@ -434,7 +439,7 @@ class Seq3Session(
     internal fun beginEmpty(tabId: String, origin: TabRef?): String? {
         val originGroupId = appState.tabGroupIdForOrigin(origin)
         val tab = appState.tab(tabId) ?: return null
-        val titles = sourceIdentityForLoadedTab(tab.id)?.let(libraryStore::forSource).orEmpty().map { it.title }.toSet()
+        val titles = libraryForTab(tab).map { it.title }.toSet()
         val title = defaultSeq3Title(titles)
         val document = Seq3Document(title = title)
         val id = "seq3-${UUID.randomUUID()}"
@@ -518,7 +523,7 @@ class Seq3Session(
         val id = "seq3-${UUID.randomUUID()}"
         // Unique against THIS exact log's own library entries (not the whole library) — two
         // different logs are free to each have their own "Untitled diagram".
-        val titles = sourceIdentityForLoadedTab(tab.id)?.let(libraryStore::forSource).orEmpty().map { it.title }.toSet()
+        val titles = libraryForTab(tab).map { it.title }.toSet()
         val title = defaultSeq3Title(titles)
         val session = Seq3WorkspaceSession(
             id = id,
@@ -823,9 +828,9 @@ class Seq3Session(
         if (appState.tabs.any { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }) return null
         val closed = host.sharedNote?.let { it.closedMembers + it.closedReferenceSources }.orEmpty()
             .filter { File(it.filename).name == filename }
-            .distinctBy { it.sourcePath ?: it.filename }
+            .distinctBy { it.sourcePath ?: it.tabId }
             .singleOrNull() ?: return null
-        return closed.sourcePath ?: closed.filename
+        return closed.sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX${closed.tabId}"
     }
 
     /**
@@ -838,7 +843,7 @@ class Seq3Session(
      * evidence and keeps the plain rule: the sole tab of that path, else the fingerprint, else [preferred] or a related tab.
      */
     private fun tabForStoredSource(source: DiagramSourceIdentity, preferred: String?, related: Set<String>, document: Seq3Document): String? {
-        val samePath = appState.tabs.filter { !it.isCaptureLauncher && it.diagramSourceKey == source.sourcePath }
+        val samePath = appState.tabs.filter { it.matchesDiagramSourceKey(source.sourcePath, allowLegacyName = it.id in related) }
         if (samePath.size <= 1 && document.evidenceSample().isEmpty()) return samePath.singleOrNull()?.id
 
         fun choose(pool: List<LogTab>): String? =
@@ -1770,7 +1775,9 @@ class Seq3Session(
     fun newSourceDiagramTitle(id: String): String {
         val current = session(id) ?: return BASE_UNTITLED_TITLE
         current.document.title.trim().takeIf { it.isNotEmpty() }?.let { return it }
-        val others = sourceIdentityOf(current)?.let(libraryStore::forSource).orEmpty()
+        val tab = current.sourceTabId?.let(appState::tab)?.takeIf { it.contentState == TabContentState.LOADED }
+        val entries = if (tab != null) libraryForTab(tab) else sourceIdentityOf(current)?.let(libraryStore::forSource).orEmpty()
+        val others = entries
             .filter { it.id != current.libraryItemId }
             .map { it.title }
         return defaultSeq3Title(others.toSet())
@@ -2464,7 +2471,14 @@ class Seq3Session(
         @Suppress("UNUSED_VARIABLE")
         val observedRevision = libraryRevision
         val source = sourceIdentityForLoadedTab(tab.id) ?: return emptyList()
-        return libraryStore.forSource(source)
+        val items = libraryStore.forSource(source)
+        // Older pathless entries used the display name. Keep them visible when that name identifies one open tab.
+        val legacySource = source.copy(sourcePath = tab.filename)
+        return if (tab.sourcePath == null && appState.tabs.count { it.matchesDiagramSourceKey(tab.filename, allowLegacyName = true) } == 1) {
+            items + libraryStore.forSource(legacySource)
+        } else {
+            items
+        }
     }
 
     /** WP17: the `ref` fragment picker's data source — [libraryForTab] above is deliberately NOT

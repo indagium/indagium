@@ -15808,7 +15808,7 @@ class AppState(
         return withPinnedRows(t) {
             runCatching {
                 file.parentFile?.mkdirs()
-                file.writeText(t.annotations.preparedForSave(t).annotationsToken())
+                file.writeText(t.annotations.preparedForSave(t).annotationsToken(citedSources = noteSourcesForExport(t)))
             }.isSuccess
         }
     }
@@ -15929,7 +15929,9 @@ class AppState(
     }
 
     fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
-        val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
+        val token = runCatching { file.readText() }.getOrNull() ?: return false
+        val annotations = token.annotationsFromToken() ?: return false
+        val sources = token.citedSourcesFromAnnotationsToken()
         val recovered = recoveredNoteRowsFor(file, annotations)
         var loaded = false
         // Loading a sidecar is not an edit: migrate resolvable legacy rows in memory, but do not
@@ -15940,13 +15942,14 @@ class AppState(
             val withRows = t.copy(recoveredNoteRows = recovered)
             val preferences = legacyLogRefPreferences()
             val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
-            withRows.copy(
+            val loadedNote = withRows.copy(
                 annotations = frozen,
                 noteTargetName = noteExportTargetName(file),
                 pendingLegacyLogRefPreferences = preferences.takeIf {
                     frozen.hasUnresolvedLegacyLogRefs(withRows)
                 },
             )
+            restoreNoteSourcesLocked(loadedNote, sources)
         }
         return loaded
     }
@@ -15986,7 +15989,7 @@ class AppState(
                     runCatching {
                         saved.writeText(buildMd(t, settings))
                         File(saved.parent, saved.nameWithoutExtension + ".ann")
-                            .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
+                            .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter, noteSourcesForExport(t)))
                         writeAnnotationFrameImages(t, saved)
                         rememberRecentNote(saved)
                     }.fold(
@@ -16099,8 +16102,10 @@ class AppState(
         // Prefer .ann sidecar — restores exact blocks and structure
         val sidecar = File(file.parent, file.nameWithoutExtension + ".ann")
         if (sidecar.exists()) {
-            val annotations = runCatching { sidecar.readText().annotationsFromToken() }.getOrNull()
+            val token = runCatching { sidecar.readText() }.getOrNull()
+            val annotations = token?.annotationsFromToken()
             if (annotations != null) {
+                val sources = token.citedSourcesFromAnnotationsToken()
                 // Change 2 (relink-log bugfix): an .ann saved before Change 1's materializeLogRefs
                 // existed has LogRef.sourceEntries == null, so if this tab's own log doesn't cover
                 // those ids either (no log attached, or a different log), recover the rows from the
@@ -16115,13 +16120,14 @@ class AppState(
                     val withRows = t.copy(recoveredNoteRows = recovered)
                     val preferences = legacyLogRefPreferences()
                     val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
-                    withRows.copy(
+                    val loadedNote = withRows.copy(
                         annotations = frozen,
                         noteTargetName = pinName,
                         pendingLegacyLogRefPreferences = preferences.takeIf {
                             frozen.hasUnresolvedLegacyLogRefs(withRows)
                         },
                     )
+                    restoreNoteSourcesLocked(loadedNote, sources)
                 }
                 return
             }
@@ -16139,7 +16145,10 @@ class AppState(
         val text = runCatching { file.readText() }.getOrElse { return }
         applyOpenedNote(tabId, file, autoLoad) { t ->
             val block = AnnBlock.Note(newId("n"), text)
-            t.copy(annotations = t.annotations.copy(blocks = listOf(block)), noteTargetName = pinName, recoveredNoteRows = emptyMap())
+            t.copy(
+                annotations = t.annotations.copy(blocks = listOf(block)), noteTargetName = pinName,
+                recoveredNoteRows = emptyMap(), noteClosedSources = emptyList(),
+            )
         }
     }
 
@@ -16270,6 +16279,7 @@ class AppState(
     internal fun persistStoppedSharedNote(host: LogTab, recipient: LogTab) {
         if (!shouldExportStoppedSharedNote(host, recipient)) return
         val name = recipient.noteTargetName ?: return
+        val sources = noteSourcesForExport(recipient)
         val directory = activeNotesDir()
         val target = reserveExportTarget(File(directory, name))
         val reserved = reservedNoteTargetNames(exceptNoteId = recipient.id)
@@ -16280,7 +16290,7 @@ class AppState(
             try {
                 reportTransferredNoteFailure(target.mdFile) {
                     target.writer.mutex.withLock {
-                        if (target.revision == target.writer.revision.get()) writeNoteExport(recipient, target.mdFile)
+                        if (target.revision == target.writer.revision.get()) writeNoteExport(recipient, target.mdFile, sources)
                     }
                     if (retiring != null) retireNoteSourceAssociation(retiring)
                     // A recipient reopened while the export was queued may have missed the new file.
@@ -17284,23 +17294,24 @@ class AppState(
         val revision = reserved?.revision ?: writer.revision.incrementAndGet()
         // Queued on the write lane and reads `tab`'s rows later (buildMd, preparedForSave): an edit
         // right before closing a capture tab must not lose its export to the row release.
+        val sources = noteSourcesForExport(tab)
         launchPinned(pinRows(tab)) {
             writer.mutex.withLock {
                 // A newer mutation was already queued while this coroutine waited for the file's
                 // write lane. Only the latest snapshot may be written; otherwise an old annotation
                 // state could finish after and clobber the newer one.
                 if (revision != writer.revision.get()) return@withLock
-                runCatching { writeNoteExport(tab, mdFile) }
+                runCatching { writeNoteExport(tab, mdFile, sources) }
             }
         }
     }
 
-    private fun writeNoteExport(tab: LogTab, mdFile: File) {
+    private fun writeNoteExport(tab: LogTab, mdFile: File, sources: List<SharedNoteClosedSource>) {
         val directory = mdFile.parentFile
         directory.mkdirs()
         mdFile.writeText(buildMd(tab, settings))
         File(directory, "${mdFile.nameWithoutExtension}.ann")
-            .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter))
+            .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter, sources))
         legacySourceFingerprintFile(mdFile).delete()
         writeAnnotationFrameImages(tab, mdFile)
         rememberRecentNote(mdFile)
