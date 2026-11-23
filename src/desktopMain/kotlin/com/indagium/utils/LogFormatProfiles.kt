@@ -34,6 +34,8 @@ private const val MAX_PROFILE_RECORD_CHARS = 256 * 1024
  */
 internal const val MAX_SPLIT_RECORD_CHARS = 16 * 1024 * 1024
 private const val MAX_JSON_RECORD_DEPTH = 128
+private const val NO_CHAR = '\u0000'
+private const val NO_LINE = -1L
 private const val MAX_PROFILE_FIELDS = 128
 private const val JSON_SCAN_CANCELLATION_CHARS = 4096
 private const val MAX_CONTINUATION_LINES = 2_000
@@ -595,6 +597,9 @@ data class JsonTailState(
     data class Boundary(val insideArray: Boolean, val pendingRecordStart: Long?)
 }
 
+/** JSON's own whitespace (RFC 8259): cheaper than the Unicode-wide Char.isWhitespace on a per-character path. */
+private fun isJsonWhitespace(c: Char): Boolean = c == ' ' || c == '\n' || c == '\r' || c == '\t'
+
 /** Scans object boundaries across lines and emits each top-level array element independently. */
 internal class JsonRecordMachine(
     private val profile: LogFormatProfile?,
@@ -619,7 +624,10 @@ internal class JsonRecordMachine(
     private var invalidStructure = false
     private var oversized = false
     private var overflowDepth = 0L
-    private var lastNonWhitespace: Char? = null
+
+    // The last non-whitespace character of the record ([NO_CHAR] when none). Updated for every character, so it is a primitive (a
+    // nullable Char boxes) and whitespace is JSON's own four characters, not the Unicode-wide Char.isWhitespace.
+    private var lastNonWhitespace: Char = NO_CHAR
 
     // A record nested deeper than MAX_JSON_RECORD_DEPTH is still well-formed: it is scanned to its end (the stack is bounded by the
     // record limit) and kept as raw text, so the events after it on the same line are not lost.
@@ -630,11 +638,13 @@ internal class JsonRecordMachine(
     private var lineColumn = 0
     private var discardLine = false
     private var arrayBeforeLastLine = false
-    private var recordBeforeLastLine: Long? = null
+
+    // The start line of the record held before the last physical line, or NO_LINE; primitive because it is set on every line.
+    private var recordBeforeLastLine = NO_LINE
     override var lineNumber: Long = sourceLineOffset
 
     fun tailState() = JsonTailState(
-        beforeLastLine = JsonTailState.Boundary(arrayBeforeLastLine, recordBeforeLastLine),
+        beforeLastLine = JsonTailState.Boundary(arrayBeforeLastLine, recordBeforeLastLine.takeIf { it != NO_LINE }),
         atEnd = JsonTailState.Boundary(arrayMode, startLine.takeIf { hasPendingRecord() }),
     )
 
@@ -653,7 +663,7 @@ internal class JsonRecordMachine(
     fun acceptFragment(fragment: String, startsLine: Boolean, endsLine: Boolean, out: MutableList<ProfileRecord>) {
         if (startsLine) {
             arrayBeforeLastLine = arrayMode
-            recordBeforeLastLine = startLine.takeIf { hasPendingRecord() }
+            recordBeforeLastLine = if (hasPendingRecord()) startLine else NO_LINE
             lineNumber++
             lineColumn = 0
             discardLine = false
@@ -798,7 +808,7 @@ internal class JsonRecordMachine(
 
     private fun appendAndScan(c: Char): Boolean {
         appendRecordChar(c)
-        if (!c.isWhitespace()) lastNonWhitespace = c
+        if (!isJsonWhitespace(c)) lastNonWhitespace = c
         if (inString) {
             when {
                 escaped -> escaped = false
@@ -891,7 +901,7 @@ internal class JsonRecordMachine(
         invalidStructure = false
         oversized = false
         overflowDepth = 0L
-        lastNonWhitespace = null
+        lastNonWhitespace = NO_CHAR
         tooDeep = false
         scannedChars = 0
     }
