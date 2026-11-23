@@ -4,11 +4,10 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.VideoSource
+import com.indagium.ui.detachUnverifiedCitationSources
 
 // Phase 4 (snapshot archive + import) — the import-side counterpart to CaptureArchive.kt's
-// stageNotes/clipMarkersForExport. Both functions here are pure (Annotations/AnnBlock/LogEntry are
-// plain `model` types, no UI/AppState dependency), which is what makes them safely callable from
-// AppState.openCaptureFile's ioScope coroutine without pulling any capture-package logic into `ui`.
+// stageNotes/clipMarkersForExport. These transforms take snapshots and never access live AppState.
 
 /** How AppState.resolveCaptureNotesImport applies a pending re-import decision — see
  *  AppState.pendingCaptureNotesImport's own doc for when this dialog appears at all (only when
@@ -83,10 +82,11 @@ fun mergeCaptureNotesImport(existing: Annotations, incoming: Annotations, action
  * LogRef is claimed at most once, in block order, so it can't double-match).
  */
 fun reanchorImportedCaptureNotes(notes: Annotations, markers: List<CaptureArchiveMarker>, logData: List<LogEntry>): Annotations {
-    val markersByNoteId = notes.blocks.filterIsInstance<AnnBlock.Note>()
+    val portable = notes.detachUnverifiedCitationSources()
+    val markersByNoteId = portable.blocks.filterIsInstance<AnnBlock.Note>()
         .mapNotNull { note -> parseMarkerHeader(note.text)?.let { note.id to it } }
         .toMap()
-    if (markersByNoteId.isEmpty()) return notes
+    if (markersByNoteId.isEmpty()) return portable
 
     val clipByNoteId = markers.associateBy { it.noteBlockId }
     val validIds = logData.mapTo(HashSet()) { it.id }
@@ -115,6 +115,7 @@ fun reanchorImportedCaptureNotes(notes: Annotations, markers: List<CaptureArchiv
     // Null return means "drop this block" (mapNotNull below) — either it belonged to a marker whose
     // window has no export-local clip (out of range) or clipping left no valid rows to point at.
     fun reanchoredLogRef(block: AnnBlock.LogRef): AnnBlock.LogRef? {
+        if (block.sourceTabId != null) return block
         val ownerNoteId = ownerNoteIdOf(block)
         if (ownerNoteId == null) return block
         val clip = clipByNoteId[ownerNoteId] ?: return null
@@ -124,14 +125,14 @@ fun reanchorImportedCaptureNotes(notes: Annotations, markers: List<CaptureArchiv
         return block.copy(logIds = ids, sourceEntries = null, presentation = remappedPresentation)
     }
 
-    val blocks = notes.blocks.mapNotNull { block ->
+    val blocks = portable.blocks.mapNotNull { block ->
         when {
             block is AnnBlock.Note && block.id in markersByNoteId -> reanchoredNote(block)
             block is AnnBlock.LogRef -> reanchoredLogRef(block)
             else -> block
         }
     }
-    return notes.copy(blocks = blocks)
+    return portable.copy(blocks = blocks)
 }
 
 /**

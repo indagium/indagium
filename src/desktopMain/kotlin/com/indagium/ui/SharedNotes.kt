@@ -96,6 +96,13 @@ private fun SharedNoteInfo.closedSource(tabId: String): SharedNoteClosedSource? 
 private fun List<AnnBlock>.citedSourceTabIds(): Set<String> =
     asSequence().filterIsInstance<AnnBlock.LogRef>().mapNotNullTo(HashSet()) { it.sourceTabId }
 
+internal fun LogTab.pruneUnusedPrivateCitationSources(): LogTab {
+    if (noteClosedSources.isEmpty()) return this
+    val cited = annotations.blocks.citedSourceTabIds()
+    val remaining = noteClosedSources.filter { it.tabId in cited }
+    return if (remaining.size == noteClosedSources.size) this else copy(noteClosedSources = remaining)
+}
+
 /** [added] joined to this list, replacing an entry of the same tab. */
 private fun List<SharedNoteClosedSource>.withClosedSources(added: List<SharedNoteClosedSource>): List<SharedNoteClosedSource> =
     if (added.isEmpty()) this else filterNot { old -> added.any { it.tabId == old.tabId } } + added
@@ -192,6 +199,21 @@ internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosed
 
 private const val PENDING_CITATION_SOURCE_PREFIX = "citation-"
 
+private fun pendingCitationSourceId(id: String, idInUse: Boolean = false): String =
+    id.takeIf { !idInUse && it.startsWith(PENDING_CITATION_SOURCE_PREFIX) } ?: "$PENDING_CITATION_SOURCE_PREFIX${UUID.randomUUID()}"
+
+/** Imported archive notes have no source descriptors. Keep their excerpts and detach external IDs. */
+internal fun Annotations.detachUnverifiedCitationSources(): Annotations {
+    val cited = blocks.citedSourceTabIds()
+    if (cited.isEmpty()) return this
+    return remapCitationSources(cited.associateWith { pendingCitationSourceId(it) })
+}
+
+private fun Annotations.remapCitationSources(destinations: Map<String, String>): Annotations = mapLogRefs { ref ->
+    val destination = destinations[ref.sourceTabId]
+    if (destination == null || destination == ref.sourceTabId) ref else ref.copy(sourceTabId = destination)
+}
+
 /** Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock. */
 internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<SharedNoteClosedSource>): LogTab {
     val cited = owner.annotations.blocks.citedSourceTabIds()
@@ -204,15 +226,11 @@ internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<Shar
             tabs.firstOrNull { tab -> tab.id == id && source.matches(tab) } ?: tabs.filter(source::matches).singleOrNull()
         }
         // An older sidecar may have no identity for this citation. Preserve the frozen rows but detach the unverified numeric ID.
-        val destination = opened?.id ?: id.takeIf { it.startsWith(PENDING_CITATION_SOURCE_PREFIX) && tab(it) == null }
-            ?: "$PENDING_CITATION_SOURCE_PREFIX${UUID.randomUUID()}"
+        val destination = opened?.id ?: pendingCitationSourceId(id, idInUse = tab(id) != null)
         destinations[id] = destination
         if (opened == null && source != null) pending += source.copy(tabId = destination)
     }
-    val annotations = owner.annotations.mapLogRefs { ref ->
-        val destination = destinations[ref.sourceTabId]
-        if (destination == null || destination == ref.sourceTabId) ref else ref.copy(sourceTabId = destination)
-    }
+    val annotations = owner.annotations.remapCitationSources(destinations)
     val info = owner.sharedNote
     return owner.copy(
         annotations = annotations,

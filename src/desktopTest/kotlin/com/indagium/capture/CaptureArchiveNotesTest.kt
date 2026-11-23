@@ -2,23 +2,35 @@ package com.indagium.capture
 
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
+import com.indagium.ui.AppState
+import com.indagium.ui.GoToRowsResult
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
+import com.indagium.ui.citedSourcesFromAnnotationsToken
+import com.indagium.ui.goToLogRefRows
+import com.indagium.ui.mkTab
 import com.indagium.utils.parseLogcat
+import kotlinx.coroutines.runBlocking
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Spacing between the fixture's synthetic rows on the capture clock — one row per second. */
 private const val FIXTURE_ROW_INTERVAL_MS = 1_000
+private const val CAPTURE_NOTES_WAIT_SECONDS = 15L
 
 /**
  * Phase 4 (snapshot archive and import): CaptureArchiveExporter.export's `notes` parameter and the
@@ -62,6 +74,12 @@ class CaptureArchiveNotesTest {
             AnnBlock.Note("nPlain", "Manual analysis note, no log reference"),
         ),
     )
+
+    private fun await(condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(CAPTURE_NOTES_WAIT_SECONDS)
+        while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(condition())
+    }
 
     private fun exportWithNotes(
         root: File,
@@ -160,6 +178,55 @@ class CaptureArchiveNotesTest {
         assertNull(clearedHeader?.lastOrdinal)
         assertTrue("rC" !in byId)
         assertEquals(6, reanchored.blocks.size) // 7 source blocks minus the dropped rC LogRef
+    }
+
+    @Test
+    fun captureOpenAndReimportKeepExternalCitationsDetachedEvenWhenTheOldTabIdIsOpen() {
+        val root = createTempDirectory("capture-notes-foreign-ref").toFile()
+        val otherId = "t999999"
+        val rows = listOf(
+            LogEntry(3, "10:00:03.000", LogLevel.I, "Other", "foreign three"),
+            LogEntry(4, "10:00:04.000", LogLevel.I, "Other", "foreign four"),
+        )
+        val external = AnnBlock.LogRef("external", listOf(3, 4), "Compare citation", otherId, "Merged", rows)
+        val notes = sourceNotes().let { it.copy(blocks = listOf(external) + it.blocks) }
+        val zip = exportWithNotes(root, "notes.zip", notes)
+        val app = AppState(
+            autosaveFile = File(root, "state.cache"), restoreOnCreate = false, autoExportNotes = false,
+            notesDir = File(root, "notes"), archiveCacheDir = File(root, "cache"),
+        )
+        try {
+            app.tabs = listOf(mkTab(otherId, "Merged", rows))
+            val tabId = app.openCaptureFile(zip)
+            await { app.tab(tabId)?.annotations?.blocks?.isNotEmpty() == true }
+            assertCaptureCitations(app, tabId, external)
+
+            assertEquals(tabId, app.openCaptureFile(zip))
+            await { app.pendingCaptureNotesImport != null }
+            app.resolveCaptureNotesImport(CaptureNotesImportAction.REPLACE)
+            assertCaptureCitations(app, tabId, external)
+
+            val sidecar = File(root, "reexport.ann")
+            assertTrue(app.saveAnnotationsTo(tabId, sidecar))
+            assertTrue(sidecar.readText().citedSourcesFromAnnotationsToken().isEmpty())
+            assertTrue(assertNotNull(app.tab(otherId)).selected.isEmpty())
+        } finally {
+            app.close()
+            root.deleteRecursively()
+        }
+    }
+
+    private fun assertCaptureCitations(app: AppState, tabId: String, external: AnnBlock.LogRef) {
+        val refs = assertNotNull(app.tab(tabId)).annotations.blocks.filterIsInstance<AnnBlock.LogRef>()
+        val detached = refs.single { it.id == external.id }
+        assertNotNull(detached.sourceTabId)
+        assertNotEquals(external.sourceTabId, detached.sourceTabId)
+        assertEquals(external.logIds, detached.logIds)
+        assertEquals(external.sourceEntries, detached.sourceEntries)
+        assertEquals(GoToRowsResult.NoSource, runBlocking { app.goToLogRefRows(detached, tabId) })
+        val local = refs.single { it.id == "rA" }
+        assertNull(local.sourceTabId)
+        assertEquals(listOf(2, 3), local.logIds)
     }
 
     @Test

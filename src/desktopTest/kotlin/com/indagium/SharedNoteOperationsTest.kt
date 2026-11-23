@@ -8,9 +8,11 @@ import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 import com.indagium.ui.AppState
+import com.indagium.ui.GoToRowsResult
 import com.indagium.ui.PendingNoteOverwrite
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.deleteSharedNote
+import com.indagium.ui.goToLogRefRows
 import com.indagium.ui.mkTab
 import com.indagium.ui.newPrivateNote
 import com.indagium.ui.nextDefaultSharedNoteName
@@ -1104,6 +1106,52 @@ class SharedNoteOperationsTest {
     }
 
     // ── Autosave ─────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun discardingTheLastPrivateCitationClearsItsSourceAndRestorePrunesStaleEntries() {
+        val dir = createTempDirectory("shared-ops-prune-private-sources").toFile()
+        val original = state(dir)
+        try {
+            original.tabs = listOf(
+                mkTab("t1", "owner.log", listOf(entry(1))).copy(sourcePath = logFile(dir, "owner.log").absolutePath),
+                mkTab("t2", "old.log", listOf(entry(1))).copy(sourcePath = logFile(dir, "old.log").absolutePath),
+            )
+            original.putBlocks("t1", logRef("first", "t2", 1), logRef("second", "t2", 1))
+            original.closeTab("t2")
+            val oldSource = original.tab("t1")!!.noteClosedSources.single()
+            original.removeBlock("t1", "first")
+            assertEquals(listOf(oldSource), original.tab("t1")!!.noteClosedSources)
+            original.removeBlock("t1", "second")
+            assertTrue(original.tab("t1")!!.noteClosedSources.isEmpty())
+
+            original.upTab("t1") {
+                it.copy(annotations = it.annotations.copy(blocks = listOf(logRef("reset", "t2", 1))), noteClosedSources = listOf(oldSource))
+            }
+            original.newAnalysis("t1")
+            assertTrue(original.tab("t1")!!.noteClosedSources.isEmpty())
+
+            // A previous build could leave this entry in the autosave after removing its citation.
+            original.upTab("t1") { it.copy(noteClosedSources = listOf(oldSource)) }
+            original.autosaveNow()
+            original.close()
+
+            val restored = AppState(File(dir, "state.cache"), restoreOnCreate = true, autoExportNotes = false)
+            try {
+                assertTrue(restored.tab("t1")!!.noteClosedSources.isEmpty())
+                val replacement = assertNotNull(restored.openFile(logFile(dir, "replacement.log")))
+                assertEquals("t2", replacement)
+                waitUntil { restored.tab(replacement)?.logData?.isNotEmpty() == true }
+                val citation = logRef("replacement", replacement, 1)
+                restored.putBlocks("t1", citation)
+                assertEquals(GoToRowsResult.Navigated(replacement, listOf(1)), runBlocking { restored.goToLogRefRows(citation, "t1") })
+            } finally {
+                restored.close()
+            }
+        } finally {
+            original.close()
+            dir.deleteRecursively()
+        }
+    }
 
     @Test
     fun restoredPrivateAndSharedReferencesReserveIdsOfClosedSources() {

@@ -16349,6 +16349,7 @@ class AppState(
                 annotations = Annotations(prefix = "$prefixLabel $sourceName"),
                 noteTargetName = newName,
                 recoveredNoteRows = emptyMap(),
+                noteClosedSources = emptyList(),
             )
         }
     }
@@ -17694,7 +17695,7 @@ class AppState(
             // same tab while that prompt is up therefore just commits normally, like any other tab.
             val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId && it.handEdit == null }
             val current = pendingForThisTab?.pendingTab ?: live
-            val next = fn(current)
+            val next = fn(current).pruneUnusedPrivateCitationSources()
             if (pendingForThisTab != null) {
                 pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
                 null
@@ -18720,7 +18721,7 @@ class AppState(
                 pendingLegacyLogRefPreferences = migrationPreferences.takeIf { hasLegacyRefs },
                 // A shared note that no longer exists cannot be shown: fall back to the tab's own note.
                 notesView = shell.tab.notesView?.takeIf { view -> sharedNoteHosts.any { it.id == view } },
-            ).freezeDeferredLegacyLogRefsIfResolvable()
+            ).freezeDeferredLegacyLogRefsIfResolvable().pruneUnusedPrivateCitationSources()
         }
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =

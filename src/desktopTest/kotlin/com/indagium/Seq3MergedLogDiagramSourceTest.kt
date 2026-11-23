@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteSourcePath
@@ -9,13 +10,17 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.ui.AppState
+import com.indagium.ui.DiagramLibrarySnapshot
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.DiagramSourceIdentity
 import com.indagium.ui.DiagramTicketFilter
+import com.indagium.ui.createSharedNote
 import com.indagium.ui.diagramSourceKey
 import com.indagium.ui.mkTab
 import com.indagium.ui.setSharedNoteMembers
 import com.indagium.ui.shareTabNote
 import com.indagium.ui.stopSharing
+import com.indagium.utils.computeLogFingerprint
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -44,10 +49,10 @@ class Seq3MergedLogDiagramSourceTest {
         assertTrue(condition(), "condition did not become true within ${WAIT_MS}ms")
     }
 
-    private fun state(root: File): AppState = AppState(
+    private fun state(root: File, library: DiagramLibraryStore = DiagramLibraryStore(File(root, "library.cache"))): AppState = AppState(
         File(root, "state.cache"),
         notesDir = File(root, "notes"),
-        diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        diagramLibraryStore = library,
     ).also {
         val merged = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "Producer", "start op", PID, TID),
@@ -200,6 +205,37 @@ class Seq3MergedLogDiagramSourceTest {
             coordinator.updateTitle(reopened, "Edited without the log")
             assertEquals(blockId, coordinator.confirm(reopened))
             assertTrue(coordinator.listLibrary(DiagramTicketFilter.NO_TICKET).isEmpty())
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aLegacyManualDiagramOnlyUsesTheMergeThatMatchesItsSavedFingerprint() {
+        val root = createTempDirectory("indagium-seq3-legacy-merge-fingerprint").toFile()
+        val store = DiagramLibraryStore(File(root, "library.cache"))
+        val state = state(root, store)
+        try {
+            val original = state.tab("m")!!
+            val replacement = mkTab("other", MERGED, state.tab("b")!!.logData.toList())
+            state.tabs = state.tabs + replacement
+            val snapshot = DiagramLibrarySnapshot.create(Seq3Document(lifelines = listOf(Seq3Lifeline("manual", "Manual", emptySet(), 0))))
+            val source = DiagramSourceIdentity(MERGED, computeLogFingerprint(original.logData))
+            val item = store.create("Legacy diagram", "", source, snapshot)
+            val host = assertNotNull(state.createSharedNote("Review", listOf(original.id, replacement.id, "b")))
+            val coordinator = state.seq3Sessions
+            val blockId = assertNotNull(coordinator.attachLibraryLink(host, item.id))
+            val editor = assertNotNull(coordinator.beginEdit(host, blockId))
+            assertEquals(original.id, coordinator.sessions.single { it.id == editor }.sourceTabId)
+            coordinator.close(editor)
+            state.closeTab(original.id)
+
+            val reopened = assertNotNull(coordinator.beginEdit(host, blockId))
+            assertNull(coordinator.sessions.single { it.id == reopened }.sourceTabId)
+            coordinator.close(reopened)
+            val privateBlock = assertNotNull(coordinator.attachLibraryLink(replacement.id, item.id))
+            assertNull(coordinator.sourceTabIdForNote(replacement.id, privateBlock))
         } finally {
             state.close()
             root.deleteRecursively()

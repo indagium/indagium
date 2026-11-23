@@ -751,6 +751,8 @@ class Seq3Session(
             val fingerprint = storedSource?.takeIf { it.sourcePath == stamped }?.contentFingerprint.orEmpty()
             return tabForStoredSource(DiagramSourceIdentity(stamped, fingerprint), owner.id, related, parsed.document)
         }
+        // An explicit pathless library source can be closed even when this note's owner is open.
+        if (storedSource != null && !storedSource.isNone && !File(storedSource.sourcePath).isAbsolute) return null
         val filename = parsed.document.sourceFile?.takeIf { it.isNotBlank() } ?: return owner.id
         val named = appState.tabs.filter { !it.isCaptureLauncher && it.id in related && File(it.filename).name == filename }
         if (named.isEmpty() || named.any { it.id == owner.id }) {
@@ -841,11 +843,17 @@ class Seq3Session(
      * survives the log growing, unlike the fingerprint). A loaded tab that disagrees is never returned. A tab whose rows are not
      * resident cannot be checked: it is the answer only when it is the one candidate left (the click then re-checks the row, see
      * [navigateToOccurrence]). Among equals [preferred], then a tab the note is about. A document with no occurrences has no
-     * evidence and keeps the plain rule: the sole tab of that path, else the fingerprint, else [preferred] or a related tab.
+     * evidence and keeps the plain rule for a real path or tab instance: the sole exact tab, else the fingerprint, else [preferred]
+     * or a related tab. Older pathless sources saved by display name require a unique fingerprint match among related tabs.
      */
     private fun tabForStoredSource(source: DiagramSourceIdentity, preferred: String?, related: Set<String>, document: Seq3Document): String? {
-        val samePath = appState.tabs.filter { it.matchesDiagramSourceKey(source.sourcePath, allowLegacyName = it.id in related) }
-        if (samePath.size <= 1 && document.evidenceSample().isEmpty()) return samePath.singleOrNull()?.id
+        val tabs = appState.tabs
+        val samePath = tabs.filter { it.matchesDiagramSourceKey(source.sourcePath, allowLegacyName = false) }
+        if (samePath.isEmpty()) return tabs.singleOrNull { tab ->
+            source.contentFingerprint.isNotEmpty() && tab.id in related && tab.matchesDiagramSourceKey(source.sourcePath, allowLegacyName = true) &&
+                sourceIdentityForLoadedTab(tab.id)?.contentFingerprint == source.contentFingerprint
+        }?.id
+        if (samePath.size == 1 && document.evidenceSample().isEmpty()) return samePath.single().id
 
         fun choose(pool: List<LogTab>): String? =
             (pool.singleOrNull() ?: pool.firstOrNull { it.id == preferred } ?: pool.firstOrNull { it.id in related })?.id
