@@ -9,6 +9,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import java.io.ByteArrayInputStream
 import java.io.InputStream
+import java.io.StringReader
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.text.ParsePosition
@@ -48,7 +49,8 @@ private const val MAX_EPOCH_LITERAL_CHARS = 64
 private const val MAX_EPOCH_PRECISION = 32
 private const val MAX_EPOCH_SCALE = 32
 private const val SIGNATURE_MATCH_SHARE = 0.7
-private const val MIN_PREVIEW_BYTES = 1024
+private const val BYTES_PER_KB = 1024
+private const val MIN_PREVIEW_BYTES = BYTES_PER_KB
 private const val MAX_PREVIEW_BYTES = 4 * 1024 * 1024
 private const val MAX_SYSLOG_PRIORITY = 191
 private const val SYSLOG_SEVERITIES_PER_FACILITY = 8
@@ -148,13 +150,31 @@ fun parseLogFormatPreview(
     val bytes = input.use { it.readNBytes(maxBytes + 1) }
     val truncated = bytes.size > maxBytes
     val sample = bytes.copyOf(minOf(bytes.size, maxBytes))
-    if (profile.engine in setOf(LogFormatEngine.DLT, LogFormatEngine.LOGCAT)) {
+    val limited = "Preview is limited to the first ${maxBytes / BYTES_PER_KB} KB."
+    // Binary DLT classification is authoritative on open and Reparse even with a text profile selected, so the preview asks the
+    // same question of the same prefix (and of the same end-of-file knowledge) before it looks at the requested engine.
+    val binaryDlt = isBinaryDltSample(sample, truncated, fileName, profile)
+    if (profile.engine in setOf(LogFormatEngine.DLT, LogFormatEngine.LOGCAT) || binaryDlt) {
         val parsed = parseLogContent(ByteArrayInputStream(sample), fileName = fileName, profile = profile, sourceClockId = sourceClockId)
-        return if (truncated) parsed.copy(diagnostics = parsed.diagnostics + "Preview is limited to the first ${maxBytes / 1024} KB.") else parsed
+        val noted = if (binaryDlt && profile.engine != LogFormatEngine.DLT) {
+            parsed.copy(diagnostics = parsed.diagnostics + "The bytes are binary DLT; previewed as DLT instead of ${profile.name}.")
+        } else {
+            parsed
+        }
+        return if (truncated) noted.copy(diagnostics = noted.diagnostics + limited) else noted
     }
     val decoded = openLogTextReader(ByteArrayInputStream(sample)).use { it.readText() }
+    if (truncated && profile.engine == LogFormatEngine.METADATA_JSON) {
+        // A document has no line structure to cut at (a compact one is a single line): parse what the sample holds. The scanner keeps
+        // only records that closed inside it, and the cut it hits at the end of the sample is the preview's, so it is not reported.
+        validateLogFormatProfile(profile)
+        val parsed = parseMetadataJson(StringReader(decoded), profile, 1, sourceClockId, truncatedAtChar = decoded.length.toLong())
+        return parsed.copy(diagnostics = parsed.diagnostics + limited)
+    }
     val completeText = if (truncated && profile.engine != LogFormatEngine.JSON_LINES) {
-        val lastLine = decoded.lastIndexOf('\n')
+        // A lone CR ends a line as well as an LF does (as on open); a CR at the cut may be the first half of a CRLF, and the line
+        // it ends is complete either way.
+        val lastLine = maxOf(decoded.lastIndexOf('\n'), decoded.lastIndexOf('\r'))
         decoded.takeIf { lastLine >= 0 }?.substring(0, lastLine + 1).orEmpty()
     } else {
         decoded
@@ -163,7 +183,14 @@ fun parseLogFormatPreview(
         completeText.lineSequence(), profile, 1, sourceClockId,
         includeIncompleteJsonTail = !truncated,
     )
-    return if (truncated) parsed.copy(diagnostics = parsed.diagnostics + "Preview is limited to the first ${maxBytes / 1024} KB.") else parsed
+    return if (truncated) parsed.copy(diagnostics = parsed.diagnostics + limited) else parsed
+}
+
+/** Whether open and Reparse would read [sample] (a prefix of a source, [truncated] when more follows) as binary DLT whatever [profile] is. */
+private fun isBinaryDltSample(sample: ByteArray, truncated: Boolean, fileName: String?, profile: LogFormatProfile): Boolean {
+    val sniff = if (sample.size > CONTENT_SNIFF_BYTES) sample.copyOf(CONTENT_SNIFF_BYTES) else sample
+    val kind = classifyLogContent(sniff, atEof = !truncated && sample.size < CONTENT_SNIFF_BYTES, fileName = fileName)
+    return selectLogContentProfile(sniff, kind, fileName, profile, emptyList()).parseAsDlt
 }
 
 internal data class ProfileRecord(

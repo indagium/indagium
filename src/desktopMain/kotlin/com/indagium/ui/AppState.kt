@@ -8054,7 +8054,33 @@ class AppState(
             ?: File(source.substringBefore('!')).length()
 
         // Available heap already reflects the resident source tab. Budget only the new parse.
-        return memoryShortfallForEstimatedBytes(estimatedHeapBytesForProfile(profile, sourceBytes), heapFreeBytesProvider())
+        return memoryShortfallForEstimatedBytes(
+            estimatedHeapBytesForProfile(reparseParseProfile(tab, profile), sourceBytes), heapFreeBytesProvider(),
+        )
+    }
+
+    /**
+     * The profile whose cost a reparse of [tab]'s source will really incur. Binary DLT is classified as DLT whatever profile was
+     * asked for ([selectLogContentProfile]), so such a source is always parsed by the DLT parser. A tab in [LogFormat.DLT] says so,
+     * except that a DLT Viewer CSV or text export is DLT-formatted too yet reads as plain text with a text profile: for a plain file the
+     * first [CONTENT_SNIFF_BYTES] decide that; an archive entry or compressed file is never extracted for it, so its tab's format stands.
+     */
+    private fun reparseParseProfile(tab: LogTab, requested: LogFormatProfile): LogFormatProfile {
+        if (tab.logFormat != LogFormat.DLT || requested.engine == LogFormatEngine.DLT) return requested
+        return if (sourceReadsAsBinaryDlt(tab)) builtinProfileFor(LogFormat.DLT) else requested
+    }
+
+    private fun sourceReadsAsBinaryDlt(tab: LogTab): Boolean {
+        val source = tab.sourcePath ?: return true
+        if (tab.archiveCandidate != null || '!' in source) return true
+        val file = File(source)
+        val sample = runCatching {
+            if (detectArchiveFormat(file) !is ArchiveFormat.None) null else file.inputStream().use { it.readNBytes(CONTENT_SNIFF_BYTES) }
+        }.getOrNull() ?: return true
+        return when (classifyLogContent(sample, sample.size < CONTENT_SNIFF_BYTES, file.name)) {
+            LogContentKind.DLT_STORAGE, LogContentKind.DLT_RAW, LogContentKind.DLT_UNSUPPORTED_V2 -> true
+            else -> false
+        }
     }
 
     private fun reparseMemoryFailure(shortfall: MemoryShortfall): IllegalStateException =
@@ -8537,16 +8563,32 @@ class AppState(
             logFormatCandidateIds = result.candidateProfileIds,
             profileSourceLineCount = result.sourceLineCount,
         )
-        synchronized(stateLock) {
+        val publishedRows = synchronized(stateLock) {
             publishOpenedTab(newTab, originLauncherId = null)
             rememberLogSectionIndex(newId, result.metadataSectionIndex)
+            tab(newId)?.logData
         }
         ioScope.launch {
-            val full = buildLogAnalysis(result.entries, settings.customIssueRules, result.format, profile = profile)
-            upTab(newId) { it.copy(analysis = full) }
+            val issueRules = settings.customIssueRules
+            val full = logAnalysisBuilder(result.entries, issueRules, result.format, profile)
+            // Only for the rows it was computed from: a section switch or an unload meanwhile replaced them (the new rows have their
+            // own analysis), and this result would put the old section's tag counts and issue anchors over them.
+            applyAnalysisIfRowsUnchanged(newId, publishedRows, full)
         }
         return newId
     }
+
+    /** Stores [analysis] on tab [tabId] only while the tab still shows [rows], the very list it was computed from. */
+    private fun applyAnalysisIfRowsUnchanged(tabId: String, rows: List<LogEntry>?, analysis: LogAnalysis) {
+        if (rows == null) return
+        upTab(tabId) { current ->
+            if (current.logData === rows && current.contentState == TabContentState.LOADED) current.copy(analysis = analysis) else current
+        }
+    }
+
+    /** Test seam: computes the full analysis of a freshly published tab's rows (tests hold it back to replace the rows meanwhile). */
+    internal var logAnalysisBuilder: (List<LogEntry>, List<CustomIssueRule>, LogFormat, LogFormatProfile?) -> LogAnalysis =
+        { rows, rules, format, profile -> buildLogAnalysis(rows, rules, format, profile = profile) }
 
     internal var logFormatProfileError by mutableStateOf<String?>(null)
         private set
@@ -14445,9 +14487,12 @@ class AppState(
                 rememberRecentFile(file)
                 markActiveLoadFinished(tabId)
                 published = true
-                val analysis = buildLogAnalysis(logData, settings.customIssueRules)
+                // The rows the analysis is computed for are the ones the tab shows now; if they are replaced meanwhile (the tab is
+                // unloaded, reloaded or tailed) the result belongs to rows that are gone and must not overwrite the new analysis.
+                val publishedRows = tab(tabId)?.logData
+                val analysis = logAnalysisBuilder(logData, settings.customIssueRules, LogFormat.LOGCAT, null)
                 ensureActive()
-                upTab(tabId) { it.copy(analysis = analysis) }
+                applyAnalysisIfRowsUnchanged(tabId, publishedRows, analysis)
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: Exception) {

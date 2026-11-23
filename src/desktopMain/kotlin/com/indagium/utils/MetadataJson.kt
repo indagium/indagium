@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.core.JsonToken
 import com.fasterxml.jackson.core.StreamReadConstraints
+import com.fasterxml.jackson.core.io.JsonEOFException
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
@@ -274,23 +275,30 @@ private fun hasRecordMetadata(metadata: JsonObject): Boolean {
     return metadata.text("identity") != null && (hasTime || hasEventMetadata)
 }
 
-private fun scanMetadataJson(reader: Reader, maxRecords: Int = Int.MAX_VALUE): MetadataJsonScan =
-    scanMetadataJson(METADATA_JSON_FACTORY.createParser(reader), maxRecords, -1)
+private fun scanMetadataJson(reader: Reader, maxRecords: Int = Int.MAX_VALUE, truncatedAtChar: Long = -1): MetadataJsonScan =
+    scanMetadataJson(METADATA_JSON_FACTORY.createParser(reader), maxRecords, -1, truncatedAtChar)
 
-/** Scans [parser], closing it; a non-negative [byteBase] makes the parser a byte-stream one whose record spans are kept. */
-internal fun scanMetadataJson(parser: JsonParser, maxRecords: Int, byteBase: Long): MetadataJsonScan {
+/**
+ * Scans [parser], closing it; a non-negative [byteBase] makes the parser a byte-stream one whose record spans are kept. A non-negative
+ * [truncatedAtChar] says the input is a preview sample cut at that many characters: a failure at the very end of it is that cut, not a
+ * damaged document, so it is not reported (the records that closed before it are kept either way).
+ */
+internal fun scanMetadataJson(parser: JsonParser, maxRecords: Int, byteBase: Long, truncatedAtChar: Long = -1): MetadataJsonScan {
     parser.use {
         val scanner = MetadataJsonScanner(parser, maxRecords, byteBase)
         try {
             scanner.readDocument()
         } catch (_: MetadataJsonSampleComplete) {
             // Detection only needs one complete metadata object or packet.
+        } catch (failure: JsonEOFException) {
+            if (truncatedAtChar < 0) scanner.diagnostics.addJsonDiagnostic(damagedDocumentMessage(parser, failure))
         } catch (failure: JsonProcessingException) {
-            scanner.diagnostics.addJsonDiagnostic(
-                "Metadata JSON is damaged or truncated at line ${parser.currentLocation().lineNr}: ${failure.originalMessage}",
-            )
+            // A preview sample's cut can land mid-token, which Jackson reports as a bad token, not as the end of input.
+            if (truncatedAtChar < 0 || parser.currentLocation().charOffset < truncatedAtChar) {
+                scanner.diagnostics.addJsonDiagnostic(damagedDocumentMessage(parser, failure))
+            }
         } catch (failure: IllegalArgumentException) {
-            scanner.diagnostics.addJsonDiagnostic(failure.message ?: "Incomplete metadata JSON document.")
+            if (truncatedAtChar < 0) scanner.diagnostics.addJsonDiagnostic(failure.message ?: "Incomplete metadata JSON document.")
         }
         return MetadataJsonScan(
             scanner.records, scanner.diagnostics, parser.currentLocation().lineNr.toLong(),
@@ -299,6 +307,9 @@ internal fun scanMetadataJson(parser: JsonParser, maxRecords: Int, byteBase: Lon
     }
 }
 
+private fun damagedDocumentMessage(parser: JsonParser, failure: JsonProcessingException) =
+    "Metadata JSON is damaged or truncated at line ${parser.currentLocation().lineNr}: ${failure.originalMessage}"
+
 internal fun parseMetadataJson(
     reader: Reader,
     profile: LogFormatProfile = metadataJsonProfile(),
@@ -306,7 +317,11 @@ internal fun parseMetadataJson(
     sourceClockId: String? = null,
     sourceLineOffset: Long = 0,
     sectionNameHint: String? = null,
-): ParsedLog = buildMetadataJsonLog(scanMetadataJson(reader), profile, startId, sourceClockId, sourceLineOffset, sectionNameHint, null)
+    /** Set for a preview sample cut at this many characters; see [scanMetadataJson]. */
+    truncatedAtChar: Long = -1,
+): ParsedLog = buildMetadataJsonLog(
+    scanMetadataJson(reader, truncatedAtChar = truncatedAtChar), profile, startId, sourceClockId, sourceLineOffset, sectionNameHint, null,
+)
 
 /**
  * Turns a document scan into rows, sections and, when [stamp] names the scanned file, the section index that lets a later switch
