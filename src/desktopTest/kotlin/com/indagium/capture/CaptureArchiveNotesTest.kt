@@ -4,6 +4,8 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.SharedNoteClosedSource
+import com.indagium.model.SharedNoteInfo
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
 import com.indagium.ui.AppState
@@ -13,6 +15,7 @@ import com.indagium.ui.annotationsToken
 import com.indagium.ui.citedSourcesFromAnnotationsToken
 import com.indagium.ui.goToLogRefRows
 import com.indagium.ui.mkTab
+import com.indagium.ui.sharedNoteHostTab
 import com.indagium.utils.parseLogcat
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -210,6 +213,36 @@ class CaptureArchiveNotesTest {
             assertTrue(app.saveAnnotationsTo(tabId, sidecar))
             assertTrue(sidecar.readText().citedSourcesFromAnnotationsToken().isEmpty())
             assertTrue(assertNotNull(app.tab(otherId)).selected.isEmpty())
+        } finally {
+            app.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun importingAPendingCitationNeverReusesAnotherNotesReopenDescriptor() {
+        val root = createTempDirectory("capture-notes-pending-source").toFile()
+        val app = AppState(File(root, "state.cache"), restoreOnCreate = false, autoExportNotes = false, notesDir = File(root, "notes"))
+        try {
+            val sourceId = "citation-existing"
+            val row = LogEntry(3, "10:00:03.000", LogLevel.I, "Other", "frozen row")
+            val ref = AnnBlock.LogRef("first", listOf(row.id), "", sourceId, "old.log", listOf(row))
+            val notes = Annotations(blocks = listOf(ref, ref.copy(id = "second")))
+            val closed = SharedNoteClosedSource(sourceId, "unrelated.log", File(root, "unrelated.log").path)
+            app.addSharedNoteHost(sharedNoteHostTab(SharedNoteInfo("shared-existing", "Existing note", closedReferenceSources = listOf(closed))))
+            app.tabs = listOf(mkTab("capture", "capture.log", emptyList()))
+
+            fun importSourceId(): String {
+                val refs = reanchorImportedCaptureNotes(notes, emptyList(), emptyList()).blocks.filterIsInstance<AnnBlock.LogRef>()
+                val id = assertNotNull(refs.first().sourceTabId)
+                assertEquals(listOf(ref.copy(sourceTabId = id), ref.copy(id = "second", sourceTabId = id)), refs)
+                assertEquals(GoToRowsResult.NoSource, runBlocking { app.goToLogRefRows(refs.first(), "capture") })
+                return id
+            }
+
+            val first = importSourceId()
+            assertNotEquals(sourceId, first)
+            assertNotEquals(first, importSourceId())
         } finally {
             app.close()
             root.deleteRecursively()

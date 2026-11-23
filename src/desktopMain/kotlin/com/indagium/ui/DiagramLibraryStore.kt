@@ -417,11 +417,19 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
 
     /** Non-throwing counterpart to [save] — see [DiagramSaveRejection]'s own doc for why this exists
      *  alongside (not instead of) the throwing API. */
-    fun trySave(item: DiagramLibraryItem): Result<DiagramLibraryItem> {
-        val isNew = synchronized(lock) { item.id !in items }
-        val rejection = rejectionFor(item, isNew)
+    fun trySave(item: DiagramLibraryItem): Result<DiagramLibraryItem> =
+        synchronized(lock) { tryPublishLocked(item) }.persistOnSuccess()
+
+    private fun tryPublishLocked(item: DiagramLibraryItem): Result<DiagramLibraryItem> {
+        val rejection = rejectionFor(item, isNew = item.id !in items)
         if (rejection != null) return Result.failure(DiagramSaveRejectedException(rejection))
-        return runCatching { save(item) }
+        items = LinkedHashMap(items).apply { put(item.id, item) }
+        return Result.success(item)
+    }
+
+    private fun Result<DiagramLibraryItem>.persistOnSuccess(): Result<DiagramLibraryItem> = mapCatching { item ->
+        persist()
+        item
     }
 
     /** Non-throwing counterpart to [create]. */
@@ -438,10 +446,14 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
     /** Non-throwing counterpart to [update]. Returns null (matching [update]'s own contract) when
      *  [id] names no existing item — a rejection has nothing to report if there's no record to have
      *  rejected changing. */
-    fun tryUpdate(id: String, transform: (DiagramLibraryItem) -> DiagramLibraryItem): Result<DiagramLibraryItem>? {
-        val old = synchronized(lock) { items[id] } ?: return null
-        return trySave(transform(old).copy(id = id))
-    }
+    fun tryUpdate(id: String, transform: (DiagramLibraryItem) -> DiagramLibraryItem): Result<DiagramLibraryItem>? =
+        tryUpdateInMemory(id, transform)?.persistOnSuccess()
+
+    private fun tryUpdateInMemory(id: String, transform: (DiagramLibraryItem) -> DiagramLibraryItem): Result<DiagramLibraryItem>? =
+        synchronized(lock) {
+            val current = items[id] ?: return null
+            tryPublishLocked(transform(current).copy(id = id))
+        }
 
     fun delete(id: String): Boolean {
         val removed = synchronized(lock) {
@@ -457,26 +469,19 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
     fun markOpened(id: String, now: Long = System.currentTimeMillis()): DiagramLibraryItem? =
         update(id) { it.copy(lastOpenedAt = now) }
 
-    /** W2: routed through the non-throwing [tryUpdate] rather than the throwing [update] this used
-     *  to call — the same store-wide attachment caps (`MAX_DIAGRAM_LIBRARY_ATTACHMENTS`/
-     *  `MAX_DIAGRAM_LIBRARY_ATTACHMENTS_PER_ITEM`) a fresh [save] can be rejected for apply here
-     *  too, and this runs from a Compose event handler ([Seq3Session.attachLibraryItem]), where an
-     *  escaping `IllegalArgumentException` crashes the window exactly like the original W1 blocker.
-     *  Returns null exactly as before on either "no such id" or a rejected save — every existing
-     *  caller already treats a null result as "the attachment wasn't recorded" via `?.`/`?:`. */
     fun addAttachment(id: String, attachment: DiagramLibraryAttachment): DiagramLibraryItem? =
-        tryUpdate(id) { item ->
-            // Confirm may be retried after an overwrite prompt; preserve one reference per note block.
+        addAttachmentInMemory(id, attachment)?.persistOnSuccess()?.getOrNull()
+
+    /** Register under the same state lock as the new block. The caller persists the change after releasing that lock. */
+    internal fun addAttachmentInMemory(id: String, attachment: DiagramLibraryAttachment): Result<DiagramLibraryItem>? =
+        tryUpdateInMemory(id) { item ->
             item.copy(
                 updatedAt = System.currentTimeMillis(),
                 attachments = item.attachments.filterNot { it.tabId == attachment.tabId && it.blockId == attachment.blockId } + attachment,
             )
-        }?.getOrNull()
+        }
 
-    /** Non-throwing counterpart of the old [removeAttachment] — see [addAttachment]'s doc; removing
-     *  an attachment only shrinks the list, so this is nearly never actually rejected, but a
-     *  snapshot that has drifted out of bounds since it was saved (e.g. a lowered
-     *  `MAX_SEQ3_HEADER_CHARS` in a later build) is still possible and must not throw either. */
+    /** Returns null if the item is missing or its saved snapshot no longer passes validation. */
     fun removeAttachment(id: String, tabId: String, blockId: String): DiagramLibraryItem? =
         tryUpdate(id) { item ->
             item.copy(
@@ -492,23 +497,8 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
      * Never call with the caller's state lock held (it writes to disk).
      */
     fun removeAttachments(tabId: String, blockIds: Collection<String>): Boolean {
-        if (blockIds.isEmpty()) return false
-        val dropping = blockIds.toHashSet()
-        val changed = synchronized(lock) {
-            var any = false
-            val updated = LinkedHashMap<String, DiagramLibraryItem>(items.size)
-            items.forEach { (id, item) ->
-                if (item.attachments.none { it.tabId == tabId && it.blockId in dropping }) {
-                    updated[id] = item
-                } else {
-                    any = true
-                    updated[id] = item.copy(attachments = item.attachments.filterNot { it.tabId == tabId && it.blockId in dropping })
-                }
-            }
-            if (any) items = updated
-            any
-        }
-        if (changed) runCatching { persist() }
+        val changed = changeAttachmentsInMemory(tabId, blockIds)
+        if (changed) persistAttachmentChanges()
         return changed
     }
 
@@ -519,28 +509,43 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
      * blank or over-long [toTabId] changes nothing. Returns whether anything changed. Never call with the caller's state lock held (it writes to disk).
      */
     fun retargetAttachments(fromTabId: String, toTabId: String, blockIds: Collection<String>): Boolean {
-        if (fromTabId == toTabId || blockIds.isEmpty() || toTabId.isBlank() || toTabId.length > MAX_DIAGRAM_LIBRARY_ID_CHARS) return false
-        val moving = blockIds.toHashSet()
-        val changed = synchronized(lock) {
-            var any = false
-            val updated = LinkedHashMap<String, DiagramLibraryItem>(items.size)
-            items.forEach { (id, item) ->
-                if (item.attachments.none { it.tabId == fromTabId && it.blockId in moving }) {
-                    updated[id] = item
-                    return@forEach
-                }
-                any = true
-                val moved = item.attachments.map { if (it.tabId == fromTabId && it.blockId in moving) it.copy(tabId = toTabId) else it }
-                // The last of two references to one note block is the newer one.
-                val deduped = moved.asReversed().distinctBy { it.tabId to it.blockId }.asReversed()
-                updated[id] = item.copy(attachments = deduped)
-            }
-            if (any) items = updated
-            any
-        }
-        if (changed) runCatching { persist() }
+        val changed = changeAttachmentsInMemory(fromTabId, blockIds, toTabId)
+        if (changed) persistAttachmentChanges()
         return changed
     }
+
+    /** Updates back-references in the same critical section as their note edit. Flush changed records after the edit. */
+    internal fun changeAttachmentsInMemory(
+        tabId: String,
+        blockIds: Collection<String>,
+        moveToTabId: String? = null,
+        updatedAt: Long? = null,
+    ): Boolean {
+        if (blockIds.isEmpty() || moveToTabId == tabId) return false
+        if (moveToTabId != null && (moveToTabId.isBlank() || moveToTabId.length > MAX_DIAGRAM_LIBRARY_ID_CHARS)) return false
+        val ids = blockIds.toHashSet()
+        fun matches(attachment: DiagramLibraryAttachment) = attachment.tabId == tabId && attachment.blockId in ids
+        return synchronized(lock) {
+            var changed = false
+            val updated = LinkedHashMap(items)
+            for ((id, item) in items) {
+                if (item.attachments.none(::matches)) continue
+                val attachments = if (moveToTabId == null) {
+                    item.attachments.filterNot(::matches)
+                } else {
+                    val moved = item.attachments.map { if (matches(it)) it.copy(tabId = moveToTabId) else it }
+                    // Keep the newer of two references to the same destination block.
+                    moved.asReversed().distinctBy { it.tabId to it.blockId }.asReversed()
+                }
+                updated[id] = item.copy(attachments = attachments, updatedAt = updatedAt ?: item.updatedAt)
+                changed = true
+            }
+            if (changed) items = updated
+            changed
+        }
+    }
+
+    internal fun persistAttachmentChanges(): Boolean = runCatching { persist() }.isSuccess
 
     /**
      * W3: the disk write — `writeFileAtomically` replaces the whole file — runs OUTSIDE [lock],

@@ -876,7 +876,12 @@ class Seq3Session(
      * open diagram takes the source its moved block names, whether or not the move changed it (the note is the truth), so the next
      * Confirm never writes a different source than the note carries.
      */
-    internal fun moveNoteOwner(fromTabId: String, toTabId: String, blocks: List<AnnBlock>) {
+    internal fun moveNoteOwner(
+        fromTabId: String,
+        toTabId: String,
+        blocks: List<AnnBlock>,
+        replacedBlocks: List<AnnBlock> = emptyList(),
+    ): Boolean {
         val moved = blocks.associateBy { it.id }
         sessions = sessions.map { session ->
             val block = if (session.noteTargetTabId == fromTabId) moved[session.confirmedBlockId] else null
@@ -890,6 +895,10 @@ class Seq3Session(
                 session
             }
         }
+        val replaced = replacedBlocks.map { it.id }.filter { it !in moved }
+        val removed = libraryStore.changeAttachmentsInMemory(toTabId, replaced)
+        val retargeted = libraryStore.changeAttachmentsInMemory(fromTabId, moved.keys, toTabId)
+        return removed || retargeted
     }
 
     /**
@@ -2284,12 +2293,12 @@ class Seq3Session(
     }
 
     /** Explicitly attaches the current workspace as an immutable note snapshot. */
-    fun attachSnapshot(id: String): String? = attach(id, Seq3AttachmentMode.SNAPSHOT)
+    fun attachSnapshot(id: String): String? = attach(id, DiagramAttachmentKind.SNAPSHOT)
 
     /** Explicitly attaches the current workspace as a durable live-link note. */
-    fun attachLiveLink(id: String): String? = attach(id, Seq3AttachmentMode.LINKED)
+    fun attachLiveLink(id: String): String? = attach(id, DiagramAttachmentKind.LINK)
 
-    private fun attach(id: String, mode: Seq3AttachmentMode): String? {
+    private fun attach(id: String, kind: DiagramAttachmentKind): String? {
         val current = session(id)
         val tabId = current?.noteTargetTabId
         val tab = tabId?.let(appState::noteTab)
@@ -2298,35 +2307,33 @@ class Seq3Session(
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
         val item = saveToLibrary(current, plainText) ?: return null
-        val blockId = when (mode) {
-            Seq3AttachmentMode.SNAPSHOT -> attachLibrarySnapshot(tabId, item.id)
-            Seq3AttachmentMode.LINKED -> attachLibraryLink(tabId, item.id)
-        } ?: return null
-        replace(id) {
-            it.copy(
-                libraryItemId = item.id,
-                confirmedBlockId = if (mode == Seq3AttachmentMode.LINKED) blockId else it.confirmedBlockId,
-                dirty = false,
-                draftSavedAtMillis = clock(),
-                exportMode = exportMode,
-            )
+        return attachLibraryItem(item.id, kind, null, ownerId = { session(id)?.noteTargetTabId }) { blockId ->
+            replace(id) {
+                it.copy(
+                    libraryItemId = item.id,
+                    confirmedBlockId = if (kind == DiagramAttachmentKind.LINK) blockId else it.confirmedBlockId,
+                    dirty = false,
+                    draftSavedAtMillis = clock(),
+                    exportMode = exportMode,
+                )
+            }
         }
-        return blockId
     }
 
     /** Adds an immutable copy of a saved library artifact to [tabId]. */
     fun attachLibrarySnapshot(tabId: String, libraryItemId: String, afterBlockId: String? = null): String? =
-        attachLibraryItem(tabId, libraryItemId, DiagramAttachmentKind.SNAPSHOT, afterBlockId)
+        attachLibraryItem(libraryItemId, DiagramAttachmentKind.SNAPSHOT, afterBlockId, ownerId = { tabId })
 
     /** Adds a durable live-link note that follows later workspace/library updates. */
     fun attachLibraryLink(tabId: String, libraryItemId: String, afterBlockId: String? = null): String? =
-        attachLibraryItem(tabId, libraryItemId, DiagramAttachmentKind.LINK, afterBlockId)
+        attachLibraryItem(libraryItemId, DiagramAttachmentKind.LINK, afterBlockId, ownerId = { tabId })
 
     private fun attachLibraryItem(
-        tabId: String,
         libraryItemId: String,
         kind: DiagramAttachmentKind,
         afterBlockId: String?,
+        ownerId: () -> String?,
+        onAttached: (String) -> Unit = {},
     ): String? {
         val item = libraryStore.get(libraryItemId) ?: return null
         val parsed = item.parsed ?: return null
@@ -2342,15 +2349,17 @@ class Seq3Session(
             // A copy of the library's snapshot with new metadata: a drifted snapshot is not made to agree by being attached.
             sourceHashOverride = parsed.sourceHash,
         )
-        val blockId = appState.addNoteBlock(tabId, text, afterBlockId) ?: return null
-        // W2: DiagramLibraryStore.addAttachment is now non-throwing (routes through tryUpdate) — a
-        // full per-item/library attachment cap, or a snapshot that has drifted out of bounds since
-        // it was saved, quietly skips the library back-reference rather than crashing; the note
-        // itself (already written above) is unaffected either way. No session is in scope here to
-        // hang a W0 popup off of (this helper backs the standalone attachLibrarySnapshot/
-        // attachLibraryLink entry points as well as attach()), so this only logs for observability.
-        if (libraryStore.addAttachment(libraryItemId, DiagramLibraryAttachment(tabId, blockId, kind, attachedAt)) == null) {
-            AppLogger.error("diagram3", "Diagram attachment not recorded in library for item $libraryItemId (cap or invalid snapshot)")
+        val (blockId, registered) = synchronized(appState.stateLock) {
+            val tabId = ownerId() ?: return null
+            val id = appState.addNoteBlock(tabId, text, afterBlockId) ?: return null
+            val attachment = DiagramLibraryAttachment(tabId, id, kind, attachedAt)
+            val recorded = libraryStore.addAttachmentInMemory(libraryItemId, attachment)?.isSuccess == true
+            onAttached(id)
+            id to recorded
+        }
+        // Keep the note if the library rejects or cannot persist its back-reference.
+        if (!registered || !libraryStore.persistAttachmentChanges()) {
+            AppLogger.error("diagram3", "Diagram attachment not saved in library for item $libraryItemId")
         }
         libraryRevision++
         return blockId
@@ -2664,33 +2673,17 @@ class Seq3Session(
         return saved
     }
 
-    /**
-     * Follows the library's back-references of diagram notes that moved from [fromTabId]'s note to [toTabId]'s (Share, Stop sharing; the
-     * block ids stay). Never call with the state lock held: the library writes to disk.
-     */
-    fun retargetLibraryAttachments(fromTabId: String, toTabId: String, blockIds: Collection<String>) {
-        if (libraryStore.retargetAttachments(fromTabId, toTabId, blockIds)) libraryRevision++
-    }
-
-    /**
-     * Drops the library's back-references of diagram notes that left [tabId]'s note without moving anywhere (replaced by Stop
-     * sharing, deleted with a shared note, cleared by "clear all notes"). One pass over the library, one write. Never call with
-     * the state lock held: the library writes to disk.
-     */
-    fun releaseLibraryAttachments(tabId: String, blockIds: Collection<String>) {
-        if (libraryStore.removeAttachments(tabId, blockIds)) libraryRevision++
-    }
-
-    /** Removes the library's durable back-reference when a Note attachment is deleted. */
-    fun removeLibraryAttachment(tabId: String, blockId: String) {
-        var changed = false
-        libraryStore.all().forEach { item ->
-            if (item.attachments.any { it.tabId == tabId && it.blockId == blockId }) {
-                libraryStore.removeAttachment(item.id, tabId, blockId)
-                changed = true
-            }
+    /** Order the library change with the deletion so a concurrent move sees the same block owner in both places. */
+    internal inline fun removeNoteAttachments(tabId: String, updatedAt: Long? = null, deleteBlocks: () -> Collection<String>) {
+        val changed = synchronized(appState.stateLock) {
+            libraryStore.changeAttachmentsInMemory(tabId, deleteBlocks(), updatedAt = updatedAt)
         }
-        if (changed) libraryRevision++
+        if (changed) persistAttachmentChanges()
+    }
+
+    internal fun persistAttachmentChanges() {
+        libraryStore.persistAttachmentChanges()
+        libraryRevision++
     }
 
     // ── Regenerate: a reviewed proposal, never a wholesale replace (spec §08) ──────────────────

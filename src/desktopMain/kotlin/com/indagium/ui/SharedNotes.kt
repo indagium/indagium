@@ -199,14 +199,16 @@ internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosed
 
 private const val PENDING_CITATION_SOURCE_PREFIX = "citation-"
 
-private fun pendingCitationSourceId(id: String, idInUse: Boolean = false): String =
-    id.takeIf { !idInUse && it.startsWith(PENDING_CITATION_SOURCE_PREFIX) } ?: "$PENDING_CITATION_SOURCE_PREFIX${UUID.randomUUID()}"
+private fun freshCitationSourceId(): String = "$PENDING_CITATION_SOURCE_PREFIX${UUID.randomUUID()}"
+
+private fun pendingCitationSourceId(id: String, idInUse: Boolean): String =
+    id.takeIf { !idInUse && it.startsWith(PENDING_CITATION_SOURCE_PREFIX) } ?: freshCitationSourceId()
 
 /** Imported archive notes have no source descriptors. Keep their excerpts and detach external IDs. */
 internal fun Annotations.detachUnverifiedCitationSources(): Annotations {
     val cited = blocks.citedSourceTabIds()
     if (cited.isEmpty()) return this
-    return remapCitationSources(cited.associateWith { pendingCitationSourceId(it) })
+    return remapCitationSources(cited.associateWith { freshCitationSourceId() })
 }
 
 private fun Annotations.remapCitationSources(destinations: Map<String, String>): Annotations = mapLogRefs { ref ->
@@ -329,21 +331,15 @@ internal fun AppState.createSharedNote(name: String, memberTabIds: List<String>)
  * Null (nothing changed) when the tab is not an open ordinary tab or an overwrite prompt is pending for it.
  */
 internal fun AppState.shareTabNote(tabId: String, name: String, memberTabIds: List<String>): String? {
-    val moved = shareTabNoteLocked(tabId, name, memberTabIds) ?: return null
-    // The library's attachments follow the blocks to the host, after the lock: the library writes to disk.
-    seq3Sessions.retargetLibraryAttachments(tabId, moved.noteTabId, moved.blockIds)
-    return moved.noteTabId
+    val move = synchronized(stateLock) { shareTabNoteLocked(tabId, name, memberTabIds) } ?: return null
+    if (move.attachmentsChanged) seq3Sessions.persistAttachmentChanges()
+    return move.hostId
 }
 
-/** The tab that holds the note after a move and the ids of the blocks that moved into it. */
-private class MovedNote(
-    val noteTabId: String,
-    val blockIds: List<String>,
-    /** Blocks of the destination's own note that the move replaced wholesale (Stop sharing with replaceExisting). */
-    val replacedBlockIds: List<String> = emptyList(),
-)
+internal data class SharedNoteMove(val hostId: String, val attachmentsChanged: Boolean)
 
-private fun AppState.shareTabNoteLocked(tabId: String, name: String, memberTabIds: List<String>): MovedNote? = synchronized(stateLock) {
+/** Caller holds stateLock and flushes any changed library attachments after releasing it. */
+internal fun AppState.shareTabNoteLocked(tabId: String, name: String, memberTabIds: List<String>): SharedNoteMove? {
     val tab = tabs.firstOrNull { it.id == tabId && !it.isCaptureLauncher } ?: return null
     // An in-flight edit lives only on pendingNoteOverwrite.pendingTab: moving the note now would race its resolution.
     if (pendingNoteOverwrite?.tabId == tabId) return null
@@ -378,8 +374,8 @@ private fun AppState.shareTabNoteLocked(tabId: String, name: String, memberTabId
             member.copy(notesView = host.id)
         }
     }
-    seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks)
-    MovedNote(host.id, host.annotations.blocks.map { it.id })
+    val attachmentsChanged = seq3Sessions.moveNoteOwner(tabId, host.id, host.annotations.blocks)
+    return SharedNoteMove(host.id, attachmentsChanged)
 }
 
 // ── Members, rename, stop sharing, delete ────────────────────────────────────────────────────
@@ -419,22 +415,13 @@ internal fun AppState.renameSharedNote(hostId: String, name: String): Boolean = 
  * an overwrite prompt is pending for the note or the tab.
  */
 internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExisting: Boolean = false): Boolean {
-    val moved = stopSharingLocked(hostId, intoTabId, replaceExisting) ?: return false
-    // The library's attachments follow the blocks to the recipient, after the lock: the library writes to disk.
-    seq3Sessions.retargetLibraryAttachments(hostId, intoTabId, moved.blockIds)
-    // The recipient's own blocks that this replaced are gone: their attachments must not keep the library items "Attached".
-    seq3Sessions.releaseLibraryAttachments(intoTabId, moved.replacedBlockIds)
-    return true
-}
-
-private fun AppState.stopSharingLocked(hostId: String, intoTabId: String, replaceExisting: Boolean): MovedNote? =
-    synchronized(stateLock) {
-        val host = sharedNoteHost(hostId) ?: return null
-        val tab = tabs.firstOrNull { it.id == intoTabId } ?: return null
-        if (intoTabId !in host.sharedNote?.memberTabIds.orEmpty()) return null
+    val attachmentsChanged = synchronized(stateLock) {
+        val host = sharedNoteHost(hostId) ?: return false
+        val tab = tabs.firstOrNull { it.id == intoTabId } ?: return false
+        if (intoTabId !in host.sharedNote?.memberTabIds.orEmpty()) return false
         val pending = pendingNoteOverwrite
-        if (pending != null && (pending.tabId == hostId || pending.tabId == intoTabId)) return null
-        if (!replaceExisting && privateNoteHasContent(tab)) return null
+        if (pending != null && (pending.tabId == hostId || pending.tabId == intoTabId)) return false
+        if (!replaceExisting && privateNoteHasContent(tab)) return false
         // The host's record of closed logs goes with the citations: without it the transferred note could no longer reopen them.
         val cited = host.annotations.blocks.citedSourceTabIds()
         val carriedSources = host.sharedNote?.let { (it.closedMembers + it.closedReferenceSources) }.orEmpty()
@@ -449,13 +436,15 @@ private fun AppState.stopSharingLocked(hostId: String, intoTabId: String, replac
             noteClosedSources = carriedSources,
         )
         updateTabsLocked(setOf(intoTabId)) { recipient }
-        seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks)
+        val changed = seq3Sessions.moveNoteOwner(hostId, intoTabId, recipient.annotations.blocks, tab.annotations.blocks)
         // Not deleteSharedNote: the host's blocks moved (their attachments are retargeted), so none is released here.
         deleteSharedNoteLocked(hostId)
         persistStoppedSharedNote(host, recipient)
-        val movedIds = recipient.annotations.blocks.mapTo(HashSet()) { it.id }
-        MovedNote(intoTabId, movedIds.toList(), tab.annotations.blocks.map { it.id }.filter { it !in movedIds })
+        changed
     }
+    if (attachmentsChanged) seq3Sessions.persistAttachmentChanges()
+    return true
+}
 
 /** True when the tab's private note holds something worth confirming over: blocks, text, or a prefix other than the seeded one. */
 internal fun AppState.privateNoteHasContent(tab: LogTab): Boolean {
@@ -469,9 +458,7 @@ internal fun AppState.privateNoteHasContent(tab: LogTab): Boolean {
  * The exported .md/.ann files on disk are left alone. False when the note does not exist.
  */
 internal fun AppState.deleteSharedNote(hostId: String): Boolean {
-    val blockIds = deleteSharedNoteLocked(hostId) ?: return false
-    // The deleted blocks' library attachments go with them, after the lock: the library writes to disk.
-    seq3Sessions.releaseLibraryAttachments(hostId, blockIds)
+    seq3Sessions.removeNoteAttachments(hostId) { deleteSharedNoteLocked(hostId) ?: return false }
     return true
 }
 

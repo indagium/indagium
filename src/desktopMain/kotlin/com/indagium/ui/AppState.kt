@@ -12368,8 +12368,10 @@ class AppState(
     fun updateBlock(tabId: String, blockId: String, newText: String) = annotationManager.updateBlock(tabId, blockId, newText)
 
     fun removeBlock(tabId: String, blockId: String) {
-        annotationManager.removeBlock(tabId, blockId)
-        seq3Sessions.removeLibraryAttachment(tabId, blockId)
+        seq3Sessions.removeNoteAttachments(tabId, updatedAt = System.currentTimeMillis()) {
+            annotationManager.removeBlock(tabId, blockId)
+            listOf(blockId)
+        }
     }
 
     fun moveBlock(tabId: String, blockId: String, delta: Int) = annotationManager.moveBlock(tabId, blockId, delta)

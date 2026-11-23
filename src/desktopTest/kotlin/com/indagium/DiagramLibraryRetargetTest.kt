@@ -9,6 +9,8 @@ import com.indagium.ui.DiagramLibrarySnapshot
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.DiagramSourceIdentity
 import java.io.File
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -25,6 +27,39 @@ class DiagramLibraryRetargetTest {
     )
 
     private fun attachment(tab: String, block: String) = DiagramLibraryAttachment(tab, block, DiagramAttachmentKind.SNAPSHOT, 1L)
+
+    @Test
+    fun draftUpdateOverlappingAMoveKeepsTheNewOwnerAndTheDraft() {
+        val root = createTempDirectory("indagium-library-draft-move").toFile()
+        try {
+            val file = File(root, "library.cache")
+            val store = DiagramLibraryStore(file)
+            val item = newItem(store, "before edit")
+            store.addAttachment(item.id, attachment("a", "block"))
+            val move = FutureTask { store.retargetAttachments("a", "host", listOf("block")) }
+            val mover = Thread(move)
+            val edited = DiagramLibrarySnapshot.create(Seq3Document(title = "edited draft"))
+            val draft = store.tryUpdate(item.id) { previous ->
+                mover.start()
+                // Let the move either finish or reach the lock protecting this draft edit.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (!move.isDone && mover.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.sleep(1)
+                assertTrue(move.isDone || mover.state == Thread.State.BLOCKED)
+                previous.copy(title = "edited draft", snapshot = edited)
+            }
+            assertNotNull(draft).getOrThrow()
+            assertTrue(move.get(5, TimeUnit.SECONDS))
+
+            val restored = assertNotNull(DiagramLibraryStore(file).get(item.id))
+            assertEquals("edited draft", restored.title)
+            assertEquals(edited, restored.snapshot)
+            assertEquals(listOf(attachment("host", "block")), restored.attachments)
+            assertTrue(store.removeAttachments("host", listOf("block")))
+            assertFalse(assertNotNull(DiagramLibraryStore(file).get(item.id)).isAttached)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 
     @Test
     fun retargetingMovesOnlyTheNamedBlocksOfTheNamedTabAndPersistsOnce() {

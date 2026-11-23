@@ -1,5 +1,6 @@
 package com.indagium
 
+import androidx.compose.runtime.snapshots.Snapshot
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
@@ -38,6 +39,48 @@ class DiagramLibraryAttachmentMoveTest {
         LogEntry(1, "10:00:00.000", LogLevel.I, "Producer", "start op", PID, TID),
         LogEntry(2, "10:00:00.050", LogLevel.I, "Consumer", "handle op", PID, TID),
     )
+
+    @Test
+    fun sharingAsSoonAsALiveLinkIsVisibleMovesItsAttachmentAndEditingSession() {
+        val root = createTempDirectory("indagium-library-attach-share").toFile()
+        val file = File(root, "library.cache")
+        val store = DiagramLibraryStore(file)
+        val state = AppState(File(root, "state.cache"), autoExportNotes = false, notesDir = File(root, "notes"), diagramLibraryStore = store)
+        try {
+            state.tabs = listOf(mkTab("a", "a.log", rows()))
+            val coordinator = state.seq3Sessions
+            val session = assertNotNull(coordinator.begin("a", setOf(1, 2)))
+            await { coordinator.sessions.single().libraryItemId != null }
+            val itemId = assertNotNull(coordinator.sessions.single().libraryItemId)
+            var hostId: String? = null
+
+            // At the first unlocked state read after insertion, run the move that another caller could now perform.
+            fun shareIfPublished() {
+                if (Thread.holdsLock(state.stateLock) || hostId != null) return
+                Snapshot.withoutReadObservation {
+                    if (state.tab("a")!!.annotations.blocks.isNotEmpty()) {
+                        hostId = assertNotNull(state.shareTabNote("a", "Investigation", listOf("a")))
+                    }
+                }
+            }
+            val block = Snapshot.observe(readObserver = { shareIfPublished() }) {
+                coordinator.attachLiveLink(session)
+            }
+            shareIfPublished()
+
+            val host = assertNotNull(hostId)
+            val blockId = assertNotNull(block)
+            assertEquals(blockId, state.sharedNoteHost(host)!!.annotations.blocks.single().id)
+            assertEquals(host, coordinator.sessions.single().noteTargetTabId)
+            val attachment = assertNotNull(DiagramLibraryStore(file).get(itemId)).attachments.single()
+            assertEquals(host to blockId, attachment.tabId to attachment.blockId)
+            state.removeBlock(host, blockId)
+            assertFalse(assertNotNull(DiagramLibraryStore(file).get(itemId)).isAttached)
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
 
     @Test
     fun attachmentsFollowTheirBlocksThroughShareAndStopSharingAndDeletingThemDetaches() {

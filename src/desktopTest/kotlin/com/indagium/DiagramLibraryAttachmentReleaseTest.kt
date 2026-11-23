@@ -8,6 +8,7 @@ import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.deleteSharedNote
 import com.indagium.ui.mkTab
 import com.indagium.ui.shareTabNote
+import com.indagium.ui.shareTabNoteLocked
 import com.indagium.ui.stopSharing
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -91,6 +92,27 @@ class DiagramLibraryAttachmentReleaseTest {
                 assertNotNull(DiagramLibraryStore(File(f.root, "library.cache")).get(replacedItem)).isAttached,
                 "the release was persisted",
             )
+        } finally {
+            f.close()
+        }
+    }
+
+    @Test
+    fun deletingAMovedBlockBeforeTheShareFlushesKeepsItDetachedOnDisk() {
+        val f = fixture()
+        try {
+            val (itemId, block) = f.attachedSnapshot("a")
+            val move = synchronized(f.state.stateLock) {
+                assertNotNull(f.state.shareTabNoteLocked("a", "Investigation", listOf("a", "b")))
+            }
+
+            // A delete can acquire the state lock before the sharing thread gets to its disk write.
+            assertTrue(move.attachmentsChanged)
+            f.state.removeBlock(move.hostId, block)
+            f.state.seq3Sessions.persistAttachmentChanges()
+
+            assertFalse(assertNotNull(f.store.get(itemId)).isAttached)
+            assertFalse(assertNotNull(DiagramLibraryStore(File(f.root, "library.cache")).get(itemId)).isAttached)
         } finally {
             f.close()
         }

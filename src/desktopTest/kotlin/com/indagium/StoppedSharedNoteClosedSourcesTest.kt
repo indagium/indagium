@@ -28,6 +28,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+private const val TAB_FIELDS_BEFORE_CLOSED_SOURCES = 26
 private const val STOPPED_TIMEOUT_MS = 30_000L
 
 /**
@@ -219,8 +220,8 @@ class StoppedSharedNoteClosedSourcesTest {
         val token = tab.tabToken()
         assertEquals(tab.noteClosedSources, token.tabShellFromToken()?.tab?.noteClosedSources)
 
-        val withoutField = token.substringBeforeLast('|')
-        assertTrue(withoutField.tabShellFromToken()?.tab?.noteClosedSources.orEmpty().isEmpty(), "a token from before the field has none")
+        val withoutField = token.split('|').take(TAB_FIELDS_BEFORE_CLOSED_SOURCES).joinToString("|")
+        assertTrue(assertNotNull(withoutField.tabShellFromToken()).tab.noteClosedSources.isEmpty(), "a token from before the field has none")
         assertTrue(mkTabForToken().tabToken().tabShellFromToken()?.tab?.noteClosedSources.orEmpty().isEmpty())
     }
 
