@@ -1711,6 +1711,7 @@ internal fun Annotations.annotationsToken(
     sourcePath: String? = null,
     filter: Filter? = null,
     citedSources: List<SharedNoteClosedSource> = emptyList(),
+    ownerSource: SharedNoteClosedSource? = null,
 ): String = tokenFields(
     prefix,
     suffix,
@@ -1736,8 +1737,12 @@ internal fun Annotations.annotationsToken(
     // getOrNull(9). Absent (null) or a legacy (<10-field) token both mean "no fingerprint
     // recorded", read by AppState's relink flow as "can't verify" rather than a mismatch.
     fingerprint.orEmpty(),
-    // Field 10 is sidecar-only and present only when there are cited sources.
-) + if (citedSources.isEmpty()) "" else "|${tokenFields(citedSources.closedSourcesToken())}"
+    // Fields 10 and 11 are sidecar-only. An owning source can exist without cross-file citations.
+) + when {
+    ownerSource != null -> "|" + tokenFields(citedSources.closedSourcesToken(), listOf(ownerSource).closedSourcesToken())
+    citedSources.isNotEmpty() -> "|" + tokenFields(citedSources.closedSourcesToken())
+    else -> ""
+}
 
 /** Decodes the Filter recorded at [annotationsToken]'s field index 8. Kept separate from
  *  [annotationsFromToken] since the filter is not an [Annotations] field (see that function's own
@@ -2126,15 +2131,19 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
 // Legacy archive tokens have no candidate, so their shell starts with unknown size metadata and
 // resolves it together with content on the queued IO restore path. Neither form scans an archive
 // synchronously during AppState construction.
-private fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null): RestoredTabSource? {
+internal fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null): RestoredTabSource? {
+    val file = File(this)
+    val suffix = persistedCandidate?.let { "!${it.entryPath}" }
+    if (suffix != null && endsWith(suffix)) {
+        return RestoredTabSource.ArchiveSource(File(removeSuffix(suffix)), persistedCandidate.entryPath, persistedCandidate)
+    }
     val bangIndex = indexOf('!')
-    if (bangIndex > 0) {
+    if (bangIndex > 0 && !file.isFile) {
         val archiveFile = File(substring(0, bangIndex))
         val entryPath = substring(bangIndex + 1).takeIf { it.isNotBlank() } ?: return null
-        val matchingPersistedCandidate = persistedCandidate?.takeIf { it.entryPath == entryPath }
-        return RestoredTabSource.ArchiveSource(archiveFile, entryPath, matchingPersistedCandidate)
+        return RestoredTabSource.ArchiveSource(archiveFile, entryPath, null)
     }
-    return File(this).let(RestoredTabSource::FileSource)
+    return RestoredTabSource.FileSource(file)
 }
 
 internal fun File.totalFileSize(): Long =

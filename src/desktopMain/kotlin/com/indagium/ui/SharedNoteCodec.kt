@@ -5,20 +5,31 @@ import com.indagium.model.Filter
 import com.indagium.model.LogTab
 import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
+import java.io.File
 import java.util.UUID
 
+private const val ANNOTATIONS_SOURCE_PATH_INDEX = 4
 private const val ANNOTATIONS_CITED_SOURCES_INDEX = 10
+private const val ANNOTATIONS_OWNER_SOURCE_INDEX = 11
 
 internal fun String.citedSourcesFromAnnotationsToken(): List<SharedNoteClosedSource> =
     runCatching { tokenFieldAt(ANNOTATIONS_CITED_SOURCES_INDEX).closedSourcesFromToken() }.getOrDefault(emptyList())
 
+/** Older sidecars recorded only the owning log's path. Composite paths need a newer instance descriptor. */
+internal fun String.noteOwnerSourceFromAnnotationsToken(): SharedNoteClosedSource? = runCatching {
+    tokenFieldAt(ANNOTATIONS_OWNER_SOURCE_INDEX).closedSourcesFromToken().singleOrNull()
+        ?: tokenFieldAt(ANNOTATIONS_SOURCE_PATH_INDEX)?.takeIf { it.isNotBlank() }?.let { path ->
+            val file = File(path)
+            if ('!' in path && !file.isFile) null else SharedNoteClosedSource("", file.name, path)
+        }
+}.getOrNull()
+
 /** Clear the export's owning log while preserving all other annotation token fields. */
 internal fun String.withoutNoteSourcePath(): String {
-    val sourcePathIndex = 4
     val fields = split('|').toMutableList()
     val emptyField = tokenFields("")
-    if (fields.size <= sourcePathIndex || fields[sourcePathIndex] == emptyField) return this
-    fields[sourcePathIndex] = emptyField
+    if (fields.size <= ANNOTATIONS_SOURCE_PATH_INDEX || fields[ANNOTATIONS_SOURCE_PATH_INDEX] == emptyField) return this
+    fields[ANNOTATIONS_SOURCE_PATH_INDEX] = emptyField
     return fields.joinToString("|")
 }
 

@@ -22,6 +22,8 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.resolveLogRefRowIds
 import com.indagium.ui.setNotesView
 import com.indagium.ui.stopSharing
+import com.indagium.ui.tabShellFromToken
+import com.indagium.ui.tabToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -397,16 +399,18 @@ class SharedNoteGoToRowsTest {
     }
 
     @Test
-    fun aClosedMembersReferenceOffersToReopenAndThenGoesToTheRows() {
+    fun aClosedMemberWithAnExclamationMarkInItsPathCanReopenAndRejoin() {
         val dir = createTempDirectory("goto-reopen").toFile()
         val app = AppState(File(dir, "state.cache"), autoExportNotes = false, notesDir = File(dir, "notes"))
         try {
-            val file = logcatFile(dir, "a.log")
+            val file = logcatFile(dir, "a!2.log")
             app.tabs = listOf(
-                mkTab("a", "a.log", listOf(entry(1, "hello from a.log", ts = "10:00:00.000"), entry(2, "second from a.log", ts = "10:00:01.000")))
+                mkTab("a", "a!2.log", listOf(entry(1, "hello from a!2.log", ts = "10:00:00.000"), entry(2, "second from a!2.log", ts = "10:00:01.000")))
                     .copy(sourcePath = file.absolutePath),
                 mkTab("b", "b.log", (1..3).map { entry(it, "b says $it") }).copy(sourcePath = File(dir, "b.log").absolutePath),
             )
+            val restoredShell = assertNotNull(app.tab("a")!!.tabToken().tabShellFromToken())
+            assertIs<com.indagium.ui.RestoredTabSource.FileSource>(restoredShell.source)
             app.activeTabId = "b"
             val host = assertNotNull(app.createSharedNote("S", listOf("a", "b")))
             val block = ref(source = "a", ids = listOf(1, 2), frozen = app.tab("a")!!.logData)
@@ -428,7 +432,9 @@ class SharedNoteGoToRowsTest {
             assertEquals(listOf(1, 2), navigated.rowIds)
             assertEquals(setOf(1, 2), reopened.selected)
             assertEquals(reopened.id, app.activeTabId)
-            assertEquals(reopened.id, (app.sharedNoteHost(host)!!.annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
+            val updated = assertNotNull(app.sharedNoteHost(host))
+            assertEquals(reopened.id, (updated.annotations.blocks.single() as AnnBlock.LogRef).sourceTabId)
+            assertTrue(reopened.id in assertNotNull(updated.sharedNote).memberTabIds)
         } finally {
             app.close()
             dir.deleteRecursively()
@@ -554,6 +560,46 @@ class SharedNoteGoToRowsTest {
             waitUntil("the note autoloads with its source already open") { app.tab(againId)?.annotations?.blocks?.isNotEmpty() == true }
             val rebound = assertIs<AnnBlock.LogRef>(app.tab(againId)!!.annotations.blocks.single())
             assertEquals(navigated.tabId, rebound.sourceTabId)
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun importingAPrivateNoteIntoASharedNoteRetainsItsLocalCitationSource() {
+        val dir = createTempDirectory("goto-private-sidecar-into-shared").toFile()
+        val app = twoTabs(dir)
+        try {
+            val source = logcatFile(dir, "original.log")
+            val sourceId = assertNotNull(app.openFile(source))
+            waitUntil("the original log loads") { app.tab(sourceId)?.contentState == TabContentState.LOADED }
+            val row = assertNotNull(app.tab(sourceId)).logData.first()
+            val citation = ref(source = null, ids = listOf(row.id), frozen = listOf(row))
+            val host = assertNotNull(app.createSharedNote("Investigation", listOf("b")))
+            val md = File(dir, "original_analysis.md").apply { writeText("Original analysis") }
+            val ann = File(dir, "original_analysis.ann").apply {
+                writeText(Annotations(blocks = listOf(citation)).annotationsToken(source.absolutePath))
+            }
+
+            app.openNoteFile(host, md)
+            val bound = assertIs<AnnBlock.LogRef>(app.sharedNoteHost(host)!!.annotations.blocks.single())
+            assertEquals(sourceId, bound.sourceTabId)
+            assertEquals(GoToRowsResult.Navigated(sourceId, listOf(row.id)), go { app.goToLogRefRows(bound, "b") })
+
+            // New sidecars retain the exact source profile and can reopen when the source tab is closed.
+            app.putIntoNote(sourceId, citation)
+            assertTrue(app.saveAnnotationsTo(sourceId, ann))
+            app.closeTab(sourceId)
+            app.openNoteFile(host, md)
+            val pending = assertIs<AnnBlock.LogRef>(app.sharedNoteHost(host)!!.annotations.blocks.single())
+            val offer = assertIs<GoToRowsResult.NeedsReopen>(go { app.goToLogRefRows(pending, "b") })
+            assertEquals(host, offer.ownerId)
+            val navigated = assertIs<GoToRowsResult.Navigated>(
+                go { app.goToLogRefRowsAfterReopen(host, offer.closedTabId, pending, "b") },
+            )
+            assertEquals(source.absolutePath, app.tab(navigated.tabId)?.sourcePath)
+            assertEquals(listOf(row.id), navigated.rowIds)
         } finally {
             app.close()
             dir.deleteRecursively()

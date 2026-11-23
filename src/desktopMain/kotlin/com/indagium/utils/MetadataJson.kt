@@ -200,8 +200,12 @@ internal class MetadataJsonScanner(
             val child = readValue(path + key)
             if (key == "metadata" && child?.element is JsonObject && hasRecordMetadata(child.element)) recordMetadata = true
             chars += key.length + (child?.chars ?: 0)
-            if (chars > METADATA_JSON_MAX_RECORD_CHARS) oversized = true
-            if (oversized) values.clear() else if (child != null) values[key] = child.element
+            if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
+                oversized = true
+                values.clear()
+            } else {
+                values[key] = child.element
+            }
         }
         if (oversized) {
             discardOversizedObject(recordMetadata, firstRecord, firstSummary, mark)
@@ -256,8 +260,12 @@ internal class MetadataJsonScanner(
             arrayElement = true
             val child = readValue(path)
             chars += child?.chars ?: 0
-            if (chars > METADATA_JSON_MAX_RECORD_CHARS) oversized = true
-            if (oversized) values.clear() else if (child != null) values += child.element
+            if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
+                oversized = true
+                values.clear()
+            } else {
+                values += child.element
+            }
         }
         return if (oversized) null else MetadataJsonValue(JsonArray(values), chars)
     }
@@ -431,6 +439,7 @@ internal fun metadataJsonEntry(
         (hciStatus != null && hciStatus.lowercase(Locale.ROOT) !in setOf("success", "0", "0x00"))
     val fields = linkedMapOf("source" to source, "identity" to identity, "section" to section)
     flattenMetadataFields(packet.value, "", fields)
+    fields["section"] = section // Section grouping and indexing use the packet's structural path.
     metadata.text("timestamp_formatted")?.let { fields["relative_time"] = it }
     metadataJsonRawBytes(packet.value)?.let { fields["raw_bytes"] = it }
     val columnValues = mapOf(

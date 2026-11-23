@@ -134,6 +134,21 @@ class MetadataJsonSectionIndexTest {
     }
 
     @Test
+    fun aPayloadSectionFieldCannotChangeTheIndexedSection() = withDirectory { directory ->
+        val packet = record("Event", "message", T0, "\n").dropLast(1) + ""","section":"payload-value"}"""
+        val file = write(directory, "capture.json", """{"Capture":{"Events":[$packet]}}""")
+
+        val parsed = full(file)
+        val section = parsed.sections.single()
+        assertEquals("Capture / Events", section.id)
+        val row = section.entries.single()
+        assertEquals(section.id, row.profileFields["section"])
+        assertTrue(assertNotNull(row.rawRecord).contains("payload-value"))
+        val index = assertNotNull(parsed.metadataSectionIndex)
+        assertSameRows(section.entries, assertNotNull(loadMetadataJsonSection(file, index, section.id, metadataJsonProfile())), section.id)
+    }
+
+    @Test
     fun aModifiedFileIsNotUsedThroughTheIndex() = withDirectory { directory ->
         val file = write(directory, "export.json", document())
         val index = assertNotNull(full(file).metadataSectionIndex)

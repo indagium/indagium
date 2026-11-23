@@ -7085,15 +7085,7 @@ class AppState(
         tab.captureArchivePath?.takeIf(String::isNotBlank)?.let { path ->
             return RestoredTabSource.CaptureSource.restore(path, tab.sourcePath)
         }
-        tab.sourcePath?.takeIf(String::isNotBlank)?.let { path ->
-            val split = path.indexOf('!')
-            if (split > 0) {
-                val archive = File(path.substring(0, split))
-                val entry = path.substring(split + 1).takeIf(String::isNotBlank) ?: return null
-                return RestoredTabSource.ArchiveSource(archive, entry, tab.archiveCandidate)
-            }
-            return RestoredTabSource.FileSource(File(path))
-        }
+        tab.sourcePath?.takeIf(String::isNotBlank)?.let { return it.restoredTabSource(tab.archiveCandidate) }
         tab.attachedVideo?.captureSourcePath?.takeIf(String::isNotBlank)?.let { path ->
             return RestoredTabSource.CaptureSource.restore(path, tab.sourcePath)
         }
@@ -15867,7 +15859,9 @@ class AppState(
         return withPinnedRows(t) {
             runCatching {
                 file.parentFile?.mkdirs()
-                file.writeText(t.annotations.preparedForSave(t).annotationsToken(citedSources = noteSourcesForExport(t)))
+                file.writeText(t.annotations.preparedForSave(t).annotationsToken(
+                    citedSources = noteSourcesForExport(t), ownerSource = t.noteOwnerSourceForExport(),
+                ))
             }.isSuccess
         }
     }
@@ -15991,6 +15985,7 @@ class AppState(
         val token = runCatching { file.readText() }.getOrNull() ?: return false
         val annotations = token.annotationsFromToken() ?: return false
         val sources = token.citedSourcesFromAnnotationsToken()
+        val originalOwnerSource = token.noteOwnerSourceFromAnnotationsToken()
         val recovered = recoveredNoteRowsFor(file, annotations)
         var loaded = false
         // Loading a sidecar is not an edit: migrate resolvable legacy rows in memory, but do not
@@ -16008,7 +16003,7 @@ class AppState(
                     frozen.hasUnresolvedLegacyLogRefs(withRows)
                 },
             )
-            restoreNoteSourcesLocked(loadedNote, sources)
+            restoreNoteSourcesLocked(loadedNote, sources, originalOwnerSource)
         }
         return loaded
     }
@@ -16048,7 +16043,9 @@ class AppState(
                     runCatching {
                         saved.writeText(buildMd(t, settings))
                         File(saved.parent, saved.nameWithoutExtension + ".ann")
-                            .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter, noteSourcesForExport(t)))
+                            .writeText(t.annotations.preparedForSave(t).annotationsToken(
+                                t.sourcePath, t.filter, noteSourcesForExport(t), t.noteOwnerSourceForExport(),
+                            ))
                         writeAnnotationFrameImages(t, saved)
                         rememberRecentNote(saved)
                     }.fold(
@@ -16165,6 +16162,7 @@ class AppState(
             val annotations = token?.annotationsFromToken()
             if (annotations != null) {
                 val sources = token.citedSourcesFromAnnotationsToken()
+                val originalOwnerSource = token.noteOwnerSourceFromAnnotationsToken()
                 // Change 2 (relink-log bugfix): an .ann saved before Change 1's materializeLogRefs
                 // existed has LogRef.sourceEntries == null, so if this tab's own log doesn't cover
                 // those ids either (no log attached, or a different log), recover the rows from the
@@ -16186,7 +16184,7 @@ class AppState(
                             frozen.hasUnresolvedLegacyLogRefs(withRows)
                         },
                     )
-                    restoreNoteSourcesLocked(loadedNote, sources)
+                    restoreNoteSourcesLocked(loadedNote, sources, originalOwnerSource)
                 }
                 return
             }
@@ -17371,7 +17369,9 @@ class AppState(
         directory.mkdirs()
         mdFile.writeText(buildMd(tab, settings))
         File(directory, "${mdFile.nameWithoutExtension}.ann")
-            .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter, sources))
+            .writeText(tab.annotations.preparedForSave(tab).annotationsToken(
+                tab.sourcePath, tab.filter, sources, tab.noteOwnerSourceForExport(),
+            ))
         legacySourceFingerprintFile(mdFile).delete()
         writeAnnotationFrameImages(tab, mdFile)
         rememberRecentNote(mdFile)

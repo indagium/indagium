@@ -74,18 +74,23 @@ internal fun noteOverwriteMessage(targetName: String, sharedNote: Boolean): Stri
             "Nothing is being written to disk while this is open — choose how to proceed."
     }
 
-/** The path of a tab opened from one plain file, normalized for comparison; null for no source or an archive entry ("zip!entry"). */
-private fun plainSourcePathKey(sourcePath: String?): String? {
-    if (sourcePath.isNullOrBlank() || '!' in sourcePath) return null
-    return File(sourcePath).absoluteFile.normalize().path
+private fun String?.plainSourcePathKey(): String? =
+    this?.takeIf { it.isNotBlank() }?.let { File(it).absoluteFile.normalize().path }
+
+private fun LogTab.plainNoteSourcePath(): String? {
+    if (archiveCandidate != null || captureArchivePath != null || attachedVideo?.captureSourcePath != null || captureSessionId != null) {
+        return null
+    }
+    // A legacy restored archive tab may lack its entry metadata until its first load.
+    return sourcePath?.takeIf { '!' !in it || it.restoredTabSource() is RestoredTabSource.FileSource }
 }
 
 /** Older sessions have no profile snapshot, so their closed sources match by path alone. */
 private fun SharedNoteClosedSource.matches(tab: LogTab): Boolean {
     if (tab.isCaptureLauncher) return false
     sourceInstanceId?.let { return it == tab.sourceInstanceId }
-    val key = plainSourcePathKey(sourcePath) ?: return false
-    return plainSourcePathKey(tab.sourcePath) == key &&
+    val key = sourcePath.plainSourcePathKey() ?: return false
+    return tab.plainNoteSourcePath().plainSourcePathKey() == key &&
         (logFormatProfileSnapshot == null || logFormatProfileSnapshot == tab.logFormatProfileSnapshot)
 }
 
@@ -181,7 +186,7 @@ private fun LogTab.withMember(tab: LogTab): LogTab = withReopenedSource(tab, add
 
 /** What a note must remember to reopen this tab's file later; null when it has no plain file to open (an archive entry, a capture). */
 private fun LogTab.asClosedSource(): SharedNoteClosedSource? =
-    sourcePath?.takeIf { plainSourcePathKey(it) != null }?.let { SharedNoteClosedSource(id, filename, it, logFormatProfileSnapshot) }
+    plainNoteSourcePath()?.takeIf { it.isNotBlank() }?.let { SharedNoteClosedSource(id, filename, it, logFormatProfileSnapshot) }
 
 /** Source identities for the note sidecar, including cited tabs that are still open at the time of export. */
 internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosedSource> {
@@ -192,10 +197,16 @@ internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosed
     val storedById = stored.associateBy { it.tabId }
     val open = tabs.mapNotNull { tab ->
         if (tab.isCaptureLauncher || tab.id !in cited || storedById[tab.id]?.matches(tab) == false) return@mapNotNull null
-        tab.asClosedSource() ?: SharedNoteClosedSource(tab.id, tab.filename, null, sourceInstanceId = tab.sourceInstanceId)
+        tab.citationSource()
     }
     return stored.withClosedSources(open)
 }
+
+private fun LogTab.citationSource(): SharedNoteClosedSource =
+    asClosedSource() ?: SharedNoteClosedSource(id, filename, null, sourceInstanceId = sourceInstanceId)
+
+internal fun LogTab.noteOwnerSourceForExport(): SharedNoteClosedSource? =
+    if (sharedNote == null && annotations.blocks.any { it is AnnBlock.LogRef && it.sourceTabId == null }) citationSource() else null
 
 private const val PENDING_CITATION_SOURCE_PREFIX = "citation-"
 
@@ -217,9 +228,17 @@ private fun Annotations.remapCitationSources(destinations: Map<String, String>):
 }
 
 /** Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock. */
-internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<SharedNoteClosedSource>): LogTab {
-    val cited = owner.annotations.blocks.citedSourceTabIds()
-    val known = sources.distinctBy { it.tabId }.associateBy { it.tabId }
+internal fun AppState.restoreNoteSourcesLocked(
+    owner: LogTab,
+    sources: List<SharedNoteClosedSource>,
+    originalOwnerSource: SharedNoteClosedSource?,
+): LogTab {
+    val owningSource = originalOwnerSource?.takeIf { owner.sharedNote != null }?.copy(tabId = freshCitationSourceId())
+    val imported = if (owningSource == null) owner.annotations else owner.annotations.mapLogRefs { ref ->
+        if (ref.sourceTabId == null) ref.copy(sourceTabId = owningSource.tabId, sourceFilename = owningSource.filename) else ref
+    }
+    val cited = imported.blocks.citedSourceTabIds()
+    val known = (sources + listOfNotNull(owningSource)).distinctBy { it.tabId }.associateBy { it.tabId }
     val destinations = HashMap<String, String>()
     val pending = ArrayList<SharedNoteClosedSource>()
     for (id in cited) {
@@ -232,7 +251,7 @@ internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<Shar
         destinations[id] = destination
         if (opened == null && source != null) pending += source.copy(tabId = destination)
     }
-    val annotations = owner.annotations.remapCitationSources(destinations)
+    val annotations = imported.remapCitationSources(destinations)
     val info = owner.sharedNote
     return owner.copy(
         annotations = annotations,
@@ -499,10 +518,10 @@ internal fun AppState.detachSharedNoteMembersLocked(closing: List<LogTab>) {
     val closingIds = closing.mapTo(HashSet()) { it.id }
     // A closing source can hand off to another tab showing the same file with the same profile.
     val successors = closing.associate { tab ->
-        val key = plainSourcePathKey(tab.sourcePath)
+        val key = tab.plainNoteSourcePath().plainSourcePathKey()
         tab.id to key?.let { k ->
             tabs.firstOrNull {
-                it.id !in closingIds && plainSourcePathKey(it.sourcePath) == k &&
+                it.id !in closingIds && it.plainNoteSourcePath().plainSourcePathKey() == k &&
                     (tab.logFormatProfileSnapshot == null || it.logFormatProfileSnapshot == tab.logFormatProfileSnapshot)
             }
         }
@@ -560,7 +579,7 @@ private fun AppState.recordPrivateNoteClosedSourcesLocked(
  * and shows the first one. Returns the tab to publish. Caller holds stateLock.
  */
 internal fun AppState.attachReopenedTabToSharedNotesLocked(opened: LogTab): LogTab {
-    if (plainSourcePathKey(opened.sourcePath) == null) return opened
+    if (opened.plainNoteSourcePath().plainSourcePathKey() == null) return opened
     rebindPrivateNotesToReopenedTabLocked(opened)
     if (sharedNoteHosts.isEmpty()) return opened
     var firstHostId: String? = null
@@ -602,7 +621,7 @@ internal fun AppState.reopenSharedNoteMember(hostId: String, closedTabId: String
 }
 
 private fun AppState.reopenClosedSource(closed: SharedNoteClosedSource): String? {
-    val path = closed.sourcePath?.takeIf { plainSourcePathKey(it) != null }
+    val path = closed.sourcePath?.takeIf { it.isNotBlank() }
     if (path == null) {
         showOpenError("Could not reopen ${closed.filename}", null, "The shared note has no file recorded for this tab.")
         return null
@@ -763,7 +782,7 @@ private fun closestUnusedRow(rows: List<Int>, target: Int, from: Int, to: Int, t
  */
 private fun AppState.reopenOfferFor(sourceTabId: String, viewingTabId: String, viewedHostId: String?): GoToRowsResult {
     val owners = listOf(viewedHostId ?: viewingTabId) + sharedNoteHosts.map { it.id }
-    val owner = owners.firstOrNull { plainSourcePathKey(closedSourceOf(it, sourceTabId)?.sourcePath) != null }
+    val owner = owners.firstOrNull { !closedSourceOf(it, sourceTabId)?.sourcePath.isNullOrBlank() }
     return owner?.let { GoToRowsResult.NeedsReopen(it, sourceTabId) } ?: GoToRowsResult.NoSource
 }
 

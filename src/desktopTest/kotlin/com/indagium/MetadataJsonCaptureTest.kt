@@ -142,6 +142,22 @@ class MetadataJsonCaptureTest {
     }
 
     @Test
+    fun oversizedNestedPayloadIsReportedAndLaterPacketsSurvive() {
+        val payloadChunk = "x".repeat(200_000)
+        val payload = List(22) { """ "$payloadChunk" """.trim() }.joinToString(",", "[", "]")
+        val first = packet(1790000000000000000L, "Oversized", "oversized").dropLast(1) +
+            ""","Details":{"Raw Bytes":$payload}}"""
+        val later = packet(1790000000000000001L, "Complete", "later")
+        val json = """{"Capture":{"Events":[$first,$later]}}"""
+
+        val parsed = parseMetadataJson(StringReader(json), metadataJsonProfile())
+
+        assertEquals(listOf("Complete"), parsed.entries.map { it.tag })
+        assertEquals(listOf("Capture / Events"), parsed.sections.map { it.id })
+        assertTrue(parsed.diagnostics.any { "exceeded the 4 MiB record limit" in it })
+    }
+
+    @Test
     fun arraysAndNestedRecordObjectsInsideAMessageDoNotBecomeSectionsOrExtraMessages() {
         val child = packet(1790000000000000001L, "Service.Child", "nested")
         val original = Json.parseToJsonElement(packet(1790000000000000000L)).jsonObject
