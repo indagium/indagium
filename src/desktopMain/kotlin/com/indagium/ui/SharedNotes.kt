@@ -129,8 +129,8 @@ private fun AppState.replaceHostLocked(host: LogTab) {
 }
 
 /** The prefix a tab's private note starts with (what opening the file or "New note" seeds). */
-private fun AppState.defaultNotePrefix(tab: LogTab): String =
-    "${settings.annotationPrefixLabel.trim().ifBlank { "From" }} ${tab.filename}"
+private fun AppState.defaultNotePrefix(filename: String): String =
+    "${settings.annotationPrefixLabel.trim().ifBlank { "From" }} $filename"
 
 private fun Annotations.mapLogRefs(fn: (AnnBlock.LogRef) -> AnnBlock.LogRef): Annotations =
     copy(blocks = blocks.map { if (it is AnnBlock.LogRef) fn(it) else it })
@@ -364,7 +364,7 @@ internal fun AppState.shareTabNoteLocked(tabId: String, name: String, memberTabI
     updateTabsLocked(members.toSet()) { member ->
         if (member.id == tabId) {
             member.copy(
-                annotations = Annotations(prefix = defaultNotePrefix(member)),
+                annotations = Annotations(prefix = defaultNotePrefix(member.filename)),
                 noteTargetName = freshPin,
                 recoveredNoteRows = emptyMap(),
                 noteClosedSources = emptyList(),
@@ -449,7 +449,8 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
 /** True when the tab's private note holds something worth confirming over: blocks, text, or a prefix other than the seeded one. */
 internal fun AppState.privateNoteHasContent(tab: LogTab): Boolean {
     val note = tab.annotations
-    val seededPrefix = note.prefix.isBlank() || note.prefix == defaultNotePrefix(tab)
+    val archivePrefix = archiveQualifiedLabel(tab.sourcePath)?.let { defaultNotePrefix(it) }
+    val seededPrefix = note.prefix.isBlank() || note.prefix == defaultNotePrefix(tab.filename) || note.prefix == archivePrefix
     return note.blocks.isNotEmpty() || !seededPrefix || note.suffix.isNotBlank() || note.issueDescription.isNotBlank()
 }
 

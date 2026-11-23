@@ -8499,13 +8499,14 @@ class AppState(
         }
         reparseTabWithLogFormatProfile(tabId, profileId) { result ->
             result.onSuccess {
-                val source = synchronized(stateLock) {
-                    upTab(tabId) { it.copy(logFormatCandidateIds = emptyList()) }
-                    tab(tabId)
-                }
-                val untouched = source != null && source.annotations.blocks.isEmpty() &&
-                    source.manualBlocks.isEmpty() && source.selected.isEmpty()
-                if (untouched) closeTab(tabId)
+                upTab(tabId) { it.copy(logFormatCandidateIds = emptyList()) }
+                closeTabsById(setOf(tabId), preferredActiveId = null, stillSafeToClose = {
+                    val source = tab(tabId)
+                    source != null && !privateNoteHasContent(source) && pendingNoteOverwrite?.tabId != tabId &&
+                        source.manualBlocks.isEmpty() && source.selected.isEmpty() &&
+                        source.noteTargetName == null && source.notesView == null && source.attachedVideo == null &&
+                        tabId !in captureControllersByTab && tabId !in embeddedMirrorsByTab
+                })
             }
             onComplete(result)
         }
@@ -12284,7 +12285,7 @@ class AppState(
     // Zip-backed tabs encode sourcePath as "<absZipPath>!<entryPath>" (see openZipEntry) — the
     // bare entry filename alone doesn't say which archive it came from, so this is qualified
     // unconditionally, regardless of whether it collides with the other tab's name.
-    private fun archiveQualifiedLabel(sourcePath: String?): String? {
+    internal fun archiveQualifiedLabel(sourcePath: String?): String? {
         val bangIdx = sourcePath?.indexOf('!') ?: return null
         if (bangIdx < 0) return null
         val zipPath = sourcePath.substring(0, bangIdx)
@@ -13427,6 +13428,22 @@ class AppState(
     private fun tabForcesHeapTrim(tab: LogTab): Boolean =
         tab.captureSessionId != null || tab.captureSourceSessionId != null || tab.attachedVideo != null
 
+    /** Unregister capture resources together so another mirror cannot attach while a tab closes. Caller holds stateLock. */
+    private fun detachLiveCaptureResourcesForCloseLocked(
+        tabIds: Set<String>,
+    ): Pair<List<Pair<String, TabCaptureController>>, List<Pair<String, EmbeddedMirrorHandle>>> {
+        val controllers = tabIds.mapNotNull { tabId -> captureControllersByTab.remove(tabId)?.let { tabId to it } }
+        val mirrors = tabIds.mapNotNull { tabId ->
+            embeddedMirrorsByTab.remove(tabId)?.let { mirror ->
+                embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                detachedEmbeddedMirrorTabs.remove(tabId)
+                embeddedMirrorVersion++
+                tabId to mirror
+            }
+        }
+        return controllers to mirrors
+    }
+
     // Resource cleanup and the tabs-list removal used to be two separate phases — cleanup
     // unguarded, then a synchronized(stateLock) block removing the tab — leaving a window where a
     // concurrent FileTailer flush (appendTailedLines, itself synchronized(stateLock)) could land
@@ -13438,11 +13455,9 @@ class AppState(
         tabIds: Set<String>,
         preferredActiveId: String?,
         loadsToFinishAfterClose: Set<String> = emptySet(),
+        stillSafeToClose: (() -> Boolean)? = null,
     ) {
         if (tabIds.isEmpty()) return
-        // Dropping the generation invalidates any alignment still deferred for these tabs, like a bump,
-        // without leaving an entry behind for every closed tab.
-        tabIds.forEach(videoAnchorRequestGeneration::remove)
         // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
         // captured under stateLock, but stopped before entering the tab-removal lock below so a
         // close action never performs process/file IO while stateLock is held. Controllers are taken
@@ -13451,16 +13466,10 @@ class AppState(
         // (ensureEmbeddedMirror requires its controller to be registered) and cannot slip past
         // this close.
         val (liveControllers, liveMirrors) = synchronized(stateLock) {
-            val controllers = tabIds.mapNotNull { tabId -> captureControllersByTab.remove(tabId)?.let { tabId to it } }
-            val mirrors = tabIds.mapNotNull { tabId ->
-                embeddedMirrorsByTab.remove(tabId)?.let { mirror ->
-                    embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
-                    detachedEmbeddedMirrorTabs.remove(tabId)
-                    embeddedMirrorVersion++
-                    tabId to mirror
-                }
-            }
-            controllers to mirrors
+            if (stillSafeToClose?.invoke() == false) return
+            // Invalidate pending video alignment before cleaning up the tab's capture resources.
+            tabIds.forEach(videoAnchorRequestGeneration::remove)
+            detachLiveCaptureResourcesForCloseLocked(tabIds)
         }
         // requestClose, not close(): this runs on the calling (often UI) thread. It tears the native
         // surface down inline when we ARE the EDT — so the surface is gone before the tab's
@@ -13499,6 +13508,8 @@ class AppState(
         // Closing a snapshot ends its extraction claim (file IO), so it happens after stateLock is released.
         val closedSnapshots = mutableListOf<ImportedCaptureSnapshot>()
         synchronized(stateLock) {
+            // The format chooser can race a Notes edit between the initial check and removal.
+            if (stillSafeToClose?.invoke() == false) return
             // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
             // counting only; the GC request itself is issued after the lock is released.
             val closing = tabs.filter { it.id in tabIds }
@@ -13717,7 +13728,10 @@ class AppState(
         } }
         // Logcat tabs merge by time of day as they always have, timestamp-less RAW rows included.
         val hasProfileSemantics = pinnedProfiles.any { it != null && it.engine != LogFormatEngine.LOGCAT } ||
-            tabsToMerge.any { it.logFormat == LogFormat.DLT }
+            tabsToMerge.any { tab ->
+                val clock = tab.profileClockSignature
+                tab.logFormat == LogFormat.DLT || clock != null && clock != LEGACY_LOGCAT_CLOCK
+            }
         val formats = tabsToMerge.map { it.logFormat }.toSet()
         // DLT rows and text rows never share a row model, whatever their clocks say; keep the
         // message this case has always raised.

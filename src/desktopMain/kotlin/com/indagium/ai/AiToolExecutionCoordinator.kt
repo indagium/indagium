@@ -250,6 +250,7 @@ internal class AiToolExecutionCoordinator(
         "open_log_file", "split_log_file" -> "Open or split a log file"
         "close_tab", "merge_tabs" -> "Change open log tabs"
         "start_tailing", "stop_tailing" -> "Change live tailing"
+        "reparse_tab_with_log_format_profile" -> "Reparse the run's source log in a new tab"
         "export_analysis", "export_filtered_log" -> "Write an export file"
         "save_annotations", "load_annotations" -> "Save or load annotation files"
         "clear_all_notes" -> "Clear all Notes sections and annotation blocks"
@@ -278,7 +279,7 @@ internal class AiToolExecutionCoordinator(
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
             "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
-            "export_filtered_log", "apply_filter_preset", "start_tailing", "stop_tailing",
+            "export_filtered_log", "apply_filter_preset", "start_tailing", "stop_tailing", "reparse_tab_with_log_format_profile",
             // search_similar_cases/get_case are deliberately NOT pinned — search_similar_cases is
             // tab-independent (it searches the whole notes corpus) and get_case takes a case `id`,
             // not a tabId, so pinning either would silently inject an unused/wrong argument.

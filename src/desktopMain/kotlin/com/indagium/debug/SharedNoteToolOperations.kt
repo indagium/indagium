@@ -4,7 +4,7 @@ import com.indagium.model.SharedNoteInfo
 import com.indagium.ui.AppState
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.setSharedNoteMembers
-import com.indagium.ui.shareTabNote
+import com.indagium.ui.shareTabNoteLocked
 
 // Handlers of the shared-note tools (catalogue: SharedNoteToolCatalog.kt), merged into IndagiumToolOperations. Every expected
 // failure is DATA, `{ "error": message }`, never an exception. The rules (who may be a member, the default name, what moves
@@ -20,12 +20,12 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
 
     /** Membership must still hold when the write commits. The tab ID comes from the run, outside tool arguments. */
     fun executeWriteForTab(name: String, arguments: Map<String, Any?>, tabId: String): Map<String, Any?> =
-        synchronized(appState.stateLock) {
-            when (name) {
-                "create_shared_note" -> create(arguments, inAppTabId = tabId)
-                "set_shared_note_members" -> setMembers(arguments.str("hostId") ?: "", arguments, inAppTabId = tabId)
-                else -> error("unknown shared-note write: $name")
+        when (name) {
+            "create_shared_note" -> create(arguments, inAppTabId = tabId)
+            "set_shared_note_members" -> synchronized(appState.stateLock) {
+                setMembers(arguments.str("hostId") ?: "", arguments, inAppTabId = tabId)
             }
+            else -> error("unknown shared-note write: $name")
         }
 
     private fun list(tabId: String?): Map<String, Any?> {
@@ -39,28 +39,31 @@ internal class SharedNoteToolOperations(private val appState: AppState) {
     private fun create(a: Map<String, Any?>, inAppTabId: String? = null): Map<String, Any?> {
         val members = a.strList("memberTabIds").orEmpty().map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         val fromTabId = a.str("fromTabId")?.trim()?.takeIf { it.isNotEmpty() }
-        val badEntry = badMemberEntry(a)
-        val problem = when {
-            badEntry != null -> badEntry
-            members.isEmpty() -> error("memberTabIds must name at least one open tab")
-            inAppTabId != null && fromTabId != null && fromTabId != inAppTabId ->
-                error("An in-app run can only share the private note of its own tab.")
-            inAppTabId != null && fromTabId == null && inAppTabId !in members ->
-                error("A shared note created by an in-app run must include its tab.")
-            else -> unknownTabs((members + listOfNotNull(fromTabId)).distinct())
-        }
-        if (problem != null) return problem
         val name = a.str("name").orEmpty()
-        val hostId = if (fromTabId != null) {
-            appState.shareTabNote(fromTabId, name, members) ?: return error(
-                "the note of tab $fromTabId could not be shared: an \"Existing notes found\" prompt is open for it; " +
-                    "a person needs to resolve it first",
-            )
-        } else {
-            appState.createSharedNote(name, members) ?: return error("the shared note was not created")
+        val (result, attachmentsChanged) = synchronized(appState.stateLock) {
+            val badEntry = badMemberEntry(a)
+            val problem = when {
+                badEntry != null -> badEntry
+                members.isEmpty() -> error("memberTabIds must name at least one open tab")
+                inAppTabId != null && fromTabId != null && fromTabId != inAppTabId ->
+                    error("An in-app run can only share the private note of its own tab.")
+                inAppTabId != null && fromTabId == null && inAppTabId !in members ->
+                    error("A shared note created by an in-app run must include its tab.")
+                else -> unknownTabs((members + listOfNotNull(fromTabId)).distinct())
+            }
+            if (problem != null) return problem
+            val move = fromTabId?.let {
+                appState.shareTabNoteLocked(it, name, members) ?: return error(
+                    "the note of tab $fromTabId could not be shared: an \"Existing notes found\" prompt is open for it; " +
+                        "a person needs to resolve it first",
+                )
+            }
+            val hostId = move?.hostId ?: appState.createSharedNote(name, members) ?: return error("the shared note was not created")
+            val info = appState.sharedNoteHost(hostId)?.sharedNote ?: return error("the shared note was not created")
+            mapOf("ok" to true, "hostId" to hostId, "name" to info.name, "members" to members(info)) to (move?.attachmentsChanged == true)
         }
-        val info = appState.sharedNoteHost(hostId)?.sharedNote ?: return error("the shared note was not created")
-        return mapOf("ok" to true, "hostId" to hostId, "name" to info.name, "members" to members(info))
+        if (attachmentsChanged) appState.seq3Sessions.persistAttachmentChanges()
+        return result
     }
 
     private fun setMembers(hostId: String, a: Map<String, Any?>, inAppTabId: String? = null): Map<String, Any?> {

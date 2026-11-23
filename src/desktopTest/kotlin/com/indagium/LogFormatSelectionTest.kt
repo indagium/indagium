@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import com.indagium.model.AnnBlock
+import com.indagium.model.Annotations
 import com.indagium.model.BUILTIN_LOG_FORMAT_PROFILES
 import com.indagium.model.LogFormatDetection
 import com.indagium.model.LogFormatEngine
@@ -217,6 +218,31 @@ class LogFormatSelectionTest {
         val source = assertNotNull(state.tab(tabId))
         assertTrue(source.logFormatCandidateIds.isEmpty())
         assertFalse(source.logFormatProfileId == "tie-a", "the source tab stays on its plain-text profile")
+    }
+
+    @Test
+    fun choosingACandidateKeepsAuthoredNoteSectionsWithoutBlocks() {
+        val state = newState()
+        val edits: List<(Annotations) -> Annotations> = listOf(
+            { it.copy(prefix = "Investigation notes") },
+            { it.copy(suffix = "Follow up on the failure") },
+            { it.copy(issueDescription = "Private issue details") },
+        )
+        for (edit in edits) {
+            val tabId = openTiedFile(state)
+            state.upAnn(tabId) { it.copy(annotations = edit(it.annotations)) }
+            val authored = assertNotNull(state.tab(tabId)).annotations
+            var result: Result<String?>? = null
+            state.resolveLogFormatCandidate(tabId, "tie-a") { result = it }
+
+            waitUntil("the reparse should finish") { result != null }
+            val newId = assertNotNull(result?.getOrNull())
+            assertEquals("tie-a", state.tab(newId)?.logFormatProfileId)
+            assertEquals(authored, assertNotNull(state.tab(tabId)).annotations)
+            assertTrue(state.tab(tabId)!!.logFormatCandidateIds.isEmpty())
+            state.closeTab(newId)
+            state.closeTab(tabId)
+        }
     }
 
     @Test

@@ -524,6 +524,7 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
         if (blockIds.isEmpty() || moveToTabId == tabId) return false
         if (moveToTabId != null && (moveToTabId.isBlank() || moveToTabId.length > MAX_DIAGRAM_LIBRARY_ID_CHARS)) return false
         val ids = blockIds.toHashSet()
+
         fun matches(attachment: DiagramLibraryAttachment) = attachment.tabId == tabId && attachment.blockId in ids
         return synchronized(lock) {
             var changed = false

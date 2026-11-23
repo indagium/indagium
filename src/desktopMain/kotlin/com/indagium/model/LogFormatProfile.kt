@@ -288,6 +288,8 @@ private fun incrementalTailStatus(profile: LogFormatProfile, incremental: Boolea
 
 private data class ClockCompatibility(val comparable: Boolean, val signature: String?, val reason: String)
 
+internal const val LEGACY_LOGCAT_CLOCK = "legacy-logcat"
+
 /** Count usable timestamps and check their clock compatibility without retaining a list of timestamps. */
 private class LogClockCoverage(private val profile: LogFormatProfile, private val sourceClockId: String?) {
     private val logcat = profile.engine == LogFormatEngine.LOGCAT
@@ -316,7 +318,7 @@ private class LogClockCoverage(private val profile: LogFormatProfile, private va
     }
 
     fun compatibility(): ClockCompatibility = when {
-        legacyTimed > 0 -> ClockCompatibility(true, "legacy-logcat", "")
+        legacyTimed > 0 -> ClockCompatibility(true, LEGACY_LOGCAT_CLOCK, "")
         parsedTimed == 0 -> ClockCompatibility(false, null, "No parseable timestamp values were found.")
         mixedDomains -> ClockCompatibility(false, null, "Records mix absolute, local, or relative timestamp kinds.")
         firstDomain == "absolute" -> ClockCompatibility(true, "absolute", "")

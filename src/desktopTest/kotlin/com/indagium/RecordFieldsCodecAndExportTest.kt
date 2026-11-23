@@ -25,9 +25,13 @@ import com.indagium.utils.RecordFieldsResult
 import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
 import com.indagium.utils.joinRecordPath
+import com.indagium.utils.prettyJsonLines
 import com.indagium.utils.recordFieldRefs
 import com.indagium.utils.withSelectedRecordSnapshot
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -264,6 +268,19 @@ class RecordFieldsCodecAndExportTest {
         val lines = json.lines()
         assertEquals(RECORD_EXPORT_MAX_LINES + 1, lines.size)
         assertEquals("… ${402 - RECORD_EXPORT_MAX_LINES} more lines", lines.last())
+    }
+
+    @Test
+    fun deeplyNestedOmittedJsonIsCountedWithoutRecursivelyFormattingIt() {
+        val depth = RECORD_EXPORT_MAX_LINES * RECORD_EXPORT_MAX_LINES
+        var node: JsonElement = JsonPrimitive("leaf")
+        repeat(depth) { node = JsonArray(listOf(node)) }
+
+        val lines = prettyJsonLines(node)
+
+        assertEquals(RECORD_EXPORT_MAX_LINES + 1, lines.size)
+        assertEquals("[", lines.first())
+        assertEquals("… ${depth * 2 + 1 - RECORD_EXPORT_MAX_LINES} more lines", lines.last())
     }
 
     @Test

@@ -72,6 +72,24 @@ class AiToolConfirmationTimeoutTest {
     }
 
     @Test
+    fun inAppReparsePinsTheRunSourceWithOrWithoutAnExplicitTabId() = runBlocking {
+        val tool = "reparse_tab_with_log_format_profile"
+        val gateway = IndagiumToolGateway(
+            catalog = listOf(IndagiumToolDescriptor(tool, "", ToolSchema(properties = buildJsonObject { }))),
+            handlers = mapOf(tool to { arguments -> arguments }),
+        )
+        val coordinator = AiToolExecutionCoordinator(gateway)
+        for (requestedTab in listOf(null, "other-tab")) {
+            val arguments = mapOf("profileId" to "json") + listOfNotNull(requestedTab?.let { "tabId" to it })
+            val run = AiRun(tabId = "source-tab", confirmationTimeoutMs = WAIT_LIMIT_MS)
+            val call = async { coordinator.executeManaged(run, tool, arguments) }
+            run.confirmations.getValue(awaitPending(run)).complete(true)
+
+            assertEquals(mapOf("profileId" to "json", "tabId" to "source-tab"), call.await().raw)
+        }
+    }
+
+    @Test
     fun withoutATimeoutTheConfirmationWaitsUntilAnswered() = runBlocking {
         val run = AiRun(tabId = "tab")
         assertEquals(null, run.confirmationTimeoutMs)

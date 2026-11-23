@@ -116,40 +116,76 @@ internal fun recordFieldTreeSource(field: AnnBlock.RecordFieldRef): String =
 internal fun recordValueText(element: JsonElement): String =
     if (element is JsonPrimitive && element.isString) element.content else element.toString()
 
-/** [element] as JSON text, two spaces to a level, one line per field or item. */
+private fun JsonElement.children(): Collection<JsonElement>? = when (this) {
+    is JsonObject -> values
+    is JsonArray -> this
+    else -> null
+}
+
+/** Count an omitted subtree without rendering its values or indents, even when it is deeply nested. */
+private fun countPrettyJsonLines(element: JsonElement): Int {
+    val children = element.children()?.takeIf { it.isNotEmpty() } ?: return 1
+    val stack = ArrayDeque<Iterator<JsonElement>>()
+    stack.addLast(children.iterator())
+    var count = 2
+    while (stack.isNotEmpty()) {
+        val siblings = stack.last()
+        if (!siblings.hasNext()) {
+            stack.removeLast()
+            continue
+        }
+        val nested = siblings.next().children()
+        if (nested.isNullOrEmpty()) {
+            count++
+        } else {
+            count += 2
+            stack.addLast(nested.iterator())
+        }
+    }
+    return count
+}
+
+/** Formats only the preview's visible lines. Omitted subtrees contribute to the count without being serialized. */
 internal fun prettyJsonLines(element: JsonElement): List<String> {
     val lines = ArrayList<String>()
+    var omitted = 0
 
-    fun write(node: JsonElement, depth: Int, prefix: String, suffix: String) {
+    fun appendLine(render: () -> String) {
+        if (lines.size < RECORD_EXPORT_MAX_LINES) lines += render() else omitted++
+    }
+
+    fun write(node: JsonElement, depth: Int, key: String?, suffix: String) {
+        if (lines.size >= RECORD_EXPORT_MAX_LINES) {
+            omitted += countPrettyJsonLines(node)
+            return
+        }
         val pad = INDENT.repeat(depth)
+        val prefix = key?.let { JsonPrimitive(it).toString() + ": " }.orEmpty()
         when {
             node is JsonObject && node.isNotEmpty() -> {
                 lines += "$pad$prefix{"
                 val last = node.entries.size - 1
                 node.entries.forEachIndexed { index, (key, value) ->
-                    write(value, depth + 1, JsonPrimitive(key).toString() + ": ", if (index < last) "," else "")
+                    write(value, depth + 1, key, if (index < last) "," else "")
                 }
-                lines += "$pad}$suffix"
+                appendLine { "$pad}$suffix" }
             }
             node is JsonArray && node.isNotEmpty() -> {
                 lines += "$pad$prefix["
                 val last = node.size - 1
-                node.forEachIndexed { index, value -> write(value, depth + 1, "", if (index < last) "," else "") }
-                lines += "$pad]$suffix"
+                node.forEachIndexed { index, value -> write(value, depth + 1, null, if (index < last) "," else "") }
+                appendLine { "$pad]$suffix" }
             }
             else -> lines += "$pad$prefix$node$suffix"
         }
     }
-    write(element, 0, "", "")
+    write(element, 0, null, "")
+    if (omitted > 0) lines += "… $omitted more lines"
     return lines
 }
 
-/** [lines] cut to [maxLines] with a closing "… N more lines" when anything was cut. */
-internal fun cappedExportLines(lines: List<String>, maxLines: Int = RECORD_EXPORT_MAX_LINES): List<String> =
-    if (lines.size <= maxLines) lines else lines.take(maxLines) + "… ${lines.size - maxLines} more lines"
-
 /** The pretty-printed, capped JSON of the record [raw], or null when it is not a JSON object or array. */
-internal fun recordExportLines(raw: String?): List<String>? = parseRecordJson(raw)?.let { cappedExportLines(prettyJsonLines(it)) }
+internal fun recordExportLines(raw: String?): List<String>? = parseRecordJson(raw)?.let(::prettyJsonLines)
 
 /**
  * The JSON object of a fields reference as an export prints it: each chosen field's joined path ("metadata.bluetooth.accessory_address")
@@ -160,7 +196,7 @@ internal fun recordFieldsExportLines(fields: List<AnnBlock.RecordFieldRef>): Lis
     fields.forEach { field ->
         runCatching { KJson.parseToJsonElement(field.json) }.getOrNull()?.let { values[joinRecordPath(field.path)] = it }
     }
-    return cappedExportLines(prettyJsonLines(JsonObject(values)))
+    return prettyJsonLines(JsonObject(values))
 }
 
 /** A fenced `json` block of [lines] in the notes' Markdown: ```json, or Jira's `{code:json}` when the notes use the Jira wiki style. */

@@ -4,10 +4,14 @@ import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiToolCallBudget
 import com.indagium.ai.AiToolExecutionCoordinator
+import com.indagium.diagram3.Seq3Document
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
+import com.indagium.ui.DiagramLibrarySnapshot
+import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.DiagramSourceIdentity
 import com.indagium.ui.mkTab
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -63,6 +68,39 @@ class SharedNoteToolsTest {
         (result[key] as List<*>).map { (it as Map<*, *>)["tabId"] as String }
 
     private fun listed(vararg args: Pair<String, Any?>) = (call("list_shared_notes", *args)["sharedNotes"] as List<*>).map { it as Map<*, *> }
+
+    @Test
+    fun anInAppSharePersistsMovedAttachmentsOutsideTheApplicationLock() {
+        lateinit var app: AppState
+        var inspectWrite = false
+        var heldDuringWrite: Boolean? = null
+        val file = object : File(dir, "diagrams.cache") {
+            override fun toPath(): Path {
+                if (inspectWrite) heldDuringWrite = Thread.holdsLock(app.stateLock)
+                return super.toPath()
+            }
+        }
+        val library = DiagramLibraryStore(file)
+        app = AppState(File(dir, "attachment-test.cache"), restoreOnCreate = false, autoExportNotes = false, diagramLibraryStore = library)
+        try {
+            app.tabs = listOf(mkTab("source", "source.log", listOf(entry(1))))
+            val item = library.create("Diagram", "", DiagramSourceIdentity.NONE, DiagramLibrarySnapshot.create(Seq3Document()))
+            val blockId = assertNotNull(app.seq3Sessions.attachLibraryLink("source", item.id))
+            inspectWrite = true
+
+            val created = SharedNoteToolOperations(app).executeWriteForTab(
+                "create_shared_note", mapOf("fromTabId" to "source", "memberTabIds" to listOf("source")), "source",
+            )
+
+            assertEquals(true, created["ok"])
+            assertEquals(false, heldDuringWrite)
+            val saved = assertNotNull(DiagramLibraryStore(file).get(item.id)).attachments.single()
+            assertEquals(created["hostId"], saved.tabId)
+            assertEquals(blockId, saved.blockId)
+        } finally {
+            app.close()
+        }
+    }
 
     @Test
     fun theThreeToolsAreInTheCatalogueAndClassifiedLikeTheOtherNotesTools() {

@@ -192,6 +192,38 @@ class LogFormatProfilePersistenceTest {
     }
 
     @Test
+    fun remergingAMixedProfileTabStillChecksItsClock() = runBlocking {
+        val directory = createTempDirectory("log-format-remerge-clock").toFile()
+        val app = newState(directory)
+        try {
+            val first = File(directory, "first.jsonl").apply { writeText(sampleRows()) }
+            val second = File(directory, "second.jsonl").apply { writeText(sampleRows()) }
+            val firstId = assertNotNull(app.openFileWithLogFormatProfile(first, customJsonProfile("first")))
+            val secondId = assertNotNull(app.openFileWithLogFormatProfile(second, customJsonProfile("second")))
+            awaitLoaded(app, firstId)
+            awaitLoaded(app, secondId)
+            app.mergeTabs(listOf(firstId, secondId), "Mixed profile merge")
+            waitUntil("the mixed-profile merge should be published") { app.tabs.any { it.filename == "Mixed profile merge" } }
+            val merged = app.tabs.single { it.filename == "Mixed profile merge" }
+            assertNull(merged.logFormatProfileSnapshot)
+            assertEquals("absolute", merged.profileClockSignature)
+
+            app.mergeTabs(listOf(merged.id, firstId), "Compatible remerge")
+            waitUntil("the compatible remerge should be published") { app.tabs.any { it.filename == "Compatible remerge" } }
+            assertEquals("absolute", app.tabs.single { it.filename == "Compatible remerge" }.profileClockSignature)
+
+            val legacy = mkTab("legacy", "plain.log", listOf(LogEntry(1, "10:15:00.000", LogLevel.I, "Tag", "legacy")))
+            app.tabs = app.tabs + legacy
+            app.mergeTabs(listOf(merged.id, legacy.id), "Incompatible remerge")
+            assertEquals("Cannot merge incompatible clocks", app.openError?.title)
+            assertTrue(app.tabs.none { it.filename == "Incompatible remerge" })
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun profileLibraryLimitRejectsNewAndDuplicateButAllowsEditsAndAutosave() {
         val directory = createTempDirectory("log-format-library-limit").toFile()
         val autosave = File(directory, "state.cache")
