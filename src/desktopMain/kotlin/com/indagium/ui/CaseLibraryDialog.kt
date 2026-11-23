@@ -475,19 +475,12 @@ private fun ReopenInvestigationButton(loading: Boolean, disabledReason: String?,
     }
 }
 
-// Always enabled, unlike ReopenInvestigationButton — this is the fallback that stays available even
-// when the original log can't be resolved (AppState.openCaseNotesOnly's whole point: the notes are
-// the durable artifact). The tooltip is the "short hint" the feature brief asked for re: LogRef
-// blocks in a log-less tab rendering but not navigating anywhere — always shown, not just when
-// disabled, since there's no disabled state here to hang it off of.
+// The notes can open even when the saved source cannot be found.
 @Composable
 private fun OpenNotesOnlyButton(loading: Boolean, onClick: () -> Unit) {
     TooltipArea(
         tooltip = {
-            ToolbarTooltip(
-                "Opens these notes in a new tab with no log attached. Log references still show, but " +
-                    "clicking one won't jump anywhere — there's no log loaded to jump to.",
-            )
+            ToolbarTooltip("Opens the notes in a new tab. A citation can jump to its original log when the source is available.")
         },
     ) {
         AppButton(

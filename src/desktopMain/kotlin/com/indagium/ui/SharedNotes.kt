@@ -233,9 +233,13 @@ internal fun AppState.restoreNoteSourcesLocked(
     sources: List<SharedNoteClosedSource>,
     originalOwnerSource: SharedNoteClosedSource?,
 ): LogTab {
-    val owningSource = originalOwnerSource?.takeIf { owner.sharedNote != null }?.copy(tabId = freshCitationSourceId())
+    val needsExplicitSource = owner.sharedNote != null || (owner.sourcePath == null && owner.logData.isEmpty())
+    val owningSource = originalOwnerSource?.takeIf { needsExplicitSource }?.copy(tabId = freshCitationSourceId())
+    val importedLocalIds = HashSet<String>()
     val imported = if (owningSource == null) owner.annotations else owner.annotations.mapLogRefs { ref ->
-        if (ref.sourceTabId == null) ref.copy(sourceTabId = owningSource.tabId, sourceFilename = owningSource.filename) else ref
+        if (ref.sourceTabId != null) return@mapLogRefs ref
+        if (owner.sharedNote == null) importedLocalIds += ref.id
+        ref.copy(sourceTabId = owningSource.tabId, sourceFilename = owningSource.filename)
     }
     val cited = imported.blocks.citedSourceTabIds()
     val known = (sources + listOfNotNull(owningSource)).distinctBy { it.tabId }.associateBy { it.tabId }
@@ -256,9 +260,15 @@ internal fun AppState.restoreNoteSourcesLocked(
     return owner.copy(
         annotations = annotations,
         noteClosedSources = if (info == null) pending else emptyList(),
+        importedLocalCitationBlockIds = importedLocalIds,
         sharedNote = info?.copy(closedReferenceSources = pending.filterNot { source -> info.closedMembers.any { it.tabId == source.tabId } }),
     )
 }
+
+internal fun LogTab.annotationsForLocatedLog(): Annotations =
+    if (importedLocalCitationBlockIds.isEmpty()) annotations else annotations.mapLogRefs { ref ->
+        if (ref.id in importedLocalCitationBlockIds) ref.copy(sourceTabId = null, sourceFilename = null) else ref
+    }
 
 /** Keeps reopen information for a closing member or a file cited by this note. */
 private fun LogTab.withSourceClosed(tab: LogTab): LogTab {

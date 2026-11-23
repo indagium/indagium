@@ -1170,6 +1170,9 @@ data class LogTab(
      * rebinds the citations to the new tab and drops the entry. Persisted in the tab token (AutosaveCodec), appended last.
      */
     val noteClosedSources: List<SharedNoteClosedSource> = emptyList(),
+    // In a notes-only workspace, explicit citations that were local to the imported note.
+    // Locate log can make these citations local again after the user verifies a replacement file.
+    val importedLocalCitationBlockIds: Set<String> = emptySet(),
     /**
      * Runtime-only, never serialized (a restored tab reparses and records it again): the byte length of [sourcePath] measured
      * BEFORE the parse that made this tab's rows read it. Starting a tail may treat the file's unfinished last line as the one the

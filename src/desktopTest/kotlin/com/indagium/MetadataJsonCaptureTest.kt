@@ -142,6 +142,30 @@ class MetadataJsonCaptureTest {
     }
 
     @Test
+    fun oversizedStringKeepsLaterPacketsWhenOpeningAFile() {
+        val root = kotlin.io.path.createTempDirectory("metadata-oversized-string").toFile()
+        try {
+            val before = packet(1790000000000000000L, "Before", "before")
+            val after = packet(1790000000000000002L, "After", "after")
+            // Put the limit inside a sequence of escapes and include a quote and braces after it.
+            val value = "x".repeat(256 * 1024 - 1) + """\u0061\"}[""" + "y".repeat(5 * 1024 * 1024)
+            val oversized = packet(1790000000000000001L, "Oversized", "oversized").dropLast(1) +
+                ""","Details":{"payload":"$value"}}"""
+            val file = java.io.File(root, "capture.json").apply {
+                writeText("""{"Capture":{"Events":[$before,$oversized,$after]}}""")
+            }
+
+            val parsed = com.indagium.utils.parseLogFileResultWithProfiles(file, profiles = emptyList(), profile = metadataJsonProfile())
+
+            assertEquals(listOf("Before", "After"), parsed.entries.map { it.tag })
+            assertTrue(parsed.diagnostics.any { "256 KiB value limit" in it })
+            assertFalse(parsed.diagnostics.any { "damaged or truncated" in it })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun oversizedNestedPayloadIsReportedAndLaterPacketsSurvive() {
         val payloadChunk = "x".repeat(200_000)
         val payload = List(22) { """ "$payloadChunk" """.trim() }.joinToString(",", "[", "]")

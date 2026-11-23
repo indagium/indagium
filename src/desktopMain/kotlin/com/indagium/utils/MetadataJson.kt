@@ -86,6 +86,83 @@ private const val CHAIN_NONE = 0
 private const val CHAIN_RECORD = 1
 private const val CHAIN_SUMMARY = 2
 
+/**
+ * An overlong string makes Jackson's text buffer throw before the closing quote has been read. Close the parser's
+ * copy at the decoded length limit and consume the rest of the input string with constant storage. The scanner
+ * uses the opening quote's offset to discard that value. Replacing the suffix with spaces preserves offsets.
+ */
+private class MetadataJsonStringLimitReader(private val source: Reader) : Reader() {
+    private val oversizedOffsets = ArrayDeque<Long>()
+    private var offset = 0L
+    private var stringStart = -1L
+    private var chars = 0
+    private var escaped = false
+    private var unicodeDigits = 0
+    private var clipped = false
+
+    override fun read(buffer: CharArray, off: Int, len: Int): Int {
+        checkParserCancellation()
+        val count = source.read(buffer, off, len)
+        for (index in off until off + count) {
+            buffer[index] = filter(buffer[index])
+            offset++
+        }
+        return count
+    }
+
+    fun wasOversizedAt(tokenOffset: Long): Boolean {
+        while (oversizedOffsets.firstOrNull()?.let { it < tokenOffset } == true) oversizedOffsets.removeFirst()
+        return oversizedOffsets.firstOrNull() == tokenOffset
+    }
+
+    private fun filter(char: Char): Char {
+        if (stringStart < 0) {
+            if (char == '"') {
+                stringStart = offset
+                chars = 0
+                clipped = false
+            }
+            return char
+        }
+        if (!escaped && unicodeDigits == 0 && char == '"') {
+            stringStart = -1
+            return if (clipped) ' ' else char
+        }
+
+        val closesCopy = !clipped && chars == METADATA_JSON_MAX_VALUE_CHARS
+        if (closesCopy) {
+            clipped = true
+            oversizedOffsets.addLast(stringStart)
+        }
+        val valid = consumeStringCharacter(char)
+        return when {
+            !clipped -> char
+            !valid -> '\u0000' // Preserve parse failure for a malformed escape or control character.
+            closesCopy -> '"'
+            else -> ' '
+        }
+    }
+
+    private fun consumeStringCharacter(char: Char): Boolean {
+        when {
+            unicodeDigits > 0 -> {
+                if (--unicodeDigits == 0 && !clipped) chars++
+                return char in '0'..'9' || char in 'a'..'f' || char in 'A'..'F'
+            }
+            escaped -> {
+                escaped = false
+                if (char == 'u') unicodeDigits = 4 else if (!clipped) chars++
+                return char in "\"\\/bfnrtu"
+            }
+            char == '\\' -> escaped = true
+            else -> if (!clipped) chars++
+        }
+        return char >= ' '
+    }
+
+    override fun close() = source.close()
+}
+
 private class MetadataJsonSampleComplete : RuntimeException(null, null, false, false)
 
 /**
@@ -101,6 +178,7 @@ internal class MetadataJsonScanner(
     private val maxRecords: Int,
     /** Offset added to the parser's byte positions (a skipped BOM); negative leaves byte spans untracked. */
     private val byteBase: Long = -1,
+    private val oversizedStringAt: (Long) -> Boolean = { false },
 ) {
     val records = mutableListOf<MetadataJsonPacket>()
     val summaries = mutableListOf<MetadataJsonSummary>()
@@ -156,13 +234,23 @@ internal class MetadataJsonScanner(
     private fun readValueToken(path: List<String>, element: Boolean): MetadataJsonValue? = when (parser.currentToken()) {
         JsonToken.START_OBJECT -> readObject(path, element)
         JsonToken.START_ARRAY -> readArray(path)
-        JsonToken.VALUE_STRING -> parser.text.let { MetadataJsonValue(JsonPrimitive(it), it.length) }
+        JsonToken.VALUE_STRING -> readString()
         JsonToken.VALUE_NULL -> MetadataJsonValue(kotlinx.serialization.json.JsonNull, 4)
         JsonToken.VALUE_TRUE -> MetadataJsonValue(JsonPrimitive(true), 4)
         JsonToken.VALUE_FALSE -> MetadataJsonValue(JsonPrimitive(false), 5)
         JsonToken.VALUE_NUMBER_INT, JsonToken.VALUE_NUMBER_FLOAT ->
             parser.decimalValue.let { MetadataJsonValue(JsonPrimitive(it), it.toString().length) }
         else -> error("Expected a JSON value at line ${parser.currentLocation().lineNr}.")
+    }
+
+    private fun readString(): MetadataJsonValue? {
+        val text = parser.text
+        val clipped = text.length == METADATA_JSON_MAX_VALUE_CHARS && oversizedStringAt(parser.currentTokenLocation().charOffset)
+        if (text.length > METADATA_JSON_MAX_VALUE_CHARS || clipped) {
+            diagnostics.addJsonDiagnostic("A JSON string exceeded the 256 KiB value limit; complete records remain available.")
+            return null
+        }
+        return MetadataJsonValue(JsonPrimitive(text), text.length)
     }
 
     /** Numbers the object that just ended: it continues the run in progress only when it directly follows that run's last object. */
@@ -240,7 +328,7 @@ internal class MetadataJsonScanner(
     private fun discardOversizedObject(recordMetadata: Boolean, firstRecord: Int, firstSummary: Int, mark: RunMark) {
         if (recordMetadata) discardNestedRecords(firstRecord, firstSummary, mark)
         if (recordMetadata || records.size == firstRecord) {
-            diagnostics.addJsonDiagnostic("A JSON object exceeded the 4 MiB record limit; complete records remain available.")
+            diagnostics.addJsonDiagnostic("A JSON object exceeded the 4 MiB record limit or contained an oversized value; complete records remain available.")
         }
     }
 
@@ -283,17 +371,25 @@ private fun hasRecordMetadata(metadata: JsonObject): Boolean {
     return metadata.text("identity") != null && (hasTime || hasEventMetadata)
 }
 
-private fun scanMetadataJson(reader: Reader, maxRecords: Int = Int.MAX_VALUE, truncatedAtChar: Long = -1): MetadataJsonScan =
-    scanMetadataJson(METADATA_JSON_FACTORY.createParser(reader), maxRecords, -1, truncatedAtChar)
+private fun scanMetadataJson(reader: Reader, maxRecords: Int = Int.MAX_VALUE, truncatedAtChar: Long = -1): MetadataJsonScan {
+    val limited = MetadataJsonStringLimitReader(reader)
+    return scanMetadataJson(METADATA_JSON_FACTORY.createParser(limited), maxRecords, -1, truncatedAtChar, limited::wasOversizedAt)
+}
 
 /**
  * Scans [parser], closing it; a non-negative [byteBase] makes the parser a byte-stream one whose record spans are kept. A non-negative
  * [truncatedAtChar] says the input is a preview sample cut at that many characters: a failure at the very end of it is that cut, not a
  * damaged document, so it is not reported (the records that closed before it are kept either way).
  */
-internal fun scanMetadataJson(parser: JsonParser, maxRecords: Int, byteBase: Long, truncatedAtChar: Long = -1): MetadataJsonScan {
+internal fun scanMetadataJson(
+    parser: JsonParser,
+    maxRecords: Int,
+    byteBase: Long,
+    truncatedAtChar: Long = -1,
+    oversizedStringAt: (Long) -> Boolean = { false },
+): MetadataJsonScan {
     parser.use {
-        val scanner = MetadataJsonScanner(parser, maxRecords, byteBase)
+        val scanner = MetadataJsonScanner(parser, maxRecords, byteBase, oversizedStringAt)
         try {
             scanner.readDocument()
         } catch (_: MetadataJsonSampleComplete) {

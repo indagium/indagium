@@ -96,10 +96,39 @@ class ReparseEstimateAndAnalysisTest {
     }
 
     @Test
+    fun changeFormatUsesTheEntireStandalonePathContainingAnExclamationMark() = runBlocking {
+        val directory = createTempDirectory("reparse-literal-bang").toFile()
+        val source = File(directory, "events!2.log").apply { writeText(jsonRows()) }
+        val app = newState(directory)
+        try {
+            app.heapFreeBytesProvider = { Long.MAX_VALUE }
+            val sourceId = assertNotNull(app.openFileWithLogFormatProfile(source, "plain-text"))
+            awaitLoaded(app, sourceId)
+
+            val profile = assertNotNull(app.logFormatProfile("json-lines"))
+            val preview = kotlinx.coroutines.CompletableDeferred<Result<com.indagium.utils.ParsedLog>>()
+            app.previewCurrentLogFormatProfile(sourceId, profile) { preview.complete(it) }
+            assertEquals("row 1", withTimeout(TIMEOUT_MS) { preview.await().getOrThrow() }.entries.first().msg)
+
+            app.heapFreeBytesProvider = { app.midpointFor(source.length()) }
+            assertNull(app.reparseTabWithLogFormatProfileAwait(sourceId, profile.id))
+            assertTrue(app.logFormatProfileError.orEmpty().contains("available"))
+
+            app.heapFreeBytesProvider = { Long.MAX_VALUE }
+            val result = assertNotNull(app.reparseTabWithLogFormatProfileAwait(sourceId, profile.id), app.logFormatProfileError)
+            assertEquals(source.absolutePath, app.tab(result)?.sourcePath)
+            assertEquals("row 1", app.tab(result)?.logData?.first()?.msg)
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun aDltViewerTextExportIsStillBudgetedForTheTextProfileItWillBeReadWith() = runBlocking {
         val directory = createTempDirectory("reparse-estimate-viewer").toFile()
         val csv = "Time,ECU,AppId,ContextId,Type,Payload\n" + (1..30).joinToString("\n") { "2026-01-02 03:04:05,ECU1,APP1,CTX1,ERROR,message $it" } + "\n"
-        val source = File(directory, "viewer.csv").apply { writeText(csv) }
+        val source = File(directory, "viewer!export.csv").apply { writeText(csv) }
         val app = newState(directory)
         try {
             app.heapFreeBytesProvider = { Long.MAX_VALUE }

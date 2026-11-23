@@ -8025,29 +8025,29 @@ class AppState(
         sourceLookupSupported = sourceLookupConfigured(),
     )
 
-    private fun parseSourceWithFormatProfile(tab: LogTab, profile: LogFormatProfile): ParsedLog {
-        val source = tab.sourcePath ?: error("This tab has no source file to reparse.")
-        if (tab.archiveCandidate != null) {
-            return extractCandidateResultWithProfiles(
-                File(source.substringBefore('!')),
-                tab.archiveCandidate,
-                archiveEntryByteBudget,
-                availableLogFormatProfiles(),
-                profile,
+    private fun parseSourceWithFormatProfile(tab: LogTab, profile: LogFormatProfile): ParsedLog =
+        when (val source = tab.sourcePath?.restoredTabSource(tab.archiveCandidate)) {
+            is RestoredTabSource.FileSource -> parseFileWithFormatProfile(source.file, profile)
+            is RestoredTabSource.ArchiveSource -> extractCandidateResultWithProfiles(
+                source.archiveFile, source.requireFormatEntry(), archiveEntryByteBudget, availableLogFormatProfiles(), profile,
             )
+            else -> error("This tab has no source file to reparse.")
         }
-        require('!' !in source) { "This archive entry no longer has its original entry metadata; reopen the archive to choose a format." }
-        return parseFileWithFormatProfile(File(source), profile)
-    }
+
+    private fun RestoredTabSource.ArchiveSource.requireFormatEntry(): ZipLogCandidate =
+        persistedCandidate ?: error("This archive entry no longer has its original entry metadata; reopen the archive to choose a format.")
 
     private fun reparseMemoryShortfall(tab: LogTab, profile: LogFormatProfile): MemoryShortfall? {
-        val source = tab.sourcePath ?: return null
-        val sourceBytes = tab.archiveCandidate?.sizeBytes
-            ?: File(source.substringBefore('!')).length()
+        val source = tab.sourcePath?.restoredTabSource(tab.archiveCandidate)
+        val sourceBytes = when (source) {
+            is RestoredTabSource.FileSource -> source.file.length()
+            is RestoredTabSource.ArchiveSource -> source.persistedCandidate?.sizeBytes ?: return null
+            else -> return null
+        }
 
         // Available heap already reflects the resident source tab. Budget only the new parse.
         return memoryShortfallForEstimatedBytes(
-            estimatedHeapBytesForProfile(reparseParseProfile(tab, profile), sourceBytes), heapFreeBytesProvider(),
+            estimatedHeapBytesForProfile(reparseParseProfile(tab, source, profile), sourceBytes), heapFreeBytesProvider(),
         )
     }
 
@@ -8057,15 +8057,13 @@ class AppState(
      * except that a DLT Viewer CSV or text export is DLT-formatted too yet reads as plain text with a text profile: for a plain file the
      * first [CONTENT_SNIFF_BYTES] decide that; an archive entry or compressed file is never extracted for it, so its tab's format stands.
      */
-    private fun reparseParseProfile(tab: LogTab, requested: LogFormatProfile): LogFormatProfile {
+    private fun reparseParseProfile(tab: LogTab, source: RestoredTabSource, requested: LogFormatProfile): LogFormatProfile {
         if (tab.logFormat != LogFormat.DLT || requested.engine == LogFormatEngine.DLT) return requested
-        return if (sourceReadsAsBinaryDlt(tab)) builtinProfileFor(LogFormat.DLT) else requested
+        val isBinary = source !is RestoredTabSource.FileSource || sourceReadsAsBinaryDlt(source.file)
+        return if (isBinary) builtinProfileFor(LogFormat.DLT) else requested
     }
 
-    private fun sourceReadsAsBinaryDlt(tab: LogTab): Boolean {
-        val source = tab.sourcePath ?: return true
-        if (tab.archiveCandidate != null || '!' in source) return true
-        val file = File(source)
+    private fun sourceReadsAsBinaryDlt(file: File): Boolean {
         val sample = runCatching {
             if (detectArchiveFormat(file) !is ArchiveFormat.None) null else file.inputStream().use { it.readNBytes(CONTENT_SNIFF_BYTES) }
         }.getOrNull() ?: return true
@@ -8435,22 +8433,19 @@ class AppState(
     }
 
     private fun parseSourcePreview(tab: LogTab, profile: LogFormatProfile): ParsedLog {
-        val source = tab.sourcePath ?: error("This tab has no source file to preview.")
-        val logicalSource = source.substringBefore('!')
-        val file = File(logicalSource)
-        val parsed = when {
-            tab.archiveCandidate != null -> {
-                val stream = openArchiveCandidateStream(file, tab.archiveCandidate) ?: error("The selected archive entry is no longer available.")
-                com.indagium.utils.parseLogFormatPreview(stream, profile, tab.filename, source)
+        val path = tab.sourcePath ?: error("This tab has no source file to preview.")
+        val stream = when (val source = path.restoredTabSource(tab.archiveCandidate)) {
+            is RestoredTabSource.FileSource -> {
+                val archiveFormat = detectArchiveFormat(source.file)
+                if (archiveFormat is ArchiveFormat.CompressedFile) openCompressedLogStream(source.file, archiveFormat.compressorName)
+                else source.file.inputStream()
             }
-            '!' in source -> error("This archive entry no longer has its original entry metadata.")
-            detectArchiveFormat(file) is ArchiveFormat.CompressedFile -> {
-                val compressed = detectArchiveFormat(file) as ArchiveFormat.CompressedFile
-                com.indagium.utils.parseLogFormatPreview(openCompressedLogStream(file, compressed.compressorName), profile, tab.filename, source)
-            }
-            else -> file.inputStream().use { com.indagium.utils.parseLogFormatPreview(it, profile, file.name, source) }
+            is RestoredTabSource.ArchiveSource -> openArchiveCandidateStream(source.archiveFile, source.requireFormatEntry())
+                ?: error("The selected archive entry is no longer available.")
+            else -> error("This tab has no source file to preview.")
         }
-        return parsed
+        val filename = if (tab.archiveCandidate != null) tab.filename else File(path).name
+        return stream.use { com.indagium.utils.parseLogFormatPreview(it, profile, filename, path) }
     }
 
     internal fun reparseTabWithLogFormatProfile(
@@ -16204,7 +16199,7 @@ class AppState(
             val block = AnnBlock.Note(newId("n"), text)
             t.copy(
                 annotations = t.annotations.copy(blocks = listOf(block)), noteTargetName = pinName,
-                recoveredNoteRows = emptyMap(), noteClosedSources = emptyList(),
+                recoveredNoteRows = emptyMap(), noteClosedSources = emptyList(), importedLocalCitationBlockIds = emptySet(),
             )
         }
     }
@@ -16913,9 +16908,7 @@ class AppState(
      *  log-less tab correctly, no special-casing needed. Never touches any existing tab. Named
      *  after the case (not "Untitled workspace") so it's identifiable in the tab strip.
      *
-     *  Caveat (surfaced to the user via the button's tooltip, not invented UI here): AnnBlock.LogRef
-     *  blocks still render fine from their stored sourceEntries, but clicking one navigates by
-     *  logIds against a tab with no rows — nothing to jump to. Honest, if a little inert. */
+     *  Citations render from their stored excerpts and can follow the source recorded in the sidecar. */
     fun openCaseNotesOnly(id: String) {
         val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
         val seq = ++caseReopenRequestSeq
@@ -17033,7 +17026,12 @@ class AppState(
                     val source = tab(attach.sourceTabId) ?: return
                     // The closed logs the note cites travel with it, so its citations can still reopen them from the new tab.
                     upTab(newTabId) {
-                        it.copy(annotations = source.annotations, noteTargetName = source.noteTargetName, noteClosedSources = source.noteClosedSources)
+                        it.copy(
+                            annotations = source.annotationsForLocatedLog(),
+                            noteTargetName = source.noteTargetName,
+                            noteClosedSources = source.noteClosedSources,
+                            importedLocalCitationBlockIds = emptySet(),
+                        ).pruneUnusedPrivateCitationSources()
                     }
                     upTab(source.id) { it.copy(noteTargetName = null) }
                 }

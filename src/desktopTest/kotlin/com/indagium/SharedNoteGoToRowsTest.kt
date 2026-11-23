@@ -607,6 +607,54 @@ class SharedNoteGoToRowsTest {
     }
 
     @Test
+    fun aPrivateNoteOpenedFromHomeCanReopenItsCitationSource() {
+        val dir = createTempDirectory("goto-private-sidecar-from-home").toFile()
+        val app = twoTabs(dir)
+        try {
+            val source = logcatFile(dir, "original.log")
+            val sourceId = assertNotNull(app.openFile(source))
+            waitUntil("the original log loads") { app.tab(sourceId)?.contentState == TabContentState.LOADED }
+            val row = assertNotNull(app.tab(sourceId)).logData.first()
+            app.putIntoNote(sourceId, ref(source = null, ids = listOf(row.id), frozen = listOf(row)))
+            val file = File(dir, "original_analysis.ann")
+            assertTrue(app.saveAnnotationsTo(sourceId, file))
+            app.closeTab(sourceId)
+
+            app.openHomeTab()
+            val noteId = assertNotNull(app.openNoteFileInNewTab(file))
+            waitUntil("the private note loads") { app.tab(noteId)?.annotations?.blocks?.isNotEmpty() == true }
+            val citation = assertIs<AnnBlock.LogRef>(app.tab(noteId)!!.annotations.blocks.single())
+            val offer = assertIs<GoToRowsResult.NeedsReopen>(go { app.goToLogRefRows(citation, noteId) })
+            assertEquals(noteId, offer.ownerId)
+            val navigated = assertIs<GoToRowsResult.Navigated>(
+                go { app.goToLogRefRowsAfterReopen(noteId, offer.closedTabId, citation, noteId) },
+            )
+            assertEquals(source.absolutePath, app.tab(navigated.tabId)?.sourcePath)
+            assertEquals(listOf(row.id), navigated.rowIds)
+            assertTrue(app.tab(noteId)!!.logData.isEmpty())
+
+            app.openHomeTab()
+            val secondId = assertNotNull(app.openNoteFileInNewTab(file))
+            waitUntil("the second private note loads") { app.tab(secondId)?.annotations?.blocks?.isNotEmpty() == true }
+            val rebound = assertIs<AnnBlock.LogRef>(app.tab(secondId)!!.annotations.blocks.single())
+            assertEquals(navigated.tabId, rebound.sourceTabId)
+
+            val moved = source.copyTo(File(dir, "renamed.log"))
+            app.locateLogForTab(secondId, moved)
+            waitUntil("the note attaches to the located log") {
+                app.tabs.any { it.sourcePath == moved.absolutePath && it.annotations.blocks.isNotEmpty() }
+            }
+            val located = app.tabs.single { it.sourcePath == moved.absolutePath }
+            val localCitation = assertIs<AnnBlock.LogRef>(located.annotations.blocks.single())
+            assertNull(localCitation.sourceTabId)
+            assertEquals(GoToRowsResult.Navigated(located.id, listOf(row.id)), go { app.goToLogRefRows(localCitation, located.id) })
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun aSidecarRemapsBothCitationsWhenTheirOpenTabIdsAreSwapped() {
         val dir = createTempDirectory("goto-sidecar-swapped").toFile()
         val app = twoTabs(dir)
