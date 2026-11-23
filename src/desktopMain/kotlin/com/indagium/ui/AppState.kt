@@ -8053,12 +8053,8 @@ class AppState(
         val sourceBytes = tab.archiveCandidate?.sizeBytes
             ?: File(source.substringBefore('!')).length()
 
-        val estimate = ::estimatedHeapBytesForProfile
-        val oldProfile = pinnedLogFormatProfileResult(tab.id).getOrNull() ?: builtinProfileFor(tab.logFormat)
-        val oldResidentBytes = if (tab.logData.isEmpty()) 0L else estimate(oldProfile, sourceBytes)
-        val newRowsBytes = estimate(profile, sourceBytes)
-        val combinedNeed = runCatching { Math.addExact(oldResidentBytes, newRowsBytes) }.getOrDefault(Long.MAX_VALUE)
-        return memoryShortfallForEstimatedBytes(combinedNeed, heapFreeBytesProvider())
+        // Available heap already reflects the resident source tab. Budget only the new parse.
+        return memoryShortfallForEstimatedBytes(estimatedHeapBytesForProfile(profile, sourceBytes), heapFreeBytesProvider())
     }
 
     private fun reparseMemoryFailure(shortfall: MemoryShortfall): IllegalStateException =
@@ -8512,7 +8508,9 @@ class AppState(
         }
     }
 
-    private fun publishReparsedProfileTab(sourceTab: LogTab, profile: LogFormatProfile, result: ParsedLog): String {
+    private fun publishReparsedProfileTab(sourceTab: LogTab, requestedProfile: LogFormatProfile, result: ParsedLog): String {
+        val profile = result.profile?.takeIf { result.format != LogFormat.DLT || it.engine == LogFormatEngine.DLT }
+            ?: if (result.format == LogFormat.DLT) builtinProfileFor(result.format) else requestedProfile
         val newId = "t${tabCounter.getAndIncrement()}"
         // The prefix comes from the tab that was reparsed: it already carries the user's prefix label and
         // an archive entry's qualified name, exactly as the ordinary open path made it.

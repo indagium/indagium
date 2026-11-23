@@ -730,6 +730,8 @@ class SharedNoteOperationsTest {
             { it.copy(annotations = Annotations(prefix = "Custom intro")) },
             { it.copy(annotations = Annotations(suffix = "tail")) },
             { it.copy(annotations = Annotations(issueDescription = "context")) },
+            { it.copy(annotations = Annotations(appVersion = "1.2.3")) },
+            { it.copy(annotations = Annotations(decisiveTags = listOf("Worker"))) },
         )
         for (makeNonEmpty in cases) {
             state.upTab("a", makeNonEmpty)

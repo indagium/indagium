@@ -177,6 +177,26 @@ class LogFormatParserCoreTest {
     }
 
     @Test
+    fun oversizedJsonArrayElementKeepsTheNextEventOnTheSameLine() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "json-lines" }
+        val limit = 256 * 1024
+        val padding = "x".repeat(limit)
+        val deep = "[".repeat(150) + "0" + "]".repeat(150)
+        val large = """{"payload":"$padding\",]}","deep":$deep}"""
+        val later = """{"level":"ERROR","message":"later event"}"""
+
+        val parsed = parseLogContent("[$large,$later]".byteInputStream(), profile = profile)
+
+        assertEquals(2, parsed.entries.size)
+        assertEquals(large.take(limit), parsed.entries.first().rawRecord)
+        assertEquals("later event", parsed.entries.last().msg)
+        assertEquals(LogLevel.E, parsed.entries.last().level)
+        assertEquals(later, parsed.entries.last().rawRecord)
+        assertEquals(listOf(1L, 1L), parsed.entries.map { it.sourceEndLine })
+        assertTrue(parsed.diagnostics.any { "oversized JSON record" in it })
+    }
+
+    @Test
     fun oneObjectJsonFileWithoutConventionalLogFieldsStillUsesStructuredJson() {
         val raw = """{"event":{"kind":"sample","details":{"values":[true,false,null]}}}"""
         val parsed = parseLogContent(ByteArrayInputStream(raw.toByteArray()), fileName = "single.json")
@@ -194,6 +214,24 @@ class LogFormatParserCoreTest {
         )
         assertEquals(listOf("complete"), preview.entries.map { it.msg })
         assertTrue(preview.diagnostics.any { it.contains("Preview is limited") })
+    }
+
+    @Test
+    fun truncatedCompactJsonPreviewKeepsCompleteEventsIncludingOneAtTheCutoff() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "json-lines" }
+        val first = """[{"message":"first"},"""
+        val second = """{"message":"second","padding":""}"""
+        val maxBytes = 1024
+        val padding = "x".repeat(maxBytes - first.length - second.length)
+        val complete = first + second.replace("\"\"", "\"$padding\"")
+        val input = """$complete,{"message":"outside sample"}]"""
+
+        val atBoundary = parseLogFormatPreview(input.byteInputStream(), profile, maxBytes = maxBytes)
+        val withinEvent = parseLogFormatPreview(input.byteInputStream(), profile, maxBytes = maxBytes + 8)
+
+        assertEquals(listOf("first", "second"), atBoundary.entries.map { it.msg })
+        assertEquals(atBoundary.entries, withinEvent.entries)
+        assertTrue(atBoundary.diagnostics.any { "Preview is limited" in it })
     }
 
     @Test

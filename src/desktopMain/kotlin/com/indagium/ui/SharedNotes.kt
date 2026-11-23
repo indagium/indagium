@@ -446,12 +446,13 @@ internal fun AppState.stopSharing(hostId: String, intoTabId: String, replaceExis
     return true
 }
 
-/** True when the tab's private note holds something worth confirming over: blocks, text, or a prefix other than the seeded one. */
+/** True when replacing a private note would discard authored text, blocks, or case metadata. */
 internal fun AppState.privateNoteHasContent(tab: LogTab): Boolean {
     val note = tab.annotations
     val archivePrefix = archiveQualifiedLabel(tab.sourcePath)?.let { defaultNotePrefix(it) }
     val seededPrefix = note.prefix.isBlank() || note.prefix == defaultNotePrefix(tab.filename) || note.prefix == archivePrefix
-    return note.blocks.isNotEmpty() || !seededPrefix || note.suffix.isNotBlank() || note.issueDescription.isNotBlank()
+    return note.blocks.isNotEmpty() || !seededPrefix || note.suffix.isNotBlank() || note.issueDescription.isNotBlank() ||
+        note.appVersion.isNotBlank() || note.decisiveTags.isNotEmpty()
 }
 
 /**

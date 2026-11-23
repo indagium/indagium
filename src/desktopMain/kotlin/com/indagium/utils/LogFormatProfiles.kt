@@ -153,7 +153,7 @@ fun parseLogFormatPreview(
         return if (truncated) parsed.copy(diagnostics = parsed.diagnostics + "Preview is limited to the first ${maxBytes / 1024} KB.") else parsed
     }
     val decoded = openLogTextReader(ByteArrayInputStream(sample)).use { it.readText() }
-    val completeText = if (truncated) {
+    val completeText = if (truncated && profile.engine != LogFormatEngine.JSON_LINES) {
         val lastLine = decoded.lastIndexOf('\n')
         decoded.takeIf { lastLine >= 0 }?.substring(0, lastLine + 1).orEmpty()
     } else {
@@ -548,8 +548,10 @@ private fun jsonRecords(
 ): Sequence<ProfileRecord> = sequence {
     val machine = JsonRecordMachine(profile, diagnostics, sourceLineOffset)
     val ready = ArrayList<ProfileRecord>(2)
-    for (line in lines) {
-        machine.accept(line, ready)
+    val iterator = lines.iterator()
+    while (iterator.hasNext()) {
+        val line = iterator.next()
+        machine.acceptFragment(line, startsLine = true, endsLine = includeIncompleteTail || iterator.hasNext(), ready)
         for (record in ready) yield(record)
         ready.clear()
     }
@@ -588,6 +590,9 @@ internal class JsonRecordMachine(
     private var inString = false
     private var escaped = false
     private var invalidStructure = false
+    private var oversized = false
+    private var overflowDepth = 0L
+    private var lastNonWhitespace: Char? = null
 
     // A record nested deeper than MAX_JSON_RECORD_DEPTH is still well-formed: it is scanned to its end (the stack is bounded by the
     // record limit) and kept as raw text, so the events after it on the same line are not lost.
@@ -627,7 +632,7 @@ internal class JsonRecordMachine(
             discardLine = false
             if (lineNumber % PROFILE_CANCELLATION_INTERVAL == 0L) checkParserCancellation()
             if (current.isNotEmpty() && shouldRecoverAt(fragment)) emitMalformed(out, lineNumber - 1)
-            if (current.isNotEmpty()) current.append('\n')
+            if (current.isNotEmpty()) appendRecordChar('\n')
         }
         if (discardLine) return
         rawLine?.let { pending ->
@@ -673,7 +678,7 @@ internal class JsonRecordMachine(
                 startRecord(first, lineNumber, fragmentColumn + index)
             }
             val c = fragment[index]
-            if (arrayMode && !inString && stack.isEmpty() && (c == ',' || c == ']')) {
+            if (arrayMode && !inString && stack.isEmpty() && overflowDepth == 0L && (c == ',' || c == ']')) {
                 emitCompleteElement(out, lineNumber)
                 if (c == ']') setArrayMode(false)
                 index++
@@ -682,17 +687,10 @@ internal class JsonRecordMachine(
             index++
             scannedChars++
             if (!appendAndScan(c)) {
-                emitMalformed(out, lineNumber)
+                if (endsLine || splitMode) emitMalformed(out, lineNumber) else resetRecord()
                 // A malformed closer invalidates this candidate. Do not interpret its suffix as a
                 // second event; the next physical root boundary is the bounded recovery point.
                 if (splitMode) keepRestOfLineRaw(fragment, index, endsLine, out) else discardLine = true
-                return
-            }
-            if (current.length > recordLimitChars) {
-                require(!splitMode) { "A JSON event exceeds the $MAX_SPLIT_RECORD_CHARS-character limit for splitting a log." }
-                diagnostics.addLimited("An oversized JSON record was kept as raw text.")
-                emitMalformed(out, lineNumber)
-                discardLine = true
                 return
             }
             if (elementComplete && !arrayMode) {
@@ -723,12 +721,15 @@ internal class JsonRecordMachine(
     override fun finish(out: MutableList<ProfileRecord>) = finish(out, includeIncomplete = true)
 
     override fun finish(out: MutableList<ProfileRecord>, includeIncomplete: Boolean) {
-        flushRawLine(out)
-        if (current.isNotEmpty() && includeIncomplete) {
-            diagnostics.addLimited("An incomplete JSON record was kept as raw text.")
-            emitMalformed(out, lineNumber)
-        } else if (!includeIncomplete) {
-            resetRecord()
+        if (includeIncomplete) flushRawLine(out) else rawLine = null
+        when {
+            !includeIncomplete && elementComplete && !inString && stack.isEmpty() && overflowDepth == 0L ->
+                emitCompleteElement(out, lineNumber)
+            current.isNotEmpty() && includeIncomplete -> {
+                diagnostics.addLimited("An incomplete JSON record was kept as raw text.")
+                emitMalformed(out, lineNumber)
+            }
+            else -> resetRecord()
         }
     }
 
@@ -757,8 +758,20 @@ internal class JsonRecordMachine(
         invalidStructure = false
     }
 
+    private fun appendRecordChar(c: Char) {
+        if (oversized) return
+        if (current.length < recordLimitChars) {
+            current.append(c)
+        } else {
+            require(!splitMode) { "A JSON event exceeds the $MAX_SPLIT_RECORD_CHARS-character limit for splitting a log." }
+            oversized = true
+            diagnostics.addLimited("An oversized JSON record was kept as truncated raw text.")
+        }
+    }
+
     private fun appendAndScan(c: Char): Boolean {
-        current.append(c)
+        appendRecordChar(c)
+        if (!c.isWhitespace()) lastNonWhitespace = c
         if (inString) {
             when {
                 escaped -> escaped = false
@@ -776,21 +789,26 @@ internal class JsonRecordMachine(
                 if (scalarArrayItem && !scalarStringItem) invalidStructure = true
             }
             '{', '[' -> {
-                stack += c
+                // After truncation, retain the known stack and count deeper levels without storing the rest of the record.
+                if (oversized && stack.size >= MAX_JSON_RECORD_DEPTH) overflowDepth++ else stack += c
                 if (stack.size > MAX_JSON_RECORD_DEPTH) tooDeep = true
             }
             '}', ']' -> {
+                if (overflowDepth > 0L) {
+                    overflowDepth--
+                    return !invalidStructure
+                }
                 val expected = if (c == '}') '{' else '['
                 if (stack.lastOrNull() != expected) return false
                 stack.removeAt(stack.lastIndex)
                 if (stack.isEmpty()) elementComplete = true
             }
         }
-        if (invalidStructure) return false
-        return true
+        return !invalidStructure
     }
 
     private fun emitCompleteElement(out: MutableList<ProfileRecord>, endLine: Long) {
+        if (oversized) return emitMalformed(out, endLine)
         val raw = current.toString().trim()
         val fields = if (recordRoot == '{' && !tooDeep) {
             profile?.let { jsonProfileFields(raw, it) }
@@ -819,17 +837,16 @@ internal class JsonRecordMachine(
     }
 
     private fun shouldRecoverAt(line: String): Boolean {
-        if (arrayMode || recordRoot != '{') return false
+        if (arrayMode || recordRoot != '{' || overflowDepth > 0L) return false
         val indent = line.indexOfFirst { !it.isWhitespace() }
         if (indent < 0 || indent > rootIndent) return false
         val first = line[indent]
         if (first != '{' && first != '[') return false
         // A same-level opener can be a value after a property colon or inside an array.
         // Recover only when the opener cannot continue the held record at this position.
-        val previous = current.lastOrNull { !it.isWhitespace() }
         val expectsValue = when (stack.lastOrNull()) {
-            '{' -> previous == ':'
-            '[' -> previous == '[' || previous == ','
+            '{' -> lastNonWhitespace == ':'
+            '[' -> lastNonWhitespace == '[' || lastNonWhitespace == ','
             else -> false
         }
         return inString || !expectsValue
@@ -845,6 +862,9 @@ internal class JsonRecordMachine(
         inString = false
         escaped = false
         invalidStructure = false
+        oversized = false
+        overflowDepth = 0L
+        lastNonWhitespace = null
         tooDeep = false
         scannedChars = 0
     }

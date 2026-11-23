@@ -7,6 +7,7 @@ import com.indagium.model.FilterMode
 import com.indagium.model.LogCapability
 import com.indagium.model.LogDisplayField
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogFormatAttribute
 import com.indagium.model.LogFormatEngine
 import com.indagium.model.LogFormatProfile
@@ -401,6 +402,56 @@ class LogFormatProfilePersistenceTest {
             )
             assertTrue(failed.isFailure)
             assertEquals(beforeFailure, app.settings.customLogFormatProfiles, "validation happens before any bundle mutation")
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun binaryDltReparsingPinsTheProfileThatActuallyParsedTheFile() = runBlocking {
+        val directory = createTempDirectory("log-format-reparse-dlt").toFile()
+        val source = File(directory, "capture.dlt").apply { writeBytes(dltStorageHeader() + dltTestFrame("binary DLT")) }
+        val app = newState(directory)
+        try {
+            val sourceId = assertNotNull(app.openFile(source))
+            val opened = awaitLoaded(app, sourceId)
+            val dltProfile = assertNotNull(app.pinnedLogFormatProfileResult(sourceId).getOrThrow())
+
+            val reparsedId = assertNotNull(app.reparseTabWithLogFormatProfileAwait(sourceId, "json-lines"))
+            val reparsed = assertNotNull(app.tab(reparsedId))
+
+            assertEquals(LogFormat.DLT, reparsed.logFormat)
+            assertEquals("automotive-dlt", reparsed.logFormatProfileId)
+            assertEquals(dltProfile, app.pinnedLogFormatProfileResult(reparsedId).getOrThrow())
+            assertEquals("${opened.filename} · ${dltProfile.name}", reparsed.filename)
+            assertEquals("binary DLT", reparsed.logData.single().msg)
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun reparseOnlyChargesNewRowsAgainstAvailableHeap() = runBlocking {
+        val directory = createTempDirectory("log-format-reparse-heap").toFile()
+        val source = File(directory, "events.jsonl").apply { writeText(sampleRows()) }
+        val app = newState(directory)
+        try {
+            app.heapFreeBytesProvider = { Long.MAX_VALUE }
+            val profile = assertNotNull(app.logFormatProfile("json-lines"))
+            val sourceId = assertNotNull(app.openFileWithLogFormatProfile(source, profile.id))
+            val opened = awaitLoaded(app, sourceId)
+            val newRowsBytes = app.estimatedHeapBytesForProfile(profile, source.length())
+
+            app.heapFreeBytesProvider = { newRowsBytes - 1 }
+            assertNull(app.reparseTabWithLogFormatProfileAwait(sourceId, profile.id))
+            assertTrue(app.logFormatProfileError.orEmpty().contains("available"))
+
+            app.heapFreeBytesProvider = { newRowsBytes }
+            val reparsedId = assertNotNull(app.reparseTabWithLogFormatProfileAwait(sourceId, profile.id))
+            assertEquals(opened.logData, app.tab(sourceId)?.logData)
+            assertEquals(opened.logData, app.tab(reparsedId)?.logData)
         } finally {
             app.close()
             directory.deleteRecursively()
