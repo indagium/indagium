@@ -1,10 +1,13 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteSourcePath
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.LogTab
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.diagramSourceKey
@@ -17,6 +20,7 @@ import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -169,4 +173,75 @@ class Seq3MergedLogDiagramSourceTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun aMergeCreatedAfterRestartCannotInheritTheClosedMergesDiagram() {
+        val root = createTempDirectory("indagium-seq3-merged-restart").toFile()
+        val cache = File(root, "state.cache")
+
+        fun app(restore: Boolean) = AppState(
+            cache,
+            restoreOnCreate = restore,
+            autoExportNotes = false,
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        )
+        try {
+            val original = app(restore = false)
+            val fixtures = try {
+                val sourceTabs = (1..3).map { index ->
+                    val file = File(root, "source-$index.log").apply {
+                        writeText("10:00:00.000 I/Tag: row $index\n")
+                    }
+                    assertNotNull(original.openFile(file))
+                }
+                await { sourceTabs.all { original.tab(it)?.logData?.isNotEmpty() == true } }
+                original.mergeTabs(sourceTabs.take(2), "Original merge")
+                await { original.tabs.any { it.filename == "Original merge" } }
+                val merged = original.tabs.single { it.filename == "Original merge" }
+                val recipient = original.tab(sourceTabs[1])!!
+
+                val coordinator = original.seq3Sessions
+                val editor = assertNotNull(coordinator.beginEmpty(merged.id))
+                assertTrue(coordinator.applyCommand(editor, Seq3Command.AddLifeline(Seq3Lifeline("manual", "Manual", emptySet(), 0))))
+                val block = assertNotNull(coordinator.confirm(editor))
+                val host = assertNotNull(original.shareTabNote(merged.id, "Review", listOf(recipient.id)))
+                assertTrue(original.stopSharing(host, recipient.id))
+                assertEquals(merged.diagramSourceKey, stampOf(original, recipient.id, block))
+                coordinator.close(editor)
+                original.closeTab(merged.id)
+                original.autosaveNow()
+                MergeRestartFixture(sourceTabs, recipient, merged, block)
+            } finally {
+                original.close()
+            }
+
+            val restored = app(restore = true)
+            try {
+                restored.startPendingRestoredTabLoads()
+                runBlocking {
+                    fixtures.sourceTabs.forEach { assertTrue(assertNotNull(restored.awaitTabLoaded(it)).logData.isNotEmpty()) }
+                }
+                val owner = assertNotNull(restored.tab(fixtures.recipient.id))
+                assertEquals(fixtures.recipient.diagramSourceInstanceId, owner.diagramSourceInstanceId)
+                restored.mergeTabs(listOf(fixtures.sourceTabs[0], fixtures.sourceTabs[2]), "Replacement merge")
+                await { restored.tabs.any { it.filename == "Replacement merge" } }
+                val replacement = restored.tabs.single { it.filename == "Replacement merge" }
+                assertEquals(fixtures.merged.id, replacement.id, "the numeric ID is reused in this fixture")
+                assertNotEquals(fixtures.merged.diagramSourceKey, replacement.diagramSourceKey)
+                assertNull(restored.seq3Sessions.sourceTabIdForNote(owner.id, fixtures.blockId))
+            } finally {
+                restored.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    private data class MergeRestartFixture(
+        val sourceTabs: List<String>,
+        val recipient: LogTab,
+        val merged: LogTab,
+        val blockId: String,
+    )
 }

@@ -79,9 +79,9 @@ internal const val DIAGRAM_TAB_SOURCE_PREFIX = "tab:"
 
 /**
  * The key a diagram records for the log it was made from ([Seq3Document.sourcePath], [DiagramSourceIdentity.sourcePath]): the
- * file path, else the stable tab id (a merged or captured log can have no path).
+ * file path, else the persistent instance identity of a pathless tab. Numeric tab ids can be reused after restart.
  */
-internal val LogTab.diagramSourceKey: String get() = sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX$id"
+internal val LogTab.diagramSourceKey: String get() = sourcePath ?: "$DIAGRAM_TAB_SOURCE_PREFIX$diagramSourceInstanceId"
 
 internal fun LogTab.matchesDiagramSourceKey(key: String, allowLegacyName: Boolean): Boolean =
     !isCaptureLauncher && (diagramSourceKey == key ||

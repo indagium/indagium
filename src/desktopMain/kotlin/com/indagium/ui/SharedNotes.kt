@@ -178,20 +178,33 @@ private fun LogTab.asClosedSource(): SharedNoteClosedSource? =
 internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosedSource> {
     val cited = owner.annotations.blocks.citedSourceTabIds()
     if (cited.isEmpty()) return emptyList()
-    val stored = owner.sharedNote?.let { it.closedMembers + it.closedReferenceSources } ?: owner.noteClosedSources
-    val open = tabs.mapNotNull { tab -> tab.takeIf { it.id in cited }?.asClosedSource() }
-    return stored.filter { it.tabId in cited }.withClosedSources(open).distinctBy { it.tabId }
+    val known = owner.sharedNote?.let { it.closedMembers + it.closedReferenceSources } ?: owner.noteClosedSources
+    val stored = known.filter { it.tabId in cited }.distinctBy { it.tabId }
+    val storedById = stored.associateBy { it.tabId }
+    val open = tabs.mapNotNull { tab ->
+        tab.takeIf { it.id in cited && storedById[it.id]?.matches(it) != false }?.asClosedSource()
+    }
+    return stored.withClosedSources(open)
 }
+
+private const val PENDING_CITATION_SOURCE_PREFIX = "citation-"
 
 /** Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock. */
 internal fun AppState.restoreNoteSourcesLocked(owner: LogTab, sources: List<SharedNoteClosedSource>): LogTab {
     val cited = owner.annotations.blocks.citedSourceTabIds()
-    var annotations = owner.annotations
-    val pending = sources.filter { it.tabId in cited }.distinctBy { it.tabId }.filter { source ->
+    val destinations = HashMap<String, String>()
+    val pending = ArrayList<SharedNoteClosedSource>()
+    for (source in sources.filter { it.tabId in cited }.distinctBy { it.tabId }) {
         val opened = tabs.firstOrNull { it.id == source.tabId && source.matches(it) }
             ?: tabs.filter(source::matches).singleOrNull()
-        if (opened != null) annotations = annotations.retargetLogRefSource(source.tabId, opened.id)
-        opened == null
+        val destination = opened?.id ?: source.tabId.takeIf { it.startsWith(PENDING_CITATION_SOURCE_PREFIX) && tab(it) == null }
+            ?: "$PENDING_CITATION_SOURCE_PREFIX${UUID.randomUUID()}"
+        destinations[source.tabId] = destination
+        if (opened == null) pending += source.copy(tabId = destination)
+    }
+    val annotations = owner.annotations.mapLogRefs { ref ->
+        val destination = destinations[ref.sourceTabId]
+        if (destination == null || destination == ref.sourceTabId) ref else ref.copy(sourceTabId = destination)
     }
     val info = owner.sharedNote
     return owner.copy(
@@ -769,25 +782,30 @@ internal suspend fun AppState.goToLogRefRows(
 ): GoToRowsResult {
     val viewedHostId = notesTargetFor(viewingTabId).takeIf { it != viewingTabId }
     val sourceTabId = block.sourceTabId ?: viewingTabId.takeIf { viewedHostId == null } ?: return GoToRowsResult.NoSource
-    if (tab(sourceTabId) == null) return reopenOfferFor(sourceTabId, viewingTabId, viewedHostId)
+    val savedSource = closedSourceOf(viewedHostId ?: viewingTabId, sourceTabId)
+    val liveSource = tab(sourceTabId)
+    if (liveSource == null || savedSource?.matches(liveSource) == false) return reopenOfferFor(sourceTabId, viewingTabId, viewedHostId)
     // The ids are resolved off the lock against one snapshot of the rows. They are applied only to those same rows: when the tab was
     // unloaded or switched section meanwhile, the resolve is redone once, and a source that still moves gets no success.
     repeat(GO_TO_ROWS_ATTEMPTS) {
         val shown = loadedSourceShowing(sourceTabId, block.sourceSectionId) ?: return GoToRowsResult.RowsNotFound
-        val ids = withContext(Dispatchers.Default) { resolveLogRefRowIds(block, shown.logData, shown.rmap) }
-        afterResolve()
-        // Row by row, not the whole list: a live tail or capture publishes a new logData every batch but keeps the earlier rows'
-        // objects, while an unload, reload or section switch replaces (or drops) the rows the ids were resolved against.
-        val stillShown = { live: LogTab ->
-            live.contentState == TabContentState.LOADED && live.selectedLogSectionId == shown.selectedLogSectionId &&
-                ids.all { id -> live.rmap[id].let { it != null && it === shown.rmap[id] } }
-        }
-        if (ids.isEmpty()) {
-            if (tab(sourceTabId)?.let(stillShown) == true) return GoToRowsResult.RowsNotFound
-        } else if (requestLogNavigationIf(sourceTabId, ids, stillShown)) {
-            // A fields reference also opens the record's tree at the chosen fields.
-            block.recordFields?.let { fields -> openRecordFields(sourceTabId, ids.first(), fields.map { it.path }.toSet()) }
-            return GoToRowsResult.Navigated(sourceTabId, ids, missing = block.logIds.size - ids.size)
+        val pinned = pinLoadedTabSnapshot(sourceTabId, shown.logData) ?: return@repeat
+        pinned.use { snapshot ->
+            val source = snapshot.tab
+            if (source.selectedLogSectionId != shown.selectedLogSectionId) return@repeat
+            val ids = withContext(Dispatchers.Default) { resolveLogRefRowIds(block, source.logData, source.rmap) }
+            afterResolve()
+            // A live tail appends new rows while preserving earlier objects. A reload or section switch can replace them.
+            val stillShown = { live: LogTab ->
+                live.contentState == TabContentState.LOADED && live.selectedLogSectionId == source.selectedLogSectionId &&
+                    ids.all { id -> live.rmap[id].let { it != null && it === source.rmap[id] } }
+            }
+            if (ids.isEmpty()) {
+                if (tab(sourceTabId)?.let(stillShown) == true) return GoToRowsResult.RowsNotFound
+            } else if (requestLogNavigationIf(sourceTabId, ids, stillShown)) {
+                block.recordFields?.let { fields -> openRecordFields(sourceTabId, ids.first(), fields.map { it.path }.toSet()) }
+                return GoToRowsResult.Navigated(sourceTabId, ids, missing = block.logIds.size - ids.size)
+            }
         }
     }
     return GoToRowsResult.RowsNotFound

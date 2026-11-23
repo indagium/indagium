@@ -7,6 +7,7 @@ import com.indagium.diagram3.DiagramExportMode
 import com.indagium.utils.JsonTailState
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.video.formatVideoTime
+import java.util.UUID
 
 private val MANUAL_COLLAPSE_DEFAULT_COLOR = Color(0xFF06b6d4)
 val DEFAULT_KEYWORD_HIGHLIGHT_COLOR = Color(0xFFfacc15)
@@ -1178,6 +1179,8 @@ data class LogTab(
     val profileSourceByteLength: Long? = null,
     /** Runtime JSON framing for a tail whose startup scan was interrupted. */
     val jsonTailState: JsonTailState? = null,
+    /** Identity for diagram sources without a file path. Shell copies and restores retain it; a new tab gets a new value. */
+    val diagramSourceInstanceId: UUID = UUID.randomUUID(),
 )
 
 /** A shared note's name, members, and sources for reopening closed tabs. */

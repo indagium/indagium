@@ -31,6 +31,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -537,8 +538,10 @@ class SharedNoteGoToRowsTest {
             val restoredId = assertNotNull(app.openFile(recipient))
             waitUntil("the note autoloads") { app.tab(restoredId)?.annotations?.blocks?.isNotEmpty() == true }
             val restored = assertIs<AnnBlock.LogRef>(app.tab(restoredId)!!.annotations.blocks.single())
-            assertEquals(GoToRowsResult.NeedsReopen(restoredId, sourceId), go { app.goToLogRefRows(restored, restoredId) })
-            val navigated = assertIs<GoToRowsResult.Navigated>(go { app.goToLogRefRowsAfterReopen(restoredId, sourceId, restored, restoredId) })
+            val pendingId = assertNotNull(restored.sourceTabId)
+            assertNotEquals(sourceId, pendingId)
+            assertEquals(GoToRowsResult.NeedsReopen(restoredId, pendingId), go { app.goToLogRefRows(restored, restoredId) })
+            val navigated = assertIs<GoToRowsResult.Navigated>(go { app.goToLogRefRowsAfterReopen(restoredId, pendingId, restored, restoredId) })
             assertEquals(originalProfile, app.tab(navigated.tabId)?.logFormatProfileSnapshot)
             assertEquals(listOf(1), navigated.rowIds)
 
@@ -547,6 +550,62 @@ class SharedNoteGoToRowsTest {
             waitUntil("the note autoloads with its source already open") { app.tab(againId)?.annotations?.blocks?.isNotEmpty() == true }
             val rebound = assertIs<AnnBlock.LogRef>(app.tab(againId)!!.annotations.blocks.single())
             assertEquals(navigated.tabId, rebound.sourceTabId)
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aSidecarRemapsBothCitationsWhenTheirOpenTabIdsAreSwapped() {
+        val dir = createTempDirectory("goto-sidecar-swapped").toFile()
+        val app = twoTabs(dir)
+        try {
+            val a = assertNotNull(app.tab("a"))
+            val b = assertNotNull(app.tab("b"))
+            val viewer = mkTab("viewer", "review.log", emptyList())
+            app.tabs = app.tabs + viewer
+            app.putIntoNote(viewer.id, ref(id = "first", source = a.id, ids = listOf(1), frozen = listOf(a.logData.first())))
+            app.putIntoNote(viewer.id, ref(id = "second", source = b.id, ids = listOf(1), frozen = listOf(b.logData.first())))
+            val sidecar = File(dir, "review.ann")
+            assertTrue(app.saveAnnotationsTo(viewer.id, sidecar))
+
+            app.tabs = listOf(a.copy(id = b.id), b.copy(id = a.id), viewer)
+            assertTrue(app.loadAnnotationsFrom(viewer.id, sidecar))
+
+            val citations = app.tab(viewer.id)!!.annotations.blocks.filterIsInstance<AnnBlock.LogRef>()
+            assertEquals(listOf(b.id, a.id), citations.map { it.sourceTabId })
+            assertEquals(GoToRowsResult.Navigated(b.id, listOf(1)), go { app.goToLogRefRows(citations[0], viewer.id) })
+            assertEquals(GoToRowsResult.Navigated(a.id, listOf(1)), go { app.goToLogRefRows(citations[1], viewer.id) })
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aReusedTabIdCannotHijackAnUnresolvedCitationOrItsNextExport() {
+        val dir = createTempDirectory("goto-sidecar-reused-id").toFile()
+        val app = twoTabs(dir)
+        try {
+            val original = assertNotNull(app.tab("a"))
+            app.putIntoNote("b", ref(source = original.id, ids = listOf(1)))
+            val initial = File(dir, "initial.ann")
+            assertTrue(app.saveAnnotationsTo("b", initial))
+            app.upTab("a") { it.copy(sourcePath = File(dir, "unrelated.log").absolutePath) }
+            assertTrue(app.loadAnnotationsFrom("b", initial))
+
+            val pending = app.tab("b")!!.noteClosedSources.single()
+            assertNotEquals(original.id, pending.tabId)
+            val citation = assertIs<AnnBlock.LogRef>(app.tab("b")!!.annotations.blocks.single())
+            assertEquals(GoToRowsResult.NeedsReopen("b", pending.tabId), go { app.goToLogRefRows(citation, "b") })
+            assertTrue(app.tab("a")!!.selected.isEmpty())
+
+            val exported = File(dir, "exported.ann")
+            assertTrue(app.saveAnnotationsTo("b", exported))
+            assertTrue(app.loadAnnotationsFrom("b", exported))
+            assertEquals(pending, app.tab("b")!!.noteClosedSources.single())
+            assertEquals(original.sourcePath, pending.sourcePath)
         } finally {
             app.close()
             dir.deleteRecursively()
@@ -612,6 +671,42 @@ class SharedNoteGoToRowsTest {
     }
 
     // ── Rows that change between resolving and applying ──────────────────────────────────────────
+
+    @Test
+    fun closingTheSourceDuringMatchingKeepsTheRowsUntilTheReaderFinishes() {
+        val dir = createTempDirectory("goto-pinned-rows").toFile()
+        val app = twoTabs(dir)
+        try {
+            app.closedTabRowsReleaseDelayMs = 1L
+            val rows = object : AbstractList<LogEntry>() {
+                var duringRead: (() -> Unit)? = null
+                private val entries = listOf(entry(1, "new first row"), entry(1).copy(id = 2))
+                override val size: Int get() = entries.size
+
+                override fun get(index: Int): LogEntry {
+                    val action = duringRead
+                    duringRead = null
+                    action?.invoke()
+                    return entries[index]
+                }
+            }
+            val source = mkTab("source", "source.log", rows)
+            val other = mkTab("other", "other.log", listOf(entry(1)))
+            app.tabs = listOf(source, other, app.tab("b")!!)
+            rows.duringRead = {
+                app.closeOtherTabs("b")
+                waitUntil("the close job releases the unpinned log") { other.logData.isEmpty() }
+                assertEquals(2, source.logData.size, "the source scan still holds a pin")
+            }
+
+            assertEquals(GoToRowsResult.RowsNotFound, go { app.goToLogRefRows(ref(source = source.id, ids = listOf(1)), "b") })
+            waitUntil("the source releases after the scan") { source.logData.isEmpty() }
+            assertEquals("b", app.activeTabId)
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
 
     @Test
     fun aSourceThatChangesAfterTheIdsWereResolvedIsResolvedAgainAndThenNavigatedOnce() {
