@@ -2,9 +2,11 @@ package com.indagium.testing
 
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.LaneToolCall
+import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.newCheckId
@@ -148,6 +150,27 @@ class StepSequenceProtocolIdentityTest {
             val second = fixture.sequence.results().last()
             assertEquals("current step only", second.observation)
             assertTrue("old step" !in second.observation)
+        } finally {
+            listener.release()
+            fixture.close()
+        }
+    }
+
+    // The answer the agent gets when its finish_step moves the case onto a step the run performs itself. The run closes that agent
+    // run right after, so an end-to-end test cannot rely on the agent ever reading this answer; the sequence is asserted directly.
+    @Test
+    fun finishingTheStepBeforeAManualStepTellsTheAgentToHandOver() = runBlocking {
+        val listener = HoldingSequenceListener("none")
+        val manual = step("Plug in the stick").copy(kind = StepKind.MANUAL, manualCompletion = ManualCompletion.TESTER_OR_CHECKS)
+        val fixture = sequenceFixture(listOf(step("Open the app", timeoutMs = 1_000), manual), listener, AtomicLong())
+        try {
+            fixture.sequence.begin(0)
+            val answer = fixture.sequence.gateway(runEpoch = null).executeSuspending(
+                "finish_step", mapOf("status" to "pass", "observation" to "opened"),
+            )
+            val map = assertIs<Map<*, *>>(answer)
+            assertEquals("handoff", map["result"], map.toString())
+            assertEquals(manual.id, fixture.sequence.driverStep?.id, "the next step is the run's own, not the agent's")
         } finally {
             listener.release()
             fixture.close()

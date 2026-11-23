@@ -21,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -318,9 +319,10 @@ class AutosaveSchedulerTest {
             base.copy(dltSplitIdentifiers = true),
             base.copy(heldFilterCriteria = Filter(levels = setOf(LogLevel.E))),
             base.copy(noteClosedSources = listOf(SharedNoteClosedSource("gone", "gone.log", "/tmp/gone.log"))),
+            base.copy(sourceInstanceId = UUID.randomUUID()),
         )
 
-        assertEquals(27, base.persistedSnapshot().size)
+        assertEquals(28, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

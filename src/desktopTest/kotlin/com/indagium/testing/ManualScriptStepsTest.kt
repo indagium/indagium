@@ -527,7 +527,8 @@ class ManualScriptStepsTest {
 
         awaitTrue("the handover to the tester") { h.coordinator.waitingSteps().isNotEmpty() }
         assertEquals("Plug in the stick", h.coordinator.waitingSteps().single().wait.instructions)
-        assertTrue(provider.toolResults.any { it.contains("handoff") }, "the agent was told the next step is not its own: ${provider.toolResults}")
+        // The "handoff" answer itself is asserted in StepSequenceProtocolIdentityTest: the run closes the agent run as soon as it takes
+        // the step over, so whether the closing run still reads that answer is a race, not behaviour.
         h.coordinator.resolveManualStep(started.runId, h.coordinator.waitingSteps().single().laneId, ManualDecision.DONE)
         val run = h.finished(started)
 
