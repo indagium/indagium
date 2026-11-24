@@ -1159,7 +1159,8 @@ private fun parseRfc5424StructuredData(raw: String): Triple<Map<String, String>,
         }
         if (cursor == 0) return null
     }
-    while (rest.getOrNull(cursor) == ' ') cursor++
+    val structuredDataEnd = cursor
+    if (rest.getOrNull(cursor) == ' ') cursor++
     val priority = values[1].toIntOrNull()?.takeIf { it in 0..MAX_SYSLOG_PRIORITY } ?: return null
     val severity = SYSLOG_SEVERITY[priority % SYSLOG_SEVERITIES_PER_FACILITY]
     val timestamp = values[3].takeUnless { it == "-" }
@@ -1172,7 +1173,7 @@ private fun parseRfc5424StructuredData(raw: String): Triple<Map<String, String>,
         "message_id" to values[7].takeUnless { it == "-" }.orEmpty(),
     )
     fields.putAll(sdFields)
-    fields["structured_data"] = rest.take(cursor)
+    fields["structured_data"] = rest.take(structuredDataEnd)
     fields[LogFieldRole.MESSAGE.name] = rest.substring(cursor)
     if (timestamp == null) fields.remove(LogFieldRole.TIMESTAMP.name)
     return Triple(fields, severity, timestamp)

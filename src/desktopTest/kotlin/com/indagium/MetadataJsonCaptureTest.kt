@@ -299,6 +299,17 @@ class MetadataJsonCaptureTest {
     }
 
     @Test
+    fun aLargeContainerKeepsItsEmptySiblingSection() {
+        val count = 25_000
+        val reader = generatedJson("""{"Capture":{"Events":[""", count, """],"Empty":[]}}""") { index ->
+            (if (index > 0) "," else "") + packet(WIRE_TIME + index, "Id$index", "message $index")
+        }
+        val parsed = parseMetadataJson(reader, metadataJsonProfile())
+        assertEquals(count, parsed.entries.size)
+        assertTrue(parsed.sections.any { it.id == "Capture / Empty" && it.entries.isEmpty() })
+    }
+
+    @Test
     fun arraysAndNestedRecordObjectsInsideAMessageDoNotBecomeSectionsOrExtraMessages() {
         val child = packet(1790000000000000001L, "Service.Child", "nested")
         val original = Json.parseToJsonElement(packet(1790000000000000000L)).jsonObject

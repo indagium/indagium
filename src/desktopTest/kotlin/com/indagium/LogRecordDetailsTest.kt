@@ -127,6 +127,16 @@ class LogRecordDetailsTest {
     }
 
     @Test
+    fun rfc5424PreservesSpacesAfterTheMessageSeparator() {
+        val profile = BUILTIN_LOG_FORMAT_PROFILES.single { it.id == "syslog-rfc5424" }
+        for (sd in listOf("-", "[example@1 k=\"v\"]")) {
+            val line = "<165>1 2026-11-20T10:00:00Z host app 4100 ID47 $sd   indented"
+            val entry = parseLogContent(ByteArrayInputStream((line + "\n").toByteArray()), profile = profile).entries.single()
+            assertEquals("  indented", entry.msg)
+        }
+    }
+
+    @Test
     fun csvDetailsListTheFieldsInTheOrderOfTheSourceLine() {
         val profile = LogFormatProfile(
             id = "ordered-csv", name = "Ordered CSV", engine = LogFormatEngine.CSV,

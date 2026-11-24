@@ -15990,15 +15990,16 @@ class AppState(
             loaded = true
             val withRows = t.copy(recoveredNoteRows = recovered)
             val preferences = legacyLogRefPreferences()
-            val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
-            val loadedNote = withRows.copy(
-                annotations = frozen,
-                noteTargetName = noteExportTargetName(file),
-                pendingLegacyLogRefPreferences = preferences.takeIf {
-                    frozen.hasUnresolvedLegacyLogRefs(withRows)
-                },
+            val restored = restoreNoteSourcesLocked(
+                withRows.copy(annotations = annotations, noteTargetName = noteExportTargetName(file)),
+                sources,
+                originalOwnerSource,
             )
-            restoreNoteSourcesLocked(loadedNote, sources, originalOwnerSource)
+            val frozen = restored.annotations.freezeLegacyLogRefs(restored, preferences)
+            restored.copy(
+                annotations = frozen,
+                pendingLegacyLogRefPreferences = preferences.takeIf { frozen.hasUnresolvedLegacyLogRefs(restored) },
+            )
         }
         return loaded
     }
@@ -16178,15 +16179,17 @@ class AppState(
                 applyOpenedNote(tabId, file, autoLoad) { t ->
                     val withRows = t.copy(recoveredNoteRows = recovered)
                     val preferences = legacyLogRefPreferences()
-                    val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
-                    val loadedNote = withRows.copy(
-                        annotations = frozen,
-                        noteTargetName = pinName,
-                        pendingLegacyLogRefPreferences = preferences.takeIf {
-                            frozen.hasUnresolvedLegacyLogRefs(withRows)
-                        },
+                    val restored = restoreNoteSourcesLocked(
+                        withRows.copy(annotations = annotations, noteTargetName = pinName),
+                        sources,
+                        originalOwnerSource,
+                        ownedByOwner = ownedByTab,
                     )
-                    restoreNoteSourcesLocked(loadedNote, sources, originalOwnerSource, ownedByOwner = ownedByTab)
+                    val frozen = restored.annotations.freezeLegacyLogRefs(restored, preferences)
+                    restored.copy(
+                        annotations = frozen,
+                        pendingLegacyLogRefPreferences = preferences.takeIf { frozen.hasUnresolvedLegacyLogRefs(restored) },
+                    )
                 }
                 return
             }

@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.ui.nearestVisiblePickedAncestor
+import com.indagium.ui.extendedFieldPick
 import com.indagium.debug.IndagiumToolOperations
 import com.indagium.model.AnnBlock
 import com.indagium.model.AnnotationLogBlockStyle
@@ -83,6 +85,18 @@ class RecordFieldsCodecAndExportTest {
     private fun notes(vararg blocks: AnnBlock) = Annotations(prefix = "p", suffix = "s", blocks = blocks.toList())
 
     // ── Freezing ─────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun keyboardExtensionUsesTheClosestVisibleAncestorOfAHiddenPick() {
+        val outer = listOf("a")
+        val parent = listOf("a", "inner")
+        val picked = listOf("a", "inner", "first")
+        val sibling = listOf("a", "sibling")
+        val order = listOf(outer, parent, sibling, listOf("tail"))
+        val anchor = nearestVisiblePickedAncestor(order, setOf(picked))
+        assertEquals(parent, anchor)
+        assertEquals(setOf(picked, sibling), extendedFieldPick(order, setOf(picked), setOf(parent, sibling), sibling).toSet())
+    }
 
     @Test
     fun theChosenSubtreesAreFrozenAsCompactJsonInTheOrderGiven() {

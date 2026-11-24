@@ -1354,6 +1354,17 @@ class RecordFieldRowSelectionUiTest {
     }
 
     @Test
+    fun shiftDownFromHiddenNestedFieldUsesItsNearestVisibleParent() {
+        show("""{"a":{"inner":{"first":1,"second":2},"sibling":3},"tail":true}""")
+        rule.clickRow(row("a", "inner", "first"))
+        rule.onNodeWithTag(row("a", "inner")).performMouseInput { click(Offset(8f, center.y)) }
+        rule.waitForIdle()
+        rule.pressKey(Key.DirectionDown, shift = true)
+        rule.pressKey(Key.C, action = true)
+        assertEquals(listOf("a.inner.first: 1", "a.sibling: 3"), recorder.copied.single().lines())
+    }
+
+    @Test
     fun aCtrlDragAfterTheParentOfAPartialPickWasCollapsedKeepsThePartialPick() {
         show("""{"metadata":{"identity":"abc","source":"phone"},"a":1,"b":2}""")
         rule.clickRow(row("metadata", "identity"))

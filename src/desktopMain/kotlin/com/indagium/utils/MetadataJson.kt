@@ -304,9 +304,6 @@ internal class MetadataJsonScanner(
         var recordMetadata = false
         var chars = 2
         var oversized = false
-        // Whether this object is itself the one that is too big (over budget, or holding a string over its limit), not merely one
-        // that holds a dropped child: a dropped child already gave up what it recorded, and its neighbours stay.
-        var origin = false
         while (next() != JsonToken.END_OBJECT) {
             require(parser.currentToken() == JsonToken.FIELD_NAME) { "Incomplete metadata JSON object." }
             val key = parser.currentName()
@@ -314,7 +311,6 @@ internal class MetadataJsonScanner(
             val child = readValue(path + key)
             if (isRecordMetadataField(key, child)) recordMetadata = true
             chars += key.length + (child?.chars ?: 0) + METADATA_JSON_ELEMENT_CHARS
-            if (isDroppedByItself(chars, child)) origin = true
             if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
                 oversized = true
                 values.clear()
@@ -325,7 +321,7 @@ internal class MetadataJsonScanner(
         if (oversized) {
             discardOversizedObject(recordMetadata, firstRecord, firstSummary, mark)
             // A packet (an array's element, or one with record metadata) that is dropped takes everything it recorded with it.
-            if (origin || recordMetadata || element) releaseArrayPaths(pathMark)
+            if (recordMetadata || element) releaseArrayPaths(pathMark)
             return null
         }
         val value = JsonObject(values)

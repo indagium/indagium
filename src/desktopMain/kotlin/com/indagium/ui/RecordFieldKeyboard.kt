@@ -67,8 +67,11 @@ private fun cursorRow(context: RecordFieldContext, picked: Set<List<String>>, or
     val cursor = context.geometry.cursor?.takeIf { it in order && marked.covers(it) }
     val anchor = context.actions.rangeAnchor(context.tabId, context.entryId)?.takeIf { it in order && marked.covers(it) }
     // A pick whose every field is hidden under a collapsed container still moves from that container.
-    return cursor ?: anchor ?: order.firstOrNull { marked.covers(it) } ?: order.firstOrNull { row -> picked.any { isFieldInside(it, row) } }
+    return cursor ?: anchor ?: order.firstOrNull { marked.covers(it) } ?: nearestVisiblePickedAncestor(order, picked)
 }
+
+internal fun nearestVisiblePickedAncestor(order: List<List<String>>, picked: Set<List<String>>): List<String>? =
+    order.filter { row -> picked.any { isFieldInside(it, row) } }.maxByOrNull { it.size }
 
 private fun moveWithArrow(context: RecordFieldContext, picked: Set<List<String>>, key: Key, extend: Boolean): Boolean {
     val order = context.geometry.order()

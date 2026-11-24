@@ -735,6 +735,38 @@ class SharedNoteGoToRowsTest {
     }
 
     @Test
+    fun openingLegacyNotesNeverFreezesTheViewingLogsOverlappingRows() {
+        val dir = createTempDirectory("goto-legacy-owner-rows").toFile()
+        val app = twoTabs(dir)
+        try {
+            val source = logcatFile(dir, "original.log")
+            val sourceId = assertNotNull(app.openFile(source))
+            waitUntil("source loads") { app.tab(sourceId)?.contentState == TabContentState.LOADED }
+            val legacy = ref(source = null, ids = listOf(1), frozen = null)
+            val ann = File(dir, "legacy.ann").apply {
+                writeText(Annotations(blocks = listOf(legacy)).annotationsToken(source.absolutePath))
+            }
+            val md = File(dir, "legacy.md").apply { writeText("legacy note") }
+            fun verify() {
+                val citation = assertIs<AnnBlock.LogRef>(app.tab("b")!!.annotations.blocks.single())
+                assertEquals(sourceId, citation.sourceTabId)
+                assertTrue(citation.sourceEntries.orEmpty().none { it.msg.contains("b says") })
+                assertEquals(GoToRowsResult.Navigated(sourceId, listOf(1)), go { app.goToLogRefRows(citation, "b") })
+                val saved = File(dir, "saved.ann")
+                assertTrue(app.saveAnnotationsTo("b", saved))
+                assertTrue(saved.readText().contains("b says").not())
+            }
+            assertTrue(app.loadAnnotationsFrom("b", ann))
+            verify()
+            app.openNoteFile("b", md)
+            verify()
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun aSidecarRemapsBothCitationsWhenTheirOpenTabIdsAreSwapped() {
         val dir = createTempDirectory("goto-sidecar-swapped").toFile()
         val app = twoTabs(dir)
