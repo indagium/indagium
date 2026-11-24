@@ -272,6 +272,24 @@ class LogFormatParserCoreTest {
     }
 
     @Test
+    fun csvPositionSelectsUnnamedAndRepeatedHeaderCells() {
+        val profile = LogFormatProfile(
+            id = "csv-header-positions", name = "Header positions", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "1"),
+            attributes = listOf(LogFormatAttribute("detail", "Detail", "2", visibleByDefault = true)),
+            visibleColumns = listOf(LogFieldRole.MESSAGE),
+        )
+        val input = "timestamp,,label,label\n12:00:00,actual message,first label,second label\n"
+        val row = parseLogContent(input.byteInputStream(), profile = profile).entries.single()
+
+        assertEquals("actual message", row.msg)
+        assertEquals("first label", row.profileFields["detail"])
+        assertEquals("second label", row.profileFields["label"])
+        assertEquals("first label", row.recordMetadata!!.displayColumns.single { it.id == "detail" }.value)
+        assertFalse(row.recordMetadata.fieldAliases.containsKey("detail"))
+    }
+
+    @Test
     fun csvSupportsQuotedMultilineCellsAndRetainsMalformedTail() {
         val profile = LogFormatProfile(
             id = "csv-quoted",

@@ -9,6 +9,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.ArrayDeque
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -19,8 +20,8 @@ private const val BYTES_PER_MIB = BYTES_PER_KIB * 1024L
 
 internal class FakeCaptureRunner : CaptureProcessRunner {
     private val handles = ArrayDeque<RunningCaptureProcess>()
-    val specs = mutableListOf<CaptureProcessSpec>()
-    val runSpecs = mutableListOf<CaptureProcessSpec>()
+    val specs = CopyOnWriteArrayList<CaptureProcessSpec>()
+    val runSpecs = CopyOnWriteArrayList<CaptureProcessSpec>()
 
     @Volatile var adbState: String = "device"
 

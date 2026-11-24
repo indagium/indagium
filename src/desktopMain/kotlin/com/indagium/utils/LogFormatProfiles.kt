@@ -205,6 +205,7 @@ internal data class ProfileRecord(
     val sourceEndLine: Long,
     val dayOfYear: Short = NO_DATE,
     val fieldAliases: Map<String, String> = emptyMap(),
+    val csvSource: CsvSourceRow? = null,
 )
 
 internal data class AdditionalProfileRecord(
@@ -1006,8 +1007,9 @@ internal class CsvRecordMachine(
         }
         if (firstColumnCount == 0) firstColumnCount = cells.size
         val aliases = linkedMapOf<String, String>()
-        val fields = mapCells(cells, aliases)
-        out += ProfileRecord(raw, fields, sourceStartLine = startLine, sourceEndLine = lineNumber, fieldAliases = aliases)
+        val source = CsvSourceRow(headers, cells)
+        val fields = mapCells(source, aliases)
+        out += ProfileRecord(raw, fields, sourceStartLine = startLine, sourceEndLine = lineNumber, fieldAliases = aliases, csvSource = source)
     }
 
     override fun finish(out: MutableList<ProfileRecord>) {
@@ -1020,34 +1022,40 @@ internal class CsvRecordMachine(
 
     override fun hasPendingRecord(): Boolean = current.isNotEmpty()
 
-    private fun mapCells(cells: List<String>, aliases: MutableMap<String, String>): Map<String, String> {
-        val fields = if (profile.hasHeader) {
-            headers.orEmpty().zip(cells).toMap()
-        } else {
-            cells.mapIndexed { index, cell -> index.toString() to cell }.toMap()
-        }
+    private fun mapCells(sourceRow: CsvSourceRow, aliases: MutableMap<String, String>): Map<String, String> {
+        val fields = sourceRow.fields
         // Keep source columns in file order, then add aliases that do not shadow a source column.
         val mapped = LinkedHashMap(fields)
         profile.fieldMappings.forEach { (role, source) ->
-            if (role.name !in fields) fields.csvSourceColumn(source)?.let { column ->
-                mapped[role.name] = fields.getValue(column)
-                aliases[role.name] = column
+            if (role.name !in fields) sourceRow.value(source)?.let { value ->
+                mapped[role.name] = value
+                sourceRow.fieldName(source, value)?.let { aliases[role.name] = it }
             }
         }
         profile.attributes.forEach { attribute ->
-            if (attribute.id !in fields) fields.csvSourceColumn(attribute.source)?.let { column ->
-                mapped[attribute.id] = fields.getValue(column)
-                aliases[attribute.id] = column
+            if (attribute.id !in fields) sourceRow.value(attribute.source)?.let { value ->
+                mapped[attribute.id] = value
+                sourceRow.fieldName(attribute.source, value)?.let { aliases[attribute.id] = it }
             }
         }
         return mapped
     }
 }
 
-/** An exact header takes precedence over a normalized column index. Generated aliases are never source columns. */
-private fun Map<String, String>.csvSourceColumn(source: String, aliases: Set<String> = emptySet()): String? {
-    if (source in this && source !in aliases) return source
-    return source.toIntOrNull()?.toString()?.takeIf { it in this && it !in aliases }
+/** Source fields and physical cell order before generated aliases are added. An exact header takes precedence over a position. */
+internal class CsvSourceRow(private val headers: List<String>?, private val cells: List<String>) {
+    val fields: Map<String, String> = headers?.zip(cells)?.toMap()
+        ?: cells.mapIndexed { index, cell -> index.toString() to cell }.toMap()
+
+    fun value(source: String): String? = fields[source] ?: source.toIntOrNull()?.let(cells::getOrNull)
+
+    fun fieldName(source: String, value: String): String? {
+        if (source in fields) return source
+        val index = source.toIntOrNull() ?: return null
+        val header = headers?.getOrNull(index) ?: index.toString()
+        // A repeated header can hide the selected cell in the named map. Keep the alias visible in that case.
+        return header.takeIf { fields[it] == value }
+    }
 }
 
 /**
@@ -1253,13 +1261,11 @@ internal fun recordToEntry(
 ): LogEntry {
     val fields = record.fields
 
-    fun csvSourceValue(source: String): String? = fields.csvSourceColumn(source, record.fieldAliases.keys)?.let(fields::get)
-
     fun role(role: LogFieldRole): String? {
         val source = profile.fieldMappings[role]
         return when {
             source == null -> fields[role.name]
-            profile.engine == LogFormatEngine.CSV -> csvSourceValue(source)
+            profile.engine == LogFormatEngine.CSV -> record.csvSource?.value(source)
             else -> fields[role.name] ?: fields[source]
         }
     }
@@ -1288,7 +1294,7 @@ internal fun recordToEntry(
     }
     // A missing value stays as an empty column, so the columns after it keep their place under the header.
     val attributeColumns = profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        val value = if (profile.engine == LogFormatEngine.CSV) csvSourceValue(attribute.source) else fields[attribute.id]
+        val value = if (profile.engine == LogFormatEngine.CSV) record.csvSource?.value(attribute.source) else fields[attribute.id]
         compactor.column(attribute.id, attribute.label, value.orEmpty())
     }
     val displayColumns = withAttributeColumns(profile, visibleColumnFields, attributeColumns)
