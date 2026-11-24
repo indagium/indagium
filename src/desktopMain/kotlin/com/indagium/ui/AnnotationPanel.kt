@@ -2482,15 +2482,19 @@ internal fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix:
                 modifier = Modifier.fillMaxWidth(),
             )
         } else {
-            val markdownState = rememberMarkdownState(content = renderSource, immediate = true)
-            remember(renderSource) { ANNOTATION_MARKDOWN_CACHE.put(renderSource, markdownState.state.value) }
-            Markdown(
-                markdownState,
-                colors = annotationMarkdownColors(tc),
-                typography = annotationMarkdownTypography(tc),
-                annotator = ANNOTATION_MARKDOWN_ANNOTATOR,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            // Keyed by the text: the renderer's state is remembered once and re-parses changed text later, off this frame, so
+            // without the key an edit would render (and cache) the previous text's tree under the new text for a while.
+            key(renderSource) {
+                val markdownState = rememberMarkdownState(content = renderSource, immediate = true)
+                remember(renderSource) { ANNOTATION_MARKDOWN_CACHE.put(renderSource, markdownState.state.value) }
+                Markdown(
+                    markdownState,
+                    colors = annotationMarkdownColors(tc),
+                    typography = annotationMarkdownTypography(tc),
+                    annotator = ANNOTATION_MARKDOWN_ANNOTATOR,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
     if (numberPrefix == null) {

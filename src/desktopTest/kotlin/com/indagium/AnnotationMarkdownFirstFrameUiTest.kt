@@ -1,11 +1,13 @@
 package com.indagium
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import com.indagium.model.ThemePreset
@@ -87,5 +89,32 @@ class AnnotationMarkdownFirstFrameUiTest {
         cache.put("err", State.Error(IllegalStateException("x")))
         assertNull(cache.get("err"), "a failed parse is not cached")
         assertEquals(2, cache.size)
+
+        cache.put("new text", parsed("old text"))
+        assertNull(cache.get("new text"), "a parse of other text is never kept under this text")
+    }
+
+    // A note edited from one line to three: a view composed afterwards (Preview, a revisit of the tab) showed the text as it was before
+    // the last edits, because the renderer's state still held the previous parse when it was cached under the new text.
+    @Test
+    fun aViewOpenedAfterAnEditShowsTheEditedTextNotAnEarlierParse() {
+        val first = "Ticket ${System.nanoTime()} https://jira.example.com/browse/ABC-225511,"
+        val full = "$first\nsecond line\nthird line"
+        var text by mutableStateOf(first)
+        var secondView by mutableStateOf(false)
+        rule.setContent {
+            Column {
+                AnnotationMarkdownText(text, themeColors(ThemePreset.DRACULA))
+                if (secondView) AnnotationMarkdownText(full, themeColors(ThemePreset.DRACULA))
+            }
+        }
+        rule.runOnIdle { text = "$first\nsecond" }
+        rule.waitForIdle()
+        rule.runOnIdle { text = full }
+        rule.waitForIdle()
+        rule.runOnIdle { secondView = true }
+        rule.waitForIdle()
+
+        assertEquals(2, rule.onAllNodesWithText("third line", substring = true).fetchSemanticsNodes().size, "both views show the whole text")
     }
 }

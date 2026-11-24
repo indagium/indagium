@@ -33,9 +33,13 @@ internal class ParsedMarkdownCache(
         entries[renderSource].also { if (it != null) hits++ else misses++ }
     }
 
-    /** Remembers a successful parse; failures and oversized sources are ignored (they re-parse as before). */
+    /**
+     * Remembers a successful parse; failures and oversized sources are ignored (they re-parse as before). So is a parse of other
+     * text: a renderer state that has not caught up with an edit yet still holds the previous text's tree, and keeping that under
+     * the new text would show every later view (Preview, a revisit) the old text, without the lines typed since.
+     */
     fun put(renderSource: String, state: State) {
-        if (state !is State.Success || renderSource.length > maxSourceChars) return
+        if (state !is State.Success || state.content != renderSource || renderSource.length > maxSourceChars) return
         synchronized(lock) { entries[renderSource] = state }
     }
 
