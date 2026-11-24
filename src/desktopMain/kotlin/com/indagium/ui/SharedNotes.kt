@@ -223,7 +223,7 @@ internal fun AppState.noteSourcesForExport(owner: LogTab): List<SharedNoteClosed
 }
 
 private fun LogTab.citationSource(): SharedNoteClosedSource =
-    asClosedSource() ?: SharedNoteClosedSource(id, filename, null, sourceInstanceId = sourceInstanceId)
+    asClosedSource() ?: SharedNoteClosedSource(id, filename, null, logFormatProfileSnapshot, sourceInstanceId)
 
 internal fun LogTab.noteOwnerSourceForExport(): SharedNoteClosedSource? =
     if (sharedNote == null && (logFormatProfileSnapshot != null ||

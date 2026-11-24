@@ -1,7 +1,5 @@
 package com.indagium
 
-import com.indagium.ui.nearestVisiblePickedAncestor
-import com.indagium.ui.extendedFieldPick
 import com.indagium.debug.IndagiumToolOperations
 import com.indagium.model.AnnBlock
 import com.indagium.model.AnnotationLogBlockStyle
@@ -15,7 +13,9 @@ import com.indagium.ui.AppState
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.b64
+import com.indagium.ui.extendedFieldPick
 import com.indagium.ui.mkTab
+import com.indagium.ui.nearestVisiblePickedAncestor
 import com.indagium.ui.recordFieldsToken
 import com.indagium.ui.requestAddRecordFields
 import com.indagium.ui.resolveLogRefRowIds

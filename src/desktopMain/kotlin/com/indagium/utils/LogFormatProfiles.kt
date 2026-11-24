@@ -1026,29 +1026,28 @@ internal class CsvRecordMachine(
         } else {
             cells.mapIndexed { index, cell -> index.toString() to cell }.toMap()
         }
-        // The source columns come first, in the order the line has them; a role or attribute that maps to a column of another
-        // name is added after them. Re-assigning an existing key keeps its place, so a value is the same whichever way it is
-        // reached: only the order of the keys is the source line's.
+        // Keep source columns in file order, then add aliases that do not shadow a source column.
         val mapped = LinkedHashMap(fields)
         profile.fieldMappings.forEach { (role, source) ->
-            val value = fields[source] ?: source.toIntOrNull()?.let { fields[it.toString()] }
-            if (value != null) {
-                if (role.name !in fields) {
-                    mapped[role.name] = value
-                    aliases[role.name] = source
-                }
+            if (role.name !in fields) fields.csvSourceColumn(source)?.let { column ->
+                mapped[role.name] = fields.getValue(column)
+                aliases[role.name] = column
             }
         }
         profile.attributes.forEach { attribute ->
-            fields[attribute.source]?.let {
-                if (attribute.id !in fields) {
-                    mapped[attribute.id] = it
-                    aliases[attribute.id] = attribute.source
-                }
+            if (attribute.id !in fields) fields.csvSourceColumn(attribute.source)?.let { column ->
+                mapped[attribute.id] = fields.getValue(column)
+                aliases[attribute.id] = column
             }
         }
         return mapped
     }
+}
+
+/** An exact header takes precedence over a normalized column index. Generated aliases are never source columns. */
+private fun Map<String, String>.csvSourceColumn(source: String, aliases: Set<String> = emptySet()): String? {
+    if (source in this && source !in aliases) return source
+    return source.toIntOrNull()?.toString()?.takeIf { it in this && it !in aliases }
 }
 
 /**
@@ -1254,11 +1253,13 @@ internal fun recordToEntry(
 ): LogEntry {
     val fields = record.fields
 
+    fun csvSourceValue(source: String): String? = fields.csvSourceColumn(source, record.fieldAliases.keys)?.let(fields::get)
+
     fun role(role: LogFieldRole): String? {
         val source = profile.fieldMappings[role]
         return when {
             source == null -> fields[role.name]
-            profile.engine == LogFormatEngine.CSV -> fields[source]
+            profile.engine == LogFormatEngine.CSV -> csvSourceValue(source)
             else -> fields[role.name] ?: fields[source]
         }
     }
@@ -1287,7 +1288,7 @@ internal fun recordToEntry(
     }
     // A missing value stays as an empty column, so the columns after it keep their place under the header.
     val attributeColumns = profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        val value = if (profile.engine == LogFormatEngine.CSV) fields[attribute.source] else fields[attribute.id]
+        val value = if (profile.engine == LogFormatEngine.CSV) csvSourceValue(attribute.source) else fields[attribute.id]
         compactor.column(attribute.id, attribute.label, value.orEmpty())
     }
     val displayColumns = withAttributeColumns(profile, visibleColumnFields, attributeColumns)

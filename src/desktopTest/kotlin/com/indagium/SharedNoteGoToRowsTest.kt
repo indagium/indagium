@@ -747,6 +747,7 @@ class SharedNoteGoToRowsTest {
                 writeText(Annotations(blocks = listOf(legacy)).annotationsToken(source.absolutePath))
             }
             val md = File(dir, "legacy.md").apply { writeText("legacy note") }
+
             fun verify() {
                 val citation = assertIs<AnnBlock.LogRef>(app.tab("b")!!.annotations.blocks.single())
                 assertEquals(sourceId, citation.sourceTabId)

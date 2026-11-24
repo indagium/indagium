@@ -253,6 +253,25 @@ class LogFormatParserCoreTest {
     }
 
     @Test
+    fun csvUsesNormalizedColumnIndicesAndPrefersExactHeaders() {
+        val profile = LogFormatProfile(
+            id = "csv-numeric-mapping", name = "Numeric mapping", engine = LogFormatEngine.CSV,
+            hasHeader = false,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "01"),
+            attributes = listOf(LogFormatAttribute("detail", "Detail", "01", visibleByDefault = true)),
+            visibleColumns = listOf(LogFieldRole.MESSAGE),
+        )
+        val headerless = parseLogContent("left,right\n".byteInputStream(), profile = profile).entries.single()
+        val withHeader = parseLogContent("01,1\nleft,right\n".byteInputStream(), profile = profile.copy(hasHeader = true)).entries.single()
+
+        assertEquals("right", headerless.msg)
+        assertEquals("right", headerless.recordMetadata!!.displayColumns.single { it.id == "detail" }.value)
+        assertEquals("1", headerless.recordMetadata.fieldAliases["MESSAGE"])
+        assertEquals("left", withHeader.msg)
+        assertEquals("left", withHeader.recordMetadata!!.displayColumns.single { it.id == "detail" }.value)
+    }
+
+    @Test
     fun csvSupportsQuotedMultilineCellsAndRetainsMalformedTail() {
         val profile = LogFormatProfile(
             id = "csv-quoted",

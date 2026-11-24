@@ -30,6 +30,7 @@ import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.logFormatProfileJson
 import com.indagium.utils.logFormatProfilesJson
 import com.indagium.utils.validateLogFormatProfile
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -126,6 +127,51 @@ class LogFormatProfilePersistenceTest {
             assertEquals("json note", (app.tab(reopenedSecond)!!.annotations.blocks.single() as AnnBlock.Note).text)
             assertTrue(firstFile.readText().contains("plain note"))
             assertTrue(secondFile.readText().contains("json note"))
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun archiveEntryNotesStayWithTheirOwningProfile() = runBlocking {
+        val directory = createTempDirectory("archive-profile-note-owner").toFile()
+        val archive = File(directory, "logs.zip")
+        writeZipEntry(archive, "nested/events.jsonl", sampleRows())
+        val candidate = listArchiveLogCandidates(archive).single()
+        val notes = File(directory, "notes")
+        val app = AppState(autosaveFile = File(directory, "state.cache"), notesDir = notes, ioDispatcher = Dispatchers.Unconfined)
+        try {
+            app.updateSettings { it.copy(autoExportNotes = true) }
+            val plain = assertNotNull(app.openArchiveEntryWithLogFormatProfile(archive, candidate, "plain-text"))
+            awaitLoaded(app, plain)
+            assertNotNull(app.addLogRefBlock(plain, listOf(1), caption = "Plain text evidence"))
+            val plainName = assertNotNull(app.tab(plain)?.noteTargetName)
+            val plainNote = File(notes, plainName)
+            val plainSidecar = File(notes, "${plainNote.nameWithoutExtension}.ann")
+            waitUntil("plain text note exported") { plainSidecar.isFile && plainSidecar.readText().annotationsFromToken() != null }
+            app.closeTab(plain)
+
+            val json = assertNotNull(app.openArchiveEntryWithLogFormatProfile(archive, candidate, "json-lines"))
+            awaitLoaded(app, json)
+            assertTrue(app.tab(json)!!.annotations.blocks.isEmpty())
+            assertNotNull(app.addNoteBlock(json, "JSON Lines evidence"))
+            val jsonName = assertNotNull(app.tab(json)?.noteTargetName)
+            assertTrue(plainName != jsonName)
+            val jsonNote = File(notes, jsonName)
+            val jsonSidecar = File(notes, "${jsonNote.nameWithoutExtension}.ann")
+            waitUntil("JSON Lines note exported") { jsonSidecar.isFile && jsonSidecar.readText().annotationsFromToken() != null }
+            app.closeTab(json)
+
+            val reopened = assertNotNull(app.openArchiveEntryWithLogFormatProfile(archive, candidate, "plain-text"))
+            awaitLoaded(app, reopened)
+            waitUntil("plain text note autoloaded") { app.tab(reopened)?.annotations?.blocks?.isNotEmpty() == true }
+            val citation = app.tab(reopened)!!.annotations.blocks.single() as AnnBlock.LogRef
+            assertEquals("Plain text evidence", citation.caption)
+            assertNull(citation.sourceTabId)
+            assertEquals(plainName, app.tab(reopened)?.noteTargetName)
+            assertTrue(plainNote.readText().contains("Plain text evidence"))
+            assertTrue(jsonNote.readText().contains("JSON Lines evidence"))
         } finally {
             app.close()
             directory.deleteRecursively()
