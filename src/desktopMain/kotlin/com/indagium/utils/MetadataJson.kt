@@ -34,6 +34,15 @@ internal const val JSON_SECTION_STATUS = "indagium_section_status"
 private const val METADATA_JSON_MAX_DEPTH = 64
 private const val METADATA_JSON_MAX_VALUE_CHARS = 256 * 1024
 private const val METADATA_JSON_MAX_RECORD_CHARS = 4 * 1024 * 1024
+
+/**
+ * Charged to a record's budget for every array element and object entry on top of its decoded characters, so containers of
+ * empty or tiny values (`["","",...]`, `{"a":"","b":""}`) reach the budget too instead of growing without bound. A retained element
+ * costs roughly 50 bytes (an empty string and its list slot) to 130 bytes (a map entry with its key and value object). At 16 a
+ * record holds at most 4 MiB / 16 = 262,144 elements, so it retains about 12-34 MiB at worst: 3-8 times the 4 MiB budget. At 8 the
+ * worst case doubles (up to 68 MiB); at 32 a record of 130,000 plain numbers would already be refused.
+ */
+internal const val METADATA_JSON_ELEMENT_CHARS = 16
 private const val METADATA_JSON_MAX_FIELDS = 128
 private const val METADATA_JSON_NANOS_TO_MILLIS = 6
 private const val METADATA_JSON_CANCELLATION_TOKENS = 128
@@ -287,7 +296,7 @@ internal class MetadataJsonScanner(
             require(next() != null) { "Incomplete metadata JSON value." }
             val child = readValue(path + key)
             if (key == "metadata" && child?.element is JsonObject && hasRecordMetadata(child.element)) recordMetadata = true
-            chars += key.length + (child?.chars ?: 0)
+            chars += key.length + (child?.chars ?: 0) + METADATA_JSON_ELEMENT_CHARS
             if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
                 oversized = true
                 values.clear()
@@ -347,7 +356,7 @@ internal class MetadataJsonScanner(
             require(parser.currentToken() != null) { "Incomplete metadata JSON array." }
             arrayElement = true
             val child = readValue(path)
-            chars += child?.chars ?: 0
+            chars += (child?.chars ?: 0) + METADATA_JSON_ELEMENT_CHARS
             if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
                 oversized = true
                 values.clear()

@@ -273,7 +273,10 @@ internal fun StructuredRecordBody(
     val scroller = LocalRecordTreeScroller.current
     val currentScroller by rememberUpdatedState(scroller)
     val fieldContext = if (recordTabId != null && actions != null) {
-        RecordFieldContext(actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry, focusTree, clearTextSelection)
+        RecordFieldContext(
+            actions, recordTabId, entryId, actions.selectedPaths(recordTabId, entryId), source, probe, geometry, focusTree, clearTextSelection,
+            selectedOrder = actions.pickOrder(recordTabId, entryId),
+        )
     } else {
         null
     }

@@ -51,7 +51,7 @@ private fun copyPicked(context: RecordFieldContext, picked: Set<List<String>>): 
         context.actions.copyText(text)
         return true
     }
-    val rows = normalizedPick(context.geometry.order(), picked)
+    val rows = normalizedPick(context.pickOrder(), picked)
     val root = parseRecordJson(context.source)
     val lines = rows.map { path ->
         val value = root?.let { jsonSubtreeAt(it, path) }?.let(::recordValueText).orEmpty()
@@ -91,6 +91,7 @@ private fun moveTo(context: RecordFieldContext, row: List<String>, order: List<L
         val range = context.geometry.between(anchor, row) ?: setOf(row)
         context.actions.setRangeAnchor(context.tabId, context.entryId, anchor)
         context.actions.pickFields(context.tabId, context.entryId, range.toList(), additive = false)
+        context.notePickOrder()
         context.geometry.cursor = row
     }
     context.geometry.revealRow(row)

@@ -26,7 +26,9 @@ import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
 import com.indagium.utils.joinRecordPath
 import com.indagium.utils.prettyJsonLines
+import com.indagium.utils.recordCitationFingerprint
 import com.indagium.utils.recordFieldRefs
+import com.indagium.utils.recordFingerprint
 import com.indagium.utils.withSelectedRecordSnapshot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -48,6 +50,8 @@ import kotlin.test.assertTrue
  * Chosen fields of a JSON record (AnnBlock.LogRef.recordFields): freezing them, the "R" token that autosave and the .ann sidecar share,
  * the Markdown / HTML export of a whole record and of chosen fields, and what the AI tools report.
  */
+private const val DLT_SESSION_ID = 4100
+
 class RecordFieldsCodecAndExportTest {
     private val record = """{"timestamp":"2026-11-16T10:00:00Z","metadata":{"bluetooth":{"accessory_address":"AA:BB:CC","rssi":-61},""" +
         """"tags":["a","b"]},"id":7}"""
@@ -176,6 +180,57 @@ class RecordFieldsCodecAndExportTest {
             app.close()
             dir.deleteRecursively()
         }
+    }
+
+    private fun dltRow(id: Int, message: String = "Request accepted") = LogEntry(
+        id, "10:00:%02d.000".format(id), LogLevel.I, "ECU1/APP1/CTX1", message, pid = DLT_SESSION_ID,
+        dltEcuId = "ECU1", dltAppId = "APP1", dltContextId = "CTX1", dltMessageType = "log",
+    )
+
+    @Test
+    fun aFieldCitationOfADltRowKeepsAFingerprintAndFindsItsRowAgain() {
+        val dir = createTempDirectory("record-fields-dlt").toFile()
+        val app = AppState(File(dir, "state.cache"), autoExportNotes = false)
+        try {
+            val rows = (1..5).map { dltRow(it, "Request $it") }
+            app.tabs = listOf(mkTab("d", "d.dlt", rows))
+            app.activeTabId = "d"
+            app.requestAddRecordFields("d", 3, listOf(listOf("ecu"), listOf("apid")))
+            app.confirmAddAnn(assertNotNull(app.addAnnRequest), "", AnnBlock.LogRefPresentationOptions())
+            val block = assertIs<AnnBlock.LogRef>(app.tab("d")!!.annotations.blocks.single())
+
+            assertEquals(listOf("ecu", "apid"), block.recordFields!!.map { it.path.single() })
+            assertNotNull(block.sourceRecordFingerprint, "a DLT row has no raw record: the fields its tree reads give the identity")
+            assertEquals("", block.sourceEntries!!.single().msg, "the saved row keeps no message")
+            assertEquals(listOf(3), resolveLogRefRowIds(block, rows, rows.associateBy { it.id }))
+
+            // Through the sidecar, and after the rows moved to other ids.
+            val sidecar = File(dir, "d.ann")
+            assertTrue(app.saveAnnotationsTo("d", sidecar))
+            val saved = assertIs<AnnBlock.LogRef>(assertNotNull(sidecar.readText().annotationsFromToken()).blocks.single())
+            assertEquals(block.sourceRecordFingerprint, saved.sourceRecordFingerprint)
+            val moved = rows.map { it.copy(id = it.id + 10) }
+            assertEquals(listOf(13), resolveLogRefRowIds(saved, moved, moved.associateBy { it.id }))
+            assertEquals(emptyList(), resolveLogRefRowIds(saved, moved.filter { it.id != 13 }, moved.filter { it.id != 13 }.associateBy { it.id }))
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aJsonRowCitationSavedBeforeStillFindsItsRowByTheRawRecordFingerprint() {
+        val row = jsonRow(2)
+        val saved = ref(fields = fields()).copy(
+            logIds = listOf(2),
+            sourceEntries = listOf(LogEntry(2, row.ts, row.level, row.tag, msg = "")),
+            sourceRecordFingerprint = record.recordFingerprint(),
+        )
+        val rows = listOf(jsonRow(1, """{"id":1}"""), row, jsonRow(3, """{"id":3}"""))
+
+        assertEquals(listOf(2), resolveLogRefRowIds(saved, rows, rows.associateBy { it.id }))
+        assertEquals(record.recordFingerprint(), row.recordCitationFingerprint())
+        assertEquals(record.recordFingerprint(), ref(fields = fields()).withSelectedRecordSnapshot(rowIsLive = true).sourceRecordFingerprint)
     }
 
     @Test

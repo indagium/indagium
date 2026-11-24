@@ -10,6 +10,7 @@ import com.indagium.model.SharedNoteInfo
 import com.indagium.ui.AppState
 import com.indagium.ui.GoToRowsResult
 import com.indagium.ui.PendingNoteOverwrite
+import com.indagium.ui.SharedNoteWriteDenied
 import com.indagium.ui.createSharedNote
 import com.indagium.ui.deleteSharedNote
 import com.indagium.ui.goToLogRefRows
@@ -26,6 +27,7 @@ import com.indagium.ui.shareTabNote
 import com.indagium.ui.sharedNotesFor
 import com.indagium.ui.stopSharing
 import com.indagium.ui.tokenFieldAt
+import com.indagium.ui.withSharedNoteWriteAuthor
 import com.indagium.utils.ZipLogCandidate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
@@ -1156,6 +1158,50 @@ class SharedNoteOperationsTest {
             }
         } finally {
             original.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aMemberThatDoesNotRestoreIsDroppedAndItsIdIsNeverReissuedToANewTab() {
+        val dir = createTempDirectory("shared-ops-restore-dropped-member").toFile()
+        val cache = File(dir, "state.cache")
+        try {
+            state(dir).let { state ->
+                try {
+                    state.tabs = listOf(
+                        mkTab("t1", "one.log", listOf(entry(1))).copy(sourcePath = logFile(dir, "one.log").absolutePath),
+                        mkTab("t2", "two.log", listOf(entry(1))).copy(sourcePath = logFile(dir, "two.log").absolutePath),
+                        mkTab("t3", "merged.log", listOf(entry(1))),
+                    )
+                    val host = assertNotNull(state.createSharedNote("Investigation", listOf("t1", "t2", "t3")))
+                    assertEquals(listOf("t1", "t2", "t3"), state.host(host).sharedNote!!.memberTabIds)
+                    state.autosaveNow()
+                } finally {
+                    state.close()
+                }
+            }
+            val restored = AppState(cache, restoreOnCreate = true)
+            try {
+                val hostId = restored.sharedNoteHosts.single().id
+                assertEquals(listOf("t1", "t2"), restored.tabs.map { it.id })
+                assertEquals(listOf("t1", "t2"), restored.host(hostId).sharedNote!!.memberTabIds)
+                restored.addTab()
+                val opened = restored.tabs.last().id
+                assertNotEquals("t3", opened)
+                assertFalse(opened in restored.host(hostId).sharedNote!!.memberTabIds)
+                assertTrue(restored.sharedNotesFor(opened).isEmpty())
+                // The member-scoped write check the tools run under refuses the newcomer.
+                runBlocking {
+                    withSharedNoteWriteAuthor(opened) {
+                        assertFailsWith<SharedNoteWriteDenied> { restored.putBlocks(hostId, noteBlock()) }
+                    }
+                }
+                assertTrue(restored.host(hostId).annotations.blocks.isEmpty())
+            } finally {
+                restored.close()
+            }
+        } finally {
             dir.deleteRecursively()
         }
     }

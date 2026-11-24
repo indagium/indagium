@@ -91,14 +91,26 @@ internal fun joinRecordPath(path: List<String>): String = buildString {
 internal fun String.recordFingerprint(): String =
     MessageDigest.getInstance("SHA-256").digest(toByteArray()).toHexString()
 
-/** Keep the visible record header and a locator when a note contains only selected fields. */
-internal fun AnnBlock.LogRef.withSelectedRecordSnapshot(): AnnBlock.LogRef {
+/**
+ * The one identity of a row a field citation points at, for creating the citation and for finding its row again: the fingerprint of
+ * the row's [LogEntry.rawRecord] when it has one (so citations saved for JSON and profile rows keep matching), else of the text the
+ * field tree reads its fields from ([recordInspectionSource]; a DLT row has no raw record, its tree is built from its fields).
+ */
+internal fun LogEntry.recordCitationFingerprint(): String = (rawRecord ?: recordInspectionSource()).recordFingerprint()
+
+/**
+ * Keep the visible record header and a locator when a note contains only selected fields. [rowIsLive] says the one cited row is still
+ * the tab's own row (a citation being created): its fingerprint may then come from [recordCitationFingerprint]. A row read back from
+ * a saved note already lost its message, so for it only a raw record can still give the fingerprint a citation saved without one needs.
+ */
+internal fun AnnBlock.LogRef.withSelectedRecordSnapshot(rowIsLive: Boolean = false): AnnBlock.LogRef {
     if (recordFields.isNullOrEmpty()) return this
     val row = sourceEntries?.singleOrNull()
     return copy(
         sourceEntries = row?.let { listOf(LogEntry(it.id, it.ts, it.level, it.tag, msg = "")) },
         presentation = presentation?.copy(rows = emptyList()),
-        sourceRecordFingerprint = sourceRecordFingerprint ?: row?.rawRecord?.recordFingerprint(),
+        sourceRecordFingerprint = sourceRecordFingerprint
+            ?: row?.let { if (rowIsLive) it.recordCitationFingerprint() else it.rawRecord?.recordFingerprint() },
     )
 }
 

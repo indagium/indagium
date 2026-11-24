@@ -827,6 +827,73 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         assertEquals(listOf(listOf("id"), IDENTITY, SOURCE, STATUS, OWNER), addedPaths())
     }
 
+    private fun toggleMetadata() {
+        rule.onNodeWithTag(nodeTag("1.root", "metadata", toggle = true)).performClick()
+        rule.waitForIdle()
+    }
+
+    @Test
+    fun collapsingTheParentOfAPartialPickDoesNotBroadenWhatItAdds() {
+        setupJson()
+        openRecordUnderRow()
+        rule.clickRow(under("metadata", "identity"))
+        rule.modifiedClick(under("metadata"), shift = true)
+        assertEquals(setOf(METADATA, IDENTITY), state.recordFieldSelection!!.paths)
+
+        toggleMetadata()
+        rule.onNodeWithTag(under("metadata", "identity")).assertDoesNotExist()
+
+        assertEquals(setOf(METADATA, IDENTITY), state.recordFieldSelection!!.paths, "collapsing leaves the pick alone")
+        assertEquals(listOf(IDENTITY), state.recordFieldsForRowMenu("a", 1), "the log row's menu")
+        rightClickRow(under("metadata"))
+        rule.onNodeWithText("Add field to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(IDENTITY), addedPaths(), "the tree's menu")
+    }
+
+    @Test
+    fun openingTheParentAgainAfterThatKeepsTheSamePick() {
+        setupJson()
+        openRecordUnderRow()
+        rule.clickRow(under("metadata", "identity"))
+        rule.modifiedClick(under("metadata"), shift = true)
+        toggleMetadata()
+        toggleMetadata()
+
+        assertEquals(listOf(IDENTITY), state.recordFieldsForRowMenu("a", 1))
+        rightClickRow(under("metadata"))
+        rule.onNodeWithText("Add field to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(IDENTITY), addedPaths())
+    }
+
+    @Test
+    fun aRangeMadeOverACollapsedContainerStillAddsTheContainerWhole() {
+        setupJson()
+        openRecordUnderRow()
+        toggleMetadata()
+        rule.clickRow(under("id"))
+        rule.modifiedClick(under("metadata"), shift = true)
+
+        assertEquals(listOf(listOf("id"), METADATA), state.recordFieldsForRowMenu("a", 1))
+        toggleMetadata()
+        assertEquals(listOf(listOf("id"), METADATA), state.recordFieldsForRowMenu("a", 1), "opening it does not change the pick")
+    }
+
+    @Test
+    fun aNewPickReplacesTheOrderTheOldOneWasMadeAgainst() {
+        setupJson()
+        openRecordUnderRow()
+        rule.clickRow(under("metadata", "identity"))
+        rule.modifiedClick(under("metadata"), shift = true)
+        assertNotNull(state.recordFieldSelection!!.order)
+
+        rule.clickRow(under("tail"))
+
+        assertNull(state.recordFieldSelection!!.order, "a plain click needs no order")
+        assertEquals(listOf(listOf("tail")), state.recordFieldsForRowMenu("a", 1))
+    }
+
     @Test
     fun withNoTreeLaidOutThePicksFieldsAreNormalisedAgainstTheRecordsOwnDocumentOrder() {
         setupJson()
@@ -914,6 +981,7 @@ internal class FieldActionsRecorder : RecordFieldActions {
     override fun toggleSelected(tabId: String, entryId: Int, path: List<String>) {
         picked = if (path in picked) picked.minusElement(path) else picked.plusElement(path)
         anchor = path
+        order = null
     }
 
     override fun addToNotes(tabId: String, entryId: Int, paths: List<List<String>>) {
@@ -936,6 +1004,16 @@ internal class FieldActionsRecorder : RecordFieldActions {
 
     override fun pickFields(tabId: String, entryId: Int, paths: List<List<String>>, additive: Boolean) {
         picked = if (additive) picked + paths else paths.toSet()
+        order = null
+    }
+
+    /** What the pick was made against, as the app keeps it ([RecordFieldSelection.order]). */
+    var order: List<List<String>>? = null
+
+    override fun pickOrder(tabId: String, entryId: Int) = order
+
+    override fun notePickOrder(tabId: String, entryId: Int, order: List<List<String>>) {
+        this.order = order
     }
 }
 
@@ -1173,6 +1251,30 @@ class RecordFieldRowSelectionUiTest {
         assertEquals(setOf(METADATA), recorder.picked)
         rule.pressKey(Key.DirectionRight)
         assertEquals(setOf(IDENTITY), recorder.picked, "on an open container Right goes to its first field")
+    }
+
+    @Test
+    fun collapsingTheParentOfAPartialPickKeepsWhatCopyAndTheMenuUse() {
+        show()
+        rule.clickRow(row("metadata", "identity"))
+        rule.modifiedClick(row("metadata"), shift = true)
+        assertEquals(setOf(METADATA, IDENTITY), recorder.picked)
+
+        rule.pressKey(Key.DirectionLeft)
+        rule.onNodeWithTag(row("metadata", "identity")).assertDoesNotExist()
+
+        assertEquals(setOf(METADATA, IDENTITY), recorder.picked, "collapsing does not rewrite the pick")
+        rule.pressKey(Key.C, action = true)
+        assertEquals(listOf("metadata.identity: abc"), recorder.copied, "only the picked field is copied")
+        rule.onNodeWithTag(row("metadata")).performMouseInput { rightClick(Offset(width - 8f, center.y)) }
+        rule.waitForIdle()
+        rule.onNodeWithText("Add field to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(listOf(IDENTITY)), recorder.added)
+
+        rule.pressKey(Key.DirectionRight)
+        rule.pressKey(Key.C, action = true)
+        assertEquals(listOf("metadata.identity: abc", "metadata.identity: abc"), recorder.copied, "opened again: the same")
     }
 
     @Test

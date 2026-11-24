@@ -65,6 +65,12 @@ internal data class RecordFieldSelection(
     val sectionId: String?,
     val entryId: Int,
     val paths: Set<List<String>>,
+    /**
+     * The visible fields (document order) of the tree the pick was made against, or null for a pick that needs none (a plain click on
+     * one field) or was made with no tree laid out. What a pick adds and copies is read against THIS order ([normalizedPick]), not the
+     * rows laid out later: expanding or collapsing a container afterwards must not change what the pick stands for. A new pick replaces it.
+     */
+    val order: List<List<String>>? = null,
 )
 
 /**
@@ -102,6 +108,12 @@ internal interface RecordFieldActions {
     fun rangeAnchor(tabId: String, entryId: Int): List<String>? = null
 
     fun setRangeAnchor(tabId: String, entryId: Int, path: List<String>) = Unit
+
+    /** The visible order the pick of record [entryId] was made against ([RecordFieldSelection.order]), or null. Reads snapshot state. */
+    fun pickOrder(tabId: String, entryId: Int): List<List<String>>? = null
+
+    /** Records [order] as what the pick just made in record [entryId] was made against; a later pick replaces it. */
+    fun notePickOrder(tabId: String, entryId: Int, order: List<List<String>>) = Unit
 
     /** Makes [paths] the pick of the record (or adds them to it when [additive]); the range anchor stays where it is. */
     fun pickFields(tabId: String, entryId: Int, paths: List<List<String>>, additive: Boolean) = Unit
@@ -192,6 +204,8 @@ internal class RecordFieldContext(
     val focusTree: () -> Unit = {},
     /** Drops the text selected in the tree (a row drag takes over from it). */
     val clearTextSelection: () -> Unit = {},
+    /** The visible order [selected] was made against ([RecordFieldActions.pickOrder]), or null: the rows laid out now are read then. */
+    val selectedOrder: List<List<String>>? = null,
 ) {
     private val coverage by lazy(LazyThreadSafetyMode.NONE) { FieldPickCoverage(selected) }
 
@@ -205,8 +219,17 @@ internal class RecordFieldContext(
         else -> FieldRowMark.NONE
     }
 
-    /** What the pick adds and copies, as [normalizedPick] reads it for the rows laid out now. */
-    fun pickedFields(): List<List<String>> = normalizedPick(geometry.order(), selected)
+    /**
+     * The visible fields the pick is read against: the ones it was made against, else (a plain click, or a pick made with no tree laid
+     * out) the rows laid out now.
+     */
+    fun pickOrder(): List<List<String>> = selectedOrder ?: geometry.order()
+
+    /** What the pick adds and copies, as [normalizedPick] reads it for the rows the pick was made against. */
+    fun pickedFields(): List<List<String>> = normalizedPick(pickOrder(), selected)
+
+    /** The pick just made (a range, a drag, a toggle, a keyboard extension) stands for the rows laid out now, whatever opens or closes later. */
+    fun notePickOrder() = actions.notePickOrder(tabId, entryId, geometry.order())
 
     /**
      * Whether a Shift-press would pick a range of fields: there is an anchor and no text is selected (with text selected it extends
@@ -257,6 +280,7 @@ internal class RecordFieldContext(
         val kept = if (additive) markedFieldRows(geometry.order(), actions.selectedPaths(tabId, entryId)) else emptyList()
         val keptSet = kept.toHashSet()
         actions.pickFields(tabId, entryId, kept + covered.filter { it !in keptSet }, additive = false)
+        notePickOrder()
         geometry.cursor = path
         return true
     }
@@ -280,6 +304,7 @@ internal class RecordFieldContext(
         val range = geometry.between(start, current) ?: setOf(current)
         val all = if (kept == null) range else markedFieldRows(order, kept).toSet() + range
         actions.pickFields(tabId, entryId, order.filter { it in all } + all.filter { it !in order }, additive = false)
+        notePickOrder()
         geometry.cursor = current
     }
 
@@ -302,6 +327,7 @@ internal class RecordFieldContext(
             actions.pickFields(tabId, entryId, next.toList(), additive = false)
             actions.setRangeAnchor(tabId, entryId, path)
         }
+        notePickOrder()
         geometry.cursor = path
     }
 }
@@ -378,6 +404,15 @@ private class AppRecordFieldActions(private val state: AppState, private val rec
         state.recordFieldAnchor = RecordFieldSelection(tabId, sectionOf(tabId), entryId, setOf(path))
     }
 
+    private fun pickHere(tabId: String, entryId: Int): RecordFieldSelection? =
+        state.recordFieldSelection?.takeIf { it.tabId == tabId && it.entryId == entryId && it.sectionId == sectionOf(tabId) }
+
+    override fun pickOrder(tabId: String, entryId: Int): List<List<String>>? = pickHere(tabId, entryId)?.order
+
+    override fun notePickOrder(tabId: String, entryId: Int, order: List<List<String>>) {
+        pickHere(tabId, entryId)?.let { state.recordFieldSelection = it.copy(order = order) }
+    }
+
     override fun pickFields(tabId: String, entryId: Int, paths: List<List<String>>, additive: Boolean) {
         val next = if (additive) selectedPaths(tabId, entryId) + paths else paths.toSet()
         state.recordFieldSelection = next.takeIf { it.isNotEmpty() }?.let { RecordFieldSelection(tabId, sectionOf(tabId), entryId, it) }
@@ -424,17 +459,23 @@ internal fun AppState.clearRecordFieldSelection(): Boolean {
 internal fun AppState.recordFieldsForRowMenu(tabId: String, entryId: Int): List<List<String>> {
     val pick = recordFieldSelection
     if (pick != null && pick.tabId == tabId && pick.entryId == entryId && pick.sectionId == tab(tabId)?.selectedLogSectionId) {
-        return normalizedPickOfRecord(tabId, entryId, pick.paths)
+        return normalizedPickOfRecord(tabId, entryId, pick.paths, pick.order)
     }
     return recordFieldTrees.selectedAtRightPress(tabId, entryId)
 }
 
 /**
- * [pick] of record [entryId] as what it adds: normalised against the rows its mounted tree shows, else (no tree is laid out, so there
- * is no geometry) against the record's own fields in document order, else the pick as it is.
+ * [pick] of record [entryId] as what it adds: normalised against the rows it was made against ([madeAgainst], see
+ * [RecordFieldSelection.order]), else the rows its mounted tree shows, else (no tree is laid out, so there is no geometry) the
+ * record's own fields in document order, else the pick as it is.
  */
-internal fun AppState.normalizedPickOfRecord(tabId: String, entryId: Int, pick: Set<List<String>>): List<List<String>> {
-    val order = recordFieldTrees.visibleOrder(tabId, entryId)
+internal fun AppState.normalizedPickOfRecord(
+    tabId: String,
+    entryId: Int,
+    pick: Set<List<String>>,
+    madeAgainst: List<List<String>>? = null,
+): List<List<String>> {
+    val order = madeAgainst ?: recordFieldTrees.visibleOrder(tabId, entryId)
         ?: tab(tabId)?.rmap?.get(entryId)?.recordInspectionSource()?.let(::recordFieldsInDocumentOrder)
         ?: return pick.toList()
     return normalizedPick(order, pick)

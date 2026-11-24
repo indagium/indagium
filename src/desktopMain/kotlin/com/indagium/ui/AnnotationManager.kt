@@ -92,7 +92,7 @@ internal class AnnotationManager(private val appState: AppState) {
                 presentation = capture?.presentation?.copy(options = options),
                 sourceSectionId = request.sourceSectionId,
                 recordFields = request.recordFields,
-            ).withSelectedRecordSnapshot()
+            ).withSelectedRecordSnapshot(rowIsLive = true)
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
         return id.takeIf { appState.noteTab(request.targetTabId)?.annotations?.blocks?.any { block -> block.id == id } == true }

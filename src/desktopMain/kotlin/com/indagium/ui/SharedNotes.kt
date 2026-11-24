@@ -9,7 +9,7 @@ import com.indagium.model.SharedNoteInfo
 import com.indagium.model.TabContentState
 import com.indagium.model.resolveRows
 import com.indagium.utils.logFormatProfileFromJson
-import com.indagium.utils.recordFingerprint
+import com.indagium.utils.recordCitationFingerprint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.delay
@@ -189,6 +189,17 @@ private fun LogTab.withReopenedSource(tab: LogTab, addMember: Boolean = false): 
 }
 
 private fun LogTab.withMember(tab: LogTab): LogTab = withReopenedSource(tab, addMember = true)
+
+/**
+ * A restored note without the members that did not come back. A member with a reopenable source restores as a shell, so an id
+ * with no restored tab (a merged or path-less log) never returns; keeping it would let an unrelated tab opened later inherit it.
+ * The closed records are left exactly as saved (none is invented). The same instance when nothing is dropped.
+ */
+internal fun LogTab.withoutUnrestoredMembers(restoredTabIds: Set<String>): LogTab {
+    val info = sharedNote ?: return this
+    val kept = info.memberTabIds.filter { it in restoredTabIds }
+    return if (kept.size == info.memberTabIds.size) this else copy(sharedNote = info.copy(memberTabIds = kept))
+}
 
 /** What a note must remember to reopen this tab's file later; null when it has no plain file to open (an archive entry, a capture). */
 private fun LogTab.asClosedSource(): SharedNoteClosedSource? =
@@ -704,7 +715,7 @@ private fun resolveSelectedRecordId(block: AnnBlock.LogRef, rows: List<LogEntry>
     val saved = block.sourceEntries?.singleOrNull()
 
     fun matches(row: LogEntry): Boolean =
-        (saved == null || (row.ts == saved.ts && row.tag == saved.tag)) && row.rawRecord?.recordFingerprint() == fingerprint
+        (saved == null || (row.ts == saved.ts && row.tag == saved.tag)) && row.recordCitationFingerprint() == fingerprint
 
     if (rmap[id]?.let(::matches) == true) return id
     return rows.asSequence().filter(::matches).minByOrNull { abs(it.id - id) }?.id

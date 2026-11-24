@@ -18793,7 +18793,18 @@ class AppState(
             val note = requireNotNull(host.sharedNote)
             (note.closedMembers.asSequence() + note.closedReferenceSources.asSequence()).map { it.tabId }
         }
-        val savedTabIds = tabs.asSequence().map { it.id } + closedSourceIds + referenceSourceIds
+        // Members are reserved BEFORE the hosts drop the ones that did not restore: such an id can never come back, but it must
+        // not be handed to the next tab either (a member-scoped check would accept the newcomer).
+        val memberIds = sharedNoteHosts.flatMap { it.sharedNote?.memberTabIds.orEmpty() }
+        val restoredIds = tabs.mapTo(HashSet()) { it.id }
+        sharedNoteHosts = sharedNoteHosts.map { it.withoutUnrestoredMembers(restoredIds) }
+        // Other saved structures keyed by a tab id that survive a restore and could attach to a reissued id: the diagram
+        // library's note attachments (a durable store of its own), the per-tab filter/draft/regex state restored above, and the
+        // closed sources a private note keeps. Strip/group/compare/diagram-session ids are pruned against the restored tabs.
+        val keyedIds = activeSavedFilterIds.keys.asSequence() + filterDraftsByTab.keys + filterDraftOriginIds.keys +
+            transientRegexSearchTabIds + diagramLibraryStore.all().asSequence().flatMap { item -> item.attachments.map { it.tabId } } +
+            tabs.asSequence().flatMap { tab -> tab.noteClosedSources.map { it.tabId } }
+        val savedTabIds = tabs.asSequence().map { it.id } + closedSourceIds + referenceSourceIds + memberIds.asSequence() + keyedIds
         tabCounter.set((savedTabIds.mapNotNull { it.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
         // Shells restore synchronously with every user-visible piece of metadata (filter,
         // annotations, expanded/manual blocks). The file contents are queued and started by App()

@@ -20,6 +20,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+private const val WIRE_TIME = 1790000000000000000L
+
 class MetadataJsonCaptureTest {
     @Suppress("MagicNumber") // Synthetic wire timestamps and byte payloads.
     private fun packet(time: Long, identity: String = "Bluetooth.HCI.Note", message: String = "Capture started"): String = buildJsonObject {
@@ -179,6 +181,84 @@ class MetadataJsonCaptureTest {
         assertEquals(listOf("Complete"), parsed.entries.map { it.tag })
         assertEquals(listOf("Capture / Events"), parsed.sections.map { it.id })
         assertTrue(parsed.diagnostics.any { "exceeded the 4 MiB record limit" in it })
+    }
+
+    /** A reader that produces [prefix], then [count] generated elements, then [suffix], without ever holding them all. */
+    private fun generatedJson(prefix: String, count: Int, suffix: String, element: (Int) -> String): java.io.Reader = object : java.io.Reader() {
+        private var current: String = prefix
+        private var offset = 0
+        private var next = 0
+        private var finished = false
+
+        override fun read(buffer: CharArray, off: Int, len: Int): Int {
+            var written = 0
+            while (written < len) {
+                if (offset >= current.length) {
+                    when {
+                        finished -> break
+                        next < count -> current = element(next++)
+                        else -> {
+                            current = suffix
+                            finished = true
+                        }
+                    }
+                    offset = 0
+                    continue
+                }
+                val take = minOf(len - written, current.length - offset)
+                current.toCharArray(buffer, off + written, offset, offset + take)
+                written += take
+                offset += take
+            }
+            return if (written == 0) -1 else written
+        }
+
+        override fun close() = Unit
+    }
+
+    /** A packet whose Details hold [count] generated elements (opened by [open], closed by [close]) between two intact packets. */
+    private fun oversizedByElementCount(open: String, close: String, count: Int, element: (Int) -> String) {
+        val oversized = packet(WIRE_TIME, "Oversized", "oversized").dropLast(1)
+        val later = packet(WIRE_TIME + 1, "Complete", "later")
+        val before = packet(WIRE_TIME + 2, "Before", "before")
+        val reader = generatedJson(
+            """{"Capture":{"Events":[$before,$oversized,"Details":{$open""", count, """$close},$later]}}""",
+        ) { index -> (if (index > 0) "," else "") + element(index) }
+
+        val parsed = parseMetadataJson(reader, metadataJsonProfile())
+
+        assertEquals(setOf("Before", "Complete"), parsed.entries.map { it.tag }.toSet())
+        assertEquals(2, parsed.entries.size)
+        assertTrue(parsed.diagnostics.any { "exceeded the 4 MiB record limit" in it }, parsed.diagnostics.toString())
+    }
+
+    @Test
+    fun aRecordWithAMillionEmptyStringsIsDroppedAsOversizedAndOtherRecordsSurvive() {
+        oversizedByElementCount(""""Raw":[""", "]}", 1_000_000) { "\"\"" }
+    }
+
+    @Test
+    fun aRecordWithHalfAMillionEmptyValuedEntriesIsDroppedAsOversizedAndOtherRecordsSurvive() {
+        // Distinct keys: ~6.7 characters each, so 500,000 of them are under the 4 MiB budget by characters alone.
+        oversizedByElementCount("", "}", 500_000) { "\"k$it\":\"\"" }
+    }
+
+    @Test
+    fun aRecordWithAMillionEmptyContainersIsDroppedAsOversizedAndOtherRecordsSurvive() {
+        oversizedByElementCount(""""Raw":[""", "]}", 1_000_000) { "[]" }
+    }
+
+    @Test
+    fun aSectionArrayFarOverTheRecordBudgetStillKeepsEveryRecord() {
+        val count = 25_000
+        val reader = generatedJson("""{"Capture":{"Events":[""", count, "]}}") { index ->
+            (if (index > 0) "," else "") + packet(1790000000000000000L + index, "Id$index", "message $index")
+        }
+
+        val parsed = parseMetadataJson(reader, metadataJsonProfile())
+
+        assertEquals(count, parsed.entries.size)
+        assertTrue(parsed.diagnostics.none { "exceeded" in it || "damaged" in it }, parsed.diagnostics.toString())
     }
 
     @Test
