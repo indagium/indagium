@@ -235,6 +235,24 @@ class LogFormatParserCoreTest {
     }
 
     @Test
+    fun csvSourceColumnsSurviveCollidingRoleAndAttributeAliases() {
+        val profile = LogFormatProfile(
+            id = "csv-collisions", name = "Collisions", engine = LogFormatEngine.CSV,
+            fieldMappings = mapOf(LogFieldRole.MESSAGE to "body"),
+            attributes = listOf(LogFormatAttribute("detail", "Body attribute", "body", visibleByDefault = true)),
+            visibleColumns = listOf(LogFieldRole.MESSAGE),
+        )
+        val row = parseLogContent("MESSAGE,body,detail\noriginal,mapped,detail-original\n".byteInputStream(), profile = profile).entries.single()
+
+        assertEquals("mapped", row.msg)
+        assertEquals("original", row.profileFields["MESSAGE"])
+        assertEquals("mapped", row.profileFields["body"])
+        assertEquals("detail-original", row.profileFields["detail"])
+        assertTrue(row.recordMetadata!!.displayColumns.any { it.label == "Body attribute" && it.value == "mapped" })
+        assertFalse(row.recordMetadata!!.fieldAliases.containsKey("MESSAGE"))
+    }
+
+    @Test
     fun csvSupportsQuotedMultilineCellsAndRetainsMalformedTail() {
         val profile = LogFormatProfile(
             id = "csv-quoted",

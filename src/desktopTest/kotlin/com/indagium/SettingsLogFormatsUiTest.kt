@@ -324,6 +324,34 @@ class SettingsLogFormatsUiTest {
     }
 
     @Test
+    fun importingProfilesGuardsUnsavedDraftAndCancelLeavesTheImportPending() {
+        val state = newState()
+        openPage(state)
+        rule.onNodeWithTag("settings-log-format-new").performScrollTo().performClick()
+        rule.onNodeWithTag("settings-log-format-name").performScrollTo().performTextReplacement("Unsaved draft")
+        val imported = LogFormatProfile(id = "imported-profile", name = "Imported profile", engine = LogFormatEngine.PLAIN_TEXT)
+        rule.runOnIdle {
+            val file = File(tempDir, "profiles.json").apply {
+                writeText(com.indagium.utils.logFormatProfilesJson(listOf(imported)))
+            }
+            assertTrue(state.previewLogFormatProfilesImport(file).isSuccess)
+        }
+
+        rule.onNodeWithTag("settings-log-format-import-confirm").performScrollTo().performClick()
+        rule.onNodeWithText("Save changes to Unsaved draft?").assertExists()
+        rule.onNode(hasText("Cancel") and !hasTestTag("settings-log-format-import-cancel")).performClick()
+        assertTrue(state.settings.customLogFormatProfiles.isEmpty())
+        assertTrue(state.pendingLogFormatImport != null)
+
+        rule.onNodeWithTag("settings-log-format-import-confirm").performScrollTo().performClick()
+        rule.onNodeWithText("Save").performClick()
+        rule.waitForIdle()
+        assertTrue(state.settings.customLogFormatProfiles.any { it.name == "Unsaved draft" })
+        assertTrue(state.settings.customLogFormatProfiles.any { it.id == imported.id })
+        assertEquals(null, state.pendingLogFormatImport)
+    }
+
+    @Test
     fun aCustomProfileHeaderHoldsTheUnsavedStateRevertSaveAndTheMenu() {
         val state = newState()
         val profile = LogFormatProfile(

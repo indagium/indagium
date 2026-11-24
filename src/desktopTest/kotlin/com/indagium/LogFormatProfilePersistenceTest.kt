@@ -86,6 +86,53 @@ class LogFormatProfilePersistenceTest {
     }
 
     @Test
+    fun distinctProfilesOfOneLogKeepTheirOwnNotesAcrossCloseAndReopen() = runBlocking {
+        val directory = createTempDirectory("profile-note-owner").toFile()
+        val source = File(directory, "events.jsonl").apply { writeText(sampleRows()) }
+        val app = AppState(
+            autosaveFile = File(directory, "state.cache"), restoreOnCreate = false, autoExportNotes = true,
+            notesDir = File(directory, "notes"),
+        )
+        try {
+            app.updateSettings { it.copy(autoExportNotes = true) }
+            val first = assertNotNull(app.openFileWithLogFormatProfile(source, "plain-text"))
+            awaitLoaded(app, first)
+            assertNotNull(app.addNoteBlock(first, "plain note"))
+            val firstName = assertNotNull(app.tab(first)?.noteTargetName)
+            val firstFile = File(directory, "notes/$firstName")
+            waitUntil("first note exported") { firstFile.isFile && firstFile.readText().contains("plain note") }
+
+            val second = assertNotNull(app.openFileWithLogFormatProfile(source, "json-lines"))
+            awaitLoaded(app, second)
+            delay(300)
+            assertTrue(app.tab(second)!!.annotations.blocks.isEmpty(), "another profile must not adopt the saved note")
+            assertNotNull(app.addNoteBlock(second, "json note"))
+            val secondName = assertNotNull(app.tab(second)?.noteTargetName)
+            assertTrue(firstName != secondName)
+            val secondFile = File(directory, "notes/$secondName")
+            waitUntil("second note exported") { secondFile.isFile && secondFile.readText().contains("json note") }
+
+            app.closeTab(first)
+            app.closeTab(second)
+            val reopenedFirst = assertNotNull(app.openFileWithLogFormatProfile(source, "plain-text"))
+            val reopenedSecond = assertNotNull(app.openFileWithLogFormatProfile(source, "json-lines"))
+            awaitLoaded(app, reopenedFirst)
+            awaitLoaded(app, reopenedSecond)
+            waitUntil("both notes autoload") {
+                app.tab(reopenedFirst)?.annotations?.blocks?.isNotEmpty() == true &&
+                    app.tab(reopenedSecond)?.annotations?.blocks?.isNotEmpty() == true
+            }
+            assertEquals("plain note", (app.tab(reopenedFirst)!!.annotations.blocks.single() as AnnBlock.Note).text)
+            assertEquals("json note", (app.tab(reopenedSecond)!!.annotations.blocks.single() as AnnBlock.Note).text)
+            assertTrue(firstFile.readText().contains("plain note"))
+            assertTrue(secondFile.readText().contains("json note"))
+        } finally {
+            app.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun profileSnapshotSurvivesRegistryEditsDeletionUnloadReloadAndAutosaveRestore() = runBlocking {
         val directory = createTempDirectory("log-format-pinned-restore").toFile()
         val source = File(directory, "service.jsonl").apply { writeText(sampleRows()) }

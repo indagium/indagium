@@ -366,15 +366,17 @@ internal fun LogFormatSettingsSection(
                         SettingsButton(
                             "Import profiles",
                             {
-                                state.applyImportedLogFormatProfiles(imported, importConflictUpdate).fold(
-                                    onSuccess = { applied ->
-                                        applied.firstOrNull()?.let(::chooseProfile)
-                                        localError = null
-                                        state.clearLogFormatProfileError()
-                                    },
-                                    onFailure = { localError = it.message ?: "Could not import these log formats." },
-                                )
-                                reclaimFocus()
+                                navigate {
+                                    state.applyImportedLogFormatProfiles(imported, importConflictUpdate).fold(
+                                        onSuccess = { applied ->
+                                            applied.firstOrNull()?.let(::chooseProfile)
+                                            localError = null
+                                            state.clearLogFormatProfileError()
+                                        },
+                                        onFailure = { localError = it.message ?: "Could not import these log formats." },
+                                    )
+                                    reclaimFocus()
+                                }
                             },
                             variant = ButtonVariant.Primary,
                             modifier = Modifier.testTag("settings-log-format-import-confirm"),

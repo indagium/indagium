@@ -8154,15 +8154,19 @@ class AppState(
         val directory = dialog.directory ?: return
         val file = File(directory, path)
         ioScope.launch {
-            val preview = runCatching {
-                val raw = readFilterImportText(file)
-                com.indagium.utils.decodeLogFormatProfiles(raw).also { profiles -> profiles.forEach(::validateLogFormatProfile) }
-            }
-            preview.onSuccess { pendingLogFormatImport = PendingLogFormatProfileImport(file, it) }
-            preview.onFailure { logFormatProfileError = it.message ?: "Could not read these log formats." }
-            onPreview(file, preview)
+            onPreview(file, previewLogFormatProfilesImport(file))
         }
     }
+
+    internal fun previewLogFormatProfilesImport(file: File): Result<List<LogFormatProfile>> =
+        runCatching {
+            val raw = readFilterImportText(file)
+            com.indagium.utils.decodeLogFormatProfiles(raw).also { profiles -> profiles.forEach(::validateLogFormatProfile) }
+        }.onSuccess {
+            pendingLogFormatImport = PendingLogFormatProfileImport(file, it)
+        }.onFailure {
+            logFormatProfileError = it.message ?: "Could not read these log formats."
+        }
 
     internal fun cancelLogFormatProfileImport() {
         pendingLogFormatImport = null
@@ -16217,7 +16221,10 @@ class AppState(
     private fun applyOpenedNote(tabId: String, file: File, autoLoad: Boolean, update: (LogTab) -> LogTab) {
         upTab(tabId) { tab ->
             // The tab or export ownership can change while the note is being read off the UI thread.
-            if (autoLoad && (!canAutoLoadOwnNotes(tab) || isAutoLoadExcludedNote(file))) tab else update(tab)
+            if (!autoLoad) return@upTab update(tab)
+            val alreadyOwned = file.name.lowercase() in reservedNoteTargetNames(exceptNoteId = tab.id)
+            val eligible = canAutoLoadOwnNotes(tab) && !isAutoLoadExcludedNote(file) && !alreadyOwned && noteProfileMatches(file, tab)
+            if (eligible) update(tab) else tab
         }
     }
 
@@ -16305,10 +16312,21 @@ class AppState(
         val match = noteFileCandidateFiles(current.filename, sourcePath)
             .filter { it.exists() }
             .filterNot(::isAutoLoadExcludedNote)
-            .filter { readSourceFingerprint(it) == SourceFingerprint.Recorded(sourcePath) }
+            .filter { it.name.lowercase() !in reservedNoteTargetNames(exceptNoteId = current.id) }
+            .filter { readSourceFingerprint(it) == SourceFingerprint.Recorded(sourcePath) && noteProfileMatches(it, current) }
             .maxByOrNull { it.lastModified() }
             ?: return
         openNoteFile(tabId, match, autoLoad = true)
+    }
+
+    /** Legacy notes without an owner profile remain eligible for their recorded source path. */
+    private fun noteProfileMatches(mdFile: File, tab: LogTab): Boolean {
+        val sidecar = File(mdFile.parentFile, "${mdFile.nameWithoutExtension}.ann")
+        if (!sidecar.isFile) return true
+        return runCatching {
+            val owner = sidecar.readText().noteOwnerSourceFromAnnotationsToken()
+            owner?.logFormatProfileSnapshot == null || owner.logFormatProfileSnapshot == tab.logFormatProfileSnapshot
+        }.getOrDefault(false)
     }
 
     private fun canAutoLoadOwnNotes(tab: LogTab): Boolean =
@@ -17495,7 +17513,7 @@ class AppState(
         val candidateName = nextFreeNoteTargetName(baseName, MAX_NOTE_TARGET_SUFFIX) { name ->
             name.lowercase() in reserved || (sourcePath != null && when (val recorded = readSourceFingerprint(File(targetDir, name))) {
                 SourceFingerprint.NotRecorded -> false
-                is SourceFingerprint.Recorded -> recorded.path != sourcePath
+                is SourceFingerprint.Recorded -> recorded.path != sourcePath || !noteProfileMatches(File(targetDir, name), tab)
                 SourceFingerprint.Unreadable -> true
             })
         }

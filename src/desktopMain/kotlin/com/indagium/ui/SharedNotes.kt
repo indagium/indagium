@@ -226,7 +226,9 @@ private fun LogTab.citationSource(): SharedNoteClosedSource =
     asClosedSource() ?: SharedNoteClosedSource(id, filename, null, sourceInstanceId = sourceInstanceId)
 
 internal fun LogTab.noteOwnerSourceForExport(): SharedNoteClosedSource? =
-    if (sharedNote == null && annotations.blocks.any { it is AnnBlock.LogRef && it.sourceTabId == null }) citationSource() else null
+    if (sharedNote == null && (logFormatProfileSnapshot != null ||
+            annotations.blocks.any { it is AnnBlock.LogRef && it.sourceTabId == null })
+    ) citationSource() else null
 
 private const val PENDING_CITATION_SOURCE_PREFIX = "citation-"
 

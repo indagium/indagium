@@ -1033,14 +1033,18 @@ internal class CsvRecordMachine(
         profile.fieldMappings.forEach { (role, source) ->
             val value = fields[source] ?: source.toIntOrNull()?.let { fields[it.toString()] }
             if (value != null) {
-                mapped[role.name] = value
-                aliases[role.name] = source
+                if (role.name !in fields) {
+                    mapped[role.name] = value
+                    aliases[role.name] = source
+                }
             }
         }
         profile.attributes.forEach { attribute ->
             fields[attribute.source]?.let {
-                mapped[attribute.id] = it
-                aliases[attribute.id] = attribute.source
+                if (attribute.id !in fields) {
+                    mapped[attribute.id] = it
+                    aliases[attribute.id] = attribute.source
+                }
             }
         }
         return mapped
@@ -1252,7 +1256,11 @@ internal fun recordToEntry(
 
     fun role(role: LogFieldRole): String? {
         val source = profile.fieldMappings[role]
-        return if (source == null) fields[role.name] else fields[role.name] ?: fields[source]
+        return when {
+            source == null -> fields[role.name]
+            profile.engine == LogFormatEngine.CSV -> fields[source]
+            else -> fields[role.name] ?: fields[source]
+        }
     }
     val timeText = record.directTimestamp ?: role(LogFieldRole.TIMESTAMP)
     val severityText = (record.directSeverity ?: role(LogFieldRole.SEVERITY))?.let(compactor::shared)
@@ -1279,7 +1287,8 @@ internal fun recordToEntry(
     }
     // A missing value stays as an empty column, so the columns after it keep their place under the header.
     val attributeColumns = profile.attributes.filter { it.visibleByDefault }.map { attribute ->
-        compactor.column(attribute.id, attribute.label, fields[attribute.id].orEmpty())
+        val value = if (profile.engine == LogFormatEngine.CSV) fields[attribute.source] else fields[attribute.id]
+        compactor.column(attribute.id, attribute.label, value.orEmpty())
     }
     val displayColumns = withAttributeColumns(profile, visibleColumnFields, attributeColumns)
     val projectedColumns: List<LogDisplayField> = displayColumns.ifEmpty { emptyList() }
