@@ -14,11 +14,13 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.width
 import com.indagium.model.HolidayLightness
@@ -106,6 +108,7 @@ class ReleaseAnnouncementUiTest {
 
     @Test fun everyAnnouncedThemeHasALightCardLeftAndADarkCardRight() {
         showThemes()
+        rule.onNodeWithTag("release-themes-scrollbar").assertDoesNotExist()
         val dialog = rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).getUnclippedBoundsInRoot()
         assertTrue(dialog.width.value >= 700f - 1f, "the dialog is wide enough for two columns")
         val lightHeader = rule.onNodeWithTag("release-themes-header-light").getUnclippedBoundsInRoot()
@@ -200,6 +203,10 @@ class ReleaseAnnouncementUiTest {
         }
         rule.onNodeWithText("Done").performClick()
         rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
+        assertTrue(rule.onNodeWithTag("release-themes-scrollbar").isDisplayed())
+        val lastTheme = loadReleaseAnnouncement().themes.last()
+        val lastCard = rule.onNodeWithTag(seasonalPackModeTag(lastTheme, dark = false))
+        assertTrue(lastCard.performScrollTo().isDisplayed())
         rule.onNodeWithText("Skip").performClick()
         assertEquals("", state.settings.lastSeenWhatsNewVersion)
         assertEquals("", state.settings.lastSeenHolidayAnnouncementVersion)

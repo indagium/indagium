@@ -7047,14 +7047,15 @@ class AppState(
     fun rotateControlToken() = controlServerManager.rotateControlToken()
 
     fun startPendingRestoredTabLoads() {
-        val targets = synchronized(stateLock) {
-            tabMemoryLifecycleStarted = true
+        synchronized(stateLock) {
             val shells = pendingRestoredLoads.toList().also { pendingRestoredLoads.clear() }
             shells.forEach { shell -> reloadSourcesByTab[shell.tab.id] = shell.source }
-            if (settings.inactiveTabUnloadMinutes <= 0) shells.map { it.tab.id }
+            val targets = if (settings.inactiveTabUnloadMinutes <= 0) shells.map { it.tab.id }
             else displayedLogTabIdsLocked().filter { id -> shells.any { it.tab.id == id } }
+            // Register startup loads before the background residency jobs can start them as reloads.
+            targets.forEach { id -> ensureTabLoaded(id, retryFailed = false, showGlobalLoading = true) }
+            tabMemoryLifecycleStarted = true
         }
-        targets.forEach { id -> ensureTabLoaded(id, retryFailed = false, showGlobalLoading = true) }
         reconcileDisplayedTabResidency()
     }
 

@@ -88,7 +88,7 @@ private fun NewHolidayThemesContent(state: AppState, release: ReleaseAnnouncemen
             color = colors.ts,
             fontSize = 12.sp,
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(COLUMN_GAP)) {
+        Row(Modifier.fillMaxWidth().padding(end = THEME_SCROLLBAR_GUTTER), horizontalArrangement = Arrangement.spacedBy(COLUMN_GAP)) {
             listOf("Light", "Dark").forEach { header ->
                 AppText(
                     header, color = colors.td, fontSize = 11.sp, fontWeight = FontWeight.Medium,
@@ -96,9 +96,13 @@ private fun NewHolidayThemesContent(state: AppState, release: ReleaseAnnouncemen
                 )
             }
         }
-        Column(
-            Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+        ScrollColumnWithBar(
+            Modifier.fillMaxWidth().heightIn(max = 360.dp),
+            contentPadding = PaddingValues(end = THEME_SCROLLBAR_GUTTER),
+            endGutter = 0.dp,
             verticalArrangement = Arrangement.spacedBy(8.dp),
+            scrollbarTag = "release-themes-scrollbar",
+            showBarOnlyWhenScrollable = true,
         ) {
             release.themes.mapNotNull { HOLIDAY_THEMES[it] }.forEach { theme ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(COLUMN_GAP)) {
@@ -123,3 +127,4 @@ private fun NewHolidayThemesContent(state: AppState, release: ReleaseAnnouncemen
 
 private val HOLIDAY_DIALOG_WIDTH = 700.dp
 private val COLUMN_GAP = 8.dp
+private val THEME_SCROLLBAR_GUTTER = 12.dp

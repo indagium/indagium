@@ -65,7 +65,9 @@ class VideoSparseSeekTest {
             // one, and to nothing else.
             val resumed = awaitPicture("first resumed frame", controller, 30_000L) { !dominantChannel(it, 1) }
             assertTrue(dominantChannel(resumed, 2) || isCyan(resumed), "resumed into %06x, not the 1.5 s or 1.6 s frame".format(resumed and 0xFFFFFF))
-            assertTrue(controller.positionMs >= 1_500L)
+            // The decoder publishes the picture before the playhead, so seeing the new bitmap
+            // does not guarantee the separate position update has landed yet.
+            await("playhead reaches the first resumed frame") { controller.positionMs >= 1_500L }
 
             controller.pause()
             controller.seek(2_000L)
@@ -77,7 +79,7 @@ class VideoSparseSeekTest {
             assertTrue(controller.positionMs in 2_000L..2_500L)
             assertTrue(isCyan(controller.grabCurrentFrame()), "the 3.0s frame must not display early")
             awaitPicture("second resumed frame", controller, 30_000L, ::isMagenta)
-            assertTrue(controller.positionMs >= 3_000L)
+            await("playhead reaches the second resumed frame") { controller.positionMs >= 3_000L }
         } finally {
             controller.close()
         }

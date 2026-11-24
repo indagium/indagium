@@ -47,9 +47,9 @@ class ReleaseAnnouncementTest {
         assertTrue(release.themes.isEmpty(), "the Halloween packs belong to the next release")
         assertNull(initialReleaseStep(release, "", ""), "a fresh install does not show historical announcements")
         val next = loadReleaseAnnouncement()
-        assertEquals("1.9.2", next.version)
+        assertEquals("1.10.0", next.version)
         assertTrue(next.pages.isNotEmpty(), "the new release bundles its real notes")
-        assertTrue(next.themes.isEmpty(), "the special themes were announced in 1.9.1")
+        assertEquals(11, next.themes.size, "the special themes introduced in 1.10.0 are bundled")
         val current = loadReleaseAnnouncement("1.9.1", { name ->
             when (name) {
                 "whats-new-start.txt" -> "1.9.0"
@@ -118,7 +118,7 @@ class ReleaseAnnouncementTest {
         assertTrue(preview.preview)
         assertEquals(release.version, preview.version)
         assertEquals(release.pages, preview.pages)
-        assertTrue(preview.themes.isNotEmpty(), "preview offers theme examples when this release has none")
+        assertEquals(release.themes, preview.themes)
         assertFalse(preview.pages.any { "This is a preview" in it.markdown })
     }
 
@@ -200,10 +200,11 @@ class ReleaseAnnouncementTest {
             assertEquals(1, state.releaseAnnouncementPage)
             state.finishWhatsNew()
             assertEquals(ReleaseAnnouncementStep.HOLIDAY_THEMES, state.releaseAnnouncementStep)
-            state.finishHolidayAnnouncement(HolidayPack.TRICK_OR_TREAT)
+            val pack = state.releaseAnnouncement!!.themes.first()
+            state.finishHolidayAnnouncement(pack)
             assertEquals("2.0.0", state.settings.lastSeenWhatsNewVersion)
             assertEquals("2.0.0", state.settings.lastSeenHolidayAnnouncementVersion)
-            assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
+            assertEquals(pack, state.settings.holiday.pack)
             state.previewReleaseAnnouncement()
             state.finishWhatsNew()
             state.finishHolidayAnnouncement()
