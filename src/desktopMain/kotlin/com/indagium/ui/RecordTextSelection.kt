@@ -136,13 +136,23 @@ internal fun markedFieldRows(order: List<List<String>>, pick: Set<List<String>>)
  * The fields a pick adds, copies or offers to the menus: the pick as [normalizeFieldPaths] reads it for a tree whose visible fields are
  * [order] (document order), so what is used is what a range was normalised to before the pick kept every covered row. Picked fields that
  * are not visible rows stay as they are unless a kept field holds them. With no [order] (a tree that is not laid out) the pick itself.
+ * The result follows the record: a hidden field takes the place of its nearest visible container (the collapsed one it sits in), so
+ * collapsing a container never moves its picked fields to the end; one with no visible container at all goes last.
  */
 internal fun normalizedPick(order: List<List<String>>, pick: Set<List<String>>): List<List<String>> {
     val coverage = FieldPickCoverage(pick)
     val visible = order.toHashSet()
     val kept = normalizeFieldPaths(order, order.filterTo(LinkedHashSet()) { coverage.covers(it) })
     val hidden = pick.filter { it !in visible && kept.none { holder -> isFieldInside(it, holder) } }
-    return kept + hidden
+    if (hidden.isEmpty()) return kept
+    val index = HashMap<List<String>, Int>(order.size * 2).apply { order.forEachIndexed { i, path -> put(path, i) } }
+
+    fun position(path: List<String>): Int {
+        for (length in path.size downTo 1) index[path.subList(0, length)]?.let { return it }
+        return Int.MAX_VALUE
+    }
+    // Stable: fields that share a place (several hidden in one container) keep the order they were picked in.
+    return (kept + hidden).sortedBy(::position)
 }
 
 /**

@@ -911,15 +911,10 @@ private fun TagsModeBarContent(
     fun refocusLog() { runCatching { logFocusRequester?.requestFocus() } }
     val componentUnavailable = componentStatus?.availability == CapabilityAvailability.UNAVAILABLE
     val canFilterByProcess = pidStatus?.availability != CapabilityAvailability.UNAVAILABLE
+    // Only what cannot be used is noted here; partial coverage ("N of M records have … values") is not shown.
     val capabilityNotes = buildList {
-        componentStatus?.takeIf { it.availability == CapabilityAvailability.PARTIAL }?.let {
-            add("Component values partial" to it.reason)
-        }
         pidStatus?.takeIf { it.availability == CapabilityAvailability.UNAVAILABLE }?.let {
             add("PID filtering unavailable" to it.reason)
-        }
-        pidStatus?.takeIf { it.availability == CapabilityAvailability.PARTIAL }?.let {
-            add("PID coverage partial" to it.reason)
         }
     }
 

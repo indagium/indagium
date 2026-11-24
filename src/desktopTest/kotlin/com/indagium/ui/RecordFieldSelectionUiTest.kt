@@ -213,6 +213,9 @@ class RecordFieldNormalizationTest {
         assertEquals(listOf(B1), normalizedPick(threeContainers, setOf(B, B1)), "partly picked: just the picked field")
         assertEquals(listOf(listOf("x", "gone")), normalizedPick(threeContainers, setOf(listOf("x", "gone"))), "a field that is no row stays as it is")
         assertEquals(listOf(B), normalizedPick(emptyList(), setOf(B)), "no rows laid out: the pick itself")
+        // B collapsed (its fields are no rows): a hidden pick inside it takes B's place, before C1, not the end.
+        val bCollapsed = threeContainers.filterNot { isFieldInside(it, B) }
+        assertEquals(listOf(B1, C1), normalizedPick(bCollapsed, linkedSetOf(C1, B1)), "a hidden field keeps its container's place")
     }
 
     @Test
@@ -1378,7 +1381,8 @@ class RecordFieldRowSelectionUiTest {
 
         assertEquals(setOf(IDENTITY, listOf("tail")), recorder.picked)
         rule.pressKey(Key.C, action = true)
-        assertEquals(listOf("metadata.identity: abc", "tail: true"), recorder.copied.single().lines().sorted())
+        // In the record's order: metadata comes before tail, so the hidden identity is not moved to the end.
+        assertEquals(listOf("metadata.identity: abc", "tail: true"), recorder.copied.single().lines())
     }
 
     @Test

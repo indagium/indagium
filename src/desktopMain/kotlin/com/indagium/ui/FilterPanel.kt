@@ -682,9 +682,6 @@ internal fun FilterPanel(
     val severityUnavailableReason = tab.profileCapabilityUnavailableReason(LogCapability.SEVERITY_FILTER, profileCapabilities)
     val severityPartialReason = tab.profileCapabilityPartialReason(LogCapability.SEVERITY_FILTER, profileCapabilities)
     val componentUnavailableReason = tab.profileCapabilityUnavailableReason(LogCapability.COMPONENT_FILTER, profileCapabilities)
-    val componentPartialReason = tab.profileCapabilityPartialReason(LogCapability.COMPONENT_FILTER, profileCapabilities)
-    val pidUnavailableReason = tab.profileCapabilityUnavailableReason(LogCapability.PID_THREAD_FILTER, profileCapabilities)
-    val pidPartialReason = tab.profileCapabilityPartialReason(LogCapability.PID_THREAD_FILTER, profileCapabilities)
     val canFilterByProcess = tab.canUseProfileCapability(LogCapability.PID_THREAD_FILTER, profileCapabilities)
     val canUseAndroidIssues = tab.canUseProfileCapability(LogCapability.ANDROID_ISSUES, profileCapabilities)
 
@@ -1390,24 +1387,6 @@ internal fun FilterPanel(
                             AppText("Switch to Regex to search record text.", color = tc.ts, fontSize = 10.sp)
                         }
                     } else {
-                        if (componentPartialReason != null) {
-                            AppText(
-                                componentPartialReason,
-                                color = tc.ts,
-                                fontSize = 10.sp,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                            )
-                        }
-                        // A tab without process IDs simply offers no process button on its tag rows: a banner saying so here,
-                        // inside the component filter, read as if the component filter itself were off.
-                        if (pidUnavailableReason == null && pidPartialReason != null) {
-                            AppText(
-                                pidPartialReason,
-                                color = tc.ts,
-                                fontSize = 10.sp,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                            )
-                        }
                         // Combined pills for pkg prefixes + included/excluded tags. The list is the section's flex part whether or not it has chips (an
                         // empty one is just room), so the input under it sits at the bottom of a tile made taller than its content.
                         val chipsShown = totalActive > 0 && fpState.incPillsExpanded
