@@ -232,6 +232,18 @@ internal class RecordFieldContext(
     fun notePickOrder() = actions.notePickOrder(tabId, entryId, geometry.order())
 
     /**
+     * The pick as what it stands for, read live: [normalizedPick] against the rows it was made against, which is what it adds and copies.
+     * Every action that builds on the pick (a Ctrl/Cmd toggle, Ctrl/Cmd+Shift range or drag, a keyboard extension) starts from this set
+     * and not from the raw one, whose helper rows (the container a range was dragged from) would otherwise stand for their whole subtree
+     * once a collapse hides what they were helping to pick. The new pick is then made against, and stored with, the rows laid out now.
+     */
+    fun canonicalPick(): Set<List<String>> {
+        val picked = actions.selectedPaths(tabId, entryId)
+        if (picked.isEmpty()) return picked
+        return normalizedPick(actions.pickOrder(tabId, entryId) ?: geometry.order(), picked).toCollection(LinkedHashSet())
+    }
+
+    /**
      * Whether a Shift-press would pick a range of fields: there is an anchor and no text is selected (with text selected it extends
      * that selection instead). Read as the press arrives, before the text selection reacts to it.
      */
@@ -276,8 +288,10 @@ internal class RecordFieldContext(
      */
     fun pickRangeTo(path: List<String>, additive: Boolean): Boolean {
         val anchor = actions.rangeAnchor(tabId, entryId) ?: return false
-        val covered = geometry.between(anchor, path) ?: setOf(path)
-        val kept = if (additive) markedFieldRows(geometry.order(), actions.selectedPaths(tabId, entryId)) else emptyList()
+        val between = geometry.between(anchor, path) ?: setOf(path)
+        val base = if (additive) canonicalPick() else emptySet()
+        val covered = between - standInRows(geometry.order(), base, between, path)
+        val kept = if (additive) markedFieldRows(geometry.order(), base) else emptyList()
         val keptSet = kept.toHashSet()
         actions.pickFields(tabId, entryId, kept + covered.filter { it !in keptSet }, additive = false)
         notePickOrder()
@@ -301,7 +315,8 @@ internal class RecordFieldContext(
      */
     fun pickDragRange(start: List<String>, current: List<String>, kept: Set<List<String>>?) {
         val order = geometry.order()
-        val range = geometry.between(start, current) ?: setOf(current)
+        val between = geometry.between(start, current) ?: setOf(current)
+        val range = if (kept == null) between else between - standInRows(order, kept, between, current)
         val all = if (kept == null) range else markedFieldRows(order, kept).toSet() + range
         actions.pickFields(tabId, entryId, order.filter { it in all } + all.filter { it !in order }, additive = false)
         notePickOrder()
@@ -320,8 +335,9 @@ internal class RecordFieldContext(
      */
     fun toggleRow(path: List<String>) {
         val picked = actions.selectedPaths(tabId, entryId)
-        val next = toggledFieldPick(geometry.order(), picked, path)
-        if (next == (if (path in picked) picked - setOf(path) else picked + setOf(path))) {
+        val base = canonicalPick()
+        val next = toggledFieldPick(geometry.order(), base, path)
+        if (base == picked && next == (if (path in picked) picked - setOf(path) else picked + setOf(path))) {
             actions.toggleSelected(tabId, entryId, path)
         } else {
             actions.pickFields(tabId, entryId, next.toList(), additive = false)

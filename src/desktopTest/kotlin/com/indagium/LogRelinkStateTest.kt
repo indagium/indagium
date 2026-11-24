@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.cases.writeCaseNote
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
+import com.indagium.model.SharedNoteClosedSource
 import com.indagium.ui.AppState
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
@@ -106,6 +107,31 @@ class LogRelinkStateTest {
         assertNull(state.logRelinkUnverifiedTabId, "a confirmed match is silent, not flagged as unverifiable")
         val newTab = state.tabs.single { it.sourcePath == renamed.absolutePath }
         assertEquals(listOf("ZzqxxRelinkTag"), newTab.annotations.decisiveTags)
+    }
+
+    @Test
+    fun locateLogForCaseOfANoteWrittenForAnotherPathTakesTheLocatedLogAsItsOwnerAndKeepsItsCitationsLocal() {
+        val notesDir = createTempDirectory("openlog-relink-owner-notes").toFile()
+        val logDir = createTempDirectory("openlog-relink-owner-logs").toFile()
+        val original = writeLogFile(logDir, "original.log", threadtimeLines("DeviceManager", 30))
+        val expectedFingerprint = computeLogFingerprint(parseLogcat(original))
+        val state = newState(notesDir)
+        val caseId = previewLocateOnlyCase(state, notesDir, "zzqxx_relink_owner", "zzqxx relink owner marker", expectedFingerprint)
+        // The note was written for a log that sat elsewhere: its sidecar names that path as the owner of its own-row citations.
+        val ann = File(notesDir, "zzqxx_relink_owner.ann")
+        val written = requireNotNull(ann.readText().annotationsFromToken())
+        val gone = SharedNoteClosedSource("t9", "original.log", File(logDir, "gone/original.log").absolutePath)
+        ann.writeText(written.annotationsToken(ownerSource = gone))
+        assertTrue(written.blocks.single().let { it is AnnBlock.LogRef && it.sourceTabId == null })
+
+        val renamed = writeLogFile(logDir, "renamed_copy.log", threadtimeLines("DeviceManager", 30))
+        state.locateLogForCase(caseId, renamed)
+
+        waitUntil { state.tabs.any { it.sourcePath == renamed.absolutePath && it.annotations.blocks.isNotEmpty() } }
+        val located = state.tabs.single { it.sourcePath == renamed.absolutePath }
+        val citation = located.annotations.blocks.single() as AnnBlock.LogRef
+        assertNull(citation.sourceTabId, "the located log is the note's log now: its own rows, not the vanished path's")
+        assertTrue(located.noteClosedSources.isEmpty())
     }
 
     @Test

@@ -867,6 +867,58 @@ class RecordFieldTextSelectionLogViewUiTest : SharedNoteUiTestBase() {
         assertEquals(listOf(IDENTITY), addedPaths())
     }
 
+    private val tail = listOf("tail")
+
+    /** A partial pick (`metadata.identity`, made by a Shift range that also marked its container), then the container collapsed. */
+    private fun partialPickThenCollapse() {
+        setupJson()
+        openRecordUnderRow()
+        rule.clickRow(under("metadata", "identity"))
+        rule.modifiedClick(under("metadata"), shift = true)
+        assertEquals(setOf(METADATA, IDENTITY), state.recordFieldSelection!!.paths)
+        toggleMetadata()
+    }
+
+    private fun assertAddsIdentityAndTail() {
+        assertEquals(setOf(IDENTITY, tail), state.recordFieldsForRowMenu("a", 1).toSet(), "the log row's menu")
+        rightClickRow(under("tail"))
+        rule.onNodeWithText("Add 2 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(IDENTITY, tail), addedPaths().toSet(), "the tree's menu")
+        assertEquals(2, addedPaths().size)
+    }
+
+    @Test
+    fun aCtrlClickAfterTheParentOfAPartialPickWasCollapsedKeepsThePartialPick() {
+        partialPickThenCollapse()
+
+        rule.modifiedClick(under("tail"), ctrl = true)
+
+        assertAddsIdentityAndTail()
+    }
+
+    @Test
+    fun expandingTheParentAfterThatShowsTheIdentityAndTheTailPickedNotTheSiblings() {
+        partialPickThenCollapse()
+        rule.modifiedClick(under("tail"), ctrl = true)
+
+        toggleMetadata()
+
+        assertEquals(setOf(IDENTITY, tail), state.recordFieldSelection!!.paths)
+        assertEquals(setOf(IDENTITY, tail), state.recordFieldsForRowMenu("a", 1).toSet())
+        rightClickRow(under("metadata", "source"))
+        rule.onNodeWithText("Add field to notes").assertExists()
+    }
+
+    @Test
+    fun aCtrlShiftRangeAfterTheParentOfAPartialPickWasCollapsedKeepsThePartialPick() {
+        partialPickThenCollapse()
+
+        rule.modifiedClick(under("tail"), ctrl = true, shift = true)
+
+        assertAddsIdentityAndTail()
+    }
+
     @Test
     fun aRangeMadeOverACollapsedContainerStillAddsTheContainerWhole() {
         setupJson()
@@ -1275,6 +1327,58 @@ class RecordFieldRowSelectionUiTest {
         rule.pressKey(Key.DirectionRight)
         rule.pressKey(Key.C, action = true)
         assertEquals(listOf("metadata.identity: abc", "metadata.identity: abc"), recorder.copied, "opened again: the same")
+    }
+
+    @Test
+    fun shiftDownFromAPartialPickWhoseParentWasCollapsedKeepsThePartialPick() {
+        show()
+        rule.clickRow(row("metadata", "identity"))
+        rule.modifiedClick(row("metadata"), shift = true)
+        rule.pressKey(Key.DirectionLeft)
+        rule.onNodeWithTag(row("metadata", "identity")).assertDoesNotExist()
+        assertEquals(setOf(METADATA, IDENTITY), recorder.picked)
+
+        rule.pressKey(Key.DirectionDown, shift = true)
+
+        assertEquals(setOf(IDENTITY, listOf("tail")), recorder.picked, "the collapsed parent is not part of the extension")
+        rule.pressKey(Key.C, action = true)
+        assertEquals(listOf("metadata.identity: abc", "tail: true"), recorder.copied.single().lines().sorted())
+        rule.onNodeWithTag(row("tail")).performMouseInput { rightClick(Offset(width - 8f, center.y)) }
+        rule.waitForIdle()
+        rule.onNodeWithText("Add 2 fields to notes").performClick()
+        rule.waitForIdle()
+        assertEquals(setOf(IDENTITY, listOf("tail")), recorder.added.single().toSet())
+    }
+
+    @Test
+    fun aCtrlDragAfterTheParentOfAPartialPickWasCollapsedKeepsThePartialPick() {
+        show("""{"metadata":{"identity":"abc","source":"phone"},"a":1,"b":2}""")
+        rule.clickRow(row("metadata", "identity"))
+        rule.modifiedClick(row("metadata"), shift = true)
+        rule.pressKey(Key.DirectionLeft)
+        rule.onNodeWithTag(row("metadata", "identity")).assertDoesNotExist()
+        val dragger = RowDragger(rule, ctrl = true)
+
+        dragger.press(rule.rowPoint(row("a")))
+        dragger.moveTo(rule.rowPoint(row("b")))
+        dragger.release()
+
+        assertEquals(setOf(IDENTITY, listOf("a"), listOf("b")), recorder.picked, "the collapsed parent is not added whole")
+        rule.pressKey(Key.C, action = true)
+        assertEquals(listOf("a: 1", "b: 2", "metadata.identity: abc"), recorder.copied.single().lines().sorted())
+    }
+
+    @Test
+    fun aCtrlClickAfterTheParentOfAPartialPickWasCollapsedKeepsWhatCopyAndTheMenuUse() {
+        show()
+        rule.clickRow(row("metadata", "identity"))
+        rule.modifiedClick(row("metadata"), shift = true)
+        rule.pressKey(Key.DirectionLeft)
+        rule.modifiedClick(row("tail"), ctrl = true)
+
+        assertEquals(setOf(IDENTITY, listOf("tail")), recorder.picked)
+        rule.pressKey(Key.C, action = true)
+        assertEquals(listOf("metadata.identity: abc", "tail: true"), recorder.copied.single().lines().sorted())
     }
 
     @Test

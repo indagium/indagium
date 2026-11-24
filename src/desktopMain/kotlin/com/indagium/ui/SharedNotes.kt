@@ -8,8 +8,11 @@ import com.indagium.model.SharedNoteClosedSource
 import com.indagium.model.SharedNoteInfo
 import com.indagium.model.TabContentState
 import com.indagium.model.resolveRows
+import com.indagium.utils.jsonSubtreeAt
 import com.indagium.utils.logFormatProfileFromJson
+import com.indagium.utils.parseRecordJson
 import com.indagium.utils.recordCitationFingerprint
+import com.indagium.utils.recordInspectionSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.delay
@@ -244,13 +247,23 @@ private fun Annotations.remapCitationSources(destinations: Map<String, String>):
     if (destination == null || destination == ref.sourceTabId) ref else ref.copy(sourceTabId = destination)
 }
 
-/** Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock. */
+/**
+ * Restores a note's cross-file citations and rebinds any source already open. Caller holds stateLock.
+ *
+ * A note's own-row citations (no source tab) are the rows of [owner] only when [owner] is the log the note was written for. They become
+ * explicit references to [originalOwnerSource] instead when [owner] is a shared note, a tab with no log of its own, or a tab that is not
+ * that source (the note was opened into another log's Notes tile). [ownedByOwner] says the caller knows [owner] is the note's log now
+ * whatever the sidecar recorded: the tab auto-loading its own notes, or one reopened or located for the note (a renamed or moved copy of
+ * the log is still the log); the citations then stay its own.
+ */
 internal fun AppState.restoreNoteSourcesLocked(
     owner: LogTab,
     sources: List<SharedNoteClosedSource>,
     originalOwnerSource: SharedNoteClosedSource?,
+    ownedByOwner: Boolean = false,
 ): LogTab {
-    val needsExplicitSource = owner.sharedNote != null || (owner.sourcePath == null && owner.logData.isEmpty())
+    val needsExplicitSource = owner.sharedNote != null || (owner.sourcePath == null && owner.logData.isEmpty()) ||
+        (!ownedByOwner && originalOwnerSource?.matches(owner) == false)
     val owningSource = originalOwnerSource?.takeIf { needsExplicitSource }?.copy(tabId = freshCitationSourceId())
     val importedLocalIds = HashSet<String>()
     val imported = if (owningSource == null) owner.annotations else owner.annotations.mapLogRefs { ref ->
@@ -710,15 +723,50 @@ private fun LogEntry.sameRowContent(saved: LogEntry): Boolean =
         (saved.pid == 0 || pid == saved.pid) && (saved.tid == 0 || tid == saved.tid) &&
         (saved.rawRecord == null || rawRecord == saved.rawRecord)
 
+/**
+ * Whether [this] row carries the header a field citation kept of its row (the saved row keeps the id, time, severity and tag, and
+ * the process and thread only when it still has them). [withSeverity] is off for a row whose fingerprint is of its raw record, which
+ * already fixes everything its severity is read from; a row without one has a fingerprint of the fields its tree shows, and those
+ * leave the severity (and the header) out, so two frames that differ only there would otherwise share it.
+ */
+private fun LogEntry.sameCitedHeader(saved: LogEntry, withSeverity: Boolean): Boolean =
+    ts == saved.ts && tag == saved.tag && (!withSeverity || level == saved.level) &&
+        (saved.pid == 0 || pid == saved.pid) && (saved.tid == 0 || tid == saved.tid)
+
 private fun resolveSelectedRecordId(block: AnnBlock.LogRef, rows: List<LogEntry>, rmap: Map<Int, LogEntry>, fingerprint: String): Int? {
     val id = block.logIds.singleOrNull() ?: return null
     val saved = block.sourceEntries?.singleOrNull()
 
     fun matches(row: LogEntry): Boolean =
-        (saved == null || (row.ts == saved.ts && row.tag == saved.tag)) && row.recordCitationFingerprint() == fingerprint
+        (saved == null || row.sameCitedHeader(saved, withSeverity = row.rawRecord == null)) && row.recordCitationFingerprint() == fingerprint
 
     if (rmap[id]?.let(::matches) == true) return id
     return rows.asSequence().filter(::matches).minByOrNull { abs(it.id - id) }?.id
+}
+
+/**
+ * A field-only citation saved before field citations carried a fingerprint of a row without a raw record (a DLT frame): the saved row
+ * is just the header with a blank message, so the row is told by that header plus the values of the chosen fields. Null for any other
+ * citation, which keeps the paths it always had.
+ */
+private fun AnnBlock.LogRef.legacyFieldOnlyHeader(): LogEntry? {
+    if (sourceRecordFingerprint != null || recordFields.isNullOrEmpty() || logIds.size != 1) return null
+    return sourceEntries?.singleOrNull()?.takeIf { it.msg.isBlank() }
+}
+
+/** The saved id when its row still has the chosen fields' values, else the one row that has them (none when several do). */
+private fun resolveLegacyFieldRecordId(block: AnnBlock.LogRef, saved: LogEntry, rows: List<LogEntry>, rmap: Map<Int, LogEntry>): Int? {
+    val id = block.logIds.single()
+    val fields = block.recordFields.orEmpty()
+
+    fun matches(row: LogEntry): Boolean {
+        if (!row.sameCitedHeader(saved, withSeverity = true)) return false
+        val root = parseRecordJson(row.recordInspectionSource()) ?: return false
+        return fields.all { field -> jsonSubtreeAt(root, field.path)?.toString() == field.json }
+    }
+
+    if (rmap[id]?.let(::matches) == true) return id
+    return rows.filter(::matches).singleOrNull()?.id
 }
 
 /** Frozen rows of one content that no longer sit under their saved id, and the ids of the rows that now carry that content. */
@@ -735,6 +783,7 @@ private class LostRowGroup(val saved: LogEntry, val targetIds: List<Int>) {
  */
 internal fun resolveLogRefRowIds(block: AnnBlock.LogRef, rows: List<LogEntry>, rmap: Map<Int, LogEntry>): List<Int> {
     block.sourceRecordFingerprint?.let { return listOfNotNull(resolveSelectedRecordId(block, rows, rmap, it)) }
+    block.legacyFieldOnlyHeader()?.let { return listOfNotNull(resolveLegacyFieldRecordId(block, it, rows, rmap)) }
     val frozen = block.sourceEntries?.associateBy { it.id }.orEmpty()
     val found = LinkedHashSet<Int>()
     val lost = LinkedHashMap<Int, LogEntry>()

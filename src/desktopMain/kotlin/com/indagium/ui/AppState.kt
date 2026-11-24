@@ -16141,7 +16141,14 @@ class AppState(
 
     fun openNoteFile(tabId: String, file: File) = openNoteFile(tabId, file, autoLoad = false)
 
-    private fun openNoteFile(tabId: String, file: File, autoLoad: Boolean) {
+    /**
+     * Like [openNoteFile], for a tab that is the log the note was written for whatever the sidecar names as its owner (the log was
+     * reopened or located for this note, so a renamed or moved copy is still it): the note's own-row citations stay the tab's own
+     * rows. A plain [openNoteFile] reads them as the sidecar's owner's when that is another log.
+     */
+    fun openNoteFileOfOwnLog(tabId: String, file: File) = openNoteFile(tabId, file, autoLoad = false, ownedByTab = true)
+
+    private fun openNoteFile(tabId: String, file: File, autoLoad: Boolean, ownedByTab: Boolean = autoLoad) {
         if (!file.exists()) {
             removeRecentNote(file)
             recentNotesMenuOpen = false
@@ -16179,7 +16186,7 @@ class AppState(
                             frozen.hasUnresolvedLegacyLogRefs(withRows)
                         },
                     )
-                    restoreNoteSourcesLocked(loadedNote, sources, originalOwnerSource)
+                    restoreNoteSourcesLocked(loadedNote, sources, originalOwnerSource, ownedByOwner = ownedByTab)
                 }
                 return
             }
@@ -16895,7 +16902,7 @@ class AppState(
             val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
             while (isLoadInFlight(newTabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
             if (seq != caseReopenRequestSeq) return@launch
-            openNoteFile(newTabId, noteFile)
+            openNoteFileOfOwnLog(newTabId, noteFile)
             closeCaseLibrary()
         }
     }
@@ -17018,7 +17025,7 @@ class AppState(
 
     private fun finishLogRelinkAttach(newTabId: String, attach: LogRelinkAttach) {
         when (attach) {
-            is LogRelinkAttach.CaseLibraryNote -> openNoteFile(newTabId, attach.noteFile)
+            is LogRelinkAttach.CaseLibraryNote -> openNoteFileOfOwnLog(newTabId, attach.noteFile)
             is LogRelinkAttach.TabAnnotations -> {
                 // The note and its file pin move to the new tab, in one step: both tabs holding one pin would make the first edit
                 // in the new tab re-pin it to another file name. The log-less tab keeps its notes in memory but no pin, so a later edit

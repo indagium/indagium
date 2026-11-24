@@ -192,7 +192,14 @@ internal class MetadataJsonScanner(
     val records = mutableListOf<MetadataJsonPacket>()
     val summaries = mutableListOf<MetadataJsonSummary>()
     val diagnostics = mutableListOf<String>()
+
+    /**
+     * The array paths section discovery can still use. [arrayPathLog] lists them in the order they were first seen, so an object or
+     * array that is dropped (oversized) or turns into a record (whose inner arrays are never sections) can release exactly the paths it
+     * recorded and a hostile packet cannot leave its fields behind.
+     */
     val arrayPaths = linkedSetOf<List<String>>()
+    private val arrayPathLog = ArrayList<List<String>>()
     var sectionStatus: Map<String, JsonObject> = emptyMap()
     var packetMetadataSeen = false
         private set
@@ -279,8 +286,15 @@ internal class MetadataJsonScanner(
         chainEnd = mark.end
     }
 
+    /** Forgets every array path first seen since the log held [mark] entries (see [arrayPaths]). */
+    private fun releaseArrayPaths(mark: Int) {
+        for (index in arrayPathLog.size - 1 downTo mark) arrayPaths.remove(arrayPathLog[index])
+        arrayPathLog.subList(mark, arrayPathLog.size).clear()
+    }
+
     private fun readObject(path: List<String>, element: Boolean): MetadataJsonValue? {
         val startToken = tokens
+        val pathMark = arrayPathLog.size
         val mark = markRun()
         val startLine = parser.currentTokenLocation().lineNr.toLong()
         val startByte = tokenByte()
@@ -290,13 +304,17 @@ internal class MetadataJsonScanner(
         var recordMetadata = false
         var chars = 2
         var oversized = false
+        // Whether this object is itself the one that is too big (over budget, or holding a string over its limit), not merely one
+        // that holds a dropped child: a dropped child already gave up what it recorded, and its neighbours stay.
+        var origin = false
         while (next() != JsonToken.END_OBJECT) {
             require(parser.currentToken() == JsonToken.FIELD_NAME) { "Incomplete metadata JSON object." }
             val key = parser.currentName()
             require(next() != null) { "Incomplete metadata JSON value." }
             val child = readValue(path + key)
-            if (key == "metadata" && child?.element is JsonObject && hasRecordMetadata(child.element)) recordMetadata = true
+            if (isRecordMetadataField(key, child)) recordMetadata = true
             chars += key.length + (child?.chars ?: 0) + METADATA_JSON_ELEMENT_CHARS
+            if (isDroppedByItself(chars, child)) origin = true
             if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
                 oversized = true
                 values.clear()
@@ -306,16 +324,12 @@ internal class MetadataJsonScanner(
         }
         if (oversized) {
             discardOversizedObject(recordMetadata, firstRecord, firstSummary, mark)
+            // A packet (an array's element, or one with record metadata) that is dropped takes everything it recorded with it.
+            if (origin || recordMetadata || element) releaseArrayPaths(pathMark)
             return null
         }
         val value = JsonObject(values)
-        if (maxRecords == 1 && path.lastOrNull() == "metadata" && hasRecordMetadata(value)) {
-            packetMetadataSeen = true
-            throw MetadataJsonSampleComplete()
-        }
-        if (path == listOf(JSON_SECTION_STATUS)) sectionStatus = value.mapNotNull { (key, child) ->
-            (child as? JsonObject)?.let { key to it }
-        }.toMap()
+        noteSpecialObject(path, value)
         if (!isMetadataRecord(value)) {
             if (path.size == 2 && path[0] != JSON_SECTION_STATUS) {
                 summaries += MetadataJsonSummary(
@@ -326,6 +340,8 @@ internal class MetadataJsonScanner(
             return MetadataJsonValue(value, chars)
         }
         discardNestedRecords(firstRecord, firstSummary, mark)
+        // The arrays inside a record stay in its tree; none of them is ever a section.
+        releaseArrayPaths(pathMark)
         records += MetadataJsonPacket(
             value, path.joinToString(" / "), startLine, parser.currentLocation().lineNr.toLong(), startByte, endByte(), records.size,
             numberRun(CHAIN_RECORD, startToken, element),
@@ -333,6 +349,24 @@ internal class MetadataJsonScanner(
         if (records.size >= maxRecords) throw MetadataJsonSampleComplete()
         return MetadataJsonValue(value, chars)
     }
+
+    private fun isRecordMetadataField(key: String, child: MetadataJsonValue?): Boolean =
+        key == "metadata" && child?.element is JsonObject && hasRecordMetadata(child.element)
+
+    /** Ends a detection sample at a record's metadata object, and takes the section status object when [path] is it. */
+    private fun noteSpecialObject(path: List<String>, value: JsonObject) {
+        if (maxRecords == 1 && path.lastOrNull() == "metadata" && hasRecordMetadata(value)) {
+            packetMetadataSeen = true
+            throw MetadataJsonSampleComplete()
+        }
+        if (path == listOf(JSON_SECTION_STATUS)) sectionStatus = value.mapNotNull { (key, child) ->
+            (child as? JsonObject)?.let { key to it }
+        }.toMap()
+    }
+
+    /** Whether a container that has [chars] so far and just read [child] is itself too big, rather than only holding a dropped container. */
+    private fun isDroppedByItself(chars: Int, child: MetadataJsonValue?): Boolean =
+        chars > METADATA_JSON_MAX_RECORD_CHARS || (child == null && parser.currentToken() == JsonToken.VALUE_STRING)
 
     private fun discardOversizedObject(recordMetadata: Boolean, firstRecord: Int, firstSummary: Int, mark: RunMark) {
         if (recordMetadata) discardNestedRecords(firstRecord, firstSummary, mark)
@@ -348,15 +382,20 @@ internal class MetadataJsonScanner(
     }
 
     private fun readArray(path: List<String>): MetadataJsonValue? {
-        arrayPaths += path
+        if (arrayPaths.add(path)) arrayPathLog += path
+        // Only what is read inside this array is released if it is dropped: its own path was always kept, and a record that stays in it
+        // (a neighbour of the element that was too big) has its section from its rows.
+        val pathMark = arrayPathLog.size
         val values = mutableListOf<JsonElement>()
         var chars = 2
         var oversized = false
+        var origin = false
         while (next() != JsonToken.END_ARRAY) {
             require(parser.currentToken() != null) { "Incomplete metadata JSON array." }
             arrayElement = true
             val child = readValue(path)
             chars += (child?.chars ?: 0) + METADATA_JSON_ELEMENT_CHARS
+            if (isDroppedByItself(chars, child)) origin = true
             if (oversized || child == null || chars > METADATA_JSON_MAX_RECORD_CHARS) {
                 oversized = true
                 values.clear()
@@ -364,6 +403,7 @@ internal class MetadataJsonScanner(
                 values += child.element
             }
         }
+        if (origin) releaseArrayPaths(pathMark)
         return if (oversized) null else MetadataJsonValue(JsonArray(values), chars)
     }
 }

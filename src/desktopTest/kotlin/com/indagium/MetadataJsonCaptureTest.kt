@@ -4,14 +4,17 @@ import com.indagium.model.CapabilityAvailability
 import com.indagium.model.LogCapability
 import com.indagium.model.LogFieldRole
 import com.indagium.model.LogLevel
+import com.indagium.utils.METADATA_JSON_FACTORY
 import com.indagium.utils.isMetadataJsonSample
 import com.indagium.utils.metadataJsonProfile
 import com.indagium.utils.parseLogContent
 import com.indagium.utils.parseMetadataJson
+import com.indagium.utils.scanMetadataJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.StringReader
 import kotlin.test.Test
@@ -246,6 +249,40 @@ class MetadataJsonCaptureTest {
     @Test
     fun aRecordWithAMillionEmptyContainersIsDroppedAsOversizedAndOtherRecordsSurvive() {
         oversizedByElementCount(""""Raw":[""", "]}", 1_000_000) { "[]" }
+    }
+
+    private fun packetWithEmptyArrayFields(count: Int, neighbours: Boolean = true) = generatedJson(
+        """{"Events":[${if (neighbours) packet(WIRE_TIME + 2, "Before", "before") + "," else ""}""" +
+            """${packet(WIRE_TIME, "Oversized", "oversized").dropLast(1)},"f_first":[]""",
+        count, """}${if (neighbours) "," + packet(WIRE_TIME + 1, "Complete", "later") else ""}]}""",
+    ) { index -> ",\"f_$index\":[]" }
+
+    @Test
+    fun aDroppedPacketKeepsNoArrayPathsOfItsOwn() {
+        val scanned = scanMetadataJson(METADATA_JSON_FACTORY.createParser(packetWithEmptyArrayFields(200_000)), Int.MAX_VALUE, -1)
+
+        assertEquals(setOf("Before", "Complete"), scanned.records.map { (it.value["metadata"] as JsonObject)["identity"]!!.jsonPrimitive.content }.toSet())
+        assertTrue(scanned.diagnostics.any { "exceeded the 4 MiB record limit" in it }, scanned.diagnostics.toString())
+        assertEquals(setOf(listOf("Events")), scanned.arrayPaths)
+    }
+
+    @Test
+    fun aDroppedPacketAloneAddsNoEmptySectionsToTheLog() {
+        val parsed = parseMetadataJson(packetWithEmptyArrayFields(200_000, neighbours = false), metadataJsonProfile())
+
+        assertEquals(emptyList(), parsed.sections.map { it.id }, "every field of the dropped packet would be an empty section")
+        assertEquals(0, parsed.entries.size)
+    }
+
+    @Test
+    fun anAcceptedRecordKeepsNoArrayPathsFromInsideItselfButSiblingSectionsStay() {
+        val record = packet(WIRE_TIME, "Inside", "inside").dropLast(1) + ""","Details":{"values":[1,2],"linked":[[]]}}"""
+        val json = """{"Events":[$record],"Empty":[],"Wrapper":{"Nested":[]}}"""
+
+        val scanned = scanMetadataJson(METADATA_JSON_FACTORY.createParser(StringReader(json)), Int.MAX_VALUE, -1)
+
+        assertEquals(setOf(listOf("Events"), listOf("Empty"), listOf("Wrapper", "Nested")), scanned.arrayPaths)
+        assertEquals(listOf("Events", "Wrapper / Nested"), parseMetadataJson(StringReader(json), metadataJsonProfile()).sections.map { it.id }.sorted())
     }
 
     @Test

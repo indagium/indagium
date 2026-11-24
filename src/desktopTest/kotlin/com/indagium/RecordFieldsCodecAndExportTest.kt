@@ -29,6 +29,7 @@ import com.indagium.utils.prettyJsonLines
 import com.indagium.utils.recordCitationFingerprint
 import com.indagium.utils.recordFieldRefs
 import com.indagium.utils.recordFingerprint
+import com.indagium.utils.recordInspectionSource
 import com.indagium.utils.withSelectedRecordSnapshot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -182,10 +183,98 @@ class RecordFieldsCodecAndExportTest {
         }
     }
 
-    private fun dltRow(id: Int, message: String = "Request accepted") = LogEntry(
-        id, "10:00:%02d.000".format(id), LogLevel.I, "ECU1/APP1/CTX1", message, pid = DLT_SESSION_ID,
-        dltEcuId = "ECU1", dltAppId = "APP1", dltContextId = "CTX1", dltMessageType = "log",
+    private fun dltRow(
+        id: Int,
+        message: String = "Request accepted",
+        level: LogLevel = LogLevel.I,
+        ts: String = "10:00:%02d.000".format(id),
+        appId: String = "APP1",
+    ) = LogEntry(
+        id, ts, level, "ECU1/$appId/CTX1", message, pid = DLT_SESSION_ID,
+        dltEcuId = "ECU1", dltAppId = appId, dltContextId = "CTX1", dltMessageType = "log",
     )
+
+    private fun dltFieldCitation(row: LogEntry, vararg paths: List<String>) = AnnBlock.LogRef(
+        "r1", listOf(row.id), "cap", sourceEntries = listOf(row),
+        recordFields = (recordFieldRefs(row.recordInspectionSource(), paths.toList()) as RecordFieldsResult.Ok).fields,
+    )
+
+    private fun resolve(block: AnnBlock.LogRef, rows: List<LogEntry>) = resolveLogRefRowIds(block, rows, rows.associateBy { it.id })
+
+    @Test
+    fun aFieldCitationOfAWarnFrameNeverLandsOnAnInfoFrameThatTookItsId() {
+        val warn = dltRow(3, "Same words", LogLevel.W, ts = "10:00:03.000")
+        val block = dltFieldCitation(warn, listOf("ecu"), listOf("apid")).withSelectedRecordSnapshot(rowIsLive = true)
+        assertNotNull(block.sourceRecordFingerprint)
+        assertEquals(LogLevel.W, block.sourceEntries!!.single().level, "the saved header keeps the severity")
+        val shifted = listOf(
+            dltRow(1, ts = "10:00:01.000"), dltRow(2, ts = "10:00:02.000"),
+            dltRow(3, "Same words", LogLevel.I, ts = "10:00:03.000"), dltRow(4, "Same words", LogLevel.W, ts = "10:00:03.000"),
+            dltRow(5, ts = "10:00:05.000"),
+        )
+
+        assertEquals(listOf(4), resolve(block, shifted), "the INFO frame at the saved id is another frame")
+        assertEquals(listOf(3), resolve(block, listOf(shifted[0], shifted[1], warn, shifted[4])), "the frame itself is still found at its id")
+        assertEquals(emptyList(), resolve(block, shifted.filter { it.id != 4 }), "no WARN frame is left to find")
+    }
+
+    @Test
+    fun twoIdenticalWarnFramesStillTakeTheOneNearestTheSavedId() {
+        val warn = dltRow(3, "Same words", LogLevel.W, ts = "10:00:03.000")
+        val block = dltFieldCitation(warn, listOf("ecu")).withSelectedRecordSnapshot(rowIsLive = true)
+        val rows = listOf(
+            dltRow(1, ts = "10:00:01.000"), dltRow(2, ts = "10:00:02.000"), dltRow(3, "Other words", LogLevel.W, ts = "10:00:03.000"),
+            dltRow(4, "Same words", LogLevel.W, ts = "10:00:03.000"), dltRow(5, "Same words", LogLevel.W, ts = "10:00:03.000"),
+        )
+
+        assertEquals(listOf(4), resolve(block, rows))
+    }
+
+    /** A field-only DLT citation as older notes stored it: the row's header, a blank message, the chosen values and no fingerprint. */
+    private fun legacyDltCitation(row: LogEntry) = dltFieldCitation(row, listOf("ecu"), listOf("apid")).copy(
+        sourceEntries = listOf(LogEntry(row.id, row.ts, row.level, row.tag, msg = "")),
+        sourceRecordFingerprint = null,
+    )
+
+    @Test
+    fun aLegacyDltFieldCitationIsFoundByItsHeaderAndFieldValues() {
+        val rows = (1..5).map { dltRow(it, "Request $it", LogLevel.W) }
+        val legacy = legacyDltCitation(rows[2])
+        assertNull(legacy.sourceRecordFingerprint)
+        assertEquals("", legacy.sourceEntries!!.single().msg)
+
+        assertEquals(listOf(3), resolve(legacy, rows), "found at its unchanged id")
+        val moved = rows.map { it.copy(id = it.id + 10) }
+        assertEquals(listOf(13), resolve(legacy, moved), "found when the ids shifted and it is the only match")
+        assertEquals(emptyList(), resolve(legacy, moved.filter { it.id != 13 }))
+
+        // Through the autosave/sidecar token, which is how a note saved before the fingerprint reaches the resolver.
+        val restored = assertIs<AnnBlock.LogRef>(
+            assertNotNull(Annotations(blocks = listOf(legacy)).annotationsToken(null).annotationsFromToken()).blocks.single(),
+        )
+        assertEquals(listOf(13), resolve(restored, moved))
+    }
+
+    @Test
+    fun aLegacyDltFieldCitationNeedsTheValuesAndTheSeverityToAgree() {
+        val rows = (1..5).map { dltRow(it, "Request $it", LogLevel.W) }
+        val legacy = legacyDltCitation(rows[2])
+        // The row now under the saved id has another application id; the same frame sits at id 7, and an INFO twin at id 8.
+        val changed = rows.map { if (it.id == 3) dltRow(3, "Request 3", LogLevel.W, appId = "APP2") else it } +
+            dltRow(7, "Request 3", LogLevel.W, ts = rows[2].ts) + dltRow(8, "Request 3", LogLevel.I, ts = rows[2].ts)
+
+        assertEquals(listOf(7), resolve(legacy, changed))
+    }
+
+    @Test
+    fun aLegacyDltFieldCitationThatTwoRowsMatchIsNotGuessed() {
+        val rows = (1..5).map { dltRow(it, "Request $it", LogLevel.W) }
+        val legacy = legacyDltCitation(rows[2])
+        val ambiguous = rows.filter { it.id != 3 } + dltRow(13, "Request 3", LogLevel.W, ts = rows[2].ts) + dltRow(14, "Request 3", LogLevel.W, ts = rows[2].ts)
+
+        assertEquals(emptyList(), resolve(legacy, ambiguous))
+        assertEquals(listOf(3), resolve(legacy, ambiguous + rows[2]), "the saved id still wins when it matches, even with twins")
+    }
 
     @Test
     fun aFieldCitationOfADltRowKeepsAFingerprintAndFindsItsRowAgain() {

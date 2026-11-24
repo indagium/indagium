@@ -66,7 +66,8 @@ private fun cursorRow(context: RecordFieldContext, picked: Set<List<String>>, or
     val marked = FieldPickCoverage(picked)
     val cursor = context.geometry.cursor?.takeIf { it in order && marked.covers(it) }
     val anchor = context.actions.rangeAnchor(context.tabId, context.entryId)?.takeIf { it in order && marked.covers(it) }
-    return cursor ?: anchor ?: order.firstOrNull { marked.covers(it) }
+    // A pick whose every field is hidden under a collapsed container still moves from that container.
+    return cursor ?: anchor ?: order.firstOrNull { marked.covers(it) } ?: order.firstOrNull { row -> picked.any { isFieldInside(it, row) } }
 }
 
 private fun moveWithArrow(context: RecordFieldContext, picked: Set<List<String>>, key: Key, extend: Boolean): Boolean {
@@ -89,8 +90,9 @@ private fun moveTo(context: RecordFieldContext, row: List<String>, order: List<L
     } else {
         val anchor = context.actions.rangeAnchor(context.tabId, context.entryId)?.takeIf { it in order } ?: from
         val range = context.geometry.between(anchor, row) ?: setOf(row)
+        val extended = extendedFieldPick(order, context.canonicalPick(), range, row)
         context.actions.setRangeAnchor(context.tabId, context.entryId, anchor)
-        context.actions.pickFields(context.tabId, context.entryId, range.toList(), additive = false)
+        context.actions.pickFields(context.tabId, context.entryId, extended, additive = false)
         context.notePickOrder()
         context.geometry.cursor = row
     }

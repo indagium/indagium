@@ -67,6 +67,41 @@ internal fun normalizeFieldPaths(order: List<List<String>>, covered: Set<List<St
 }
 
 /**
+ * The rows of [range] (the rows between an anchor and the new end, in the rows laid out now) that only stand in for [base] fields that are
+ * no visible rows: a container collapsed since the pick was made is not itself picked, and adding it to a range would add its whole subtree
+ * and so widen the pick. Those fields stay picked ([extendedFieldPick] and the additive range and drag keep them); the row is left out,
+ * except [end], the row the range was explicitly taken to.
+ */
+internal fun standInRows(
+    order: List<List<String>>,
+    base: Set<List<String>>,
+    range: Set<List<String>>,
+    end: List<String>? = null,
+): Set<List<String>> {
+    val visible = order.toHashSet()
+    val hidden = base.filter { it !in visible }
+    if (hidden.isEmpty()) return emptySet()
+    val coverage = FieldPickCoverage(base)
+    return range.filterTo(LinkedHashSet()) { row -> row != end && !coverage.covers(row) && hidden.any { isFieldInside(it, row) } }
+}
+
+/**
+ * The pick a keyboard extension to [end] makes from [range] on top of [base], the canonical pick it extends: the range without its
+ * [standInRows], and the [base] fields they stood for.
+ */
+internal fun extendedFieldPick(
+    order: List<List<String>>,
+    base: Set<List<String>>,
+    range: Set<List<String>>,
+    end: List<String>,
+): List<List<String>> {
+    val holders = standInRows(order, base, range, end)
+    if (holders.isEmpty()) return range.toList()
+    val visible = order.toHashSet()
+    return range.filter { it !in holders } + base.filter { it !in visible && holders.any { holder -> isFieldInside(it, holder) } }
+}
+
+/**
  * Which rows a pick of record fields marks. The pick holds the rows the user covered (a Shift range or a drag keeps every row between
  * its ends, like a text selection); a picked field with none of its own fields picked (a Ctrl/Cmd-clicked container, or a range that
  * ends on one) stands for its whole subtree, exactly as [normalizeFieldPaths] adds it, so the rows inside it are marked too. A picked
@@ -459,7 +494,7 @@ private fun rowDragStart(
     val hit = geometry.hitAt(position.y) ?: return null
     if (!hit.inArea && position.x < toPx(geometry.control(hit.path)?.clickStart ?: 0.dp)) return null
     val additive = keys.isCtrlPressed || keys.isMetaPressed
-    return RowDrag(hit.path, additive, if (additive) context.actions.selectedPaths(context.tabId, context.entryId) else emptySet())
+    return RowDrag(hit.path, additive, if (additive) context.canonicalPick() else emptySet())
 }
 
 private const val NANOS_PER_SECOND = 1_000_000_000f

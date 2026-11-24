@@ -19,6 +19,7 @@ import com.indagium.ui.createSharedNote
 import com.indagium.ui.goToLogRefRows
 import com.indagium.ui.goToLogRefRowsAfterReopen
 import com.indagium.ui.mkTab
+import com.indagium.ui.noteOwnerSourceFromAnnotationsToken
 import com.indagium.ui.resolveLogRefRowIds
 import com.indagium.ui.setNotesView
 import com.indagium.ui.stopSharing
@@ -649,6 +650,84 @@ class SharedNoteGoToRowsTest {
             val localCitation = assertIs<AnnBlock.LogRef>(located.annotations.blocks.single())
             assertNull(localCitation.sourceTabId)
             assertEquals(GoToRowsResult.Navigated(located.id, listOf(row.id)), go { app.goToLogRefRows(localCitation, located.id) })
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aNoteOfLogAOpenedInLogBsNotesKeepsItsOwnRowCitationsOnA() {
+        val dir = createTempDirectory("goto-note-of-a-in-b").toFile()
+        val app = twoTabs(dir)
+        try {
+            app.putIntoNote("a", ref(source = null, ids = listOf(2, 3)))
+            val md = File(dir, "a_analysis.md").apply { writeText("A's analysis") }
+            val ann = File(dir, "a_analysis.ann")
+            assertTrue(app.saveAnnotationsTo("a", ann))
+
+            app.openNoteFile("b", md)
+
+            val cited = assertIs<AnnBlock.LogRef>(app.tab("b")!!.annotations.blocks.single())
+            assertEquals("a", cited.sourceTabId, "its own rows are A's rows, not B's")
+            assertEquals(GoToRowsResult.Navigated("a", listOf(2, 3)), go { app.goToLogRefRows(cited, "b") })
+            assertEquals("a", app.activeTabId)
+
+            // Saved again from B, the note still names A as the log it cites and B is not recorded as its owner.
+            val resaved = File(dir, "b_copy.ann")
+            assertTrue(app.saveAnnotationsTo("b", resaved))
+            val token = resaved.readText()
+            assertEquals(listOf(File(dir, "a.log").absolutePath), token.citedSourcesFromAnnotationsToken().map { it.sourcePath })
+            assertNull(token.noteOwnerSourceFromAnnotationsToken())
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aNoteOfLogAOpenedInLogBsNotesWithAClosedAReopensAFromTheOffer() {
+        val dir = createTempDirectory("goto-note-of-closed-a-in-b").toFile()
+        val app = twoTabs(dir)
+        try {
+            val source = logcatFile(dir, "original.log")
+            val sourceId = assertNotNull(app.openFile(source))
+            waitUntil("the original log loads") { app.tab(sourceId)?.contentState == TabContentState.LOADED }
+            val row = assertNotNull(app.tab(sourceId)).logData.first()
+            app.putIntoNote(sourceId, ref(source = null, ids = listOf(row.id), frozen = listOf(row)))
+            val md = File(dir, "original_analysis.md").apply { writeText("analysis") }
+            assertTrue(app.saveAnnotationsTo(sourceId, File(dir, "original_analysis.ann")))
+            app.closeTab(sourceId)
+
+            app.openNoteFile("b", md)
+
+            val pending = assertIs<AnnBlock.LogRef>(app.tab("b")!!.annotations.blocks.single())
+            assertNotNull(pending.sourceTabId)
+            val offer = assertIs<GoToRowsResult.NeedsReopen>(go { app.goToLogRefRows(pending, "b") })
+            assertEquals("b", offer.ownerId)
+            val navigated = assertIs<GoToRowsResult.Navigated>(go { app.goToLogRefRowsAfterReopen("b", offer.closedTabId, pending, "b") })
+            assertEquals(source.absolutePath, app.tab(navigated.tabId)?.sourcePath)
+            assertEquals(listOf(row.id), navigated.rowIds)
+        } finally {
+            app.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aNotesOwnSidecarOpenedOnItsOwnLogKeepsItsCitationsLocal() {
+        val dir = createTempDirectory("goto-own-sidecar").toFile()
+        val app = twoTabs(dir)
+        try {
+            app.putIntoNote("a", ref(source = null, ids = listOf(2, 3)))
+            val md = File(dir, "a_analysis.md").apply { writeText("A's analysis") }
+            assertTrue(app.saveAnnotationsTo("a", File(dir, "a_analysis.ann")))
+
+            app.openNoteFile("a", md)
+
+            val own = assertIs<AnnBlock.LogRef>(app.tab("a")!!.annotations.blocks.single())
+            assertNull(own.sourceTabId)
+            assertEquals(GoToRowsResult.Navigated("a", listOf(2, 3)), go { app.goToLogRefRows(own, "a") })
         } finally {
             app.close()
             dir.deleteRecursively()
